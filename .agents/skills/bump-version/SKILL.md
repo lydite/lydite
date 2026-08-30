@@ -25,7 +25,7 @@ belongs to `lydite/actions`, whose consumers pin `uses:
 lydite/actions/scan@v1` — that repo's own `release.yml` moves it, and fails
 the release if the remote did not actually advance.
 
-So if you find yourself reaching for `git push --force origin v3` in this
+So if you find yourself reaching for `git push --force origin v0` in this
 repository, stop: there is nothing here that consumes it. Releasing a new
 version of the action is a separate task in `lydite/actions`.
 
