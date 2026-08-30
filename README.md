@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)"  srcset="assets/lydite-logo-horizontal-tagline-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/lydite-logo-horizontal-tagline-light.svg">
-    <img alt="lydite" src="assets/lydite-logo-horizontal-tagline-light.svg" width="480">
+    <source media="(prefers-color-scheme: light)" srcset="assets/lydite-logo-horizontal-tagline.svg">
+    <img alt="lydite" src="assets/lydite-logo-horizontal-tagline.svg" width="480">
   </picture>
 </p>
 

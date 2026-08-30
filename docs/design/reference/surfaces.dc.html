@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #07091E; }
+  a { color: #A98BFF; text-decoration: none; }
+  a:hover { color: #C9B6FF; }
+  ::selection { background: rgba(107,44,255,0.4); }
+</style>
+</helmet>
+
+<div style="background:#07091E;color:#EDEEF5;font-family:Geist,'Geist Sans','Helvetica Neue',Helvetica,system-ui,sans-serif;min-width:1240px;padding-bottom:120px">
+
+  <div style="padding:72px 88px 64px;background:radial-gradient(120% 140% at 50% 0%,rgba(107,44,255,0.2) 0%,rgba(7,9,30,0) 62%),#0B0E2B;border-bottom:1px solid #1E2450">
+    <div style="max-width:1264px;margin:0 auto;display:flex;justify-content:space-between;align-items:flex-end;gap:64px">
+      <div style="display:flex;flex-direction:column;gap:24px">
+        <img src="assets/logo/lydite-logo-horizontal-dark.svg" alt="lydite" style="height:64px;width:auto;display:block">
+        <h1 style="margin:0;font-size:44px;font-weight:600;letter-spacing:-0.03em;line-height:1.05">Surfaces</h1>
+        <p style="margin:0;max-width:620px;font-size:16px;line-height:1.65;color:#9AA0B5;text-wrap:pretty">The same verdict in three places a developer actually reads it: the terminal, the pull request, and the page that made them try it.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#6E7594;text-align:right;white-space:nowrap">
+        <span>BRAND / 04</span>
+        <span style="color:#EDEEF5">CLI · PR · marketing</span>
+        <span>one ruleset, one answer</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-width:1264px;margin:0 auto;padding:0 88px;display:flex;flex-direction:column;gap:88px">
+
+    <!-- CLI -->
+    <section style="padding-top:72px;display:flex;flex-direction:column;gap:32px">
+      <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2450;padding-bottom:16px">
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#6B2CFF;letter-spacing:0.12em">01</span>
+        <h2 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em">CLI output</h2>
+        <span style="font-size:14px;color:#6E7594">The canonical surface. Everything else quotes it.</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">PASS · EXIT 0</span>
+          <div style="background:#04061A;border:1px solid #1E2450;border-radius:12px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.9">
+            <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:#0B0E2B;border-bottom:1px solid #1E2450"><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="font-size:11px;color:#6E7594;margin-left:6px">core-api — zsh</span></div>
+            <div style="padding:16px 18px;display:flex;flex-direction:column">
+              <span><span style="color:#16C79A">$</span> <span style="color:#A98BFF">lydite</span> <span style="color:#EDEEF5">scan --gate 80</span></span>
+              <span style="color:#6E7594">→ 3 languages · ruleset 7f2ac9 · v2.4.1</span>
+              <span style="color:#6E7594">&nbsp;</span>
+              <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">coverage</span> <span style="color:#6E7594">………………………</span> <span style="color:#16C79A">87%</span> <span style="color:#6E7594">(gate 80%)</span></span>
+              <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">static analysis</span> <span style="color:#6E7594">…………</span> <span style="color:#16C79A">0</span> <span style="color:#6E7594">blocking</span></span>
+              <span><span style="color:#F0B429">!</span> <span style="color:#EDEEF5">crap score</span> <span style="color:#6E7594">………………</span> <span style="color:#F0B429">3</span> <span style="color:#6E7594">methods over 30</span></span>
+              <span style="color:#6E7594">&nbsp;</span>
+              <span><span style="color:#16C79A">gate passed</span><span style="color:#6E7594"> in 12.4s · identical to CI #4821</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">FAIL · EXIT 1</span>
+          <div style="background:#04061A;border:1px solid #1E2450;border-radius:12px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.9">
+            <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:#0B0E2B;border-bottom:1px solid #1E2450"><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="font-size:11px;color:#6E7594;margin-left:6px">edge-router — zsh</span></div>
+            <div style="padding:16px 18px;display:flex;flex-direction:column">
+              <span><span style="color:#16C79A">$</span> <span style="color:#A98BFF">lydite</span> <span style="color:#EDEEF5">scan --gate 80</span></span>
+              <span style="color:#6E7594">→ 1 language · ruleset 7f2ac9 · v2.4.1</span>
+              <span style="color:#6E7594">&nbsp;</span>
+              <span><span style="color:#F2426E">✗</span> <span style="color:#EDEEF5">coverage</span> <span style="color:#6E7594">………………………</span> <span style="color:#F2426E">71%</span> <span style="color:#6E7594">(gate 80%)</span></span>
+              <span><span style="color:#F2426E">✗</span> <span style="color:#EDEEF5">static analysis</span> <span style="color:#6E7594">…………</span> <span style="color:#F2426E">2</span> <span style="color:#6E7594">blocking</span></span>
+              <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">crap score</span> <span style="color:#6E7594">………………</span> <span style="color:#16C79A">0</span></span>
+              <span style="color:#6E7594">&nbsp;</span>
+              <span style="color:#F2426E">gate failed · coverage 71% &lt; 80%</span>
+              <span style="color:#9AA0B5">4 files added 212 uncovered lines.</span>
+              <span style="color:#A98BFF">run `lydite cover --explain` to see them</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:24px">
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">DRIFT · EXIT 2</span>
+          <div style="background:#04061A;border:1px solid rgba(240,180,41,.32);border-radius:12px;padding:16px 18px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.9;display:flex;flex-direction:column">
+            <span><span style="color:#F0B429">!</span> <span style="color:#EDEEF5">local ruleset differs from CI</span></span>
+            <span style="color:#9AA0B5">local &nbsp;v2.3.0 · a1b0e4</span>
+            <span style="color:#9AA0B5">ci &nbsp;&nbsp;&nbsp;&nbsp;v2.4.1 · 7f2ac9</span>
+            <span style="color:#6E7594">results from this run cannot be compared to CI.</span>
+            <span style="color:#A98BFF">run `lydite sync` to match the CI ruleset</span>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">GRAMMAR</span>
+          <div style="background:#0E1230;border:1px solid #1E2450;border-radius:12px;padding:20px 22px;display:flex;flex-direction:column;gap:11px;font-size:13.5px;line-height:1.5;color:#9AA0B5">
+            <span style="display:flex;gap:12px"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;color:#16C79A;width:16px">✓</span>pass · teal · exit 0</span>
+            <span style="display:flex;gap:12px"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;color:#F0B429;width:16px">!</span>warn or drift · amber · exit 2</span>
+            <span style="display:flex;gap:12px"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;color:#F2426E;width:16px">✗</span>fail · rose · exit 1</span>
+            <span style="display:flex;gap:12px"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;color:#6E7594;width:16px">→</span>context line · faint · never a verdict</span>
+            <span style="display:flex;gap:12px"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;color:#A98BFF;width:16px">$</span>a command the reader can run · violet</span>
+            <span style="border-top:1px solid #1E2450;padding-top:11px;color:#6E7594">Leaders (………) align the value column at 34 characters. <span style="color:#9AA0B5">--no-color</span> drops colour, keeps every glyph.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PR -->
+    <section style="display:flex;flex-direction:column;gap:32px">
+      <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2450;padding-bottom:16px">
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#6B2CFF;letter-spacing:0.12em">02</span>
+        <h2 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em">Pull request</h2>
+        <span style="font-size:14px;color:#6E7594">A comment and an inline annotation, in the host’s light chrome.</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:24px;align-items:start">
+        <div style="background:#FFFFFF;border:1px solid #E1E4EF;border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:#F5F6FA;border-bottom:1px solid #E1E4EF">
+            <img src="assets/logo/lydite-avatar.svg" alt="lydite bot" style="width:24px;height:24px;border-radius:50%">
+            <span style="font-size:13px;font-weight:600;color:#10133F">lydite</span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#545B7A;background:#EEF0F6;border:1px solid #E1E4EF;border-radius:6px;padding:2px 6px">bot</span>
+            <span style="font-size:12.5px;color:#8A90A8">commented on commit 8f31c2</span>
+          </div>
+          <div style="padding:20px;display:flex;flex-direction:column;gap:18px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:#D62254;background:#FDECF1;border-radius:999px;padding:5px 12px">Gate failed</span>
+              <span style="font-size:13px;color:#545B7A">3 critical findings block this merge.</span>
+            </div>
+            <div style="border:1px solid #E1E4EF;border-radius:10px;overflow:hidden">
+              <div style="display:grid;grid-template-columns:1fr 92px 92px;gap:12px;padding:9px 14px;background:#F5F6FA;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.12em;color:#8A90A8"><span>CHECK</span><span style="text-align:right">HEAD</span><span style="text-align:right">BASE</span></div>
+              <div style="display:grid;grid-template-columns:1fr 92px 92px;gap:12px;padding:11px 14px;border-top:1px solid #E1E4EF;font-size:13px;color:#10133F;align-items:center"><span>Coverage</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#D62254">74%</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#8A90A8">81%</span></div>
+              <div style="display:grid;grid-template-columns:1fr 92px 92px;gap:12px;padding:11px 14px;border-top:1px solid #E1E4EF;font-size:13px;color:#10133F;align-items:center"><span>Static analysis</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#D62254">3</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#8A90A8">0</span></div>
+              <div style="display:grid;grid-template-columns:1fr 92px 92px;gap:12px;padding:11px 14px;border-top:1px solid #E1E4EF;font-size:13px;color:#10133F;align-items:center"><span>CRAP score</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#A87A0C">3</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:#8A90A8">2</span></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:9px">
+              <span style="font-size:13px;font-weight:600;color:#10133F">Blocking</span>
+              <span style="display:flex;gap:10px;align-items:baseline;font-size:13px;color:#545B7A"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:500;color:#D62254;background:#FDECF1;border:1px solid rgba(214,34,84,.28);border-radius:5px;padding:2px 6px;flex:none">CRITICAL</span><span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#10133F">src/auth/session.rs:143</span> — unwrapped Result on the auth path</span></span>
+              <span style="display:flex;gap:10px;align-items:baseline;font-size:13px;color:#545B7A"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:500;color:#D62254;background:#FDECF1;border:1px solid rgba(214,34,84,.28);border-radius:5px;padding:2px 6px;flex:none">CRITICAL</span><span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#10133F">api/src/query.ts:88</span> — user input reaches a raw SQL string</span></span>
+              <span style="display:flex;gap:10px;align-items:baseline;font-size:13px;color:#545B7A"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:500;color:#D62254;background:#FDECF1;border:1px solid rgba(214,34,84,.28);border-radius:5px;padding:2px 6px;flex:none">CRITICAL</span><span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#10133F">internal/cfg/load.go:31</span> — secret read from an unvalidated env var</span></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;border-top:1px solid #E1E4EF;padding-top:16px">
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#8A90A8">v2.4.1 · ruleset 7f2ac9 · same as your local run</span>
+              <span style="flex:1"></span>
+              <span style="font-size:12.5px;font-weight:500;color:#5B21D6">Full report →</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:24px">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">INLINE ANNOTATION</span>
+            <div style="background:#FFFFFF;border:1px solid #E1E4EF;border-radius:12px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.85">
+              <div style="padding:9px 14px;background:#F5F6FA;border-bottom:1px solid #E1E4EF;font-size:11.5px;color:#545B7A">src/auth/session.rs</div>
+              <div style="padding:10px 0">
+                <div style="display:grid;grid-template-columns:44px 1fr;padding:0 14px"><span style="color:#B6BDD6">142</span><span style="color:#545B7A">let token = header</span></div>
+                <div style="display:grid;grid-template-columns:44px 1fr;padding:0 14px;background:#FDECF1"><span style="color:#D62254">143</span><span style="color:#10133F">    .unwrap();</span></div>
+              </div>
+              <div style="margin:0 14px 14px;border:1px solid #E1E4EF;border-radius:10px;padding:14px;display:flex;gap:12px;background:#FAFBFD">
+                <img src="assets/logo/lydite-icon-flat.svg" alt="lydite" style="width:20px;height:auto;flex:none">
+                <div style="display:flex;flex-direction:column;gap:6px;font-family:Geist,system-ui,sans-serif">
+                  <span style="font-size:13px;font-weight:600;color:#10133F">unwrapped Result on the auth path</span>
+                  <span style="font-size:12.5px;line-height:1.55;color:#545B7A">A malformed header panics the request thread. Return <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#10133F">AuthError::Missing</span> instead.</span>
+                  <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8A90A8">clippy::unwrap_used · critical · crap 41</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6E7594">CHECK RUN LINES</span>
+            <div style="background:#FFFFFF;border:1px solid #E1E4EF;border-radius:12px;padding:8px 16px">
+              <div style="display:flex;align-items:center;gap:12px;padding:11px 0;font-size:13px;color:#10133F"><span style="width:8px;height:8px;border-radius:50%;background:#D62254;flex:none"></span><span style="flex:1">lydite / gate</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#8A90A8">failed · 12s</span></div>
+              <div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid #EEF0F6;font-size:13px;color:#10133F"><span style="width:8px;height:8px;border-radius:50%;background:#0F9E7A;flex:none"></span><span style="flex:1">lydite / parity</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#8A90A8">in parity · 1s</span></div>
+              <div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid #EEF0F6;font-size:13px;color:#10133F"><span style="width:8px;height:8px;border-radius:50%;background:#A87A0C;flex:none"></span><span style="flex:1">lydite / crap</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#8A90A8">3 over 30 · 4s</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MARKETING -->
+    <section style="display:flex;flex-direction:column;gap:32px">
+      <div style="display:flex;align-items:baseline;gap:16px;border-bottom:1px solid #1E2450;padding-bottom:16px">
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#6B2CFF;letter-spacing:0.12em">03</span>
+        <h2 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em">Marketing site</h2>
+        <span style="font-size:14px;color:#6E7594">The one place the gradient is allowed to lead.</span>
+      </div>
+
+      <div style="border:1px solid #1E2450;border-radius:16px;overflow:hidden">
+        <div style="background:#0B0E2B;border-bottom:1px solid #1E2450;height:60px;display:flex;align-items:center;gap:32px;padding:0 32px">
+          <img src="assets/logo/lydite-logo-horizontal-dark.svg" alt="lydite" style="height:26px;width:auto">
+          <span style="display:flex;gap:26px;font-size:13.5px;color:#9AA0B5"><span>Product</span><span>Docs</span><span>Pricing</span><span>Changelog</span></span>
+          <span style="flex:1"></span>
+          <span style="font-size:13.5px;color:#9AA0B5">Sign in</span>
+          <span style="font-size:13px;font-weight:500;color:#fff;height:34px;padding:0 16px;border-radius:8px;background:linear-gradient(135deg,#6E21F3,#251FF7);display:flex;align-items:center">Get started</span>
+        </div>
+
+        <div style="background:radial-gradient(90% 120% at 78% 8%,rgba(107,44,255,0.3) 0%,rgba(11,14,43,0) 58%),#07091E;padding:80px 56px;display:grid;grid-template-columns:1.05fr 1fr;gap:56px;align-items:center">
+          <div style="display:flex;flex-direction:column;gap:28px">
+            <span style="align-self:flex-start;display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#A98BFF;background:rgba(107,44,255,.14);border:1px solid rgba(107,44,255,.3);border-radius:999px;padding:6px 12px">rust · typescript · go</span>
+            <h3 style="margin:0;font-size:54px;line-height:1.04;letter-spacing:-0.035em;font-weight:600;text-wrap:balance">Green locally.<br>Green in CI.<br><span style="background:linear-gradient(100deg,#8B5CFF,#4A3BFF);-webkit-background-clip:text;background-clip:text;color:transparent">Same answer.</span></h3>
+            <p style="margin:0;font-size:17px;line-height:1.65;color:#9AA0B5;max-width:480px;text-wrap:pretty">One CLI for coverage, static analysis and CRAP ratings. The same binary and ruleset run on your laptop and on your runner, so the two can never disagree.</p>
+            <div style="display:flex;gap:12px;align-items:center">
+              <span style="font-size:15px;font-weight:500;color:#fff;height:48px;padding:0 26px;border-radius:10px;background:linear-gradient(135deg,#6E21F3,#251FF7);display:flex;align-items:center">Start scanning</span>
+              <span style="font-size:15px;font-weight:500;color:#EDEEF5;height:48px;padding:0 22px;border-radius:10px;background:#151A3D;border:1px solid #2A3168;display:flex;align-items:center">Read the docs</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;background:#04061A;border:1px solid #1E2450;border-radius:10px;padding:13px 16px;max-width:420px">
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;color:#EDEEF5;flex:1"><span style="color:#16C79A">$</span> brew install lydite</span>
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#6E7594">copy</span>
+            </div>
+          </div>
+          <div style="background:#04061A;border:1px solid #2A3168;border-radius:14px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;line-height:2;box-shadow:0 28px 70px rgba(0,0,0,.6)">
+            <div style="display:flex;align-items:center;gap:8px;padding:12px 16px;background:#0B0E2B;border-bottom:1px solid #1E2450"><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span><span style="width:10px;height:10px;border-radius:50%;background:#2A3168"></span></div>
+            <div style="padding:20px;display:flex;flex-direction:column">
+              <span><span style="color:#16C79A">$</span> <span style="color:#A98BFF">lydite</span> <span style="color:#EDEEF5">scan</span></span>
+              <span style="color:#6E7594">→ 3 languages · ruleset 7f2ac9</span>
+              <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">coverage</span> <span style="color:#6E7594">…………</span> <span style="color:#16C79A">87%</span></span>
+              <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">static analysis</span> <span style="color:#6E7594">…</span> <span style="color:#16C79A">0</span></span>
+              <span><span style="color:#F0B429">!</span> <span style="color:#EDEEF5">crap score</span> <span style="color:#6E7594">………</span> <span style="color:#F0B429">3</span></span>
+              <span style="color:#6E7594">&nbsp;</span>
+              <span style="color:#16C79A">gate passed</span>
+              <span style="color:#6E7594">identical to CI #4821</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:#0B0E2B;border-top:1px solid #1E2450;padding:56px;display:grid;grid-template-columns:repeat(3,1fr);gap:32px">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6B2CFF">ONE BINARY</span>
+            <span style="font-size:19px;font-weight:600;letter-spacing:-0.01em">No second toolchain for CI</span>
+            <span style="font-size:14.5px;line-height:1.65;color:#9AA0B5;text-wrap:pretty">The runner installs the same version you have. A ruleset hash in every report proves it.</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6B2CFF">THREE CHECKS</span>
+            <span style="font-size:19px;font-weight:600;letter-spacing:-0.01em">Coverage, analysis, CRAP</span>
+            <span style="font-size:14.5px;line-height:1.65;color:#9AA0B5;text-wrap:pretty">One gate a team can agree on, instead of four dashboards nobody opens.</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:0.14em;color:#6B2CFF">EXPLAINABLE</span>
+            <span style="font-size:19px;font-weight:600;letter-spacing:-0.01em">Every failure names a file</span>
+            <span style="font-size:14.5px;line-height:1.65;color:#9AA0B5;text-wrap:pretty">Findings arrive with a path, a rule and a next command. Nothing says “see output above”.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+</x-dc>
+</body>
+</html>

@@ -32,13 +32,15 @@ internal/semgrep/                # pinned Semgrep, installed via pipx
 internal/coverage/               # per-language coverage percentage (see Coverage below)
 internal/gitstate/               # lydite branch read/write (see Coverage below)
 internal/executil/              # shared external-command runner every scanner package uses
-assets/lydite-logo.png         # logo — used by README and the action's PR comment (see below)
+assets/                        # the shipped logo set — the action's PR comment embeds
+                                #   lydite-mark-64.png by raw URL (see below)
+docs/design/                    # tokens, surface specs, and the reference prototypes (see Design)
 docs/release-notes/             # _header.md + one <tag>.md per release that needs one (see Release notes)
 .goreleaser.yml                 # build/release config (v2 schema)
 .golangci.yml                   # lint config (v2 schema)
 .github/workflows/{ci,release}.yml
 .github/dependabot.yml
-action.yml                      # composite action: install + scan + coverage + PR comment + report
+                                # (the composite action lives in lydite/actions, not here)
 scripts/install.sh              # curl|sh installer shipped with every release
 ```
 
@@ -828,7 +830,7 @@ why a consumer's CI only needs to hand lydite a token: lydite owns the whole Cod
 relationship (coverage *and* JUnit test-results), so the calling workflow never has to install a
 Codecov CLI or push to Codecov directly itself.
 
-The PR comment's header embeds `assets/lydite-logo.png` by **absolute raw URL**
+The PR comment's header embeds `assets/lydite-mark-64.png` by **absolute raw URL**
 (`raw.githubusercontent.com/lydite/lydite/main/...`), never a repo-relative path — the comment is
 posted into the *consuming* repo's PR, where a relative `assets/...` would resolve against that repo
 and 404. It's pinned to lydite's default branch, not a release tag, so the image keeps resolving for
@@ -843,6 +845,36 @@ into a shell script is a real script-injection vector if the interpolated value 
 shell metacharacters, regardless of how trusted the input value looks today. `if:` conditions and
 `with:` blocks on a `uses:` step are fine to interpolate directly — only `run:` script bodies are
 the risk, since that's the only place text gets spliced into something a shell then executes.
+
+## Design
+
+The brand and design system live here rather than in a `lydite/brand` repository, because
+every consumer of them is already in this repository — see
+[ADR 0012](docs/adr/0012-design-system-in-the-monorepo.md). The split that matters is
+inside the tree, not across repositories:
+
+- `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png`, whose path is a
+  public API (above).
+- `docs/design/tokens.md` is the token set and the surface specifications.
+- `docs/design/reference/` is **reference only** — the `.dc.html` prototypes and the logo
+  construction proofs. The prototypes use a custom runtime and inline styles, both
+  artefacts of the authoring environment: do not port the runtime, and do not copy the
+  styles into `web/`.
+
+Two things in `tokens.md` are documented but **not implemented**, and neither should be
+mistaken for a description of current behavior:
+
+**The CLI output grammar is a proposal.** It specifies glyphs (`✓`/`!`/`✗`/`→`/`$`), leader
+dots aligning the value column at 34 characters, and exit code 2 for drift. lydite does not
+emit that today, and adopting it is a **breaking change to an interface another repository
+parses** — `lydite/actions`'s `tool_result()` matches `^\[(PASS|FAIL)\] <name>$` anchored at
+both ends. It has to change in the same release, or every consumer's PR comment silently
+loses its verdict while the scan still reports success.
+
+**There is no light product theme and no responsive design.** The light token ramp exists
+and the PR comment uses it, but no product screen has been drawn light, and nothing below
+1240px has been drawn at all. `docs/design/README.md` records both as gaps. Inventing
+either from the token table is how a design system starts lying about its own coverage.
 
 ## Release notes
 
