@@ -58,17 +58,25 @@ jobs:
       # commit list genuinely is the whole story, and failing a release over a
       # file the release did not need would make every release depend on
       # remembering a step.
+      #
+      # The header is assembled into RUNNER_TEMP, not the working directory.
+      # goreleaser's release mode aborts on a dirty worktree, and an untracked
+      # release-header.md sitting in the repository root is enough to trip it:
+      # "git is in a dirty state ... ?? release-header.md". Snapshot mode
+      # disables that validation, so a local `--snapshot` dry-run passes either
+      # way and cannot be used to check this.
       - name: Assemble the release header
         env:
           TAG: ${{ github.ref_name }}
+          HEADER: ${{ runner.temp }}/release-header.md
         run: |
           set -euo pipefail
 
-          cat docs/release-notes/_header.md > release-header.md
+          cat docs/release-notes/_header.md > "$HEADER"
           notes="docs/release-notes/${TAG}.md"
           if [[ -f "$notes" ]]; then
-            printf '\n---\n\n' >> release-header.md
-            cat "$notes" >> release-header.md
+            printf '\n---\n\n' >> "$HEADER"
+            cat "$notes" >> "$HEADER"
             echo "Release body carries ${notes}." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No ${notes}; release body is the header plus the generated changelog." >> "$GITHUB_STEP_SUMMARY"
@@ -78,6 +86,6 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           version: "~> v2"
-          args: release --clean --parallelism 1 --release-header=release-header.md
+          args: release --clean --parallelism 1 --release-header=${{ runner.temp }}/release-header.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
