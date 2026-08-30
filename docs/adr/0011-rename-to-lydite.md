@@ -6,7 +6,7 @@ name cannot be obtained; only a suffixed org (`bulwarkhq`, `bulwarkdev`) was ava
 
 That alone did not force a rename. The squatting account is not a competing product, so there was
 no brand collision to resolve, and keeping the name would have cost nothing but a suffix. The
-rename was chosen because the project is already moving to a fresh repository at 3.0.0 with a new
+rename was chosen because the project is already moving to a fresh repository at 0.1.0 with a new
 module path and a renamed state branch — so the marginal cost of the name is at its lowest it will
 ever be, and it buys the clean topology the move was for: `lydite/lydite` and `lydite/actions`,
 with no suffix and one uncontested name across GitHub, npm, PyPI, and a matching domain.
