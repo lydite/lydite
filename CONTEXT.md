@@ -18,9 +18,9 @@ The aggregate coverage value cached on the `lydite` branch for a specific main-b
 A source line that a language's own coverage tool (`go tool cover`, `cargo llvm-cov`, Istanbul) reports an entry for. Comments, blank lines, imports, and braces are never coverable — they simply never appear in a coverage report, so patch coverage's denominator (coverable changed lines) excludes them automatically, without lydite doing any language-aware filtering itself.
 
 **Linter**:
-Which engine backs lydite's TypeScript check for a given repo — ESLint (the default) or Biome — selected by `typescript.linter` in `.lydite.yml`. The two are mutually exclusive; there is no "both". A repo's value is a **migration state**, not a per-invocation choice: it is a fact about that repo, the same for every run in it.
-_Note_: the two are not interchangeable rule sets. Switching changes which findings lydite gates on, and under Biome the check gates on **correctness** as well as security — so the TypeScript check is "security findings only" under ESLint but not under Biome.
-_Avoid_: "linting mode", "the TS linter setting".
+The engine backing lydite's TypeScript check: Biome, and only Biome. `typescript.linter` in `.lydite.yml` accepts `biome` alone; the retired `eslint` value is rejected with an error rather than accepted and quietly run under Biome.
+_Note_: the TypeScript check gates on **correctness** as well as security, so it is not "security findings only" the way the other language checks are. The ESLint stack it replaced covered a different set of security rules — Node/backend heuristics with no Biome equivalent — so this is a change in what is gated, not only in what runs it. See [ADR 0008](docs/adr/0008-biome-as-the-only-typescript-linter.md).
+_Avoid_: "linting mode", "the TS linter setting", describing Biome as opt-in.
 
 **Pin**:
 The exact version of a tool lydite installs and runs, recorded in a real package-manager manifest (`package.json`, `Cargo.toml`, `go.mod`, `requirements.txt`) so Dependabot can see and bump it — never only in a Go constant. The distinguishing property of a pin is that something must be able to *age it out*: a pin nothing can bump is indistinguishable from a scanner that has silently stopped being current.
@@ -37,14 +37,14 @@ A measurement record that cannot be recomputed after the fact — the toolchain 
 Derived data that can be regenerated on demand by re-running the tool that produced it. Losing a cache entry costs time, not information, so cache writes are best-effort and non-fatal. The per-commit **Baseline** is a cache; **Quality history** is a **Ledger**. The distinction is not stylistic: it dictates whether a failed write may be ignored.
 
 **Projection**:
-A pre-computed rollup derived from the **Ledger**, existing so the dashboard reads one small file instead of the whole history. Regenerable by definition, so it is a **Cache** in every respect except that its source is the ledger rather than a scanner.
-
-**Gap**:
-An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.
+A pre-computed rollup derived from the **Ledger**, existing so the dashboard reads one small file instead of walking every partition. Regenerable by definition, so it is a **Cache** in every respect except that its source is the ledger rather than a scanner.
 
 **Finding snapshot**:
 The full set of findings from the most recent run — rule, path, severity, message — overwritten on every run. A **Cache**, not a **Ledger**: it is fully regenerable by re-scanning, and only the latest one is ever of interest. It answers "what is wrong right now, and where?"; the ledger answers "is this getting better?". Keeping findings out of the ledger is what lets quality history stay small enough to retain forever.
 _Note_: because snapshots are not retained, "when did this finding first appear?" is deliberately unanswerable today. Answering it later means adding stable per-finding fingerprints and promoting findings to a ledger of their own — an additive change, which is why the split is the cheaper starting point.
+
+**Gap**:
+An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.
 
 ## Flagged ambiguities
 **"Threshold"** — the original patch-coverage feature request proposed a `coverage.patch.threshold` config (an arbitrary fixed percentage per language). This was superseded: patch coverage has no independent threshold — it always gates against the aggregate baseline (see **Patch coverage**). Only an `enabled: bool` (default `true`, opt-out) remains in config.
