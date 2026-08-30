@@ -20,14 +20,16 @@ tag. It is the only thing that triggers anything.
 
 **This repository has no floating major-alias tag.** `install.sh` and
 `lydite update` both resolve a version through the `releases/latest` redirect
-or an exact `v<version>` tag, so nothing here ever reads a `vN`. The alias
-belongs to `lydite/actions`, whose consumers pin `uses:
-lydite/actions/scan@v1` — that repo's own `release.yml` moves it, and fails
-the release if the remote did not actually advance.
+or an exact `v<version>` tag, so nothing here ever reads a `vN`, and
+`release.yml` has no step that moves one. The alias belongs to
+`lydite/actions`, whose consumers pin `uses: lydite/actions/scan@v1` — that
+repo's own `release.yml` moves it, and fails the release if the remote did
+not actually advance.
 
 So if you find yourself reaching for `git push --force origin v0` in this
-repository, stop: there is nothing here that consumes it. Releasing a new
-version of the action is a separate task in `lydite/actions`.
+repository, stop: there is nothing here that consumes it, and nothing to
+verify afterwards. Releasing a new version of the action is a separate task
+in `lydite/actions`.
 
 ## 0. Preconditions
 
@@ -38,6 +40,20 @@ version of the action is a separate task in `lydite/actions`.
   in the root `.envrc` (`gh auth token --user <username>`). Read that user
   before any `gh`/push command.
 - `git fetch origin --tags` so local tags and `origin/main` are current.
+- **Dry-run goreleaser** from the tree you are about to tag:
+
+  ```bash
+  go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
+  ```
+
+  `release.yml` runs only on a `v*.*.*` tag push, so nothing in CI ever
+  exercises `.goreleaser.yml`. A config error therefore surfaces for the
+  first time *during* the release, once the tag is already public and
+  immutable, and the recovery is a throwaway version number. The snapshot
+  runs the same config through the same before-hooks, builds and archives,
+  stopping short of publishing. Expect four binaries, four archives and a
+  `checksums.txt` under `dist/`; that directory is gitignored, so delete it
+  afterwards or leave it.
 
 ## 1. Pick the version
 
@@ -48,6 +64,9 @@ gh release list --repo lydite/lydite --limit 5
 git log --oneline "$(gh release view --repo lydite/lydite --json tagName -q .tagName)"..origin/main
 ```
 
+The second command needs a release to exist; with none published yet, read
+the whole history instead (`git log --oneline origin/main`).
+
 Choose the bump by the **highest-impact change to the shipped binary**
 since the last release (SemVer):
 
@@ -55,18 +74,37 @@ since the last release (SemVer):
 - **minor** (`vX.Y+1.0`) — backward-compatible features / new flags / new
   scanner integrations.
 - **major** (`vX+1.0.0`) — breaking changes (config schema changes, removed
-  CLI surface, `lydite` baseline format changes). A new major also
-  means a **new floating alias** (`vN+1`) and updating consumers that pin the
-  old one — call this out explicitly.
+  CLI surface, `lydite` baseline format changes).
+
+Nothing pins a CLI version: the action's `version` input defaults to
+`latest`, so **every release reaches every consumer on their next CI run**,
+major ones included (ADR 0010). The bump number is a description of what
+changed, not a gate on who receives it — which is what makes the release
+notes below the actual mechanism for warning anyone.
 
 Config-only changes (e.g. a `dependabot.yml` edit) do **not** by themselves
 warrant a release; only cut one when the binary changed.
 
 Let `$VER` be the new version (e.g. `v1.3.1`) and `$SHA` the `origin/main`
-commit to release. `$MAJOR` is its alias (`v1`) — used only for verification
-below, since the workflow derives and moves it itself.
+commit to release.
 
-## 2. Tag the release and push
+## 2. Write the release notes, if this release needs them
+
+`release.yml` assembles the release body from `docs/release-notes/_header.md`
+plus `docs/release-notes/$VER.md` when that file exists, and goreleaser
+appends its commit-derived changelog underneath. A missing per-version file
+is deliberately not an error — most patches are fully described by their
+commit subjects.
+
+Write one when the release carries what a commit subject cannot: a change in
+what an existing number or verdict *means*, an upgrade step consumers must
+take, or a new major.
+
+**The file has to be merged to `main` before the tag is pushed.** The
+workflow reads it out of the tagged tree, so a notes file written afterwards
+is not in the release and cannot be got into it without a new version.
+
+## 3. Tag the release and push
 
 Annotated tag (matches existing release tags), at the exact `main` commit:
 
@@ -80,21 +118,6 @@ git push origin "$VER"
 The push fires `release.yml`. Nothing else triggers it — only tags matching
 `v*.*.*`.
 
-## 3. The major alias moves itself
-
-Nothing to do. `release.yml`'s final step derives `$MAJOR` from the tag you
-pushed, force-moves it, and then re-reads it from the remote to confirm it
-advanced — a push that silently no-ops fails the release rather than leaving
-consumers pinned to the previous scanner.
-
-Watch for it in the run; the job summary ends with `v1 now points at $VER`.
-
-If that step fails, the release is **incomplete even though the assets
-published**: `vX.Y.Z` exists and `vN` does not point at it, so no consumer
-has the change. Fix the workflow and re-run the job rather than pushing the
-alias by hand — a manual move hides the fact that the automation is broken,
-and the next release breaks the same way.
-
 ## 4. Verify
 
 ```bash
@@ -104,10 +127,21 @@ gh run watch "$(gh run list --repo lydite/lydite --workflow release.yml \
 gh release view "$VER" --repo lydite/lydite \
   --json tagName,isDraft,isPrerelease,assets \
   -q '{tag:.tagName, draft:.isDraft, prerelease:.isPrerelease, assets:[.assets[].name]}'
-git ls-remote origin "refs/tags/$MAJOR"   # must equal $SHA
 ```
 
-The last line is the one that matters: it is the difference between a release
-that shipped and a release that only looks like it did. `release.yml` already
-asserts it, so a mismatch here means the workflow did not run its final step
-at all.
+`assets` must list `install.sh` alongside the archives, the raw binaries and
+`checksums.txt`. It is the one asset goreleaser does not build — it is copied
+in via `extra_files` — and the install line in the README
+(`releases/latest/download/install.sh`) resolves to it, so a release missing
+it breaks new installs while looking complete.
+
+Then check the body, if step 2 wrote a notes file:
+
+```bash
+gh release view "$VER" --repo lydite/lydite --json body -q .body | head -40
+```
+
+The notes must appear above goreleaser's generated changelog. A green run is
+not evidence of this: the assembly step writes `release-header.md` and passes
+it with `--release-header`, and if that step is absent or the file is not
+found the release still publishes — with the header silently missing.
