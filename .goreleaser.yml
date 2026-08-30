@@ -8,7 +8,12 @@ version: 2
 
 before:
   hooks:
-    - go mod tidy
+    # `-C cli` is load-bearing. The Go module lives in cli/, not at the
+    # repository root, and a before-hook runs at the root with no shell, so
+    # neither a bare `go mod tidy` nor a `cd` in front of it works: the hook
+    # fails with "go.mod file not found" and the release ends before a single
+    # binary is built.
+    - go -C cli mod tidy
 
 builds:
   - id: lydite
@@ -59,7 +64,7 @@ changelog:
 
 release:
   github:
-    owner: wardnet
+    owner: lydite
     name: lydite
   extra_files:
     - glob: scripts/install.sh
