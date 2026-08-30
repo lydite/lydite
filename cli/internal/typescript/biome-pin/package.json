@@ -2,8 +2,8 @@
   "name": "lydite-biome-pin",
   "version": "0.0.0",
   "private": true,
-  "description": "Version pin for lydite's bundled Biome toolchain, used when a repo sets typescript.linter: biome. Not a package lydite builds or publishes: it exists so Dependabot can see this version and open bump PRs, and so `npm ci` installs it deterministically. See internal/typescript/biome.go.",
+  "description": "Version pin for lydite's bundled Biome toolchain, the engine behind the TypeScript check. Not a package lydite builds or publishes: it exists so Dependabot can see this version and open bump PRs, and so `npm ci` installs it deterministically. See internal/typescript/biome.go.",
   "dependencies": {
-    "@biomejs/biome": "2.5.8"
+    "@biomejs/biome": "2.5.10"
   }
 }

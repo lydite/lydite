@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.8/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
   "root": true,
   "files": {
     "includes": [
@@ -16,6 +16,7 @@
     ]
   },
   "vcs": { "enabled": false },
+  "css": { "parser": { "tailwindDirectives": true } },
   "formatter": { "enabled": false },
   "assist": { "enabled": false },
   "linter": {

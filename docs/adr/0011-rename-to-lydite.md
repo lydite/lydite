@@ -25,7 +25,7 @@ tested. Assaying and measurement proved almost entirely unclaimed by comparison.
 The accepted cost is that the name is opaque: nobody knows what a lydite is without being told.
 This is the genre norm rather than an exception — Snyk, Trivy, Grype, Syft, and Nuclei are equally
 meaningless on sight — and opacity is precisely what buys an uncontested namespace everywhere at
-once. `tallystick` was the runner-up, a better metaphor for the ledger in ADR 0007 but four
+once. `tallystick` was the runner-up, a better metaphor for the ledger in ADR 0009 but four
 characters longer for something typed daily.
 
 ## What the rename touches

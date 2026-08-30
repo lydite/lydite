@@ -7,7 +7,7 @@ tool rather than one of its users. It moves to a `lydite` org.
 ## Two repos, not three
 
 `lydite/lydite` is the monorepo: `cli/` (Go), `web/` (the React dashboard), and later `worker/`
-(the OAuth token exchange described in ADR 0007). These ship as one artifact from one tag — the
+(the OAuth token exchange described in ADR 0009). These ship as one artifact from one tag — the
 dashboard is embedded in the binary — so they release together and cannot drift apart.
 
 `lydite/actions` holds the composite action, consumed as `uses: lydite/actions/scan@v1`. It is

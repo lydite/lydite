@@ -68,9 +68,34 @@ func TestBiomeConfigDisablesFormatterAndAssist(t *testing.T) {
 	}
 }
 
-// TestBiomeConfigIgnoresMatchesDefaultSkipDirs is the Biome counterpart of
-// TestEslintConfigIgnoresMatchesDefaultSkipDirs, and guards a failure verified
-// against Biome 2.5.8 directly: with these negations removed, Biome lints
+// TestBiomeConfigEnablesTailwindDirectives guards a failure that had no
+// workaround from the scanned repository. Tailwind v4 moved configuration into
+// ordinary .css files — @theme, @custom-variant, @utility, @source — and
+// Biome's CSS parser rejects all of them unless this is set. The result is a
+// `parse` diagnostic, which reportableBiome keeps on purpose (a file lydite
+// could not lint is worth knowing about), so the TypeScript check failed on a
+// stylesheet that was never wrong.
+//
+// A repository cannot fix it locally, which is why it belongs here: suppression
+// comments do not apply to parse errors, and a nested biome.json is ignored
+// when Biome runs under --config-path, as lintDirBiome does.
+func TestBiomeConfigEnablesTailwindDirectives(t *testing.T) {
+	css, ok := biomeCfg(t)["css"].(map[string]any)
+	if !ok {
+		t.Fatal("biome.json has no css section; Tailwind v4 directives fail to parse without it")
+	}
+	parser, ok := css["parser"].(map[string]any)
+	if !ok {
+		t.Fatal("biome.json has no css.parser section")
+	}
+	if parser["tailwindDirectives"] != true {
+		t.Errorf("css.parser.tailwindDirectives = %v, want true", parser["tailwindDirectives"])
+	}
+}
+
+// TestBiomeConfigIgnoresMatchesDefaultSkipDirs guards a failure verified
+// against Biome directly, on 2.5.8 and again on 2.5.10: with these negations
+// removed, Biome lints
 // dist/ and reports findings inside a minified production bundle. The ignores
 // are load-bearing, not decorative.
 func TestBiomeConfigIgnoresMatchesDefaultSkipDirs(t *testing.T) {
@@ -116,8 +141,7 @@ func TestReportableBiomeGatesOnlyOnOurGroups(t *testing.T) {
 	// A file Biome cannot parse emits only `parse` diagnostics (category verified
 	// against 2.5.8 with a deliberately broken .ts file). Filtering those out
 	// leaves count == 0, which clears the error and prints "no findings" — a
-	// package where nothing was linted would report as a clean pass. ESLint's
-	// reportable() keeps its fatal diagnostics for exactly this reason.
+	// package where nothing was linted would report as a clean pass.
 	// Failure categories, none of which are rule opinions: a package where these
 	// fire was not successfully linted, and filtering them out reports it as a
 	// clean pass. internalError/io is the nastier one — Biome emits it with
