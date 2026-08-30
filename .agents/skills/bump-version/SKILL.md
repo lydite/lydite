@@ -48,12 +48,21 @@ in `lydite/actions`.
 
   `release.yml` runs only on a `v*.*.*` tag push, so nothing in CI ever
   exercises `.goreleaser.yml`. A config error therefore surfaces for the
-  first time *during* the release, once the tag is already public and
-  immutable, and the recovery is a throwaway version number. The snapshot
-  runs the same config through the same before-hooks, builds and archives,
-  stopping short of publishing. Expect four binaries, four archives and a
-  `checksums.txt` under `dist/`; that directory is gitignored, so delete it
-  afterwards or leave it.
+  first time *during* the release, once the tag is already public. The
+  snapshot runs the same config through the same before-hooks, builds and
+  archives, stopping short of publishing. Expect four binaries, four
+  archives and a `checksums.txt` under `dist/`; that directory is
+  gitignored, so delete it afterwards or leave it.
+
+  **A passing snapshot is not a passing release.** Snapshot mode disables
+  whole pipes rather than merely skipping the upload — the git-state
+  validation among them — so it cannot see a dirty worktree, a missing tag,
+  or anything else that pipe checks. Watch the run output for `pipe skipped
+  or partially skipped reason=disabled during snapshot mode`: whatever it
+  covers is untested until a real tag. In particular, a step that writes a
+  file into the working directory before goreleaser runs will abort the
+  release with `git is in a dirty state` and pass the dry-run silently, so
+  such files belong in `$RUNNER_TEMP`.
 
 ## 1. Pick the version
 
