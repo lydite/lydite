@@ -1,0 +1,78 @@
+# goreleaser configuration for lydite.
+#
+# Builds a single binary, `lydite`, from ./cmd/lydite. It runs both as a
+# local developer tool (self-updates via `lydite update`) and inside CI via
+# the reusable workflows / composite action in this repo, so it ships for
+# both linux and darwin.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: lydite
+    dir: cli
+    main: ./cmd/lydite
+    binary: lydite
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+# One archive so consumers get everything, plus a raw uncompressed binary for
+# curl-and-run / CI usage that doesn't want an extraction step.
+archives:
+  - id: lydite
+    ids:
+      - lydite
+    name_template: >-
+      lydite_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+  - id: raw
+    ids:
+      - lydite
+    formats:
+      - binary
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: wardnet
+    name: lydite
+  extra_files:
+    - glob: scripts/install.sh
+  header: |
+    ## lydite
+
+    Unified code-quality and security scanning for Rust, TypeScript, and Go —
+    one CLI, run identically locally and in CI.
+
+    **Install / update**
+
+    ```sh
+    curl -fsSL https://github.com/lydite/lydite/releases/latest/download/install.sh | sh
+    ```
+
+    `lydite update` self-updates the CLI in place.

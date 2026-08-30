@@ -1,3 +1,163 @@
-# lydite
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"  srcset="assets/lydite-logo-horizontal-tagline-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/lydite-logo-horizontal-tagline-light.svg">
+    <img alt="lydite" src="assets/lydite-logo-horizontal-tagline-light.svg" width="480">
+  </picture>
+</p>
 
-Unified code-quality and security scanning for Rust, TypeScript, and Go.
+<p align="center">
+  Unified code-quality and security scanning for Rust, TypeScript, and Go — one CLI, run identically
+  locally and in CI, so "green locally" and "green in CI" can never drift apart.
+</p>
+
+`lydite` replaces ad hoc, per-repo security workflows (CodeQL, standalone `cargo-audit` jobs,
+Codecov as a blocking gate) with one consistent pipeline: it auto-detects which ecosystems a repo
+uses, runs each one's checks with a pinned, self-installed toolchain, and diffs test coverage
+against a lazily-computed baseline — no manual setup, no "works on my machine."
+
+## What it checks
+
+| Ecosystem | Checks |
+|---|---|
+| Rust | `cargo fmt --check`, `cargo clippy` (pedantic/restriction groups come from the target repo's own `Cargo.toml`), `cargo-audit` (CVEs), `cargo-deny` (licenses + bans) |
+| TypeScript | ESLint + `eslint-plugin-security`, using a toolchain `lydite` bundles and pins itself — independent of whatever (if anything) the target package declares in its own `devDependencies`. Projects migrating to [Biome](https://biomejs.dev) can opt in with `typescript.linter: biome` |
+| Go | `gosec`, `govulncheck` |
+| All of the above | [Semgrep](https://semgrep.dev) |
+
+Every tool is pinned to an exact version and installed into a `lydite`-managed cache directory the
+first time it's needed — nothing is ever silently run at whatever version happens to already be on
+`PATH`. Those pins live in real package manifests that Dependabot watches, so a pinned security
+toolchain can't quietly go stale while still reporting `[PASS]`.
+
+## Install
+
+```sh
+curl -fsSL https://github.com/lydite/lydite/releases/latest/download/install.sh | sh
+```
+
+This installs to `~/.local/bin` by default (override with `LYDITE_INSTALL_DIR`); pin a specific
+version with `LYDITE_VERSION=1.2.3 curl ... | sh`. Update in place any time with `lydite update`.
+
+> **Don't** `go install lydite/lydite/cmd/lydite@latest` — the module path is deliberately not a
+> resolvable `github.com/...` import path (see [AGENTS.md](AGENTS.md)), so `go install` won't find
+> it. Use the installer above.
+
+## Usage
+
+```sh
+lydite scan --dir .          # run every check for every ecosystem detected under --dir (default ".")
+lydite coverage --dir .      # diff current coverage against the cached baseline for the PR's base commit
+lydite version
+lydite update                 # self-update to the latest release
+```
+
+`lydite scan` exits non-zero if any check fails, printing a `[PASS]`/`[FAIL]` line per check.
+
+`lydite coverage` defaults to running each ecosystem's test suite itself — the right choice for
+local dev, one command and nothing to remember. A repo whose CI already runs a test job with
+coverage instrumentation on says so once, in `.lydite.yml`, and lydite becomes a pure consumer of
+that job's report instead of running the whole suite again:
+
+```yaml
+coverage:
+  source: report        # default is "run" — lydite produces coverage itself
+```
+
+That's usually the whole change: each language's conventional report paths are searched without
+further configuration (`coverage.out`/`cover.out`/`c.out` per Go module, `coverage/llvm-cov.json`
+and `coverage/lcov.info` per Rust crate, Istanbul's `coverage/coverage-summary.json` per TS
+package). Only a report written somewhere unconventional needs naming:
+
+```yaml
+coverage:
+  source: report
+  rust:
+    report: daemon/coverage/daemon-llvm-cov.json   # non-standard name, so point at it
+```
+
+`--source run|report` overrides the file for a one-off local run, as do `--go-report`,
+`--rust-report` and `--rust-lcov-report` for the paths.
+
+See [AGENTS.md](AGENTS.md#coverage) for exactly how the baseline is computed and cached, and why
+`coverage.source` exists.
+
+## Configuration
+
+`.lydite.yml` at the repo root is optional — the default (no file) is to scan everything detected
+with every check enabled and to produce coverage by running the tests. Use it to disable a language
+entirely, exclude a path from detection, point Semgrep at a custom ruleset, or describe how the
+repo's coverage is produced:
+
+```yaml
+rust:
+  enabled: true
+  exclude: []
+typescript:
+  enabled: true
+  exclude: ["legacy-app"]
+  linter: eslint  # or "biome" — which linter backs the TypeScript check
+go:
+  enabled: true
+  exclude: []
+semgrep:
+  enabled: true
+  config: auto
+toolchain:
+  enabled: true   # set false to skip toolchain provisioning (air-gapped runners)
+coverage:
+  source: run     # or "report" — a prior CI job produces coverage, lydite only parses it
+  tolerance: 0.1  # pp the aggregate gate tolerates below baseline (patch gate: coverage.patch.tolerance)
+```
+
+See [AGENTS.md](AGENTS.md#configuration) for the full schema and merge semantics.
+
+Note there are no toolchain *versions* in there. lydite makes sure the Go, Rust and Node runtimes
+its checks need are present at the version each ecosystem requires, and it reads that version from
+the files your repo already has — the `go`/`toolchain` directives in every `go.mod` it discovers,
+`rust-toolchain.toml`, `engines.node` or `.nvmrc`. A toolchain already on PATH that satisfies the
+declared version is used as-is, so on a normal CI runner this costs nothing. See
+[AGENTS.md](AGENTS.md#toolchains) for what gets provisioned and how.
+
+## GitHub Actions
+
+The action installs lydite, runs `scan`/`coverage`, posts a single sticky PR comment summarizing
+both, and optionally reports to the Semgrep AppSec Platform and/or Codecov:
+
+```yaml
+permissions:
+  contents: write       # lydite coverage caches baselines on the lydite branch
+  pull-requests: write  # for the PR summary comment
+steps:
+  - uses: actions/checkout@v7
+    with:
+      fetch-depth: 0    # lydite coverage needs full history to resolve the PR's base commit
+  - uses: lydite/actions/scan@v1
+    with:
+      semgrep-app-token: ${{ secrets.SEMGREP_APP_TOKEN }}  # optional — omit to keep Semgrep local-only
+      codecov-token: ${{ secrets.CODECOV_TOKEN }}          # optional — omit to skip the Codecov upload
+```
+
+Both `scan` and `coverage` can be turned off independently (`run-scan: false` / `run-coverage:
+false`) if a repo only wants one of them, or isn't ready to grant `contents: write` yet. See
+`action.yml`'s own input descriptions for the full list (`dir`, `version`, `github-token`, and the
+two optional tokens).
+
+Note there is no input for coverage production. Who produces coverage, and where its reports live,
+come from `.lydite.yml` at the scan root — the same answer for every workflow that calls the
+action, so it's stated once in the repo rather than restated at each call site. `dir` is the one
+thing that can't move there, since the file lives *at* the scan root and lydite has to be told the
+root before it can read its own config.
+
+`@v1` is a floating major alias, moved onto each new `v1.x.y` release rather than pinned — so
+consumers pick up scanner fixes without a bump PR every time. Pin an exact `@v1.x.y` instead if you
+need a release to stay put. See the `bump-version` skill for how a release is cut and the alias
+moved.
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) for the development commands, package layout, and conventions.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

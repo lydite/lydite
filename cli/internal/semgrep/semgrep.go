@@ -1,0 +1,89 @@
+// Package semgrep runs Semgrep against a directory tree. Semgrep is a
+// separate Python-packaged binary (not Rust or Go tooling), so unlike gosec/
+// govulncheck it's installed via pipx rather than a language-native install
+// command; lydite still ensures the pinned version is what's actually
+// installed (not just "something called semgrep exists on PATH"), for the
+// same toolchain-reproducibility reason as everything else it runs.
+package semgrep
+
+import (
+	"context"
+	"os"
+	"strings"
+
+	"lydite/lydite/internal/executil"
+)
+
+// AppTokenEnv is the environment variable Semgrep itself reads for AppSec
+// Platform authentication. lydite doesn't invent its own — reusing
+// Semgrep's own variable means a caller (e.g. the lydite/lydite GitHub
+// Action) only has to plumb one secret through, and `semgrep ci` still works
+// exactly as documented if invoked directly outside of lydite too.
+const AppTokenEnv = "SEMGREP_APP_TOKEN" // #nosec G101 -- this is an env var NAME, not a credential value
+
+// Check runs Semgrep against dir using the given ruleset config (e.g. "auto",
+// or a custom registry ref/path from .lydite.yml), failing on any finding.
+//
+// When SEMGREP_APP_TOKEN is set in the environment, this runs `semgrep ci`
+// instead of `semgrep scan` — Semgrep's own diff-aware CI mode, which both
+// scopes findings to what the current change actually introduced and
+// uploads results to the Semgrep AppSec Platform dashboard, in one
+// invocation. Without a token (local dev, but also any CI run GitHub
+// withholds secrets from — a Dependabot PR being the standing example),
+// behavior falls back to a plain `semgrep scan`.
+//
+// baseSHA, when non-empty, makes that fallback diff-aware too: Semgrep only
+// reports findings absent at that commit. Empty means scan everything, which
+// is what a local `lydite scan` wants.
+func Check(ctx context.Context, dir, rulesetConfig, baseSHA string) executil.Result {
+	if r := ensure(ctx); !r.Ok() {
+		return r
+	}
+	return executil.Run(ctx, dir, "semgrep", buildArgs(rulesetConfig, os.Getenv(AppTokenEnv) != "", baseSHA)...)
+}
+
+// buildArgs decides the semgrep subcommand and flags: `ci` (diff-aware,
+// uploads to the AppSec Platform) when appToken is set, otherwise a plain
+// `scan`. `ci` mode omits --config entirely for the "auto" sentinel, since
+// semgrep ci already applies the org's configured platform policy by
+// default — passing "--config auto" would override that with the plain
+// community ruleset instead of layering on top of it. It also ignores
+// baseSHA: `semgrep ci` already derives its own diff base from the CI
+// environment, and passing --baseline-commit on top of that is redundant.
+//
+// The `scan` fallback takes --baseline-commit so that, in a PR, it blocks on
+// the same thing `semgrep ci` would — findings the PR itself introduces —
+// rather than on every pre-existing finding in the repo. Without this, whether
+// a PR is green depends on whether the run happened to have a token, which is
+// not a property of the code under review.
+func buildArgs(rulesetConfig string, appToken bool, baseSHA string) []string {
+	if appToken {
+		args := []string{"ci"}
+		if rulesetConfig != "" && rulesetConfig != "auto" {
+			args = append(args, "--config", rulesetConfig)
+		}
+		return args
+	}
+	args := []string{"scan", "--config", rulesetConfig, "--error"}
+	if baseSHA != "" {
+		args = append(args, "--baseline-commit", baseSHA)
+	}
+	return args
+}
+
+// ensure installs the pinned Semgrep version via pipx unless it's already
+// installed at exactly that version.
+func ensure(ctx context.Context) executil.Result {
+	if executil.Available("semgrep") {
+		v := executil.Run(ctx, "", "semgrep", "--version")
+		if v.Ok() && strings.TrimSpace(v.Output) == version {
+			return executil.Result{Name: "semgrep"}
+		}
+	}
+	r := executil.Run(ctx, "", "pipx", "install", "--force", "semgrep=="+version)
+	// Override Name: executil.Run sets it to the literal binary invoked
+	// ("pipx"), but a failure here means the Semgrep check itself never ran —
+	// report() should say so, not "pipx".
+	r.Name = "semgrep"
+	return r
+}

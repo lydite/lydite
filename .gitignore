@@ -1,0 +1,17 @@
+# Go build output
+/lydite
+*.exe
+*.test
+*.out
+
+# Go workspace file
+go.work
+go.work.sum
+
+# goreleaser build artifacts
+dist/
+
+# Agentic toolkit generated config
+/.claude/
+/CLAUDE.md
+/.mcp.json

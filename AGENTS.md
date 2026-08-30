@@ -1,0 +1,744 @@
+# lydite — agent guide
+
+Lydite is a Go CLI that unifies code-quality and security scanning — SAST, SCA, linting, and
+coverage gates — for Rust, TypeScript, and Go projects. It is the single entry point a developer
+runs locally and CI runs identically, so "green locally" and "green in CI" can never drift apart.
+It replaces per-repo ad hoc security workflows (CodeQL, standalone cargo-audit jobs, Codecov as a
+blocking gate) across `wardnet`, `wardnet-cloud`, and `inforge` with one consistent pipeline.
+
+## Commands
+
+```sh
+go build ./...                 # build the binary
+go test -race ./...            # run tests
+golangci-lint run ./...        # lint — must be clean before a PR
+go run ./cmd/lydite            # run the CLI locally
+
+# Release build dry-run (produces dist/):
+go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
+```
+
+## Layout
+
+```
+cmd/lydite/                    # the lydite CLI (scan, coverage, version, update)
+internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
+internal/config/                # .lydite.yml loading (opt-outs + pipeline shape — see Configuration below)
+internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
+internal/rust/                  # clippy, cargo-audit, cargo-deny
+internal/typescript/            # pinned ESLint + eslint-plugin-security; opt-in Biome (see Linters)
+internal/golang/                # gosec, govulncheck (installed into a version-keyed GOBIN dir)
+internal/semgrep/                # pinned Semgrep, installed via pipx
+internal/coverage/               # per-language coverage percentage (see Coverage below)
+internal/gitstate/               # lydite branch read/write (see Coverage below)
+internal/executil/              # shared external-command runner every scanner package uses
+assets/lydite-logo.png         # logo — used by README and the action's PR comment (see below)
+.goreleaser.yml                 # build/release config (v2 schema)
+.golangci.yml                   # lint config (v2 schema)
+.github/workflows/{ci,release}.yml
+.github/dependabot.yml
+action.yml                      # composite action: install + scan + coverage + PR comment + report
+scripts/install.sh              # curl|sh installer shipped with every release
+```
+
+- Module path: `lydite/lydite` (not `github.com/lydite/lydite` — a deliberate deviation from
+  the other repos in this org, to be applied there too later; do not "fix" this back).
+- `lydite` ships as a single statically-linked binary (`CGO_ENABLED=0`), built for
+  linux/darwin × amd64/arm64.
+
+## Status
+
+All four subcommands (`scan`, `coverage`, `version`, `update`) are fully implemented — every check
+is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
+a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
+`internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
+self-update (checksum-verified binary replacement, refuses on dev builds, passive update nudge on
+every other command). `lydite coverage` has been verified end-to-end against this repo's own real
+`lydite` branch on GitHub, not just a local fixture.
+
+## CI
+
+`.github/workflows/ci.yml` runs three jobs on every push/PR to `main`: `lint` (golangci-lint),
+`build & test` (`go build`/`go test -race`), and `self-scan` — lydite builds itself and runs
+`lydite scan --dir .` against its own repo. `self-scan` is dogfooding, not a formality: it's the
+only job that exercises the actual scan/report path end-to-end against a real repo, and it already
+caught a real bug once (see the git history around the `go-version: "1.26.5"` pin below).
+
+**Pin the exact Go patch version in workflows (currently `"1.26.6"`), never a bare minor (`"1.26"`).**
+`actions/setup-go`'s `go-version: "1.26"` resolves to whatever `1.26.x` patch it has
+cached/available, which is not necessarily the version this repo's `go.mod` `toolchain` directive
+pins — and critically, `go install`-ing an *external* tool (gosec, govulncheck) does **not** consult
+the current module's `go.mod` toolchain directive the way building the module itself does. This bit
+us for real: `self-scan`'s `govulncheck` step passed locally (toolchain directive respected) but
+failed in CI (setup-go had installed an older, vulnerable patch) until `go-version` was pinned to the
+exact `1.26.5`. If `go.mod`'s `toolchain` line is ever bumped, update every `go-version:` in
+`ci.yml`/`release.yml` to match in the same change.
+
+`internal/toolchain` (see Toolchains below) now also sets `GOTOOLCHAIN` from the scanned repo's own
+`go.mod` before running any Go tooling, which fixes this class of drift for **consumers** — they no
+longer need to pin `go-version` on lydite's account. Keep the pins here regardless: this repo's
+`lint` and `build & test` jobs invoke `go` directly rather than through lydite, so nothing in that
+mechanism covers them, and `self-scan` benefits from the pin holding independently of the feature
+it is dogfooding.
+
+## Configuration
+
+`.lydite.yml` at the scan root is optional and carries all the config. It does two things, and
+tuning severity or suppressing individual findings is neither of them (that's what a fix-up pass +
+inline `#nosec`/`nosemgrep` annotations in the scanned repo are for):
+
+- **Opt out** of what lydite's zero-config default already does (scan everything detected, every
+  check enabled), plus the numeric gate knobs (`coverage.tolerance`, `coverage.patch.tolerance`).
+- **Describe the repo's pipeline** — `coverage.source` and the `coverage.{go,rust}` report paths.
+  These narrow nothing; they state a fact about how the repo is built. That fact is the same for
+  every invocation in that repo, which is exactly why it belongs in a file at the scan root rather
+  than in a flag or action input each caller has to remember to repeat identically.
+
+See `internal/config/config.go` for the full schema; shape:
+
+```yaml
+rust:
+  enabled: true          # set false to skip Rust entirely even if a Cargo.toml is detected
+  exclude: []            # extra directory names to skip during ecosystem/package detection
+typescript:
+  enabled: true
+  exclude: ["legacy-app"]
+  linter: eslint         # or "biome" — which engine backs the TS check (see Linters
+                          # below). Mutually exclusive; there is deliberately no "both".
+  install: ""            # override coverage's install-command auto-detection, e.g.
+                          # "corepack enable && yarn install --immutable" (see Coverage below)
+go:
+  enabled: true
+  exclude: []
+semgrep:
+  enabled: true
+  config: auto           # override to a custom registry ref/path if needed
+toolchain:
+  enabled: true          # set false to keep the diagnostics but never download/install
+                          # (air-gapped runners, or images that preprovision everything)
+  # go/rust/node: deliberately unset. The versions come from the repo's own
+  # manifests — see Toolchains below. These keys exist only as a local override.
+coverage:
+  source: run            # who produces the coverage data. "run" (default) has lydite execute each
+                          # ecosystem's test suite itself; "report" has it never execute anything and
+                          # only parse what a prior CI job already wrote. Not "run tests or not" —
+                          # that describes lydite's behavior; this names which side of the pipeline
+                          # owns coverage production. Anything else is rejected, never silently
+                          # treated as "run" (see the section below).
+  go:
+    report: coverage.out # only read under source: report, and usually unnecessary — each discovered
+                          # module's own coverage.out/cover.out/c.out is found without it. A bare
+                          # path applies when exactly one module is discovered; a repo with several
+                          # uses a mapping instead:
+                          #   report:
+                          #     wctl: coverage/wctl.out
+                          #     sdk/wardnet-go: coverage/sdk.out
+  rust:
+    report: coverage/llvm-cov.json  # the cargo-llvm-cov JSON export — the aggregate percentage
+    lcov: coverage/lcov.info        # the lcov export — patch coverage's per-line data. Two paths
+                                     # because the JSON export has no per-line data at all. Same
+                                     # bare-or-mapping shape as go.report, keyed by crate dir.
+                                     # There is deliberately no `typescript:` here: Istanbul/Vitest
+                                     # write coverage/{coverage-summary.json,lcov.info} by fixed
+                                     # convention, so there has never been anything to override.
+  tolerance: 0.1         # pp a language's aggregate coverage may dip below its baseline before
+                          # the gate fails; absorbs sub-tenth measurement noise ("86.1% vs
+                          # baseline 86.1%, regressed 0.0%"). Compared at display precision
+                          # (tenths); 0 = fail any dip the report can show. Must be finite and
+                          # non-negative — Load rejects anything else.
+  patch:
+    tolerance: 0.1       # the patch gate's own dip allowance — deliberately independent, so
+                          # loosening the aggregate knob never weakens the untested-new-code check
+```
+
+Omitting the file, or omitting a section/key within it, keeps that value at its default — see
+`internal/config/config_test.go` for the exact merge semantics.
+
+## Linters: ESLint (default) and Biome (opt-in)
+
+`typescript.linter` selects which engine backs the TypeScript check: `eslint` (the default,
+and byte-for-byte what every repo had before the key existed) or `biome`. They are mutually
+exclusive and there is deliberately no `both` — a repo is migrating, and the key names where
+it has got to. An unknown value is rejected by `config.validateLinter` rather than falling
+back, because a misspelled opt-in that silently keeps running the old linter is the one
+outcome nobody can detect.
+
+**The two are not interchangeable rule sets, and switching changes what lydite gates on.**
+`eslint-plugin-security` is Node/backend heuristics (`detect-child-process`,
+`detect-object-injection`, `detect-non-literal-fs-filename`, `detect-unsafe-regex`, …);
+Biome's `security` group is six JSX/eval/secret rules (`noBlankTarget`,
+`noDangerouslySetInnerHtml`, `noDangerouslySetInnerHtmlWithChildren`, `noGlobalEval`,
+`noScriptUrl`, `noSecrets`). Only `noGlobalEval` genuinely coincides with anything ESLint's
+plugin has. Under Biome, lydite additionally gates on the **`correctness`** group, so a repo
+that opts in is gating on more than security. That is accepted because it is opt-in per repo,
+and Semgrep still runs across every ecosystem either way. See [ADR 0005](docs/adr/0005-optional-biome-linter.md).
+
+Four things about the Biome integration were established against Biome 2.5.8 directly rather
+than from its docs, and all four are load-bearing:
+
+- **`files.includes` negations work from an out-of-tree config.** Biome resolves config globs
+  "relative to the folder the configuration file is in", and lydite stages `biome.json` in its
+  cache directory — so this looked like it would silently ignore nothing. It doesn't: `**`-prefixed
+  negations are depth-agnostic and match correctly. But they are doing real work — with them
+  removed, Biome lints `dist/` and reports findings inside a minified production bundle, the exact
+  incident `TestEslintConfigIgnoresMatchesDefaultSkipDirs` was written for. `TestBiomeConfigIgnoresMatchesDefaultSkipDirs`
+  guards it.
+- **`--config-path` beats the scanned project's own root `biome.json`.** A project config setting
+  `linter.enabled: false` is ignored, so lydite's verdict doesn't vary with what the target repo
+  declares — the same stance `internal/typescript`'s doc comment takes for ESLint.
+- **A `biome.json` in a *subdirectory* aborts the whole run.** Biome reports "Found a nested root
+  configuration" and produces no report at all, regardless of what lydite's own config sets
+  `root` to. `lintDirBiome` detects that specific failure and reports it as a configuration
+  conflict naming the fix (add `"root": false` to the nested file, or exclude the directory),
+  because it must read as neither a pass nor a findings failure.
+- **A nested config declaring `"root": false` is *merged* into lydite's config.** Its rules then
+  fire in our run. `reportableBiome`'s category allowlist contains that — merged `lint/style/*`
+  is dropped. The same merge is a real limitation in the other direction that cannot be closed
+  from here: a nested config could set `"security": "off"` and silently narrow what lydite
+  checks.
+
+`recommended: false` in the bundled `biome.json` is not tidiness — without it Biome's default
+preset enables `style` and `suspicious` too, and lydite would start failing PRs over opinions it
+never agreed to enforce. The formatter and assist are explicitly disabled for the same reason:
+lydite is not a formatter and must never report a formatting diff as a finding.
+
+## Tool version pins
+
+lydite pins every tool it runs, which is the whole premise — and for a long time every one of
+those pins was a Go string constant, invisible to Dependabot. A pinned security toolchain that
+nothing ever ages out is a scanner that quietly goes stale while still reporting `[PASS]`, which
+is the worst available failure. Every pin now lives in a real package-manager manifest that
+Dependabot watches, colocated with the package that uses it:
+
+| Tool(s) | Manifest | Runtime source |
+|---|---|---|
+| eslint, eslint-plugin-security, @typescript-eslint/parser, typescript | `internal/typescript/eslint-pin/package.json` + lock | the manifest itself (`npm ci`) |
+| @biomejs/biome | `internal/typescript/biome-pin/package.json` + lock | the manifest itself (`npm ci`) |
+| cargo-audit | `internal/rust/cargo-audit-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
+| cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
+| semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
+| gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |
+
+The npm toolchains install with `npm ci` from a committed lockfile into a cache directory keyed
+by a **hash of that lockfile**. The old key was a hand-maintained string of concatenated version
+numbers, so adding a dependency meant remembering to extend the key, and forgetting meant reusing
+a cache directory that predated it — precisely how "every .ts file is silently skipped" would have
+come back when the TypeScript parser was added. A lockfile hash cannot be forgotten.
+
+**Go is the one exception, deliberately.** `gosecPkg`/`govulncheckPkg` are const expressions that
+concatenate the version at compile time, and `go:embed` cannot read files inside a nested module,
+so the versions can't be read from `go-pin/go.mod` at runtime. The constants stay and
+`internal/golang/pins_test.go` fails CI if a Dependabot bump to `go-pin/go.mod` isn't mirrored into
+them. `go-pin` is a **separate module** rather than `tool` directives in lydite's own `go.mod`:
+declaring them in the main module works, but drags gosec's entire dependency graph (grpc, protobuf,
+`google.golang.org/api`, …) into code lydite never links — measured at go.mod 17→69 lines and
+go.sum 17→114 — which would then generate a stream of irrelevant Dependabot PRs.
+
+**Each cargo tool gets its own manifest, and that is not tidiness.** cargo-audit and cargo-deny
+cannot resolve in a shared dependency graph — cargo-deny's `krates` pins `petgraph =0.8.1` while
+cargo-audit's `cargo-lock` pulls `0.8.2` — and a `[package]` manifest with no `src/lib.rs` doesn't
+parse at all. Either way cargo errors, Dependabot's updater fails in a job log nobody reads, and the
+pin silently stops being bumped: the exact failure this whole arrangement exists to prevent. `cargo
+install` never shares a graph between two tools, so the conflict is invisible in normal use.
+`internal/rust`'s `TestPinManifestsAreSeparate` guards against a well-meaning consolidation.
+
+**Adding a new pin means three edits, not one:** the manifest, a `.github/dependabot.yml` entry,
+and an exclude in lydite's own `.lydite.yml`. The manifests are real `package.json`/`Cargo.toml`/
+`go.mod` files, so CI's self-scan would otherwise treat each as a package to lint, a crate to audit
+or a module to scan. `internal/config`'s `TestPinDirectoriesAreExcluded` covers only the exclude
+half — it never reads `dependabot.yml`, and it discovers pins by a `*-pin` directory-name suffix, so
+`internal/semgrep/requirements.txt` falls outside it entirely. Nothing enforces the Dependabot
+entry. See [ADR 0006](docs/adr/0006-tool-pins-as-dependabot-manifests.md).
+
+## Toolchains
+
+lydite provisions every tool it *runs* — gosec/govulncheck via `go install` into a version-keyed
+cache, cargo-audit/cargo-deny via `cargo install`, ESLint via npm, Semgrep via pipx — under the
+"pin the exact toolchain, don't reuse ambient installs" principle in `internal/golang`. The one
+thing it long did *not* provision was the language toolchain it does that provisioning **with**:
+`go`, `cargo` and `node` were simply assumed to be on PATH. `internal/toolchain` closes that.
+
+Nothing was visibly broken before, and that matters for judging changes here: on a GitHub-hosted
+runner Go is preinstalled and Go 1.21+ fetches whatever `go.mod` asks for, so the assumption held.
+It was a robustness and determinism gap, not an outage — a self-hosted or container runner without
+Go fails at `go install`, the version used is whatever the image ships rather than what the repo
+declares, and with no shared module cache every run re-downloads.
+
+**Versions come from the repo's own manifests, never from `.lydite.yml`.**
+
+| Ecosystem | Version source |
+|---|---|
+| Go | the `go` and `toolchain` directives in **every** discovered `go.mod`, highest wins |
+| Rust | `channel` in `rust-toolchain.toml`, else the legacy bare `rust-toolchain`, per discovered crate |
+| TypeScript | `engines.node` in each detected package's `package.json`, else `.nvmrc` (package, then scan root) |
+
+Those files are already authoritative and already enforced by the language's own tooling, so a
+second copy in lydite's config could only agree redundantly or drift silently — and a stale
+duplicate is worse than none, because it reads as authoritative. `toolchain.{go,rust,node}` in
+`.lydite.yml` exist purely as a deliberate local **override**, which is a different thing from a
+parallel source of truth. `toolchain.enabled: false` keeps the diagnostics and skips the
+downloads.
+
+**An ambient toolchain that already satisfies the declared version is used as-is.** Downloading
+something already present and correct is pure cost, and on the runners lydite actually runs on
+that is the common case — so the common path does no network I/O at all. `internal/toolchain`'s
+`satisfied` is the single predicate for that decision; an unpinned requirement (a `stable` rust
+channel, an `lts/*` .nvmrc, no declaration at all) is satisfied by anything present, since the repo
+named no floor to be below. A toolchain that won't identify itself is treated as too old, because
+it cannot be *shown* to satisfy a pin.
+
+Each ecosystem provisions differently, and only one of the three downloads anything:
+
+- **Go** delegates to `GOTOOLCHAIN`. Any Go 1.21+ can fetch another toolchain itself, through the
+  module proxy and verified against Go's checksum database — better provenance than lydite could
+  hand-roll — so lydite just names the version. Only with no Go at all, or one older than 1.21,
+  does it download a tarball from `go.dev`, taking the SHA-256 from the release index.
+  **Go is pinned even when the ambient toolchain already satisfies the declaration** — the one
+  ecosystem where "satisfied" is not the same as "nothing to do". `GOTOOLCHAIN`'s default (`auto`)
+  does not only *upgrade*: `go install <tool>@<version>` run outside a module, which
+  `internal/golang` does to fetch gosec and govulncheck, makes the go command consult that
+  **tool's** own `go.mod` and switch to whatever minimum it declares. `golang.org/x/vuln@v1.6.0`
+  declares `go >= 1.25.0`, so an `auto` runner with Go 1.26 installed builds govulncheck with
+  go1.25 — and a govulncheck built by an older Go rejects newer source outright. That is the exact
+  failure recorded under CI above, and it reproduces on a runner whose ambient toolchain is
+  perfectly correct. `pinAmbientGo` therefore sets `GOTOOLCHAIN=local` in that case.
+  `local`, not the declared version: the declaration is a *minimum*, so a `go 1.26` directive
+  resolves to `go1.26.0` and pinning it would downgrade a runner already on 1.26.6 — backwards,
+  when the newer patch is the one carrying the security fix. lydite's own `ci.yml` sets
+  `GOTOOLCHAIN: local` by hand for exactly this reason; consumers now get it automatically.
+  The probe reads the ambient version with `GOTOOLCHAIN=local` set for the same reason: `go
+  version` inside a module honours that module's `toolchain` directive and reports the version it
+  would switch *to*, which is not the one `local` would then select — measure and pin have to come
+  from the same place, or lydite concludes "ambient is fine" and lands on an older toolchain than
+  it just measured.
+- **Rust** delegates to rustup, which already reads the same `rust-toolchain.toml` lydite does.
+  This extends rather than contradicts `internal/rust`'s existing stance that the toolchain version
+  "is the target repo's responsibility via its own rust-toolchain.toml". What it adds is
+  materialising the channel up front with the `clippy` and `rustfmt` components the checks need —
+  rustup would otherwise install it lazily in the middle of `cargo clippy`, where a missing
+  component reads as a check failure rather than a setup step. With no rustup at all, lydite says
+  so and continues rather than installing rustup behind the user's back.
+  Installing is not selecting, and the two come apart in exactly one case. rustup picks a toolchain
+  by reading `rust-toolchain.toml` from the directory cargo runs in, which covers the normal case
+  for free — `internal/rust` and `internal/coverage` both run cargo inside the crate directory, so
+  the file lydite read is the file rustup reads. A version supplied by `toolchain.rust` in
+  `.lydite.yml` has no such file, so rustup cannot see it and would install the requested channel
+  and then go on running the old default. `Requirement.Overridden` marks that case and
+  `provisionRust` sets `RUSTUP_TOOLCHAIN` **only** then: applying it whenever a channel came from a
+  manifest would override rustup's own per-crate selection — the thing `internal/rust` says not to
+  second-guess — and would break a monorepo whose crates pin different channels.
+- **Node** is the only one lydite downloads and unpacks itself, from `nodejs.org`, with the digest
+  read from that release's `SHASUMS256.txt`. There is no assumable equivalent of GOTOOLCHAIN or
+  rustup — nvm/fnm/volta are all optional and mutually exclusive. The `.tar.gz` is taken over the
+  `.tar.xz` purely because Go's standard library decompresses gzip and not xz.
+
+**Provisioning failures warn; they do not fail the scan.** This step is preparation, not a gate,
+and falling through to "whatever is on PATH" is exactly today's behavior — turning a working scan
+into a hard failure over a network blip would be a regression, and if the toolchain really is
+absent the next step fails loudly and specifically. What must not happen is failing *silently*, so
+every reuse, substitution, skip and failure is named on stderr. Stderr, not stdout, deliberately:
+`action.yml`'s PR-comment builder scrapes bracketed tags from coverage stdout with a pattern that
+is **not** line-anchored, so unrelated chatter on stdout would end up in the PR comment.
+
+**Doing this in lydite rather than in each caller's CI is the point.** gt briefly grew a
+`setup-go` step in its lydite stage (`19e4b77`, reverted in `a0ed107`) and it was wrong twice
+over: it looked for `go.mod` at exactly one path, so wardnet — whose modules live under `wctl/` and
+`sdk/wardnet-go/`, not the scan root — would silently have got nothing, and it put knowledge of Go
+toolchains into gt, which would then have needed the same for Rust and TypeScript forever. lydite
+already knows which ecosystems it detected and where, so it reads every manifest under the scan
+root; and it is the only place that helps wardnet at all, since wardnet calls `wardnet/bulwark@v1`
+directly rather than through gt. See [ADR 0004](docs/adr/0004-ensure-language-toolchains.md).
+
+Downloads land in the same version-keyed `~/.cache/lydite` layout every other lydite-managed
+install already uses, so a consumer caching that one path (as wardnet's workflow already does)
+covers language toolchains too with no key change. Installs stage into a sibling temp directory and
+are renamed into place, so an interrupted download can never leave a half-populated toolchain that
+the next run mistakes for a complete one.
+
+## Coverage
+
+`lydite coverage` diffs the current branch's per-language coverage against a lazily-computed,
+per-main-commit-SHA baseline cached on a dedicated `lydite` branch (never `main` — bot-owned
+generated cache data, not source, needs no PR/review and never pollutes main's history):
+
+- **A run on main records its own coverage as that commit's baseline.** When `HeadSHA == BaseSHA`
+  (lydite is running on main, not ahead of it) there is nothing to gate against — the current commit
+  *is* the baseline — so `cmd/lydite/coverage.go` writes what it just measured to `lydite`
+  and stops. This is the *primary* way baselines get created, and the only one that works for a repo
+  whose coverage is produced by a multi-job CI pipeline rather than by lydite running the tests
+  itself (precisely what `coverage.source: report` exists to serve): such a repo can never *re*compute a
+  historical baseline, because `computeBaselineAt`'s throwaway worktree is a bare checkout with none
+  of the toolchain (`cargo-llvm-cov`, yarn/Node) or staged reports the pipeline provides — it
+  measures nothing. wardnet ran that way for months: the numbers it kept failing to reconstruct in a
+  worktree were numbers it had *already measured, and thrown away*, when this same command ran on
+  main. Recording them costs nothing — no test re-run, no extra tooling, they are already in hand.
+  **Consumers must therefore run `lydite coverage` on pushes to main, not only on PRs.**
+- **Baseline writes merge; a partial run never shrinks the baseline.** A consumer's CI may
+  path-filter its coverage jobs (wardnet skips frontend coverage on a Rust-only change), and the
+  cache-miss worktree routinely lacks tooling, so either write path can legitimately measure only
+  some of the detected languages. Recording only what was measured would silently drop the
+  unmeasured language's entry — every later PR would see it as `[NEW]`, compared against nothing,
+  permanently, and the "never cache an empty baseline" guard doesn't catch it because the report
+  isn't empty, just partial. So *both* writers (record-on-main and `computeBaselineAt`'s cache-miss
+  path) run `cmd/lydite/coverage.go`'s `carryForwardBaseline` first: it copies the entry for every
+  *detected-but-unmeasured* language from the nearest prior baseline via `gitstate.PriorBaselines`,
+  which starts at the recorded SHA **itself** (so a re-run or a concurrent per-language job never
+  clobbers a fresher same-commit entry with an ancestor's stale value — and a shallow depth-1
+  checkout can still see it) before walking first-parent ancestors, best-effort, skipping poisoned
+  `{}` entries. A language that's genuinely gone — source deleted, or `enabled: false` in
+  `.lydite.yml` (`enabledEcosystems` strips disabled languages from the detected set) — is no
+  longer *detected*, so its entry still dies with it; only "the code is there but this run didn't
+  measure it" carries forward. The `recorded coverage baseline` line names anything carried, and an
+  unmeasured language *no* prior had is named in a stderr warning (shallow history is the usual
+  culprit) instead of vanishing silently. This applies even when a main run measures **nothing**
+  (a docs-only merge: every producer path-filtered away, no reports for a report-sourced repo to read) —
+  the whole baseline is carried rather than skipping the record, because a main commit with no
+  baseline forces every PR against it into the recompute-nothing → all-`[NEW]` → gate-on-nothing
+  hole (wardnet/wardnet#899). "No coverage measured" is only printed when there was truly nothing
+  to record: nothing measured *and* no priors to carry.
+- `internal/gitstate.BaseSHA` resolves `git merge-base HEAD origin/main`.
+- `internal/gitstate.ReadBaseline` fetches `lydite` and reads `<sha>.json` via `git show`
+  (no checkout) — a missing branch or missing file is a cache miss, not an error.
+- On a cache miss, `cmd/lydite/coverage.go`'s `computeBaselineAt` checks out `origin/main` at that
+  SHA into a throwaway `git worktree` (never disturbing the caller's own working tree/branch),
+  computes coverage there, and `internal/gitstate.WriteBaseline` pushes it to `lydite` (via
+  another throwaway worktree — creating the branch as an orphan the first time). `lydite` is
+  shared and busy — every CI run on the repo may push to it — so `WriteBaseline` fetches the fresh
+  remote ref immediately before staging each attempt (the local tracking ref is as stale as the
+  job's checkout, minutes old by the time a scan finishes) and retries a rejected push from the
+  re-fetched ref, treating "the fetched branch already has this exact content" as success. A push
+  that never lands is returned as an error: the PR-side cache-miss caller downgrades it to a
+  warning (it already holds the computed baseline), but the record-on-main path must never print
+  "recorded" for a baseline that was lost — that exact silent loss (stale ref → non-fast-forward
+  rejection → swallowed) is how wardnet's main runs kept recording nothing while every PR
+  re-hit a cache miss.
+- `internal/coverage.Compute` gets the actual number per detected ecosystem: `go tool cover -func`'s
+  total line for Go, `cargo llvm-cov --json`'s `data[0].totals.lines.percent` for Rust, and — for
+  TypeScript, best-effort only — a package's own `test:coverage` script plus Vitest/Istanbul's
+  `coverage-summary.json`, since unlike a linter there's no single canonical coverage-invocation
+  convention to standardize on across arbitrary TS packages. A language whose coverage can't be
+  measured is silently omitted from the report, not failed.
+- Rust never assumes `--dir` itself is the crate/workspace root — `internal/detect.RustCrateDirs`
+  discovers every independent Cargo crate/workspace root under `--dir` (deduping a workspace
+  member's own `Cargo.toml` under its ancestor workspace root), and both `internal/rust.Check` and
+  `internal/coverage.rustCoverage` iterate every discovered root, averaging coverage across them the
+  same way TypeScript averages across packages. Rust's report overrides are therefore keyed by
+  crate directory (relative to `--dir`) rather than a single path — `coverage.rust.report` and
+  `coverage.rust.lcov` accept a mapping of crate dir to path, and the `--rust-report`/
+  `--rust-lcov-report` flags are repeatable with the same `<crateDir>=<path>` syntax. A bare value
+  (a scalar in the file, or no `=` on the flag) is only honored when discovery finds exactly one
+  crate, preserving the original single-crate invocation unchanged.
+- Go never assumes `--dir` itself is a module root either, for the same reason and by the same
+  shape (see [ADR 0002](docs/adr/0002-go-multi-module-coverage.md)) — `internal/detect.GoModuleDirs`
+  discovers every module under `--dir` and `internal/coverage.goCoverage` measures each in turn,
+  averaging across them. `coverage.go.report` and `--go-report` are likewise keyed by module dir
+  (`--go-report <moduleDir>=<path>`). This one bit for real: `go test`, `go list -m` and `go tool
+  cover -func` are all module-scoped, so running them at a monorepo root measured *nothing* — and
+  said so only in a warning, leaving Go absent from wardnet's gate, aggregate and patch both, while
+  CI stayed green. Two guards keep that from recurring quietly: the aggregate is computed from the
+  profile itself rather than by shelling out to `go tool cover -func` (same number, but it works
+  from any directory), and `moduleName` rejects `go list -m`'s `command-line-arguments` answer
+  instead of treating it as a module path that strips nothing.
+- Generated Go files are excluded from both the aggregate and the patch gate, matched on Go's
+  `// Code generated ... DO NOT EDIT.` convention (<https://golang.org/s/generatedcode>) rather than
+  a filename pattern — the same signal golangci-lint and Codecov use. Without it the gate measures
+  code generation rather than testing: wardnet's regenerated REST client was 983 of one PR's 1007
+  changed Go lines and pinned its SDK module's aggregate at 2%. Note `go.exclude` in `.lydite.yml`
+  cannot do this job — it narrows module *discovery*, not what is inside a module.
+- **An empty baseline is never cached, and an empty cached baseline is a miss.** `Compute` silently
+  omits any language whose tooling it can't run (deliberate — a repo with no coverage tooling
+  shouldn't hard fail). But baseline computation runs in a *bare worktree*: no `node_modules`, no
+  CI-staged report, only whatever tooling the runner happens to have. `internal/coverage.rustCoverage`
+  under `SourceRun` requires `cargo-llvm-cov` on `PATH` and lydite does **not** install it (unlike
+  cargo-audit/cargo-deny/gosec/semgrep, which it pins and installs itself) — so on a runner without
+  it, the baseline computes to `{}`. Cached, that `{}` is indistinguishable from a real entry: every
+  later PR gets a cache *hit*, every language reports `[NEW]`, and the gate enforces **nothing**,
+  silently and permanently, with no way to self-heal. wardnet ran this way — all nine baselines on
+  its `lydite` branch were `{}`, and its coverage gate had never once compared anything.
+  `cmd/lydite/coverage.go` therefore refuses to cache an empty report, `gitstate.ReadBaseline`
+  treats a cached `{}` as a miss (which heals already-poisoned branches without a manual purge), and
+  `warnUnmeasured` names every detected-but-unmeasured ecosystem on stderr rather than dropping it in
+  silence. If a language is missing from the gate, lydite now says so.
+- A language with no prior baseline entry (new) is reported but doesn't fail the check on its own;
+  a language whose current coverage dipped below its baseline by more than `coverage.tolerance`
+  (default 0.1pp, compared at the report's tenth-of-a-point display precision) does. To keep
+  tolerated dips from compounding — each merge lowering the baseline the next PR gates against —
+  the baseline writers restore any within-tolerance dip to the prior (high-water) value when
+  recording; only a beyond-tolerance drop, which was FAIL-visible on the PR that introduced it,
+  resets the baseline. A language the baseline has but the
+  current run doesn't splits on detection: still detected in the tree means its coverage step just
+  didn't run this time (path-filtered CI job, missing tooling) and it's reported as `[UNMEASURED]`;
+  no longer detected means the source actually left the tree and it's reported as `[DROPPED]`
+  (wardnet/wardnet#892 showed a Rust-only PR as "typescript: no longer measured" when the TS code
+  was untouched — only the frontend coverage job had been skipped). Neither fails on its own.
+
+### `coverage.source`: who produces the coverage
+
+Unlike Codecov or Sonar — which never execute your tests, only ingest a coverage report your build
+already produced — `lydite coverage`'s default (`coverage.source: run`) actually runs each
+ecosystem's test suite itself (`go test -coverprofile`, `cargo llvm-cov`, a package's
+`test:coverage` script). That's the right default for local dev (one command, no separate step to
+remember), but it's wrong for CI if a test job already runs with coverage instrumentation on —
+running tests again would duplicate work that may already be expensive (wardnet/wardnet-cloud's
+existing pipelines already run tests twice: once plain for pass/fail, once instrumented for
+coverage; `lydite coverage` piling on a third run would make it worse, not better).
+
+`coverage.source: report` fixes this: lydite never executes anything, only looks for a report file
+a prior job already produced — `internal/coverage.findReportForUnit` checks an explicit override
+first (keyed by the discovered module/crate directory it applies to, from `coverage.go.report` /
+`coverage.rust.report` / `coverage.rust.lcov`, or the matching `--go-report`/`--rust-report`/
+`--rust-lcov-report` flag), then a built-in candidate list resolved relative to that directory
+(`coverage.out`/`cover.out`/`c.out` for Go;
+`coverage/llvm-cov.json`/`llvm-cov.json`/`target/llvm-cov/llvm-cov.json` for Rust — TypeScript has
+no override, since `coverage/coverage-summary.json` is already Istanbul's own fixed convention, not
+something projects vary). In CI, the intended shape is: the existing test job already produces
+coverage as a side effect of running tests once (e.g. `cargo llvm-cov nextest` *as* the test runner,
+not a second pass after a plain `cargo test`), and `lydite coverage` runs afterward as a pure
+report-consumer.
+
+**The axis is named for who owns production, not for what lydite skips.** The setting used to be
+`--tests=run|skip` (and a `tests-mode` action input), which described lydite's own behavior and
+left the reader to infer the pipeline shape behind it. `run`/`report` names the decision the repo
+is actually making. The never-execute promise is unchanged and still guarded by
+`internal/coverage.TestGoCoverageSourceReportDoesNotRunTests`.
+
+**Where it lives is the point** (see [ADR 0003](docs/adr/0003-coverage-source-in-config.md)).
+`coverage.source` is a property of how a repo's pipeline is built
+— one answer, true for every workflow in that repo — so it belongs in `.lydite.yml` at the scan
+root, not restated at each call site. The composite action therefore has *no* input for it:
+`action.yml` passes only `--dir`, and `--dir` is the one thing that can't move into the file, since
+the file lives at the scan root and lydite must know the root before it can read its own config.
+The CLI flags (`--source`, and `--go-report`/`--rust-report`/`--rust-lcov-report`) remain as a
+local-dev/one-off override that outranks the file; `--tests` survives as a deprecated alias mapping
+`skip` to `report`. `cmd/lydite/coverage.go`'s `resolveSource` and `resolveReports` own that
+precedence. Both source flags default to `""`, not to `"run"` — with a `"run"` default the flag
+would always be populated, always outrank the file, and `coverage.source` would never once be
+consulted, a silent failure indistinguishable from the config key not working.
+
+**One exception, and it is a trap.** Computing a **baseline** at a historical main SHA (a cache
+miss) always uses `coverage.SourceRun` internally — `cmd/lydite/coverage.go`'s `computeBaselineAt`
+hardcodes it and passes an empty `ReportPaths{}` — regardless of what `coverage.source` says. A
+historical commit's throwaway checkout has no CI-produced report sitting in it, so there is nothing
+to consume. This is why `internal/coverage.Compute` takes the source as a **parameter** and never
+reads `cfg.Coverage.Source` itself, even though it is already handed the config: a `Compute` that
+consulted the config directly would hand every report-sourced repo an empty baseline forever —
+exactly the `{}` poisoning the caller then refuses to cache, leaving the gate comparing against
+nothing, silently and permanently. Keeping the axis in the signature forces the one caller that
+must override it to say so out loud.
+`cmd/lydite/TestComputeBaselineAtRunsTestsEvenWhenSourceIsReport` guards this directly, with a
+fixture whose only possible source of a coverage number is a test that actually ran. The real cost
+is one test run per main commit (cached afterward on `lydite`), not once per PR, so it
+doesn't reintroduce the duplication `coverage.source: report` exists to avoid.
+
+TypeScript's `SourceRun` path also runs a one-time dependency install per workspace root before
+executing each package's `test:coverage` script — a fresh checkout (baseline computation's throwaway
+worktree, but also any other `SourceRun` invocation) has no `node_modules` a prior step could have
+already installed. `internal/coverage.resolvePackageManager` auto-detects npm/yarn/pnpm from the
+root's lockfile (`package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`); a root with more than one
+recognized lockfile is treated as ambiguous and install is skipped there rather than guessing a
+priority order. `typescript.install` in `.lydite.yml` overrides auto-detection entirely with an
+explicit shell command (e.g. `corepack enable && yarn install --immutable`), for Corepack-pinned or
+otherwise nonstandard install flows auto-detection can't infer, or to resolve an ambiguous root.
+`internal/coverage.tsWorkspaceRoots` dedupes so a shared root serving multiple nested packages is
+only installed once, not once per package.
+
+### Patch coverage
+
+Aggregate coverage and patch coverage catch disjoint regression classes: aggregate catches
+coverage lost in code the current PR never touches (e.g. a deleted test file — none of those lines
+are in the diff, so aggregate is the only gate that notices); patch coverage catches untested new
+code even when the codebase is big enough that it doesn't move the aggregate percentage. Neither
+bounds the other, so `lydite coverage` computes and gates on both, not either/or — patch coverage
+is a second, independent check alongside `diffReport`'s existing aggregate gate, not a replacement.
+
+Patch coverage has **no baseline or threshold of its own** — it always gates against that same
+language's aggregate baseline already read from `lydite` (`patch% >= baseline% -
+coverage.patch.tolerance` — its own knob, deliberately independent of `coverage.tolerance`, so
+loosening the noisy aggregate gate never silently weakens this one). A language
+with no aggregate baseline yet is reported informationally (`[NEW]`), not failed, mirroring
+aggregate's own handling of a first-time-seen language. It's opt-out, not opt-in, per language, via
+`.lydite.yml`:
+
+```yaml
+coverage:
+  patch:
+    go:
+      enabled: false   # defaults to true
+```
+
+Changed lines come from a hand-rolled unified-diff hunk parser (`internal/coverage.ChangedLines`,
+`git diff --relative --unified=0 <merge-base>..HEAD`) — deliberately not a diff library, since the
+format needed is a small, stable subset (hunk headers + `+` lines). `--relative` matters: the
+command runs in `--dir`, and every consumer of the changed-line map works in `--dir`-relative
+paths (crate/package prefixes, lcov normalization). Without it, git emits repo-root-relative paths,
+so with `--dir` pointing at a subdirectory (wardnet's `--dir source`) every changed file failed the
+prefix match and the patch gate silently measured nothing. `mergeBase` is the exact same SHA
+`gitstate.BaseSHA` already resolved for the aggregate baseline lookup, reused as-is rather than
+recomputed. The parser does no language-aware filtering of comments/blank lines/imports — that
+happens later, when changed lines are intersected with a coverage report's line-hit data
+(`internal/coverage.PatchPercent` counts only lines the report actually mentions).
+
+**A Go coverage profile is the exception, and it bit us.** lcov (Rust, TypeScript) lists only
+executable lines, so "absent from the report" safely means "not executable, don't count it". A Go
+profile records *blocks*, not statements — every line between a block's braces is in the report,
+comments and blank lines included.
+
+The dividing line is the *format*, not the tooling: lcov simply has no slot for a non-executable
+line, whereas a Go profile has no notion of a line at all, only a brace-to-brace span that lydite
+itself expands. Don't infer it from how the tool measures — Vitest's default `v8` provider is
+range-based exactly like Go's profile, and `llvm-cov`'s own text report does print counts beside
+comment lines inside a function. Both still emit clean lcov (v8 maps ranges back onto statements via
+`v8-to-istanbul`; `llvm-cov --lcov` only emits `DA:` for lines carrying a coverage segment) —
+verified directly against both producers with a comment and a blank line inside an uncovered
+function, neither of which appeared in the resulting lcov. So Go needs the filtering below and the
+other two genuinely don't. So a comment added inside an uncovered function counted as an
+uncovered new line, and a comment-only PR scored 0% patch coverage and failed the gate
+(`wardnet/inforge#216`, whose entire diff was `nosemgrep` annotations and workflow YAML).
+`internal/coverage.ParseGoProfile` therefore reads each profiled source file and drops blank and
+`//`-comment lines before they ever reach `LineHits`. It deliberately does **not** try to track
+`/* */` comments (that needs a lexer — `/*` inside a string literal opens nothing) or treat a
+leading `*` as a comment continuation (`*p = x` is a pointer assignment): over-counting a rare block
+comment merely understates patch coverage, while wrongly dropping a statement would let genuinely
+untested code through the gate.
+
+Per-ecosystem line-hit sources, all converging on the same `LineHits` (`map[file]map[line]hits`)
+shape:
+
+- **Go**: `internal/coverage.ParseGoProfile` reads the same `coverage.out` profile the aggregate
+  percentage is computed from — no separate format, no second `go test` run. `Compute`'s returned
+  `PatchSources.GoProfiles` is a `map[string]GoModuleProfile` keyed by module dir (like Rust's
+  `RustLCOV`, not a single path), each entry carrying the profile path, the module path, and the
+  module's directory relative to `--dir`. Both of the latter are needed to turn a profile's
+  package-qualified names into `--dir`-relative paths, and neither generalises across modules —
+  wardnet's are `github.com/wardnet/wardnet/source/wctl` under `wctl/` and `wardnet.network/go`
+  under `sdk/wardnet-go/`. `goPatchPercent` merges every module's hits; no per-module prefix scoping
+  is needed (unlike Rust's), because the keys are already `--dir`-relative and cannot collide.
+- **Rust**: `cargo llvm-cov` doesn't emit per-line data in its `--json` export, so patch coverage
+  additionally produces an `--lcov` report, per discovered crate/workspace root (see the Coverage
+  section above). Under `SourceRun`, this doesn't cost a second test execution: `cargo llvm-cov
+  --no-report` runs each crate's suite once and keeps raw profile data on disk, then both `--no-run
+  --json` (aggregate, unchanged) and `--no-run --lcov` (patch, new) regenerate their reports from
+  that same profile. Under `SourceReport`, the lcov file is another `findReportForCrate` lookup per
+  crate — an explicit `coverage.rust.lcov` entry (or `--rust-lcov-report <crateDir>=<path>`), else a
+  candidate list
+  (`coverage/lcov.info`, `lcov.info`, `target/llvm-cov/lcov.info`) resolved relative to that crate's
+  own directory, mirroring `coverage.rust.report` exactly. `Compute`'s returned `PatchSources.RustLCOV` is
+  a `map[string]string` keyed by crate dir (like TypeScript's `TSLCOV`, not a single path) —
+  `cmd/lydite/coverage.go`'s `rustPatchPercent` resolves each crate's contribution independently,
+  mirroring `tsPatchPercent`'s longest-prefix matching so two crates can't clobber each other's hit
+  data for a same-named file. A crate with no resolvable lcov file is omitted from patch coverage,
+  not a failure — but not silently when it matters (see the `[UNMEASURED]` paragraph below).
+- **TypeScript**: reads `<pkgDir>/coverage/lcov.info` (Istanbul/Vitest's native lcov output) — fixed
+  convention, no override flag, matching the existing no-override precedent for TS aggregate
+  coverage. This only works if the consumer's own test config already has an `lcov` reporter
+  enabled; otherwise it's omitted, the same best-effort caveat AGENTS.md already documents for TS
+  aggregate coverage.
+
+`cmd/lydite/coverage.go`'s `patchReport` prints one bracketed status line per language using the
+same `[PASS]/[FAIL]/[NEW]` vocabulary the aggregate gate already uses (e.g.
+`[FAIL]    go patch: 0.0% (0/9 new lines; baseline 55.68%)`) — this needs no changes to
+`action.yml`'s PR-comment builder, since its `cov_detail` regex is generic and already picks up any
+matching bracketed line.
+
+**A skipped patch gate must say so.** When a *detected* language's patch gate is enabled and the
+diff touches that language's files, but no per-line source was resolved (no lcov for the crate, no
+`lcov` reporter in a TS package), `patchReport` prints an `[UNMEASURED] <lang> patch: ...` line and
+a stderr warning naming the missing wiring — it never fails the gate on its own, mirroring
+`diffReport`'s `[UNMEASURED]` handling. The old behavior was a bare `continue`, and it read as
+"patch coverage passed" in the PR comment: wardnet/wardnet#957 shipped a green lydite summary
+(aggregate flat, patch never ran for want of an lcov path) while Codecov — fed the very same lcov
+export the pipeline had already produced — failed that diff's patch coverage. The two reports can
+only stay aligned if a gate that didn't run is visibly distinct from a gate that passed. The
+report stays scoped to detected ecosystems, since the patch gates default to enabled for all three
+languages regardless of what the repo contains — a stray changed `.rs` file in a pure Go repo must
+not produce a rust line.
+
+## Semgrep: token-bearing vs token-less runs
+
+`internal/semgrep.Check` picks its subcommand from whether `SEMGREP_APP_TOKEN` is set: `semgrep ci`
+(diff-aware, applies the org's platform policy, uploads to the AppSec Platform) when it is, plain
+`semgrep scan --config <ruleset> --error` when it isn't. Those two modes disagree about **scope**,
+and that disagreement was a standing CI defect: GitHub deliberately withholds repo secrets from
+`dependabot[bot]` events, so every Dependabot PR arrived with an empty token, silently fell back to
+a *whole-repo* scan, and blocked on the consuming repo's pre-existing findings — findings no
+token-bearing run had ever reported, in code the PR never touched. Whether a PR was green depended
+on who opened it.
+
+`lydite scan --diff-base <ref>` closes that gap: in scan mode it passes Semgrep
+`--baseline-commit`, so the fallback blocks on the same thing `semgrep ci` would — what the change
+introduces — and nothing else. `--diff-base auto` resolves the merge-base with `origin/main` via the
+same `internal/gitstate.BaseSHA` the coverage gate already uses, so a PR's scan and its coverage
+agree on what "this change" means. `action.yml` passes `auto` on every `pull_request` event.
+
+Two deliberate choices in `cmd/lydite/scan.go`'s `resolveDiffBase`:
+
+- **A token short-circuits it entirely** — `semgrep ci` already scopes itself to the diff, so
+  resolving a merge-base would cost a `git fetch` nothing reads, and would newly demand a
+  full-history checkout from token-bearing consumers that don't need one today.
+- **An unresolvable `auto` is an error, not a silent full scan.** Falling back would reintroduce
+  the exact surprise the flag exists to remove: a scan that quietly widens its own scope. A shallow
+  checkout is a fixable misconfiguration (`fetch-depth: 0`), so lydite says so and fails.
+
+Default (`--diff-base` empty) is still a full-repo scan — that's what a local `lydite scan` wants,
+and it's what a push to `main` gets.
+
+Restoring `semgrep ci` on Dependabot PRs (for the platform dashboard's sake) is a *consumer-side*
+option, not a lydite one: the token has to be added to the repo's separate **Dependabot secrets**
+store (`gh secret set SEMGREP_APP_TOKEN --app dependabot`), since Actions secrets are not visible to
+Dependabot events. It is not required for CI to be green — the diff-aware fallback above is — and it
+does hand an upload token to a workflow that executes the bumped dependency's code, so it's a
+per-repo judgment call.
+
+## The `action.yml` composite action
+
+Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
+lydite's usage is uniform enough (`.lydite.yml` already carries all the config) that the action
+owns the whole install → run → report flow: install lydite, run `scan`/`coverage` (each toggleable
+independently via `run-scan`/`run-coverage`), post one sticky PR comment summarizing both (upsert,
+not a fresh comment every run — via `marocchino/sticky-pull-request-comment`), and optionally
+upload to Codecov (non-blocking, purely for its dashboard/history) and/or switch lydite's own
+Semgrep check into `semgrep ci` mode (diff-aware + uploads to the Semgrep AppSec Platform) when a
+`SEMGREP_APP_TOKEN`-equivalent input is supplied. The Codecov upload is two `codecov/codecov-action`
+invocations sharing the same `codecov-token` gate — one `report_type: coverage`, one
+`report_type: test_results` — both relying entirely on that action's own recursive workspace
+auto-discovery rather than lydite passing explicit `files:`/`directory:` paths itself. This is
+why a consumer's CI only needs to hand lydite a token: lydite owns the whole Codecov
+relationship (coverage *and* JUnit test-results), so the calling workflow never has to install a
+Codecov CLI or push to Codecov directly itself.
+
+The PR comment's header embeds `assets/lydite-logo.png` by **absolute raw URL**
+(`raw.githubusercontent.com/lydite/lydite/main/...`), never a repo-relative path — the comment is
+posted into the *consuming* repo's PR, where a relative `assets/...` would resolve against that repo
+and 404. It's pinned to lydite's default branch, not a release tag, so the image keeps resolving for
+consumers pinned to an older lydite version. Renaming or moving that file therefore breaks the logo
+in every consumer's PR comment retroactively — treat its path as a public API.
+
+**Never interpolate `${{ inputs.* }}` or `${{ steps.*.outputs.* }}` directly into a `run:` script
+body** — pass it via that step's `env:` block instead, and reference the env var name (`"$DIR"`,
+not `"${{ inputs.dir }}"`) inside the script. Semgrep's own `yaml.github-actions.security.run-shell-injection`
+rule caught this exact mistake once already (see git history) — expression interpolation directly
+into a shell script is a real script-injection vector if the interpolated value could ever contain
+shell metacharacters, regardless of how trusted the input value looks today. `if:` conditions and
+`with:` blocks on a `uses:` step are fine to interpolate directly — only `run:` script bodies are
+the risk, since that's the only place text gets spliced into something a shell then executes.
+
+## Conventions
+
+- **Version injection:** `cmd/lydite` exposes `var version = "dev"`, overridden at release via
+  `-ldflags "-X main.version=<tag>"`. Keep that variable name and package stable.
+- **goreleaser & golangci-lint both use the v2 config schema.** In golangci-lint v2, `gosimple` is
+  part of `staticcheck` — don't add it as a separate linter (it will error).
+- Lint must pass with zero issues; `errcheck` is on, so check returned errors.
+
+## Boundaries
+
+- **Always:** run `go build ./...`, `go test -race ./...`, and `golangci-lint run ./...` before
+  proposing a PR.
+- **Ask first:** changing the Go version, renaming the binary/`cmd` dir, altering the release
+  archive layout, or editing CI.
+- **Never:** introduce cgo, commit `dist/` or secrets, or skip the lint/test gates.
+
+## Worktrees
+
+This repo uses a bare-repo + typed-worktree layout managed by the `gt` CLI — one session, one
+`gt wt add <type/name>` worktree; never use raw `git worktree` or edit inside `.bare/`.
