@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,5 +182,139 @@ func TestReviewWarnsWhenTheWorkingTreeIsDirty(t *testing.T) {
 	out, _ := runReview(t, dir, base)
 	if !strings.Contains(out, "uncommitted changes") {
 		t.Errorf("expected the report to exclude and name uncommitted work, got:\n%s", out)
+	}
+}
+
+// A base that does not name a commit is refused rather than passed to git.
+//
+// Each of these turns the gate into a rubber stamp: an empty base makes the
+// range read "..HEAD", which is an empty diff that nothing can disqualify,
+// and makes the exemptions spec read ":<path>", which git resolves against
+// the index — handing the branch the allowlist the merge-base read exists to
+// deny it. A base beginning with "-" lands where git reads an option.
+func TestReviewRefusesABaseThatIsNotACommit(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	for _, base := range []string{"", "--output=/tmp/lydite-should-not-exist", "refs/heads/nope"} {
+		t.Run(base, func(t *testing.T) {
+			out, err := runReview(t, dir, base)
+			if err == nil {
+				t.Fatalf("base %q must be refused, got a verdict:\n%s", base, out)
+			}
+			var exit ui.ExitError
+			if errors.As(err, &exit) {
+				t.Fatalf("base %q produced a verdict (exit %d) rather than an error", base, exit.Code)
+			}
+		})
+	}
+	if _, err := os.Stat("/tmp/lydite-should-not-exist"); err == nil {
+		t.Fatal("a base beginning with \"-\" reached git as an option and wrote a file")
+	}
+}
+
+// The diff has to describe what this branch introduces, so a base off the
+// branch's own history is refused.
+func TestReviewRefusesABaseThatIsNotAnAncestor(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"README.md": "hello again"},
+	)
+	ctx := context.Background()
+	run := func(args ...string) string {
+		t.Helper()
+		r := executil.RunQuiet(ctx, dir, "git", args...)
+		if !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+		}
+		return strings.TrimSpace(r.Output)
+	}
+	run("checkout", "-q", "-b", "sibling", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(dir, "other.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "sibling")
+	sibling := run("rev-parse", "HEAD")
+	run("checkout", "-q", "main")
+
+	if out, err := runReview(t, dir, sibling); err == nil {
+		t.Fatalf("a base off this branch's history must be refused:\n%s", out)
+	}
+}
+
+// --base defaults to "auto", which is what every CI invocation uses, so the
+// merge-base path needs exercising and not just the explicit-SHA one.
+func TestReviewAutoResolvesTheMergeBase(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	ctx := context.Background()
+	origin := t.TempDir()
+	// origin/main carries the base commit only, so HEAD is genuinely ahead
+	// of it and the merge-base is something to gate against. Pushing HEAD
+	// would make the merge-base HEAD itself, which is a run on main — a
+	// different case, and the one that legitimately passes.
+	for _, args := range [][]string{
+		{"init", "--bare", "-b", "main", origin},
+		{"remote", "add", "origin", origin},
+		{"push", "-q", "origin", "HEAD~1:refs/heads/main"},
+	} {
+		if r := executil.RunQuiet(ctx, dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+		}
+	}
+
+	out, err := runReview(t, dir, "auto")
+	if err == nil {
+		t.Fatalf("an unexempt change must be referred:\n%s", out)
+	}
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("--base auto must reach a referral verdict, got %v:\n%s", err, out)
+	}
+}
+
+// An unresolvable "auto" is an error rather than a silent fallback: guessing
+// a base would quietly change which paths the verdict was computed from.
+func TestReviewAutoWithNoOriginIsAnError(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"README.md": "hello again"},
+	)
+	out, err := runReview(t, dir, "auto")
+	if err == nil {
+		t.Fatalf("an unresolvable auto must error, got a verdict:\n%s", out)
+	}
+	var exit ui.ExitError
+	if errors.As(err, &exit) {
+		t.Fatalf("an unresolvable auto produced a verdict (exit %d) rather than an error", exit.Code)
+	}
+}
+
+// A referral on a large change names a few examples rather than every path:
+// a verdict a reader has to scroll past hundreds of lines to reach is one
+// they stop reading.
+func TestCappedTruncatesWithACount(t *testing.T) {
+	var items []string
+	for i := 0; i < listCap+5; i++ {
+		items = append(items, fmt.Sprintf("path/%d.go", i))
+	}
+	got := capped(items)
+	if len(got) != listCap+1 {
+		t.Fatalf("got %d entries, want %d plus a tail", len(got), listCap)
+	}
+	if got[len(got)-1] != "…and 5 more" {
+		t.Errorf("tail = %q, want a count of what is not shown", got[len(got)-1])
+	}
+	// The three-index slice keeps the tail out of the caller's backing
+	// array, so a second call cannot see the first call's tail.
+	if items[listCap] != fmt.Sprintf("path/%d.go", listCap) {
+		t.Errorf("capped overwrote its input: %q", items[listCap])
+	}
+	if short := []string{"a", "b"}; len(capped(short)) != 2 {
+		t.Errorf("a list within the cap must pass through unchanged")
 	}
 }

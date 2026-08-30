@@ -59,8 +59,15 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 // plumbing whose output is data the caller parses: `git diff` would print the
 // entire patch into the middle of a report, and `git show` of a config file
 // would print the file. Those commands are read, not watched.
+// Unlike Run, some of RunQuiet's arguments are derived from CLI flags, so a
+// caller must resolve a user-supplied revision or path before passing it —
+// cmd/lydite's resolveReviewBase is the worked example. What holds
+// unconditionally, and is what the annotation below rests on, is that name is
+// a fixed literal at every call site and args reach the child as argv with no
+// shell, so there is no command injection here; argument injection is the
+// caller's to prevent.
 func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, never user input or shell-interpreted
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -103,8 +110,7 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 // Under --json, stdout carries a document and nothing else, so the commands
 // point this at stderr instead: the findings still reach the terminal and the
 // CI log, and the document stays parseable. Data on stdout, diagnostics on
-// stderr — the split every other tool makes, and the one this package's
-// original unconditional os.Stdout quietly prevented.
+// stderr — the split every other tool makes.
 var streamTarget io.Writer = os.Stdout
 
 // StreamTo redirects live command output. Call it once, from the command

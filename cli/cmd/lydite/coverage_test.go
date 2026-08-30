@@ -525,9 +525,23 @@ func TestDiffReportPass(t *testing.T) {
 func TestDiffReportOnlyCountsRealRegressions(t *testing.T) {
 	current := map[string]float64{"go": 40, "rust": 60}
 	baseline := map[string]float64{"go": 50, "typescript": 85}
-	out, err := runDiffReport(t, 0, current, baseline)
-	if err == nil || !strings.Contains(err.Error(), "1") {
-		t.Fatalf("expected exactly 1 regressed language reported in the error, got: %v", err)
+	rep := ui.NewReport("coverage")
+	diffReport(rep, current, baseline, 0, nil)
+	out := reportText(rep)
+	if err := reportErr(rep); err == nil {
+		t.Fatalf("expected the run to fail, got: %v", err)
+	}
+	// Counted from the rows, not from the error text. The error is the
+	// verdict's exit code and says nothing about how many languages
+	// regressed, so asserting on its message would pass for any number.
+	failing := 0
+	for _, row := range rep.Rows() {
+		if row.Status == ui.StatusFail {
+			failing++
+		}
+	}
+	if failing != 1 {
+		t.Fatalf("expected exactly 1 regressed language, got %d:\n%s", failing, out)
 	}
 	for _, want := range []string{"fail", "new", "dropped"} {
 		if !strings.Contains(out, want) {
@@ -537,9 +551,9 @@ func TestDiffReportOnlyCountsRealRegressions(t *testing.T) {
 }
 
 // The coverage gates share one renderer with every other command, so they
-// cannot drift apart on formatting the way two hand-rolled prefix helpers
-// could. What is worth pinning here is that they all reach it: a gate that
-// printed its own line would be the drift this replaced.
+// cannot drift apart on formatting. What is worth pinning is that they all
+// reach it: a gate that printed its own line would drift from the others on
+// every later change to the grammar.
 func TestCoverageRowsShareTheGrammar(t *testing.T) {
 	rep := ui.NewReport("coverage")
 	diffReport(rep, map[string]float64{"go": 50}, map[string]float64{"go": 50}, 0, []detect.Ecosystem{detect.Go})

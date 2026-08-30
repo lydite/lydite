@@ -15,6 +15,8 @@ golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
 go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
 
+# The Go module is rooted at cli/, so every command above runs from there.
+
 # Release build dry-run (produces dist/):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ```
@@ -22,9 +24,10 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ## Layout
 
 ```
-cmd/lydite/                    # the lydite CLI (scan, review, coverage, version, update)
-internal/ui/                    # the output grammar every command renders through, plus --json
-internal/referral/              # exemptions, disqualifiers, the referral decision (see Referral below)
+cli/                           # the Go module (module path lydite/lydite); every go command runs here
+cli/cmd/lydite/                # the lydite CLI (scan, review, coverage, version, update)
+cli/internal/ui/               # the output grammar every command renders through, plus --json
+cli/internal/referral/         # exemptions, disqualifiers, the referral decision (see Referral below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -171,7 +174,7 @@ Biome backs the TypeScript check. `typescript.linter` accepts `biome` and nothin
 retired `eslint` value is **rejected** by `config.validateLinter` with an error naming the
 removal, rather than accepted and quietly run under Biome. A repo that set that key stated
 which rule set it gates on, and switching it silently would change what the scan measures
-while every run still reported `[PASS]` — the same reason an unknown value is rejected rather
+while every run still reported a pass — the same reason an unknown value is rejected rather
 than defaulted. `LinterESLint` stays defined for no purpose but to be recognised and refused.
 
 **Biome is not a replacement for `eslint-plugin-security` — Semgrep is, and it already ran.**
@@ -244,7 +247,7 @@ findings are on the terminal and in the log `action.yml` captures before anyone 
 `Result`. Biome is the exception: its report goes to a file via `--reporter-file` so its own
 chatter cannot corrupt the JSON, so nothing streams and `Output` holds no findings.
 `cmd/lydite/scan.go`'s `report` prints `Detail` under a failing check — without it a
-developer sees `[FAIL] biome(.)` and has to re-run the pinned toolchain by hand to learn why,
+developer sees a bare `✗ biome(.)` row and has to re-run the pinned toolchain by hand to learn why,
 and the PR comment carries nothing at all. Detail lines are **indented**, and that is
 load-bearing rather than cosmetic: a finding quotes source, which can contain anything the
 source contains — including something shaped like a verdict — and indentation is what stops
@@ -259,7 +262,7 @@ lydite is not a formatter and must never report a formatting diff as a finding.
 
 lydite pins every tool it runs, which is the whole premise — and for a long time every one of
 those pins was a Go string constant, invisible to Dependabot. A pinned security toolchain that
-nothing ever ages out is a scanner that quietly goes stale while still reporting `[PASS]`, which
+nothing ever ages out is a scanner that quietly goes stale while still reporting a pass, which
 is the worst available failure. Every pin now lives in a real package-manager manifest that
 Dependabot watches, colocated with the package that uses it:
 
@@ -429,7 +432,7 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   path-filter its coverage jobs (wardnet skips frontend coverage on a Rust-only change), and the
   cache-miss worktree routinely lacks tooling, so either write path can legitimately measure only
   some of the detected languages. Recording only what was measured would silently drop the
-  unmeasured language's entry — every later PR would see it as `[NEW]`, compared against nothing,
+  unmeasured language's entry — every later PR would see it as `new`, compared against nothing,
   permanently, and the "never cache an empty baseline" guard doesn't catch it because the report
   isn't empty, just partial. So *both* writers (record-on-main and `computeBaselineAt`'s cache-miss
   path) run `cmd/lydite/coverage.go`'s `carryForwardBaseline` first: it copies the entry for every
@@ -445,7 +448,7 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   culprit) instead of vanishing silently. This applies even when a main run measures **nothing**
   (a docs-only merge: every producer path-filtered away, no reports for a report-sourced repo to read) —
   the whole baseline is carried rather than skipping the record, because a main commit with no
-  baseline forces every PR against it into the recompute-nothing → all-`[NEW]` → gate-on-nothing
+  baseline forces every PR against it into the recompute-nothing → all-`new` → gate-on-nothing
   hole (wardnet/wardnet#899). "No coverage measured" is only printed when there was truly nothing
   to record: nothing measured *and* no priors to carry.
 - `internal/gitstate.BaseSHA` resolves `git merge-base HEAD origin/main`.
@@ -506,7 +509,7 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   under `SourceRun` requires `cargo-llvm-cov` on `PATH` and lydite does **not** install it (unlike
   cargo-audit/cargo-deny/gosec/semgrep, which it pins and installs itself) — so on a runner without
   it, the baseline computes to `{}`. Cached, that `{}` is indistinguishable from a real entry: every
-  later PR gets a cache *hit*, every language reports `[NEW]`, and the gate enforces **nothing**,
+  later PR gets a cache *hit*, every language reports `new`, and the gate enforces **nothing**,
   silently and permanently, with no way to self-heal. wardnet ran this way — all nine baselines on
   its `lydite` branch were `{}`, and its coverage gate had never once compared anything.
   `cmd/lydite/coverage.go` therefore refuses to cache an empty report, `gitstate.ReadBaseline`
@@ -521,8 +524,8 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   recording; only a beyond-tolerance drop, which was FAIL-visible on the PR that introduced it,
   resets the baseline. A language the baseline has but the
   current run doesn't splits on detection: still detected in the tree means its coverage step just
-  didn't run this time (path-filtered CI job, missing tooling) and it's reported as `[UNMEASURED]`;
-  no longer detected means the source actually left the tree and it's reported as `[DROPPED]`
+  didn't run this time (path-filtered CI job, missing tooling) and it's reported as `unmeasured`;
+  no longer detected means the source actually left the tree and it's reported as `dropped`
   (wardnet/wardnet#892 showed a Rust-only PR as "typescript: no longer measured" when the TS code
   was untouched — only the frontend coverage job had been skipped). Neither fails on its own.
 
@@ -552,19 +555,19 @@ It is returned rather than dropped because dropping it is invisible. A language 
 as soon as **one** of its units measures, so `warnUnmeasured` — which works per language — stays
 silent while the floor gate covers fewer units than the repo holds: a repo whose CI path-filtered
 eight of nine TypeScript packages has a fully measured language and a gate that saw one package.
-`floorReport` therefore names each one as `[UNMEASURED]` with a stderr warning and prints its pass
+`floorReport` therefore names each one as `unmeasured` with a stderr warning and prints its pass
 line as `N of M unit(s)`, the same "a gate that didn't run must be visibly distinct from a gate that
 passed" rule Patch coverage below states.
 
 A TypeScript package that declares no `test:coverage` script is the exception: under `SourceRun` it
 has opted out of being measured, which is not the same as a report lydite expected and did not
-find, so it is not a discovered unit at all. One `[UNMEASURED]` line and one warning per types-only
+find, so it is not a discovered unit at all. One `unmeasured` row and one warning per types-only
 package on every run trains readers to ignore the tag that exists to be noticed.
 
 **`floorReport` filters to enabled ecosystems, and it is the only gate that does.** `Compute`
 measures every language `detect.Ecosystems` finds without consulting `rust/typescript/go.enabled`,
 so its units — and `current` itself — can carry a language the repo opted out of. For the aggregate
-that has always been one surprising `[FAIL]` line; for a per-unit gate it would be one build failure
+that has always been one surprising failing row; for a per-unit gate it would be one build failure
 per crate. Closing it at the source (having `Compute` skip disabled languages, which is what this
 document's Coverage section already claims happens) is the better fix and is not this change.
 
@@ -574,7 +577,7 @@ repo, so the headline barely moves. The two metrics answer different questions �
 leave code untested?" is the aggregate, "is there a unit nobody tests at all?" is the floor — and
 neither bounds the other. `cmd/lydite/coverage.go`'s `floorReport` gates every measured unit
 against it and adds one failing row per unit below, in the same `internal/ui` grammar
-`diffReport`/`patchReport` use. An unmeasured unit is `[UNMEASURED]`, never a failure and never
+`diffReport`/`patchReport` use. An unmeasured unit is reported as `unmeasured`, never a failure and never
 folded into the passing count.
 
 **It is also the one gate that runs on main.** The aggregate and patch gates compare against a
@@ -682,7 +685,7 @@ Patch coverage has **no baseline or threshold of its own** — it always gates a
 language's aggregate baseline already read from `lydite` (`patch% >= baseline% -
 coverage.patch.tolerance` — its own knob, deliberately independent of `coverage.tolerance`, so
 loosening the noisy aggregate gate never silently weakens this one). A language
-with no aggregate baseline yet is reported informationally (`[NEW]`), not failed, mirroring
+with no aggregate baseline yet is reported informationally (`new`), not failed, mirroring
 aggregate's own handling of a first-time-seen language. It's opt-out, not opt-in, per language, via
 `.lydite.yml`:
 
@@ -754,7 +757,7 @@ shape:
   `cmd/lydite/coverage.go`'s `rustPatchPercent` resolves each crate's contribution independently,
   mirroring `tsPatchPercent`'s longest-prefix matching so two crates can't clobber each other's hit
   data for a same-named file. A crate with no resolvable lcov file is omitted from patch coverage,
-  not a failure — but not silently when it matters (see the `[UNMEASURED]` paragraph below).
+  not a failure — but not silently when it matters (see the `unmeasured` paragraph below).
 - **TypeScript**: reads `<pkgDir>/coverage/lcov.info` (Istanbul/Vitest's native lcov output) — fixed
   convention, no override flag, matching the existing no-override precedent for TS aggregate
   coverage. This only works if the consumer's own test config already has an `lcov` reporter
@@ -768,9 +771,9 @@ however many gates ran.
 
 **A skipped patch gate must say so.** When a *detected* language's patch gate is enabled and the
 diff touches that language's files, but no per-line source was resolved (no lcov for the crate, no
-`lcov` reporter in a TS package), `patchReport` prints an `[UNMEASURED] <lang> patch: ...` line and
+`lcov` reporter in a TS package), `patchReport` adds an `unmeasured` row for that language and
 a stderr warning naming the missing wiring — it never fails the gate on its own, mirroring
-`diffReport`'s `[UNMEASURED]` handling. The old behavior was a bare `continue`, and it read as
+`diffReport`'s `unmeasured` handling. The old behavior was a bare `continue`, and it read as
 "patch coverage passed" in the PR comment: wardnet/wardnet#957 shipped a green lydite summary
 (aggregate flat, patch never ran for want of an lcov path) while Codecov — fed the very same lcov
 export the pipeline had already produced — failed that diff's patch coverage. The two reports can
@@ -799,12 +802,12 @@ is the single place that mapping lives: `✗` anywhere is 1, else a referral is 
 the terminal, so the two cannot disagree, and statuses travel as their own names rather than
 as glyphs. `TestJSONKeysArePartOfTheContract` pins the keys; `ui.jsonRow` stays a separate
 type from `ui.Row` for that reason, so a field added for rendering cannot quietly become
-part of the published document. `lydite/actions` still greps for the retired
-`^\[(PASS|FAIL)\] <name>$` shape and therefore matches nothing — cutting it over is a change
-in that repository. **Do not reintroduce a bracketed text mode to accommodate it.** That
-coupling is exactly why the grammar sat specified-but-unimplemented: while a consumer parsed
-the terminal, every refinement to the human surface needed a synchronised release in another
-repo.
+part of the published document. `lydite/actions` greps for a
+`^\[(PASS|FAIL)\] <name>$` shape this grammar does not produce, and therefore matches nothing
+— cutting it over to `--json` is a change in that repository. **Do not reintroduce a bracketed
+text mode to accommodate it.** A text-scraping consumer forces every refinement to the human
+surface through a synchronised release in another repo, which is the coupling `--json` exists
+to remove.
 
 **stdout is the report; everything else goes to stderr.** `internal/gitstate`'s git plumbing
 runs through `executil.RunQuiet`, which captures without streaming — `git rev-parse` printing
@@ -822,7 +825,7 @@ flag list under a failed gate.
 ## Referral: `lydite review`
 
 `lydite review` decides whether a change may merge unattended. It runs no check — no
-scanner, no test suite — so it has no `[FAIL]`: it emits pass or refer, and a malformed
+scanner, no test suite — so it has no failure state: it emits pass or refer, and a malformed
 exemptions file or an unresolvable merge-base is an error, exit 1. See
 [ADR 0013](docs/adr/0013-referral-not-approval.md) for the model and
 [ADR 0014](docs/adr/0014-evidence-only-referral-matching.md) for what it matches on.
@@ -856,9 +859,16 @@ Five properties are load-bearing and easy to weaken by accident:
   change; matching on the *union* of two exemptions would mean adding a narrow entry silently
   widens every existing one, destroying `git log .lydite.exemptions.yml` as the readable
   record of widenings that #15 exists to protect.
-- **Disqualifiers veto any match, and the built-in four cannot be removed.** Net-new
-  suppression annotation, newly skipped or `.only`-focused test, edit to `.lydite.yml` or
-  `.lydite.exemptions.yml`, edit to `.github/workflows/`.
+- **Disqualifiers veto any match, and the built-in set cannot be removed.** A net-new
+  suppression annotation, a newly skipped or `.only`-focused test, a removed test, an edit to
+  `.lydite.yml`/`.lydite.exemptions.yml`, an edit to `.github/workflows/`, and an edit to
+  `.gitattributes`. The suppression list carries the whole-file and whole-crate forms
+  (`#![allow(`, `#[expect(`, `@ts-nocheck`, `//nolint`, `//go:build ignore`) alongside the
+  per-line ones, because the broad form is strictly more powerful than the narrow one it would
+  otherwise be the only one caught. `.gitattributes` is there because a `-diff` attribute
+  replaces a hunk body with `Binary files ... differ`, and git reads that attribute from the
+  branch — the diff is passed `--text` so the trick does not work, and the edit is referred
+  anyway.
 - **Everything matched on is evidence off the diff.** Nothing an author asserts about their
   own change may earn an exemption or clear a disqualifier — ADR 0013's `!` conventional-commit
   marker is deliberately *not* implemented, because nothing detects an undeclared API break and
@@ -869,8 +879,10 @@ Five properties are load-bearing and easy to weaken by accident:
   human, and a workflow edit outside a monorepo's scan root is exactly what must not slip past.
   `--dir` only locates the exemptions file.
 
-Path patterns are **anchored**: `README.md` matches the README at the scan root and nothing
-else, and any-depth matching is spelled `**/README.md`. This parts company with gitignore on
+Path patterns are **repository-root-relative and anchored**: `README.md` matches the README at
+the repository root and nothing else, any-depth matching is spelled `**/README.md`, and a
+monorepo scanned with `--dir source` writes `source/README.md` — the diff is not scoped to
+`--dir`, so the paths carry no prefix stripped. This parts company with gitignore on
 purpose — floating patterns are right for a skip list where over-matching is free, and wrong
 for a list that decides what merges without a human. Unknown YAML keys are rejected rather
 than ignored, for the reason `config.validateLinter` rejects `linter: eslint`.
@@ -880,8 +892,9 @@ from identical inputs. A dirty working tree gets its own row saying the uncommit
 excluded, because silently deciding on HEAD while the developer is looking at edited files is
 the one way this command gives a confidently wrong answer.
 
-Nothing enforces the verdict yet: the clearance loop (resolving a referral by PR comment,
-bound to the head SHA) is #14, and exemption-file isolation is #15.
+The verdict is computed and reported, and nothing in this repository enforces it against a
+merge: there is no clearance mechanism, and a pull request touching the exemptions file is not
+required to touch nothing else.
 
 ## Semgrep: token-bearing vs token-less runs
 
@@ -921,10 +934,10 @@ per-repo judgment call.
 
 ## The `action.yml` composite action
 
-**Its output parser is currently broken, and that is expected.** `tool_result()` matches
-`^\[(PASS|FAIL)\] <name>$`, which the CLI no longer emits — see "Output grammar and
-`--json`" above. The fix is to read `--json` in `lydite/actions`; it has not been made
-because lydite has no consumers yet. The fix is *not* to reintroduce bracketed text here.
+**Its output parser does not match lydite's output.** `tool_result()` matches
+`^\[(PASS|FAIL)\] <name>$`, a shape `internal/ui` does not produce — see "Output grammar and
+`--json`" above. It has to read `--json` instead. Reintroducing a bracketed text mode here is
+the wrong direction: it is what couples the human surface to a parser in another repository.
 
 Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
 lydite's usage is uniform enough (`.lydite.yml` already carries all the config) that the action
@@ -977,12 +990,11 @@ mistaken for a description of current behavior:
 
 **The CLI output grammar is implemented**, in `internal/ui`, and every command renders
 through it — glyphs, leader dots aligning the value column at 34 characters, `--no-color`,
-and a verdict-plus-duration last line. `lydite/actions` still parses the old
-`^\[(PASS|FAIL)\] <name>$` shape and therefore reads nothing; cutting it over to `--json` is
-a change in that repository, and it is safe to make at any time because lydite has no
-consumers yet. Do not restore the bracketed text form to accommodate it — the whole reason
-the grammar sat unimplemented for so long is that a text-scraping consumer made every
-refinement a two-repository release.
+and a verdict-plus-duration last line. `lydite/actions` parses a
+`^\[(PASS|FAIL)\] <name>$` shape this grammar does not produce, and therefore reads nothing;
+cutting it over to `--json` is a change in that repository. Do not restore the bracketed text
+form to accommodate it — a text-scraping consumer makes every refinement to the human surface
+a two-repository release.
 
 **There is no light product theme and no responsive design.** The light token ramp exists
 and the PR comment uses it, but no product screen has been drawn light, and nothing below

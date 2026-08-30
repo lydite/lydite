@@ -6,8 +6,14 @@ import (
 	"strings"
 )
 
-// Match reports whether pattern covers a scan-root-relative, forward-slash
-// path.
+// Match reports whether pattern covers a repository-root-relative,
+// forward-slash path.
+//
+// Repository root, not scan root, and the distinction is not academic: the
+// referral diff deliberately covers the whole repository so that a workflow
+// edit outside a monorepo's scan root cannot slip past, so the paths reaching
+// here carry no --dir prefix stripped. A repository scanned with --dir source
+// writes "source/README.md", not "README.md".
 //
 // The syntax is deliberately a subset, and anchored:
 //
@@ -15,8 +21,8 @@ import (
 //     across a "/", exactly as path.Match defines them.
 //   - "**" matches zero or more whole segments, so "docs/**" covers
 //     "docs/adr/0001.md" and "src/**/*_test.go" covers any depth.
-//   - A pattern is always rooted. "README.md" matches the README at the scan
-//     root and nothing else; matching one at any depth is spelled
+//   - A pattern is always rooted. "README.md" matches the README at the
+//     repository root and nothing else; matching one at any depth is spelled
 //     "**/README.md".
 //
 // The anchoring is where this parts company with gitignore, whose slash-less
@@ -26,17 +32,30 @@ import (
 // silently covers more than it appears to is the whole failure mode. Every
 // widening should have to be written down.
 func Match(pattern, target string) bool {
-	return matchSegments(strings.Split(pattern, "/"), strings.Split(target, "/"))
+	p, t := strings.Split(pattern, "/"), strings.Split(target, "/")
+	// Each (pattern index, target index) pair has one answer, so memoising
+	// them turns the "**" backtracking below from combinatorial in the
+	// number of "**" segments into a product of the two lengths. Without it
+	// a pattern carrying several "**" segments that ultimately fails to
+	// match re-walks the same suffixes exponentially: eight of them against
+	// a thirty-segment path is tens of millions of calls.
+	seen := make(map[[2]int]bool, len(p)*len(t))
+	return matchSegments(p, t, seen)
 }
 
-func matchSegments(pattern, target []string) bool {
+func matchSegments(pattern, target []string, seen map[[2]int]bool) bool {
 	for len(pattern) > 0 {
 		if pattern[0] == "**" {
+			key := [2]int{len(pattern), len(target)}
+			if seen[key] {
+				return false
+			}
+			seen[key] = true
 			// Try every split point, shortest first. "**" is the only
 			// construct that can consume a variable number of segments, so
 			// it is the only one needing backtracking.
 			for i := 0; i <= len(target); i++ {
-				if matchSegments(pattern[1:], target[i:]) {
+				if matchSegments(pattern[1:], target[i:], seen) {
 					return true
 				}
 			}

@@ -61,7 +61,8 @@ type Exemption struct {
 	// to survive review; a diff of bare globs is not reviewable.
 	Reason string `yaml:"reason"`
 	// Paths are the patterns that must, between them, cover every changed
-	// path. See Match for the syntax.
+	// path. They are repository-root-relative even when lydite runs with
+	// --dir pointing at a subdirectory — see Match for the syntax and why.
 	Paths []string `yaml:"paths"`
 }
 

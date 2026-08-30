@@ -145,8 +145,9 @@ type jsonReport struct {
 
 // WriteJSON renders the machine grammar. It carries the same rows as the
 // text, so the two can never disagree about what happened, and it is what
-// anything automated should read — screen-scraping the human surface is the
-// coupling that kept the design system in docs/design/tokens.md unimplemented.
+// anything automated reads: screen-scraping the human surface couples a
+// consumer to a rendering that is free to change, which costs that consumer a
+// synchronised release for every refinement to the terminal output.
 func (r *Report) WriteJSON(w io.Writer) error {
 	rows := make([]jsonRow, 0, len(r.rows))
 	for _, row := range r.rows {

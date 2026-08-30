@@ -934,9 +934,9 @@ func diffReport(rep *ui.Report, current, baseline map[string]float64, tolerance 
 // here, next to the other two gates that already take it.
 //
 // Units are reported in a stable order (language, then directory) so the line
-// set doesn't reshuffle between runs, and the bracketed vocabulary matches
-// diffReport/patchReport because action.yml's PR-comment builder greps for
-// exactly that.
+// set doesn't reshuffle between runs, and the rows go through the same
+// internal/ui grammar diffReport and patchReport use, so one run renders one
+// report whichever gates contributed to it.
 func floorReport(rep *ui.Report, cmd *cobra.Command, units []coverage.Unit, floor float64, enabled []detect.Ecosystem) {
 	if floor <= 0 || len(units) == 0 {
 		return

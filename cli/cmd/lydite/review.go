@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -170,7 +171,8 @@ func referralDetail(d referral.Decision, declared int) []string {
 	return append(detail, "ask a human to clear this change")
 }
 
-// resolveReviewBase turns --base into a commit.
+// resolveReviewBase turns --base into a full commit SHA, and refuses
+// anything that is not one.
 //
 // "auto" reuses the merge-base internal/gitstate already resolves for the
 // coverage gate, so a change's scan, coverage and referral all agree on what
@@ -178,15 +180,47 @@ func referralDetail(d referral.Decision, declared int) []string {
 // silent fallback: guessing a base would silently change which paths the
 // verdict was computed from, and a shallow checkout is a fixable
 // misconfiguration.
+//
+// Every base is then resolved through `git rev-parse --verify` and required
+// to be an ancestor of HEAD, and the resolved SHA — never the caller's
+// string — is what reaches git afterwards. Three separate failures ride on
+// this, and each one turns the gate into a rubber stamp rather than a
+// blocker:
+//
+//   - An empty base makes the range read "..HEAD", which git resolves to an
+//     empty diff. No changed paths means nothing to cover and no line to
+//     scan, so the run passes with every disqualifier silent.
+//   - An empty base also makes the exemptions spec read ":<path>", which git
+//     resolves against the *index* — handing the branch control of the
+//     allowlist the merge-base read exists to deny it.
+//   - A base beginning with "-" lands in an argv position git reads as an
+//     option, so "--base=--output=/tmp/x" is an arbitrary file write.
+//
+// A base that is not an ancestor of HEAD is refused for the same reason:
+// the diff would describe something other than what this branch introduces.
 func resolveReviewBase(ctx context.Context, dir, base string) (string, error) {
-	if base != "auto" {
-		return base, nil
+	if base == "" {
+		return "", fmt.Errorf("--base is empty: name a commit, or use \"auto\" to resolve the merge-base with origin/main")
 	}
-	baseSHA, err := gitstate.BaseSHA(ctx, dir)
-	if err != nil {
-		return "", fmt.Errorf("--base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
+	if base == "auto" {
+		baseSHA, err := gitstate.BaseSHA(ctx, dir)
+		if err != nil {
+			return "", fmt.Errorf("--base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
+		}
+		base = baseSHA
 	}
-	return baseSHA, nil
+	// --end-of-options stops a value beginning with "-" from being read as
+	// an option, which is what makes verifying it here sufficient to protect
+	// every later invocation.
+	rev := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{commit}")
+	resolved := strings.TrimSpace(rev.Output)
+	if !rev.Ok() || resolved == "" {
+		return "", fmt.Errorf("--base %q does not name a commit", base)
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "merge-base", "--is-ancestor", resolved, "HEAD"); !r.Ok() {
+		return "", fmt.Errorf("--base %s is not an ancestor of HEAD, so the diff would not describe this branch", resolved[:12])
+	}
+	return resolved, nil
 }
 
 // loadExemptionsAt reads the exemptions file out of the base commit, never

@@ -48,8 +48,16 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 			if len(ecosystems) == 0 {
-				_, err := fmt.Fprintln(cmd.OutOrStdout(), "no supported ecosystem detected under", dir)
-				return err
+				// Through the report, not around it: --json promises stdout
+				// carries a document and nothing else, and a bare sentence
+				// printed here is unparseable output on a path no scan of
+				// this repository ever reaches.
+				rep.Add(ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "scan",
+					Value:  "no supported ecosystem detected under " + dir,
+				})
+				return report(cmd, rep, nil, asJSON, noColor)
 			}
 
 			// Before anything shells out to cargo/go/npx: make sure each

@@ -32,14 +32,24 @@ type Disqualification struct {
 // measurements of the code, they are evidence that something tried to make a
 // verdict go away, and they must never be clearable by the thing that
 // produced them.
+// The whole-file and whole-crate forms sit alongside the per-line ones
+// because they are strictly more powerful: `#![allow(clippy::all)]` silences
+// for an entire crate the very check internal/rust runs, and `@ts-nocheck`
+// turns off type checking for a whole file. Catching only the narrow form
+// would veto the small suppression and wave the large one through.
 var suppressionTokens = []string{
 	"nosemgrep",
 	"#nosec",
+	"//nolint",
 	"#[allow(",
+	"#![allow(",
+	"#[expect(",
+	"#![expect(",
 	"biome-ignore",
 	"eslint-disable",
 	"@ts-ignore",
 	"@ts-expect-error",
+	"@ts-nocheck",
 }
 
 // skipTokens stop a test from running or from being counted.
@@ -50,6 +60,8 @@ var suppressionTokens = []string{
 // harder to notice, since the suite still reports passes.
 var skipTokens = []string{
 	"t.Skip(",
+	"//go:build ignore",
+	"// +build ignore",
 	"t.Skipf(",
 	"t.SkipNow(",
 	"#[ignore]",
@@ -68,6 +80,27 @@ var skipTokens = []string{
 // workflowDir is the tree whose contents decide what CI runs at all. A change
 // that edits it can turn off the checks that would have judged it.
 const workflowDir = ".github/workflows"
+
+// gitAttributes decides how git renders a diff. A `-diff` or `binary`
+// attribute replaces a hunk body with "Binary files ... differ", and the
+// attribute is read from the branch — so a change that edits this file is
+// changing the evidence this package reads about itself. `--text` stops the
+// rendering trick; this veto covers the rest of what the file can do.
+const gitAttributes = ".gitattributes"
+
+// testDeclarations open a test. Removing one is how a check stops failing
+// without anything being fixed, which is the same "made a verdict go away"
+// evidence a suppression is — so it is read from removed lines, and only in
+// files that look like tests, where these tokens cannot mean anything else.
+var testDeclarations = []string{
+	"func Test",
+	"func Benchmark",
+	"func Fuzz",
+	"#[test]",
+	"it(",
+	"test(",
+	"describe(",
+}
 
 // Disqualifications returns every veto the change trips, one per kind per
 // file, in the order the change presents them.
@@ -96,7 +129,7 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 		out = append(out, Disqualification{Kind: kind, Path: p, Evidence: evidence})
 	}
 
-	for _, line := range ch.AddedLines {
+	for _, line := range ch.Added {
 		if tok, ok := containsAny(line.Text, suppressionTokens); ok {
 			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
 		}
@@ -104,10 +137,25 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("test disabled", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
 		}
 	}
+	for _, p := range ch.Deleted {
+		if IsTestPath(p) {
+			add("tests removed", p, p+" deleted")
+		}
+	}
+	for _, line := range ch.Removed {
+		if !IsTestPath(line.Path) {
+			continue
+		}
+		if tok, ok := containsAny(line.Text, testDeclarations); ok {
+			add("tests removed", line.Path, fmt.Sprintf("%s drops %s", line.Path, tok))
+		}
+	}
 	for _, p := range ch.Paths {
 		switch {
 		case path.Base(p) == config.FileName || path.Base(p) == FileName:
 			add("lydite config edited", p, p)
+		case path.Base(p) == gitAttributes:
+			add("diff rendering edited", p, p)
 		case p == workflowDir || strings.HasPrefix(p, workflowDir+"/"):
 			add("CI workflow edited", p, p)
 		}

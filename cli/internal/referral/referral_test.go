@@ -3,6 +3,7 @@ package referral
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMatchIsAnchoredAndSegmentAware(t *testing.T) {
@@ -122,19 +123,19 @@ exemptions:
 	}{
 		{
 			"a net-new suppression",
-			Change{Paths: []string{"src/a.go"}, AddedLines: []AddedLine{{Path: "src/a.go", Text: "\tx := run(c) // #nosec G204"}}},
+			Change{Paths: []string{"src/a.go"}, Added: []DiffLine{{Path: "src/a.go", Text: "\tx := run(c) // #nosec G204"}}},
 			"suppression added",
 		},
 		{
 			"a newly skipped test",
-			Change{Paths: []string{"src/a_test.go"}, AddedLines: []AddedLine{{Path: "src/a_test.go", Text: "\tt.Skip(\"flaky\")"}}},
+			Change{Paths: []string{"src/a_test.go"}, Added: []DiffLine{{Path: "src/a_test.go", Text: "\tt.Skip(\"flaky\")"}}},
 			"test disabled",
 		},
 		{
 			// describe.only silently stops every other test in the file from
 			// running, and the suite still reports passes.
 			"a focused test that disables its neighbours",
-			Change{Paths: []string{"src/a.test.ts"}, AddedLines: []AddedLine{{Path: "src/a.test.ts", Text: "describe.only('auth', () => {"}}},
+			Change{Paths: []string{"src/a.test.ts"}, Added: []DiffLine{{Path: "src/a.test.ts", Text: "describe.only('auth', () => {"}}},
 			"test disabled",
 		},
 		{
@@ -257,7 +258,7 @@ func TestEmptyDocumentParsesToTheDayOneState(t *testing.T) {
 // would let a file be moved out of an exempt tree — or into one — while the
 // exemption still matched.
 func TestRenameContributesBothPaths(t *testing.T) {
-	got, err := parseNameStatus("R100\tdocs/old.md\tsrc/new.go\nM\tREADME.md\n")
+	got, _, err := parseNameStatus("R100\tdocs/old.md\tsrc/new.go\nM\tREADME.md\n")
 	if err != nil {
 		t.Fatalf("parseNameStatus: %v", err)
 	}
@@ -272,7 +273,7 @@ func TestRenameContributesBothPaths(t *testing.T) {
 	}
 }
 
-func TestParseAddedLinesIgnoresRemovalsAndHeaders(t *testing.T) {
+func TestParseDiffLinesSeparatesAdditionsFromRemovals(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/src/a.go b/src/a.go",
 		"--- a/src/a.go",
@@ -281,9 +282,12 @@ func TestParseAddedLinesIgnoresRemovalsAndHeaders(t *testing.T) {
 		"+\tadded line",
 		"-\tremoved line",
 	}, "\n")
-	got := parseAddedLines(patch)
+	got, removed := parseDiffLines(patch)
 	if len(got) != 1 || got[0].Path != "src/a.go" || got[0].Text != "\tadded line" {
 		t.Fatalf("got %+v, want the single added line in src/a.go", got)
+	}
+	if len(removed) != 1 || removed[0].Text != "\tremoved line" {
+		t.Fatalf("got %+v, want the single removed line", removed)
 	}
 }
 
@@ -300,8 +304,8 @@ func TestTokensMatchWholeWordsOnly(t *testing.T) {
 	}
 	for _, line := range clean {
 		d := Disqualifications(Change{
-			Paths:      []string{"src/a.go"},
-			AddedLines: []AddedLine{{Path: "src/a.go", Text: line}},
+			Paths: []string{"src/a.go"},
+			Added: []DiffLine{{Path: "src/a.go", Text: line}},
 		}, Disqualifiers{})
 		if len(d) != 0 {
 			t.Errorf("%q must not disqualify, got %+v", line, d)
@@ -314,8 +318,8 @@ func TestTokensMatchWholeWordsOnly(t *testing.T) {
 	}
 	for line, want := range dirty {
 		d := Disqualifications(Change{
-			Paths:      []string{"src/a.go"},
-			AddedLines: []AddedLine{{Path: "src/a.go", Text: line}},
+			Paths: []string{"src/a.go"},
+			Added: []DiffLine{{Path: "src/a.go", Text: line}},
 		}, Disqualifiers{})
 		if len(d) != 1 || d[0].Kind != want {
 			t.Errorf("%q: got %+v, want one %q", line, d, want)
@@ -328,7 +332,7 @@ func TestTokensMatchWholeWordsOnly(t *testing.T) {
 func TestDisqualificationsCollapsePerFile(t *testing.T) {
 	d := Disqualifications(Change{
 		Paths: []string{"src/a.go"},
-		AddedLines: []AddedLine{
+		Added: []DiffLine{
 			{Path: "src/a.go", Text: "a() // #nosec"},
 			{Path: "src/a.go", Text: "b() // #nosec"},
 			{Path: "src/a.go", Text: "c() // nosemgrep"},
@@ -337,5 +341,175 @@ func TestDisqualificationsCollapsePerFile(t *testing.T) {
 	}, Disqualifiers{})
 	if len(d) != 2 {
 		t.Fatalf("got %d rows, want one per file: %+v", len(d), d)
+	}
+}
+
+// An added source line whose own text is "++ /dev/null" renders in the patch
+// as "+++ /dev/null". Read by prefix alone it looks like a file header, which
+// blanks the current file and drops every added line after it — so a
+// suppression placed below one is never scanned. Content can only appear
+// inside a hunk, which is what makes the two distinguishable.
+func TestAddedContentCannotForgeAFileHeader(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/evil.js b/evil.js",
+		"--- /dev/null",
+		"+++ b/evil.js",
+		"@@ -0,0 +1,3 @@",
+		"+/*",
+		"++ /dev/null",
+		"+*/",
+		"+const a = 1; // eslint-disable-line",
+	}, "\n")
+	added, _ := parseDiffLines(patch)
+	for _, l := range added {
+		if l.Path != "evil.js" {
+			t.Fatalf("a content line changed the current file: %+v", added)
+		}
+	}
+	if len(added) != 4 {
+		t.Fatalf("got %d added lines, want 4: %+v", len(added), added)
+	}
+	d := Disqualifications(Change{Paths: []string{"evil.js"}, Added: added}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Errorf("the suppression below the forged header must still be seen, got %+v", d)
+	}
+}
+
+// A line whose content begins with "++" renders as "+++x;" and is real
+// content, not a header.
+func TestAddedLineBeginningWithPlusPlusIsContent(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/a.js b/a.js",
+		"--- a/a.js",
+		"+++ b/a.js",
+		"@@ -1 +1 @@",
+		"++x; // eslint-disable-line",
+	}, "\n")
+	added, _ := parseDiffLines(patch)
+	if len(added) != 1 || added[0].Text != "+x; // eslint-disable-line" {
+		t.Fatalf("got %+v, want the ++x line kept as content", added)
+	}
+}
+
+// git pads a "+++ b/<path>" header with a tab when the path contains a
+// space, so the raw remainder of the header is not the path.
+func TestFileHeaderPathDropsGitsPadding(t *testing.T) {
+	patch := strings.Join([]string{
+		"diff --git a/my file.txt b/my file.txt",
+		"--- a/my file.txt",
+		"+++ b/my file.txt\t",
+		"@@ -1 +1 @@",
+		"+x // #nosec",
+	}, "\n")
+	added, _ := parseDiffLines(patch)
+	if len(added) != 1 || added[0].Path != "my file.txt" {
+		t.Fatalf("got %+v, want path \"my file.txt\" with no trailing tab", added)
+	}
+}
+
+// The whole-file and whole-crate suppression forms are strictly more
+// powerful than the per-line ones, so catching only the narrow form would
+// veto the small suppression and wave the large one through.
+func TestBroadSuppressionFormsDisqualify(t *testing.T) {
+	cases := map[string]string{
+		"#![allow(clippy::all)]":       "suppression added",
+		"#[expect(dead_code)]":         "suppression added",
+		"#![expect(dead_code)]":        "suppression added",
+		"// @ts-nocheck":               "suppression added",
+		"func f() { //nolint:errcheck": "suppression added",
+		"//go:build ignore":            "test disabled",
+		"// +build ignore":             "test disabled",
+	}
+	for line, want := range cases {
+		d := Disqualifications(Change{
+			Paths: []string{"src/a"},
+			Added: []DiffLine{{Path: "src/a", Text: line}},
+		}, Disqualifiers{})
+		if len(d) != 1 || d[0].Kind != want {
+			t.Errorf("%q: got %+v, want one %q", line, d, want)
+		}
+	}
+}
+
+// A change that edits .gitattributes is changing how git renders the very
+// diff this package reads about it.
+func TestGitAttributesEditDisqualifies(t *testing.T) {
+	d := Disqualifications(Change{Paths: []string{".gitattributes"}}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "diff rendering edited" {
+		t.Fatalf("got %+v, want a diff-rendering veto", d)
+	}
+}
+
+// Deleting a test is how a check stops failing without anything being fixed
+// — the same "made a verdict go away" evidence a suppression is.
+func TestRemovedTestsDisqualify(t *testing.T) {
+	deleted := Disqualifications(Change{
+		Paths:   []string{"src/foo_test.go"},
+		Deleted: []string{"src/foo_test.go"},
+	}, Disqualifiers{})
+	if len(deleted) != 1 || deleted[0].Kind != "tests removed" {
+		t.Errorf("deleting a test file must veto, got %+v", deleted)
+	}
+
+	gutted := Disqualifications(Change{
+		Paths:   []string{"src/foo_test.go"},
+		Removed: []DiffLine{{Path: "src/foo_test.go", Text: "func TestThing(t *testing.T) {"}},
+	}, Disqualifiers{})
+	if len(gutted) != 1 || gutted[0].Kind != "tests removed" {
+		t.Errorf("removing a test declaration must veto, got %+v", gutted)
+	}
+
+	// A removed line in ordinary source is not a test being deleted, and
+	// `test(` or `describe(` there can mean anything.
+	source := Disqualifications(Change{
+		Paths:   []string{"src/app.ts"},
+		Removed: []DiffLine{{Path: "src/app.ts", Text: "  test(value)"}},
+	}, Disqualifiers{})
+	if len(source) != 0 {
+		t.Errorf("a removal in non-test source must not veto, got %+v", source)
+	}
+}
+
+// Patterns are repository-root-relative, so a repo scanned with --dir source
+// declares "source/README.md". Matching them against the scan-root-relative
+// form would leave every exemption silently dead in a monorepo.
+func TestPatternsAreRepositoryRootRelative(t *testing.T) {
+	f := parseOrFail(t, `
+exemptions:
+  - name: readme-only
+    reason: prose changes nothing executable
+    paths: ["source/README.md"]
+`)
+	if d := Decide(Change{Paths: []string{"source/README.md"}}, f); d.Referred {
+		t.Errorf("a repository-root-relative pattern must match the path git reports, got %+v", d)
+	}
+}
+
+// A pattern the matcher cannot parse is rejected when the file loads. An
+// exemption that silently matches nothing is one nobody notices is broken.
+func TestMalformedPatternIsRejected(t *testing.T) {
+	if _, err := Parse([]byte("exemptions:\n  - name: n\n    reason: r\n    paths: [\"src/[unclosed\"]\n"), FileName); err == nil {
+		t.Error("a malformed glob must be rejected at load time")
+	}
+	if _, err := Parse([]byte("disqualifiers:\n  paths: [\"src/[unclosed\"]\n"), FileName); err == nil {
+		t.Error("a malformed disqualifier glob must be rejected at load time")
+	}
+}
+
+// Each (pattern index, target index) pair has one answer, so memoising them
+// keeps a pattern carrying many "**" segments from re-walking the same
+// suffixes exponentially.
+func TestManyDoubleStarsDoNotBlowUp(t *testing.T) {
+	pattern := strings.Repeat("**/", 12) + "nomatch.txt"
+	target := strings.Repeat("a/", 30) + "b.txt"
+	done := make(chan bool, 1)
+	go func() { done <- Match(pattern, target) }()
+	select {
+	case got := <-done:
+		if got {
+			t.Errorf("Match(%q, ...) = true, want false", pattern)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Match did not terminate promptly on a pattern with many ** segments")
 	}
 }

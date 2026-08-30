@@ -6,9 +6,14 @@ matches on — changed paths, added lines, the base commit's copy of the
 exemption set — is read off the diff. Nothing an author asserts about their own
 change may earn an exemption or clear a disqualifier.
 
-This narrows [ADR 0013](0013-referral-not-approval.md), which is otherwise
-implemented as written. That ADR closes on a property worth restating, because
-it is the one this decision qualifies:
+This narrows [ADR 0013](0013-referral-not-approval.md)'s matching model. The
+rest of that ADR is not contradicted, but neither is it all built: the
+clearance loop — a comment bound to a head SHA, the authenticator code, and
+the inversion that drops the native required-approval count to zero — is
+unimplemented, and so is its worked exemption "a dependency bump with a clean
+SCA run", which needs a condition an exemption of `{name, reason, paths}`
+cannot express. ADR 0013 closes on a property worth restating, because it is
+the one this decision qualifies:
 
 > A surviving mutant that cannot be killed must be annotated as equivalent. A
 > public API break must be declared through the conventional-commit marker.
@@ -88,8 +93,12 @@ reviewed.
 
 ## Matching detail that follows from the above
 
-- **Path patterns are anchored.** `README.md` matches the README at the scan
-  root and nothing else; any-depth matching is spelled `**/README.md`. This
+- **Path patterns are repository-root-relative, and anchored.** `README.md`
+  matches the README at the repository root and nothing else; any-depth
+  matching is spelled `**/README.md`. Repository root rather than scan root
+  follows from the whole-repository diff below: the paths carry no `--dir`
+  prefix stripped, so a repository scanned with `--dir source` writes
+  `source/README.md`. This
   parts company with gitignore, whose slash-less patterns float. Floating is
   right for a list of things to skip, where over-matching is free. It is wrong
   here: these patterns decide what merges without a human, so every widening
