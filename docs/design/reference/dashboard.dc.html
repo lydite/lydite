@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body {
+    margin: 0; background: #07091E;
+    --bg:#07091E; --surface:#0E1230; --raised:#151A3D; --border:#1E2450; --strong:#2A3168;
+    --text:#EDEEF5; --muted:#9AA0B5; --faint:#6E7594;
+    --crit:#F2426E; --high:#FF7A45; --med:#F0B429; --low:#35C4E8; --info:#9AA0B5; --pass:#16C79A;
+    --violet:#6B2CFF; --violet-soft:#A98BFF; --track:#151A3D;
+  }
+  a { color: #A98BFF; text-decoration: none; }
+  a:hover { color: #C9B6FF; }
+  @keyframes lyd-spin { to { transform: rotate(360deg); } }
+</style>
+</helmet>
+
+<svg width="0" height="0" style="position:absolute;opacity:0" aria-hidden="true"><defs>
+<g id="d-overview" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></g>
+<g id="d-projects" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 7.2a2 2 0 0 1 2-2h3.4l2 2.6H18.8a2 2 0 0 1 2 2v7.4a2 2 0 0 1-2 2H5.2a2 2 0 0 1-2-2z"/></g>
+<g id="d-reports" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16M7.5 20v-6M12 20V6.5M16.5 20v-9"/></g>
+<g id="d-settings" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h14M4 12h14M4 17h14"/><circle cx="16" cy="7" r="2.2"/><circle cx="9" cy="12" r="2.2"/><circle cx="14" cy="17" r="2.2"/></g>
+<g id="d-shield" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2l7 2.8v5.4c0 4.2-2.9 7.4-7 8.6-4.1-1.2-7-4.4-7-8.6V6z"/><path d="M9.2 11.7l2.2 2.2 4-4.3"/></g>
+<g id="d-alert" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.4L20.8 19.4H3.2z"/><path d="M12 9.8v4.1M12 16.9h.01"/></g>
+<g id="d-check" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.6"/><path d="M8.2 12.3l2.8 2.7 5-5.4"/></g>
+<g id="d-drift" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 8.4h9.6M4.2 15.6h9.6"/><circle cx="18" cy="8.4" r="2.2"/><circle cx="18" cy="15.6" r="2.2"/></g>
+<g id="d-search" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.8" cy="10.8" r="6.6"/><path d="M15.8 15.8l4.4 4.4"/></g>
+<g id="d-chev" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6.2 9.5L12 15.4l5.8-5.9"/></g>
+<g id="d-chevr" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6.2L15.4 12l-5.9 5.8"/></g>
+<g id="d-moon" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.6A8.6 8.6 0 0 1 9.4 4 8.6 8.6 0 1 0 20 14.6z"/></g>
+<g id="d-sun" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 3.2v2.2M12 18.6v2.2M3.2 12h2.2M18.6 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M18 6l-1.6 1.6M7.6 16.4L6 18"/></g>
+<g id="d-scan" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 12a8.4 8.4 0 1 1-2.6-6.1"/><path d="M20.6 4.2v4.6H16"/></g>
+<g id="d-download" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.2v10.4M8 11l4 3.8 4-3.8M4.4 19.6h15.2"/></g>
+<g id="d-bell" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10.2a5 5 0 0 1 10 0c0 4 1.6 5.6 1.6 5.6H5.4S7 14.2 7 10.2z"/><path d="M10.4 18.6a1.8 1.8 0 0 0 3.2 0"/></g>
+<g id="d-clock" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 7.4v5l3.4 2"/></g>
+</defs></svg>
+
+<div style="{{ themeVars }}">
+<div style="display:flex;min-height:900px;min-width:1280px;background:var(--bg);color:var(--text);font-family:Geist,'Geist Sans','Helvetica Neue',Helvetica,system-ui,sans-serif">
+
+  <aside style="width:248px;flex:none;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:24px 16px;gap:28px">
+    <div style="padding:0 8px"><img src="{{ logoSrc }}" alt="lydite" style="height:30px;width:auto;display:block"></div>
+
+    <nav style="display:flex;flex-direction:column;gap:4px">
+      <sc-for list="{{ nav }}" as="item" hint-placeholder-count="4">
+        <span onClick="{{ item.onClick }}" style="position:relative;display:flex;align-items:center;height:40px;border-radius:8px;font-size:13.5px;cursor:pointer;transition:background .12s ease" style-hover="background:var(--raised)">
+          <sc-if value="{{ item.active }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;inset:0;border-radius:8px;background:#6B2CFF"></span></sc-if>
+          <span style="{{ item.style }}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="{{ item.icon }}"></use></svg><span style="font-weight:500">{{ item.label }}</span></span>
+        </span>
+      </sc-for>
+    </nav>
+
+    <div style="flex:1"></div>
+
+    <div style="background:var(--raised);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
+      <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:0.12em;color:var(--faint)">CLI</span>
+      <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:var(--text)">lydite v2.4.1</span>
+      <span style="font-size:12px;line-height:1.5;color:var(--faint)">Ruleset 7f2ac9 · matches CI</span>
+    </div>
+  </aside>
+
+  <main style="flex:1;display:flex;flex-direction:column;min-width:0">
+
+    <header style="height:68px;flex:none;border-bottom:1px solid var(--border);background:var(--surface);display:flex;align-items:center;gap:16px;padding:0 28px">
+      <h1 style="margin:0;font-size:19px;font-weight:600;letter-spacing:-0.01em">Overview</h1>
+      <span style="display:flex;align-items:center;gap:9px;background:var(--raised);border:1px solid var(--border);border-radius:8px;height:34px;padding:0 12px;font-size:13px;cursor:pointer;transition:border-color .14s ease" style-hover="border-color:var(--strong)">
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px">acme/core-api</span>
+        <svg width="15" height="15" viewBox="0 0 24 24" style="color:var(--faint)"><use href="#d-chev"></use></svg>
+      </span>
+      <span style="flex:1"></span>
+      <span style="display:flex;align-items:center;gap:10px;background:var(--raised);border:1px solid var(--border);border-radius:8px;height:34px;padding:0 12px;width:220px">
+        <svg width="15" height="15" viewBox="0 0 24 24" style="color:var(--faint);flex:none"><use href="#d-search"></use></svg>
+        <input type="text" placeholder="Search findings" style="font-family:inherit;font-size:13px;color:var(--text);background:transparent;border:0;outline:none;flex:1;min-width:0">
+      </span>
+      <span onClick="{{ toggleTheme }}" style="width:34px;height:34px;border-radius:8px;border:1px solid var(--border);background:var(--raised);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);transition:color .14s ease" style-hover="color:var(--text)">
+        <svg width="17" height="17" viewBox="0 0 24 24"><use href="{{ themeIcon }}"></use></svg>
+      </span>
+      <span style="width:34px;height:34px;border-radius:8px;border:1px solid var(--border);background:var(--raised);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);position:relative;transition:color .14s ease" style-hover="color:var(--text)">
+        <svg width="17" height="17" viewBox="0 0 24 24"><use href="#d-bell"></use></svg>
+        <span style="position:absolute;top:7px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--crit)"></span>
+      </span>
+      <button type="button" onClick="{{ runScan }}" style="border:0;cursor:pointer;font-family:inherit;font-size:13.5px;font-weight:500;color:#fff;height:34px;padding:0 16px;border-radius:8px;background:linear-gradient(135deg,#6E21F3,#251FF7);display:flex;align-items:center;gap:8px;transition:filter .16s ease" style-hover="filter:brightness(1.12)">
+        <span style="{{ scanIconStyle }}"><svg width="15" height="15" viewBox="0 0 24 24"><use href="#d-scan"></use></svg></span>{{ scanLabel }}
+      </button>
+    </header>
+
+    <div style="padding:24px 28px;display:flex;flex-direction:column;gap:20px">
+
+      <div style="{{ parityStyle }}">
+        <span style="{{ parityLeadStyle }}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#d-drift"></use></svg><span style="font-size:13.5px;font-weight:500">{{ parityTitle }}</span></span>
+        <span style="width:1px;height:20px;background:var(--border)"></span>
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted)">local <span style="{{ localStyle }}">{{ localVer }}</span> · ruleset <span style="{{ localStyle }}">{{ localHash }}</span></span>
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted)">ci <span style="color:var(--text)">v2.4.1</span> · ruleset <span style="color:var(--text)">7f2ac9</span></span>
+        <span style="flex:1"></span>
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--faint)">{{ parityNote }}</span>
+        <span onClick="{{ toggleParity }}" style="font-size:12px;color:var(--violet-soft);cursor:pointer;font-weight:500">{{ parityAction }}</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:13.5px;color:var(--muted)">Coverage</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--pass)">+2 pts</span></div>
+          <div style="position:relative;height:96px;display:flex;align-items:flex-end;justify-content:center">
+            <svg width="176" height="96" viewBox="0 0 176 96" style="display:block">
+              <path d="M16 88a72 72 0 0 1 144 0" fill="none" stroke="var(--track)" stroke-width="13" stroke-linecap="round"></path>
+              <path d="M16 88a72 72 0 0 1 144 0" fill="none" stroke="var(--pass)" stroke-width="13" stroke-linecap="round" stroke-dasharray="226.2" stroke-dashoffset="29.4"></path>
+              <line x1="139" y1="51" x2="153.5" y2="40.4" stroke="var(--faint)" stroke-width="2"></line>
+            </svg>
+            <span style="position:absolute;bottom:2px;left:0;right:0;text-align:center;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:30px;letter-spacing:-0.02em">87%</span>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint);text-align:center">gate 80% · passing</span>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:13.5px;color:var(--muted)">Static analysis</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">semgrep · clippy</span></div>
+          <div style="height:96px;display:flex;align-items:center;gap:16px">
+            <span style="width:56px;height:56px;border-radius:14px;background:rgba(22,199,154,.12);display:flex;align-items:center;justify-content:center;color:var(--pass);flex:none"><svg width="28" height="28" viewBox="0 0 24 24"><use href="#d-shield"></use></svg></span>
+            <span style="display:flex;flex-direction:column"><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:34px;letter-spacing:-0.02em;line-height:1.1">0</span><span style="font-size:13px;color:var(--muted)">blocking findings</span></span>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">16 non-blocking · 4 baselined</span>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:13.5px;color:var(--muted)">CRAP score</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--med)">warn</span></div>
+          <div style="height:96px;display:flex;align-items:center;gap:16px">
+            <div style="position:relative;width:88px;height:88px;flex:none;display:flex;align-items:center;justify-content:center">
+              <svg width="88" height="88" viewBox="0 0 88 88"><circle cx="44" cy="44" r="34" fill="none" stroke="var(--track)" stroke-width="10"></circle><circle cx="44" cy="44" r="34" fill="none" stroke="var(--med)" stroke-width="10" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="160" transform="rotate(-90 44 44)"></circle></svg>
+              <span style="position:absolute;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:26px">3</span>
+            </div>
+            <span style="display:flex;flex-direction:column;gap:4px"><span style="font-size:13px;color:var(--muted)">methods over 30</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--faint)">worst: 41</span></span>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">1–5 warns · 6+ fails</span>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><span style="font-size:13.5px;color:var(--muted)">Repositories</span><span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">monitored</span></div>
+          <div style="height:96px;display:flex;flex-direction:column;justify-content:center;gap:12px">
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:34px;letter-spacing:-0.02em;line-height:1">24</span>
+            <div style="display:flex;flex-direction:column;gap:7px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--muted)">
+              <span style="display:flex;justify-content:space-between"><span>rust</span><span style="color:var(--text)">11</span></span>
+              <span style="display:flex;justify-content:space-between"><span>typescript</span><span style="color:var(--text)">9</span></span>
+              <span style="display:flex;justify-content:space-between"><span>go</span><span style="color:var(--text)">4</span></span>
+            </div>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">22 in parity · 2 drifting</span>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1.6fr 1fr;gap:20px">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px 24px 16px;display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:baseline;justify-content:space-between">
+            <span style="font-size:15px;font-weight:600">Coverage vs gate</span>
+            <span style="display:flex;gap:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)"><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:2px;background:var(--violet)"></span>coverage</span><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:2px;background:var(--strong)"></span>gate 80%</span></span>
+          </div>
+          <svg width="100%" height="180" viewBox="0 0 640 180" preserveAspectRatio="none" style="display:block">
+            <defs><linearGradient id="dashFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6B2CFF" stop-opacity="0.4"></stop><stop offset="1" stop-color="#6B2CFF" stop-opacity="0"></stop></linearGradient></defs>
+            <line x1="0" y1="72" x2="640" y2="72" stroke="var(--strong)" stroke-width="1" stroke-dasharray="5 5"></line>
+            <path d="M8 148 L56 138 L104 142 L152 118 L200 124 L248 100 L296 104 L344 84 L392 90 L440 66 L488 58 L536 52 L584 44 L632 40 L632 180 L8 180Z" fill="url(#dashFill)"></path>
+            <path d="M8 148 L56 138 L104 142 L152 118 L200 124 L248 100 L296 104 L344 84 L392 90 L440 66 L488 58 L536 52 L584 44 L632 40" fill="none" stroke="var(--violet)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+            <circle cx="632" cy="40" r="4.5" fill="var(--violet)" stroke="var(--surface)" stroke-width="2.5"></circle>
+          </svg>
+          <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:var(--faint)"><span>14 Aug</span><span>21 Aug</span><span>28 Aug</span></div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px 24px;display:flex;flex-direction:column;gap:18px">
+          <span style="font-size:15px;font-weight:600">Findings by severity</span>
+          <div style="display:flex;height:10px;border-radius:999px;overflow:hidden">
+            <span style="width:14%;background:var(--crit)"></span><span style="width:22%;background:var(--high)"></span><span style="width:34%;background:var(--med)"></span><span style="width:20%;background:var(--low)"></span><span style="width:10%;background:var(--info)"></span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:11px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted)">
+            <span style="display:flex;justify-content:space-between"><span style="display:flex;gap:9px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:var(--crit)"></span>critical</span><span style="color:var(--text)">3</span></span>
+            <span style="display:flex;justify-content:space-between"><span style="display:flex;gap:9px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:var(--high)"></span>high</span><span style="color:var(--text)">5</span></span>
+            <span style="display:flex;justify-content:space-between"><span style="display:flex;gap:9px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:var(--med)"></span>medium</span><span style="color:var(--text)">8</span></span>
+            <span style="display:flex;justify-content:space-between"><span style="display:flex;gap:9px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:var(--low)"></span>low</span><span style="color:var(--text)">5</span></span>
+            <span style="display:flex;justify-content:space-between"><span style="display:flex;gap:9px;align-items:center"><span style="width:8px;height:8px;border-radius:2px;background:var(--info)"></span>info</span><span style="color:var(--text)">2</span></span>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:14px;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:13px;color:var(--muted)">Blocking the gate</span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;color:var(--crit)">3 of 23</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden">
+        <div style="padding:18px 24px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border)">
+          <span style="font-size:15px;font-weight:600">Findings</span>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--faint)">{{ countLabel }}</span>
+          <span style="flex:1"></span>
+          <sc-for list="{{ filters }}" as="f" hint-placeholder-count="6">
+            <span onClick="{{ f.onClick }}" style="{{ f.style }}">{{ f.label }}</span>
+          </sc-for>
+          <span style="width:1px;height:22px;background:var(--border)"></span>
+          <span style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);cursor:pointer;transition:color .14s ease" style-hover="color:var(--text)"><svg width="15" height="15" viewBox="0 0 24 24"><use href="#d-download"></use></svg>SARIF</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:96px 1fr 168px 128px 76px;gap:16px;padding:10px 24px;background:var(--raised);font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:0.12em;color:var(--faint)">
+          <span>SEVERITY</span><span>FINDING</span><span>RULE</span><span>WHERE</span><span style="text-align:right">CRAP</span>
+        </div>
+
+        <sc-for list="{{ rows }}" as="row" hint-placeholder-count="6">
+          <div style="display:grid;grid-template-columns:96px 1fr 168px 128px 76px;gap:16px;padding:0 24px;height:48px;align-items:center;border-top:1px solid var(--border);cursor:pointer;transition:background .12s ease" style-hover="background:var(--raised)">
+            <span style="{{ row.badgeStyle }}">{{ row.sev }}</span>
+            <span style="display:flex;flex-direction:column;gap:2px;min-width:0">
+              <span style="font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.title }}</span>
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.path }}</span>
+            </span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.rule }}</span>
+            <span style="{{ row.whereStyle }}">{{ row.where }}</span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;text-align:right;color:var(--muted)">{{ row.crap }}</span>
+          </div>
+        </sc-for>
+
+        <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:56px 24px;display:flex;flex-direction:column;align-items:center;gap:10px;border-top:1px solid var(--border)">
+            <span style="font-size:15px;font-weight:600">No findings at this severity</span>
+            <span style="font-size:13px;color:var(--muted)">Clear the filter to see all 23 findings in this scan.</span>
+          </div>
+        </sc-if>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-top:1px solid var(--border)">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:var(--faint)">{{ pageLabel }}</span>
+          <span style="display:flex;gap:6px">
+            <span style="width:28px;height:28px;border-radius:6px;background:var(--raised);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--faint)"><svg width="14" height="14" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#d-chevr"></use></svg></span>
+            <span style="width:28px;height:28px;border-radius:6px;background:var(--raised);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text);cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24"><use href="#d-chevr"></use></svg></span>
+          </span>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px 24px;display:flex;flex-direction:column;gap:16px">
+          <div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:15px;font-weight:600">Recent scans</span><span style="font-size:12.5px;color:var(--violet-soft);cursor:pointer">View all</span></div>
+          <div style="display:flex;flex-direction:column">
+            <sc-for list="{{ scans }}" as="s" hint-placeholder-count="4">
+              <div style="display:flex;align-items:center;gap:14px;padding:11px 0;border-top:1px solid var(--border)">
+                <span style="{{ s.dotStyle }}"></span>
+                <span style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+                  <span style="font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.repo }}</span>
+                  <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)">{{ s.meta }}</span>
+                </span>
+                <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:var(--muted)">{{ s.cov }}</span>
+                <span style="{{ s.tagStyle }}">{{ s.tag }}</span>
+                <span style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint);width:52px;text-align:right">{{ s.ago }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:#04061A;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.9">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0B0E2B;border-bottom:1px solid #1E2450">
+            <span style="font-size:11.5px;color:#9AA0B5">last local run</span>
+            <span style="font-size:11px;color:#6E7594">4m ago · identical to CI #4821</span>
+          </div>
+          <div style="padding:16px 18px;display:flex;flex-direction:column">
+            <span><span style="color:#16C79A">$</span> <span style="color:#A98BFF">lydite</span> <span style="color:#EDEEF5">scan --gate 80</span></span>
+            <span style="color:#6E7594">→ rust · typescript · go &nbsp;|&nbsp; ruleset 7f2ac9</span>
+            <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">coverage</span> <span style="color:#6E7594">……………………</span> <span style="color:#16C79A">87%</span></span>
+            <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">static analysis</span> <span style="color:#6E7594">………</span> <span style="color:#16C79A">0</span></span>
+            <span><span style="color:#F0B429">!</span> <span style="color:#EDEEF5">crap score</span> <span style="color:#6E7594">……………</span> <span style="color:#F0B429">3</span></span>
+            <span style="color:#6E7594">&nbsp;</span>
+            <span><span style="color:#16C79A">gate passed</span><span style="color:#6E7594"> in 12.4s</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:980}}">
+class Component extends DCLogic {
+  state = { theme: 'dark', navIndex: 0, filter: 'all', drift: false, scanning: false };
+
+  renderVals() {
+    const dark = this.state.theme === 'dark';
+    const T = dark ? {} : {
+      '--bg':'#F5F6FA','--surface':'#FFFFFF','--raised':'#F5F6FA','--border':'#E1E4EF','--strong':'#C3C9DE',
+      '--text':'#10133F','--muted':'#545B7A','--faint':'#8A90A8',
+      '--crit':'#D62254','--high':'#D2571C','--med':'#A87A0C','--low':'#0E7C99','--info':'#8A90A8','--pass':'#0F9E7A',
+      '--violet':'#6B2CFF','--violet-soft':'#5B21D6','--track':'#EAECF4'
+    };
+
+    const navItems = [['Overview','#d-overview'],['Projects','#d-projects'],['Reports','#d-reports'],['Settings','#d-settings']];
+    const nav = navItems.map(([label, icon], i) => ({
+      label, icon,
+      active: this.state.navIndex === i,
+      style: {
+        position:'relative', display:'flex', alignItems:'center', gap:'12px', flex:1,
+        padding:'0 14px', height:'40px',
+        color: this.state.navIndex === i ? '#FFFFFF' : 'var(--muted)'
+      },
+      onClick: () => this.setState({ navIndex: i })
+    }));
+
+    const sevColor = { critical:'var(--crit)', high:'var(--high)', medium:'var(--med)', low:'var(--low)', info:'var(--info)' };
+    const data = [
+      ['critical','Unwrapped Result on the auth path','src/auth/session.rs:143','clippy::unwrap_used','new','41'],
+      ['critical','User input reaches a raw SQL string','api/src/query.ts:88','semgrep:sql-injection','new','36'],
+      ['critical','Secret read from an unvalidated env var','internal/cfg/load.go:31','semgrep:hardcoded-secret','new','—'],
+      ['high','Panic in a request handler','src/http/router.rs:212','clippy::panic','baseline','29'],
+      ['high','Missing timeout on outbound call','api/src/client.ts:54','semgrep:no-timeout','new','24'],
+      ['medium','Untested error branch','internal/sync/merge.go:210','lydite:coverage-branch','new','32'],
+      ['medium','Cyclomatic complexity 24','src/parser/expr.rs:64','lydite:crap','baseline','31'],
+      ['low','Unused public export','api/src/util/fmt.ts:12','tsc:noUnusedLocals','new','—'],
+      ['info','TODO older than 90 days','src/store/mod.rs:8','lydite:stale-todo','baseline','—'],
+    ];
+
+    const shown = this.state.filter === 'all' ? data : data.filter(d => d[0] === this.state.filter);
+    const rows = shown.map(([sev, title, path, rule, where, crap]) => ({
+      sev: sev.toUpperCase(), title, path, rule, where, crap,
+      badgeStyle: {
+        fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: '10px', fontWeight: 500,
+        letterSpacing: '0.06em', color: sevColor[sev], background: 'color-mix(in srgb, currentColor 12%, transparent)',
+        border: '1px solid color-mix(in srgb, currentColor 34%, transparent)',
+        borderRadius: '6px', padding: '4px 0', textAlign: 'center', width: '78px'
+      },
+      whereStyle: {
+        fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: '11px',
+        color: where === 'new' ? 'var(--violet-soft)' : 'var(--faint)'
+      }
+    }));
+
+    const counts = { all: data.length };
+    ['critical','high','medium','low','info'].forEach(k => counts[k] = data.filter(d => d[0] === k).length);
+    const filterKeys = ['all','critical','high','medium','low','info'];
+    const filters = filterKeys.map(k => {
+      const active = this.state.filter === k;
+      return {
+        label: k === 'all' ? 'all' : k,
+        onClick: () => this.setState({ filter: k }),
+        style: {
+          fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: '11px', letterSpacing: '0.04em',
+          padding: '5px 10px', borderRadius: '999px', cursor: 'pointer',
+          color: active ? '#FFFFFF' : 'var(--muted)',
+          background: active ? '#6B2CFF' : 'var(--raised)',
+          border: '1px solid ' + (active ? '#6B2CFF' : 'var(--border)'),
+          transition: 'background .14s ease, color .14s ease'
+        }
+      };
+    });
+
+    const scanData = [
+      ['acme/core-api','main · 8f31c2 · rust','87%','pass','4m'],
+      ['acme/web-console','main · 41ba90 · typescript','82%','pass','26m'],
+      ['acme/edge-router','fix/timeout · 0c7d15 · go','71%','fail','1h'],
+      ['acme/billing','main · b92e04 · typescript','79%','drift','3h'],
+    ];
+    const tagColor = { pass:'var(--pass)', fail:'var(--crit)', drift:'var(--med)' };
+    const scans = scanData.map(([repo, meta, cov, tag, ago]) => ({
+      repo, meta, cov, tag, ago,
+      dotStyle: { width:'8px', height:'8px', borderRadius:'50%', background: tagColor[tag], flex:'none' },
+      tagStyle: {
+        fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize:'10.5px', letterSpacing:'0.04em',
+        color: tagColor[tag], background:'color-mix(in srgb, currentColor 12%, transparent)',
+        borderRadius:'6px', padding:'3px 8px', width:'44px', textAlign:'center'
+      }
+    }));
+
+    const drift = this.state.drift;
+    return {
+      themeVars: T,
+      logoSrc: dark ? 'assets/logo/lydite-logo-horizontal-dark.svg' : 'assets/logo/lydite-logo-horizontal.svg',
+      themeIcon: dark ? '#d-sun' : '#d-moon',
+      toggleTheme: () => this.setState(s => ({ theme: s.theme === 'dark' ? 'light' : 'dark' })),
+      nav, rows, filters, scans,
+      isEmpty: rows.length === 0,
+      countLabel: this.state.filter === 'all' ? '23 in this scan · 3 blocking' : counts[this.state.filter] + ' ' + this.state.filter,
+      pageLabel: rows.length ? '1–' + rows.length + ' of 23' : '0 of 23',
+      scanLabel: this.state.scanning ? 'Scanning…' : 'Run scan',
+      scanIconStyle: {
+        display: 'flex', animation: this.state.scanning ? 'lyd-spin 1s linear infinite' : 'none'
+      },
+      runScan: () => {
+        if (this.state.scanning) return;
+        this.setState({ scanning: true });
+        setTimeout(() => this.setState({ scanning: false }), 2200);
+      },
+      parityStyle: {
+        display:'flex', alignItems:'center', gap:'18px', padding:'13px 20px', borderRadius:'12px',
+        background: drift ? 'color-mix(in srgb, var(--med) 8%, var(--surface))' : 'var(--surface)',
+        border: '1px solid ' + (drift ? 'color-mix(in srgb, var(--med) 40%, transparent)' : 'var(--border)')
+      },
+      parityLeadStyle: { display:'flex', alignItems:'center', gap:'9px', color: drift ? 'var(--med)' : 'var(--pass)' },
+      parityTitle: drift ? 'Drift detected' : 'In parity',
+      parityNote: drift ? 'local ruleset is 2 versions behind' : 'identical results · 4m ago',
+      parityAction: drift ? 'Sync local' : 'Simulate drift',
+      localVer: drift ? 'v2.3.0' : 'v2.4.1',
+      localHash: drift ? 'a1b0e4' : '7f2ac9',
+      localStyle: { color: drift ? 'var(--med)' : 'var(--text)' },
+      toggleParity: () => this.setState(s => ({ drift: !s.drift }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>
