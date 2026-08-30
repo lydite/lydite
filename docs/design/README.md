@@ -53,7 +53,10 @@ open /tmp/lydite-design/design-system.dc.html
 ## Surfaces
 
 **CLI output** — the canonical surface. Everything else quotes it; nothing rephrases
-it. Its grammar is a specification, in `tokens.md` under "CLI output grammar".
+it. Its grammar is specified in `tokens.md` under "CLI output grammar" and
+implemented in `cli/internal/ui`, which every command renders through. Anything
+automated reads `--json` and never the text, which is what keeps the human
+surface free to change.
 
 **Pull-request comment** — drawn in the *host's* light chrome, not lydite's dark
 theme, because GitHub owns that page. Use the light token ramp there.

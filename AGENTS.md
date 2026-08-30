@@ -13,6 +13,7 @@ go build ./...                 # build the binary
 go test -race ./...            # run tests
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
+go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
 
 # Release build dry-run (produces dist/):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
@@ -21,7 +22,9 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ## Layout
 
 ```
-cmd/lydite/                    # the lydite CLI (scan, coverage, version, update)
+cmd/lydite/                    # the lydite CLI (scan, review, coverage, version, update)
+internal/ui/                    # the output grammar every command renders through, plus --json
+internal/referral/              # exemptions, disqualifiers, the referral decision (see Referral below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -51,7 +54,7 @@ scripts/install.sh              # curl|sh installer shipped with every release
 
 ## Status
 
-All four subcommands (`scan`, `coverage`, `version`, `update`) are fully implemented — every check
+All five subcommands (`scan`, `review`, `coverage`, `version`, `update`) are fully implemented — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
@@ -243,9 +246,9 @@ chatter cannot corrupt the JSON, so nothing streams and `Output` holds no findin
 `cmd/lydite/scan.go`'s `report` prints `Detail` under a failing check — without it a
 developer sees `[FAIL] biome(.)` and has to re-run the pinned toolchain by hand to learn why,
 and the PR comment carries nothing at all. Detail lines are **indented**, and that is
-load-bearing rather than cosmetic: `action.yml`'s `tool_result()` matches
-`^\[(PASS|FAIL)\] <name>$` anchored at both ends, so an indented line cannot be mistaken for
-a status line even when a finding's own message contains one.
+load-bearing rather than cosmetic: a finding quotes source, which can contain anything the
+source contains — including something shaped like a verdict — and indentation is what stops
+it from beginning a line the way a status row does.
 
 `recommended: false` in the bundled `biome.json` is not tidiness — without it Biome's default
 preset enables `style` and `suspicious` too, and lydite would start failing PRs over opinions it
@@ -385,9 +388,9 @@ Each ecosystem provisions differently, and only one of the three downloads anyth
 and falling through to "whatever is on PATH" is exactly today's behavior — turning a working scan
 into a hard failure over a network blip would be a regression, and if the toolchain really is
 absent the next step fails loudly and specifically. What must not happen is failing *silently*, so
-every reuse, substitution, skip and failure is named on stderr. Stderr, not stdout, deliberately:
-`action.yml`'s PR-comment builder scrapes bracketed tags from coverage stdout with a pattern that
-is **not** line-anchored, so unrelated chatter on stdout would end up in the PR comment.
+every reuse, substitution, skip and failure is named on stderr. Stderr, not stdout, deliberately: stdout carries the
+report, and one command emits exactly one report — a warning interleaved into it would break
+the grammar and, under `--json`, the document.
 
 **Doing this in lydite rather than in each caller's CI is the point.** gt briefly grew a
 `setup-go` step in its lydite stage (`19e4b77`, reverted in `a0ed107`) and it was wrong twice
@@ -570,7 +573,7 @@ blind to a small unit nobody tests: a package with 0 of 8 lines covered is 0.1% 
 repo, so the headline barely moves. The two metrics answer different questions — "did this change
 leave code untested?" is the aggregate, "is there a unit nobody tests at all?" is the floor — and
 neither bounds the other. `cmd/lydite/coverage.go`'s `floorReport` gates every measured unit
-against it and prints one `[FAIL]` line per unit below, in the same bracketed vocabulary
+against it and adds one failing row per unit below, in the same `internal/ui` grammar
 `diffReport`/`patchReport` use. An unmeasured unit is `[UNMEASURED]`, never a failure and never
 folded into the passing count.
 
@@ -758,11 +761,10 @@ shape:
   enabled; otherwise it's omitted, the same best-effort caveat AGENTS.md already documents for TS
   aggregate coverage.
 
-`cmd/lydite/coverage.go`'s `patchReport` prints one bracketed status line per language using the
-same `[PASS]/[FAIL]/[NEW]` vocabulary the aggregate gate already uses (e.g.
-`[FAIL]    go patch: 0.0% (0/9 new lines; baseline 55.68%)`) — this needs no changes to
-`action.yml`'s PR-comment builder, since its `cov_detail` regex is generic and already picks up any
-matching bracketed line.
+`cmd/lydite/coverage.go`'s `patchReport` adds one row per language in the same `internal/ui`
+grammar the aggregate gate uses (e.g. `✗ go patch ... 0.0% (0/9 new lines; baseline 55.68%)`).
+Every gate in a run shares one `ui.Report`, so a command emits one row set and one verdict line
+however many gates ran.
 
 **A skipped patch gate must say so.** When a *detected* language's patch gate is enabled and the
 diff touches that language's files, but no per-line source was resolved (no lcov for the crate, no
@@ -776,6 +778,110 @@ only stay aligned if a gate that didn't run is visibly distinct from a gate that
 report stays scoped to detected ecosystems, since the patch gates default to enabled for all three
 languages regardless of what the repo contains — a stray changed `.rs` file in a pure Go repo must
 not produce a rust line.
+
+## Output grammar and `--json`
+
+Every command renders through `internal/ui`, which implements the specification in
+`docs/design/tokens.md`: a row is glyph, space, label, leader dots, value with the value
+column at 34 characters; the last line is the command, the verdict and the duration.
+`--no-color` drops colour and keeps every glyph, and colour is off automatically when
+stdout is not a terminal or `NO_COLOR` is set — so a CI log never fills with escape
+sequences nobody configured away.
+
+**Glyph and exit code are different axes, deliberately.** A run has exactly one verdict and
+that verdict owns the exit code; a row's glyph only says how much attention the row wants.
+`refer`, `unmeasured` and `dropped` all render amber `!`, and only `refer` votes. This is
+what lets an unmeasured gate be visibly distinct from a passing one — the wardnet#957
+failure — without a path-filtered coverage job starting to fail builds. `ui.Report.ExitCode`
+is the single place that mapping lives: `✗` anywhere is 1, else a referral is 2, else 0.
+
+**Anything automated reads `--json`, never the text.** The document carries the same rows as
+the terminal, so the two cannot disagree, and statuses travel as their own names rather than
+as glyphs. `TestJSONKeysArePartOfTheContract` pins the keys; `ui.jsonRow` stays a separate
+type from `ui.Row` for that reason, so a field added for rendering cannot quietly become
+part of the published document. `lydite/actions` still greps for the retired
+`^\[(PASS|FAIL)\] <name>$` shape and therefore matches nothing — cutting it over is a change
+in that repository. **Do not reintroduce a bracketed text mode to accommodate it.** That
+coupling is exactly why the grammar sat specified-but-unimplemented: while a consumer parsed
+the terminal, every refinement to the human surface needed a synchronised release in another
+repo.
+
+**stdout is the report; everything else goes to stderr.** `internal/gitstate`'s git plumbing
+runs through `executil.RunQuiet`, which captures without streaming — `git rev-parse` printing
+two SHAs into the middle of a report was how this was found. Scanners still stream live
+through `executil.Run`, because their findings are the point; under `--json` the commands
+call `executil.StreamTo(os.Stderr)` so the document stays parseable and the findings still
+reach the terminal and the CI log. Warnings have always gone to stderr and still do.
+
+Errors are not verdicts. A command that cannot reach an answer returns an `error`, and
+`main.go` prints `lydite: <err>` and exits 1; a command that reached one returns
+`ui.ExitError`, which `main.go` exits on silently because the report already said what
+happened. Every subcommand sets `SilenceUsage`/`SilenceErrors` so cobra does not print a
+flag list under a failed gate.
+
+## Referral: `lydite review`
+
+`lydite review` decides whether a change may merge unattended. It runs no check — no
+scanner, no test suite — so it has no `[FAIL]`: it emits pass or refer, and a malformed
+exemptions file or an unresolvable merge-base is an error, exit 1. See
+[ADR 0013](docs/adr/0013-referral-not-approval.md) for the model and
+[ADR 0014](docs/adr/0014-evidence-only-referral-matching.md) for what it matches on.
+
+The model is an allowlist and the default is to refer. `.lydite.exemptions.yml` at the scan
+root declares shapes of change that merge unattended; with no file, or an empty one, every
+change is referred, which is the correct day-one state rather than a broken one.
+
+```yaml
+exemptions:
+  - name: readme-only
+    # reason is required: this file is the entire risk model, and a diff of
+    # bare globs is not reviewable.
+    reason: >
+      Prose in the top-level README changes nothing executable and no build
+      step reads it.
+    paths: ["README.md"]
+disqualifiers:
+  # Only ever ADDS to the built-in set. A veto list that can be emptied is
+  # not a floor.
+  paths: ["infra/**"]
+```
+
+Five properties are load-bearing and easy to weaken by accident:
+
+- **The file is read from the merge-base, never from the branch.** A change that widens the
+  gate gets no benefit from its own widening — otherwise one pull request declares itself
+  exempt. `loadExemptionsAt` does this with `git show <base>:<path>`.
+- **All-or-nothing, against a single exemption.** Every changed path must be covered by one
+  exemption. Matching on *any* path would let an agent staple a README tweak onto a dangerous
+  change; matching on the *union* of two exemptions would mean adding a narrow entry silently
+  widens every existing one, destroying `git log .lydite.exemptions.yml` as the readable
+  record of widenings that #15 exists to protect.
+- **Disqualifiers veto any match, and the built-in four cannot be removed.** Net-new
+  suppression annotation, newly skipped or `.only`-focused test, edit to `.lydite.yml` or
+  `.lydite.exemptions.yml`, edit to `.github/workflows/`.
+- **Everything matched on is evidence off the diff.** Nothing an author asserts about their
+  own change may earn an exemption or clear a disqualifier — ADR 0013's `!` conventional-commit
+  marker is deliberately *not* implemented, because nothing detects an undeclared API break and
+  a claim-based veto works only for the author who would have declared anyway. The rule for any
+  future addition: an author-controlled claim may add a referral, never remove one.
+- **The diff covers the whole repository, not just `--dir`.** Unlike `internal/coverage`, which
+  scopes its diff with git's `--relative`, referral decides whether a *pull request* needs a
+  human, and a workflow edit outside a monorepo's scan root is exactly what must not slip past.
+  `--dir` only locates the exemptions file.
+
+Path patterns are **anchored**: `README.md` matches the README at the scan root and nothing
+else, and any-depth matching is spelled `**/README.md`. This parts company with gitignore on
+purpose — floating patterns are right for a skip list where over-matching is free, and wrong
+for a list that decides what merges without a human. Unknown YAML keys are rejected rather
+than ignored, for the reason `config.validateLinter` rejects `linter: eslint`.
+
+The verdict is computed from `<merge-base>..HEAD`, so the local answer and the CI answer come
+from identical inputs. A dirty working tree gets its own row saying the uncommitted work was
+excluded, because silently deciding on HEAD while the developer is looking at edited files is
+the one way this command gives a confidently wrong answer.
+
+Nothing enforces the verdict yet: the clearance loop (resolving a referral by PR comment,
+bound to the head SHA) is #14, and exemption-file isolation is #15.
 
 ## Semgrep: token-bearing vs token-less runs
 
@@ -814,6 +920,11 @@ does hand an upload token to a workflow that executes the bumped dependency's co
 per-repo judgment call.
 
 ## The `action.yml` composite action
+
+**Its output parser is currently broken, and that is expected.** `tool_result()` matches
+`^\[(PASS|FAIL)\] <name>$`, which the CLI no longer emits — see "Output grammar and
+`--json`" above. The fix is to read `--json` in `lydite/actions`; it has not been made
+because lydite has no consumers yet. The fix is *not* to reintroduce bracketed text here.
 
 Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
 lydite's usage is uniform enough (`.lydite.yml` already carries all the config) that the action
@@ -864,12 +975,14 @@ inside the tree, not across repositories:
 Two things in `tokens.md` are documented but **not implemented**, and neither should be
 mistaken for a description of current behavior:
 
-**The CLI output grammar is a proposal.** It specifies glyphs (`✓`/`!`/`✗`/`→`/`$`), leader
-dots aligning the value column at 34 characters, and exit code 2 for drift. lydite does not
-emit that today, and adopting it is a **breaking change to an interface another repository
-parses** — `lydite/actions`'s `tool_result()` matches `^\[(PASS|FAIL)\] <name>$` anchored at
-both ends. It has to change in the same release, or every consumer's PR comment silently
-loses its verdict while the scan still reports success.
+**The CLI output grammar is implemented**, in `internal/ui`, and every command renders
+through it — glyphs, leader dots aligning the value column at 34 characters, `--no-color`,
+and a verdict-plus-duration last line. `lydite/actions` still parses the old
+`^\[(PASS|FAIL)\] <name>$` shape and therefore reads nothing; cutting it over to `--json` is
+a change in that repository, and it is safe to make at any time because lydite has no
+consumers yet. Do not restore the bracketed text form to accommodate it — the whole reason
+the grammar sat unimplemented for so long is that a text-scraping consumer made every
+refinement a two-repository release.
 
 **There is no light product theme and no responsive design.** The light token ramp exists
 and the PR comment uses it, but no product screen has been drawn light, and nothing below

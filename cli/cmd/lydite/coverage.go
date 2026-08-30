@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -18,6 +17,7 @@ import (
 	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/ui"
 )
 
 // priorBaselineDepth bounds how far back the baseline writers look for a
@@ -35,11 +35,36 @@ func newCoverageCmd() *cobra.Command {
 	var goReport []string
 	var rustReport []string
 	var rustLCOVReport []string
+	var asJSON, noColor bool
 	cmd := &cobra.Command{
-		Use:   "coverage",
-		Short: "Diff current coverage against the lydite baseline for the PR's base commit",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use: "coverage",
+		// A non-zero verdict is an answer, not a misuse of the command and
+		// not a malfunction. Cobra prints usage and an "Error:" line for any
+		// error a RunE returns, which would bury the report under the flag
+		// list every time a gate failed. main owns error reporting.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Diff current coverage against the lydite baseline for the PR's base commit",
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			ctx := cmd.Context()
+			// Every gate below adds rows rather than printing, so the run has
+			// one report and one verdict line however many of them ran, and
+			// however early the body returned. A hard error skips rendering:
+			// main prints that, and a verdict lydite could not reach must not
+			// be drawn as though it had.
+			streamDiagnostics(asJSON)
+			rep := ui.NewReport("coverage")
+			defer func() {
+				if err != nil {
+					return
+				}
+				out := cmd.OutOrStdout()
+				if werr := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); werr != nil {
+					err = werr
+					return
+				}
+				err = rep.Err()
+			}()
 
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -124,7 +149,8 @@ func newCoverageCmd() *cobra.Command {
 					return err
 				}
 				if len(record) == 0 {
-					return printNoCoverage(cmd, source)
+					printNoCoverage(rep, source)
+					return nil
 				}
 				// Keyed by tree. The commit is incidental; the tree is what the
 				// coverage describes, and it is the identifier this commit shares
@@ -144,9 +170,8 @@ func newCoverageCmd() *cobra.Command {
 					if len(carried) > 0 {
 						note = fmt.Sprintf(" (%s carried forward from a prior baseline — detected but not measured this run)", strings.Join(carried, ", "))
 					}
-					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "recorded coverage baseline for %s: %s%s\n", sha, formatReport(record), note); err != nil {
-						return err
-					}
+					rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline recorded",
+						Value: fmt.Sprintf("%s: %s%s", shortSHA(sha), formatReport(record), note)})
 				}
 				// The floor is the one gate with something to say on main. The
 				// aggregate and patch gates compare against a baseline, and on
@@ -160,11 +185,13 @@ func newCoverageCmd() *cobra.Command {
 				// worth keeping whether or not a unit is below the floor, and
 				// losing it would push every later pull request into a
 				// recompute-nothing cache miss over an unrelated failure.
-				return floorReport(cmd, units, cfg.Coverage.Floor, ecosystems)
+				floorReport(rep, cmd, units, cfg.Coverage.Floor, ecosystems)
+				return nil
 			}
 
 			if len(current) == 0 {
-				return printNoCoverage(cmd, source)
+				printNoCoverage(rep, source)
+				return nil
 			}
 			if shaErr != nil {
 				return shaErr
@@ -187,9 +214,9 @@ func newCoverageCmd() *cobra.Command {
 				return err
 			}
 			if !hit {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "no cached baseline for %s — computing one now (first PR against this main commit pays this cost)\n", sha); err != nil {
-					return err
-				}
+				rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
+					Value:  fmt.Sprintf("not cached for %s — computing it now", shortSHA(sha)),
+					Detail: []string{"the first pull request against this main commit pays this cost"}})
 				baseline, err = computeBaselineAt(ctx, cmd, dir, sha, cfg)
 				if err != nil {
 					return err
@@ -249,24 +276,23 @@ func newCoverageCmd() *cobra.Command {
 				}
 			}
 
-			aggregateErr := diffReport(cmd, current, baseline, cfg.Coverage.Tolerance, ecosystems)
+			diffReport(rep, current, baseline, cfg.Coverage.Tolerance, ecosystems)
 			// sha is the same merge-base gitstate.BaseSHA already resolved for
 			// the aggregate baseline lookup above — patch coverage reuses it
 			// directly rather than recomputing "git merge-base HEAD origin/main"
 			// a second time.
-			patchErr := patchReport(cmd, ctx, dir, patchWanted, sources, sha, baseline, cfg.Coverage.Patch.Tolerance, ecosystems)
+			patchErr := patchReport(rep, cmd, ctx, dir, patchWanted, sources, sha, baseline, cfg.Coverage.Patch.Tolerance, ecosystems)
 			// The per-unit floor is what the line-weighted aggregate above
 			// cannot see: a unit small enough that having no tests at all
 			// barely moves the total. It gates on the units this run
 			// measured, with no baseline of its own — the floor is an
 			// absolute standard, not a ratchet, which is also why the
 			// record-on-main path above runs it and the other two gates.
-			floorErr := floorReport(cmd, units, cfg.Coverage.Floor, ecosystems)
-			// errors.Join keeps both messages when aggregate AND patch coverage
-			// regress in the same run — AGENTS.md's documented "compute and gate
-			// on both, not either/or" contract must hold for the returned error
-			// too, not just for what gets printed to stdout above.
-			return errors.Join(aggregateErr, patchErr, floorErr)
+			floorReport(rep, cmd, units, cfg.Coverage.Floor, ecosystems)
+			// patchReport is the only one of the three that can still fail
+			// outright: it reads per-line data off disk. The gates' own
+			// verdicts travel as rows, so the report decides the exit code.
+			return patchErr
 		},
 	}
 	// --dir stays a flag and cannot move into .lydite.yml: the file lives AT
@@ -274,6 +300,8 @@ func newCoverageCmd() *cobra.Command {
 	// own config. Everything else about coverage production now has a home in
 	// that file, and the flags below are the local-dev/one-off escape hatch.
 	cmd.Flags().StringVar(&dir, "dir", ".", "repository root")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
+	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	cmd.Flags().StringVar(&sourceFlag, "source", "",
 		`who produces the coverage data: "run" (lydite executes each ecosystem's test suite
 itself) or "report" (a prior CI job already produced one; lydite only parses it). Defaults to
@@ -498,16 +526,6 @@ func warnUnmeasured(cmd *cobra.Command, ecosystems []detect.Ecosystem, report ma
 	return nil
 }
 
-// statusPrefix renders a bracketed status tag padded to a fixed column width
-// (10 characters, e.g. "[FAIL]    "), shared by diffReport and patchReport
-// so the two gates can't drift apart on formatting — action.yml's PR-comment
-// builder greps for exactly this "[TAG]<spaces>" vocabulary.
-func statusPrefix(tag string) string {
-	bracket := "[" + tag + "]"
-	pad := max(10-len(bracket), 1)
-	return bracket + strings.Repeat(" ", pad)
-}
-
 // regressedBeyond reports whether cur dipped below base by more than
 // tolerance percentage points, comparing at the report's display precision
 // (tenths) so what's shown and what's gated always agree: a raw float64
@@ -515,7 +533,7 @@ func statusPrefix(tag string) string {
 // (86.2-86.1 exceeds 0.1 but 86.1-86.0 does not), failing one "regressed
 // 0.1%" while passing an identical-looking other. Shared by diffReport and
 // patchReport so the two gates can't drift apart on the comparison, like
-// statusPrefix does for formatting.
+// the shared ui grammar does for formatting.
 func regressedBeyond(cur, base, tolerance float64) bool {
 	return math.Round((base-cur)*10) > math.Round(tolerance*10)
 }
@@ -541,7 +559,7 @@ func regressedBeyond(cur, base, tolerance float64) bool {
 // ChangedLines is called exactly once, for the union of every wanted
 // language's extensions, then partitioned per language — not once per
 // language — since all three langs diff the identical mergeBase..HEAD range.
-func patchReport(cmd *cobra.Command, ctx context.Context, dir string, want coverage.PatchWanted, sources coverage.PatchSources, mergeBase string, baseline map[string]float64, tolerance float64, detected []detect.Ecosystem) error {
+func patchReport(rep *ui.Report, cmd *cobra.Command, ctx context.Context, dir string, want coverage.PatchWanted, sources coverage.PatchSources, mergeBase string, baseline map[string]float64, tolerance float64, detected []detect.Ecosystem) error {
 	type language struct {
 		name   string
 		wanted bool
@@ -572,7 +590,6 @@ func patchReport(cmd *cobra.Command, ctx context.Context, dir string, want cover
 		detectedSet[string(e)] = true
 	}
 
-	regressed := 0
 	for _, lang := range langs {
 		if !lang.wanted {
 			continue
@@ -607,7 +624,7 @@ func patchReport(cmd *cobra.Command, ctx context.Context, dir string, want cover
 		// Go repo shouldn't produce a rust line.
 		if !resolved {
 			if detectedSet[lang.name] {
-				if err := reportPatchUnmeasured(cmd, lang.name, langChanged); err != nil {
+				if err := reportPatchUnmeasured(rep, cmd, lang.name, langChanged); err != nil {
 					return err
 				}
 			}
@@ -619,25 +636,19 @@ func patchReport(cmd *cobra.Command, ctx context.Context, dir string, want cover
 		pct := float64(hit) / float64(total) * 100
 
 		base, baseOK := baseline[lang.name]
-		var tag, detail string
+		status := ui.StatusPass
+		value := fmt.Sprintf("%.1f%% (%d/%d new lines; baseline %.1f%%)", pct, hit, total, base)
 		switch {
 		case !baseOK:
-			tag, detail = "NEW", fmt.Sprintf("%s patch: %.1f%% (%d/%d new lines; no baseline yet)", lang.name, pct, hit, total)
+			status = ui.StatusNew
+			value = fmt.Sprintf("%.1f%% (%d/%d new lines; no baseline yet)", pct, hit, total)
 		// The patch gate has its own tolerance knob
 		// (coverage.patch.tolerance) — deliberately not coverage.tolerance,
 		// so loosening the noisy aggregate gate never weakens this one.
 		case regressedBeyond(pct, base, tolerance):
-			regressed++
-			tag, detail = "FAIL", fmt.Sprintf("%s patch: %.1f%% (%d/%d new lines; baseline %.1f%%)", lang.name, pct, hit, total, base)
-		default:
-			tag, detail = "PASS", fmt.Sprintf("%s patch: %.1f%% (%d/%d new lines; baseline %.1f%%)", lang.name, pct, hit, total, base)
+			status = ui.StatusFail
 		}
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix(tag)+detail); err != nil {
-			return err
-		}
-	}
-	if regressed > 0 {
-		return fmt.Errorf("patch coverage regressed for %d language(s)", regressed)
+		rep.Add(ui.Row{Status: status, Label: lang.name + " patch", Value: value})
 	}
 	return nil
 }
@@ -657,7 +668,7 @@ var patchSourceHints = map[string]string{
 // action.yml's generic bracketed-tag grep) and a stderr warning naming the
 // missing wiring. A diff that touched none of the language's files stays
 // silent — nothing was skipped, there was simply nothing to gate.
-func reportPatchUnmeasured(cmd *cobra.Command, lang string, changed map[string][]int) error {
+func reportPatchUnmeasured(rep *ui.Report, cmd *cobra.Command, lang string, changed map[string][]int) error {
 	if len(changed) == 0 {
 		return nil
 	}
@@ -665,10 +676,8 @@ func reportPatchUnmeasured(cmd *cobra.Command, lang string, changed map[string][
 	for _, l := range changed {
 		lines += len(l)
 	}
-	detail := fmt.Sprintf("%s patch: not measured (%d changed line(s) across %d file(s), but no per-line coverage source was resolved)", lang, lines, len(changed))
-	if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix("UNMEASURED")+detail); err != nil {
-		return err
-	}
+	rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: lang + " patch",
+		Value: fmt.Sprintf("not measured (%d changed line(s) across %d file(s), no per-line source resolved)", lines, len(changed))})
 	_, err := fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s patch coverage is enabled and this diff touches %s files, but no per-line coverage source was resolved — %s\n", lang, lang, patchSourceHints[lang])
 	return err
 }
@@ -849,7 +858,7 @@ func rustPatchPercent(dir string, rustLCOV map[string]string, changed map[string
 // once it isn't (the source actually left the tree). None of those fail the
 // check on its own — only a measured decrease beyond the configured noise
 // tolerance does (see regressedBeyond).
-func diffReport(cmd *cobra.Command, current, baseline map[string]float64, tolerance float64, detected []detect.Ecosystem) error {
+func diffReport(rep *ui.Report, current, baseline map[string]float64, tolerance float64, detected []detect.Ecosystem) {
 	detectedSet := make(map[string]bool, len(detected))
 	for _, e := range detected {
 		detectedSet[string(e)] = true
@@ -867,38 +876,31 @@ func diffReport(cmd *cobra.Command, current, baseline map[string]float64, tolera
 	}
 	sort.Strings(sorted)
 
-	regressed := 0
 	for _, lang := range sorted {
 		cur, curOK := current[lang]
 		base, baseOK := baseline[lang]
-		var tag, detail string
+		var status ui.Status
+		var value string
 		switch {
 		case !baseOK:
-			tag, detail = "NEW", fmt.Sprintf("%s: %.1f%% (no baseline yet)", lang, cur)
+			status, value = ui.StatusNew, fmt.Sprintf("%.1f%% (no baseline yet)", cur)
 		// A language still detected in the tree but absent from this run's
 		// measurements isn't gone — its coverage step just didn't run (a
 		// path-filtered CI job, missing tooling). Say that, and reserve
 		// DROPPED for a language whose source actually left the tree.
 		case !curOK && detectedSet[lang]:
-			tag, detail = "UNMEASURED", fmt.Sprintf("%s: not measured this run (baseline %.1f%%)", lang, base)
+			status, value = ui.StatusUnmeasured, fmt.Sprintf("not measured this run (baseline %.1f%%)", base)
 		case !curOK:
-			tag, detail = "DROPPED", fmt.Sprintf("%s: no longer measured (baseline was %.1f%%)", lang, base)
+			status, value = ui.StatusDropped, fmt.Sprintf("no longer measured (baseline was %.1f%%)", base)
 		// Dips within the configured noise tolerance don't count — see
 		// config.Coverage.Tolerance for the rationale.
 		case regressedBeyond(cur, base, tolerance):
-			regressed++
-			tag, detail = "FAIL", fmt.Sprintf("%s: %.1f%% (baseline %.1f%%, regressed %.1f%%)", lang, cur, base, base-cur)
+			status, value = ui.StatusFail, fmt.Sprintf("%.1f%% (baseline %.1f%%, regressed %.1f%%)", cur, base, base-cur)
 		default:
-			tag, detail = "PASS", fmt.Sprintf("%s: %.1f%% (baseline %.1f%%)", lang, cur, base)
+			status, value = ui.StatusPass, fmt.Sprintf("%.1f%% (baseline %.1f%%)", cur, base)
 		}
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix(tag)+detail); err != nil {
-			return err
-		}
+		rep.Add(ui.Row{Status: status, Label: lang, Value: value})
 	}
-	if regressed > 0 {
-		return fmt.Errorf("coverage regressed for %d language(s)", regressed)
-	}
-	return nil
 }
 
 // floorReport gates every measured unit against coverage.floor, printing one
@@ -935,9 +937,9 @@ func diffReport(cmd *cobra.Command, current, baseline map[string]float64, tolera
 // set doesn't reshuffle between runs, and the bracketed vocabulary matches
 // diffReport/patchReport because action.yml's PR-comment builder greps for
 // exactly that.
-func floorReport(cmd *cobra.Command, units []coverage.Unit, floor float64, enabled []detect.Ecosystem) error {
+func floorReport(rep *ui.Report, cmd *cobra.Command, units []coverage.Unit, floor float64, enabled []detect.Ecosystem) {
 	if floor <= 0 || len(units) == 0 {
-		return nil
+		return
 	}
 	enabledSet := make(map[string]bool, len(enabled))
 	for _, e := range enabled {
@@ -950,7 +952,7 @@ func floorReport(cmd *cobra.Command, units []coverage.Unit, floor float64, enabl
 		}
 	}
 	if len(sorted) == 0 {
-		return nil
+		return
 	}
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].Lang != sorted[j].Lang {
@@ -962,16 +964,13 @@ func floorReport(cmd *cobra.Command, units []coverage.Unit, floor float64, enabl
 	below, cleared := 0, 0
 	for _, u := range sorted {
 		if !u.Measured() {
-			detail := fmt.Sprintf("%s floor: %s not measured this run (floor %.1f%% not applied)",
-				u.Lang, unitLabel(u), floor)
-			if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix("UNMEASURED")+detail); err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintf(cmd.ErrOrStderr(),
+			rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: u.Lang + " floor: " + unitLabel(u),
+				Value: fmt.Sprintf("not measured this run (floor %.1f%% not applied)", floor)})
+			// A warning that cannot reach stderr is not something the gate
+			// can do anything about, and must not replace the verdict.
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 				"warning: no coverage report for %s unit %s, so the %.1f%% floor was not applied to it — its coverage step didn't run, or its report isn't where lydite looks\n",
-				u.Lang, unitLabel(u), floor); err != nil {
-				return err
-			}
+				u.Lang, unitLabel(u), floor)
 			continue
 		}
 		pct := u.Lines.Percent()
@@ -983,23 +982,16 @@ func floorReport(cmd *cobra.Command, units []coverage.Unit, floor float64, enabl
 			continue
 		}
 		below++
-		detail := fmt.Sprintf("%s floor: %s at %.1f%% (%d/%d lines, floor %.1f%%)",
-			u.Lang, unitLabel(u), pct, u.Lines.Covered, u.Lines.Total, floor)
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix("FAIL")+detail); err != nil {
-			return err
-		}
+		rep.Add(ui.Row{Status: ui.StatusFail, Label: u.Lang + " floor: " + unitLabel(u),
+			Value: fmt.Sprintf("%.1f%% (%d/%d lines, floor %.1f%%)", pct, u.Lines.Covered, u.Lines.Total, floor)})
 	}
 	if below == 0 {
 		// "N of M" rather than a bare count: the two numbers differ exactly
 		// when some unit went ungated, so the PR comment cannot read as
 		// repo-wide coverage of a partial run.
-		detail := fmt.Sprintf("floor: %d of %d unit(s) at or above %.1f%%", cleared, len(sorted), floor)
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), statusPrefix("PASS")+detail); err != nil {
-			return err
-		}
-		return nil
+		rep.Add(ui.Row{Status: ui.StatusPass, Label: "floor",
+			Value: fmt.Sprintf("%d of %d unit(s) at or above %.1f%%", cleared, len(sorted), floor)})
 	}
-	return fmt.Errorf("%d unit(s) below the %.1f%% per-unit coverage floor", below, floor)
 }
 
 // unitLabel names a unit for a report line. A unit rooted at --dir itself has
@@ -1014,13 +1006,16 @@ func unitLabel(u coverage.Unit) string {
 // printNoCoverage reports a run that measured nothing and — on main — had no
 // prior baseline entries to carry forward either: there is nothing to gate
 // and nothing worth recording.
-func printNoCoverage(cmd *cobra.Command, source coverage.Source) error {
-	msg := "no coverage measured — no coverage tooling detected/available for any ecosystem"
+func printNoCoverage(rep *ui.Report, source coverage.Source) {
+	row := ui.Row{Status: ui.StatusUnmeasured, Label: "coverage",
+		Value: "not measured — no coverage tooling available for any ecosystem"}
 	if source == coverage.SourceReport {
-		msg += " (coverage.source is \"report\", which only reads an existing report — did an earlier CI job produce one at the expected path?)"
+		row.Detail = []string{
+			"coverage.source is \"report\", so lydite only reads a report a prior job wrote",
+			"check that an earlier CI job produced one at the path lydite looks for",
+		}
 	}
-	_, err := fmt.Fprintln(cmd.OutOrStdout(), msg)
-	return err
+	rep.Add(row)
 }
 
 // enabledEcosystems drops languages disabled in .lydite.yml from the

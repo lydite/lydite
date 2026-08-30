@@ -15,6 +15,11 @@
 // and caches the baseline, every subsequent PR against that SHA reuses it.
 package gitstate
 
+// Every git invocation here goes through executil.RunQuiet rather than
+// executil.Run. Run streams a command's output live, which is right for a
+// scanner whose findings are the point and wrong for plumbing whose output is
+// data: `git rev-parse` would print two SHAs into the middle of the command's
+// report, and under --json into the middle of the document.
 import (
 	"context"
 	"encoding/json"
@@ -64,7 +69,7 @@ func StatePath(key string) string {
 // already the number for the main commit it produces. Keyed by commit SHA those
 // two are unrelated, and the measurement is thrown away.
 func TreeSHA(ctx context.Context, dir, commit string) (string, error) {
-	r := executil.Run(ctx, dir, "git", "rev-parse", commit+"^{tree}")
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", commit+"^{tree}")
 	if !r.Ok() {
 		return "", fmt.Errorf("git rev-parse %s^{tree}: %w", commit, r.Err)
 	}
@@ -77,7 +82,7 @@ func TreeSHA(ctx context.Context, dir, commit string) (string, error) {
 // merge-base — there is nothing to compare against, but the coverage measured
 // right now IS that commit's baseline, and recording it is the whole point).
 func HeadSHA(ctx context.Context, dir string) (string, error) {
-	r := executil.Run(ctx, dir, "git", "rev-parse", "HEAD")
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "HEAD")
 	if !r.Ok() {
 		return "", fmt.Errorf("git rev-parse HEAD: %w", r.Err)
 	}
@@ -87,10 +92,10 @@ func HeadSHA(ctx context.Context, dir string) (string, error) {
 // BaseSHA resolves the commit on origin/main this branch diverged from, so
 // lydite coverage knows which baseline to compare against.
 func BaseSHA(ctx context.Context, dir string) (string, error) {
-	if r := executil.Run(ctx, dir, "git", "fetch", "origin", "main"); !r.Ok() {
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", "main"); !r.Ok() {
 		return "", fmt.Errorf("fetch origin main: %w", r.Err)
 	}
-	r := executil.Run(ctx, dir, "git", "merge-base", "HEAD", "origin/main")
+	r := executil.RunQuiet(ctx, dir, "git", "merge-base", "HEAD", "origin/main")
 	if !r.Ok() {
 		return "", fmt.Errorf("git merge-base HEAD origin/main: %w", r.Err)
 	}
@@ -102,7 +107,7 @@ func BaseSHA(ctx context.Context, dir string) (string, error) {
 func ReadBaseline(ctx context.Context, dir string, keys ...string) (map[string]float64, bool, error) {
 	// A missing remote branch is the expected first-ever-run state, not an
 	// error: there's nothing to fetch yet.
-	if r := executil.Run(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
 		return nil, false, nil
 	}
 	// Keys are tried in order: the tree first, then the commit SHA. The SHA is
@@ -115,7 +120,7 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (map[string]f
 		if key == "" {
 			continue
 		}
-		r = executil.Run(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
+		r = executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
 		if r.Ok() {
 			found = key
 			break
@@ -158,7 +163,7 @@ func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDep
 	if len(langs) == 0 {
 		return found
 	}
-	if r := executil.Run(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
 		return found
 	}
 	// One ls-tree up front so only commits that actually have a cached
@@ -170,7 +175,7 @@ func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDep
 	// unaffected). -r is load-bearing for the same reason: baselines live in
 	// a subdirectory of the branch, and a non-recursive listing names that
 	// directory rather than the entries inside it.
-	ls := executil.Run(ctx, dir, "git", "ls-tree", "-r", "--full-tree", "--name-only", "origin/"+BranchName)
+	ls := executil.RunQuiet(ctx, dir, "git", "ls-tree", "-r", "--full-tree", "--name-only", "origin/"+BranchName)
 	if !ls.Ok() {
 		return found
 	}
@@ -183,7 +188,7 @@ func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDep
 	// Commit AND tree for each entry, in one walk: baselines are keyed by tree
 	// now, and by commit for anything written before that. Asking git for both
 	// costs nothing here and avoids a rev-parse per commit.
-	rev := executil.Run(ctx, dir, "git", "log", "--first-parent",
+	rev := executil.RunQuiet(ctx, dir, "git", "log", "--first-parent",
 		fmt.Sprintf("--max-count=%d", maxDepth), "--format=%H %T", sha)
 	if !rev.Ok() {
 		return found
@@ -205,7 +210,7 @@ func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDep
 		if key == "" {
 			continue
 		}
-		r := executil.Run(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
+		r := executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
 		if !r.Ok() {
 			continue
 		}
@@ -266,7 +271,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	defer func() { _ = executil.Run(ctx, dir, "git", "worktree", "remove", "--force", tmp) }()
+	defer func() { _ = executil.RunQuiet(ctx, dir, "git", "worktree", "remove", "--force", tmp) }()
 
 	// A local branch unique to this invocation (derived from the unique temp
 	// dir), never the shared BranchName itself: git refuses to have the same
@@ -278,26 +283,26 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	// via refspec below.
 	staging := "lydite-staging-" + filepath.Base(tmp)
 
-	branchExists := executil.Run(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok()
+	branchExists := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok()
 	if branchExists {
 		// Refresh origin/<BranchName> right before staging on it: the tracking
 		// ref left behind by the job's checkout (or a prior ReadBaseline) can
 		// be minutes stale, and a staging branch built on a stale ref pushes
 		// non-fast-forward and is rejected.
-		if r := executil.Run(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+		if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
 			return fmt.Errorf("fetch %s: %w", BranchName, r.Err)
 		}
-		if r := executil.Run(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
+		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
 			return fmt.Errorf("worktree add %s: %w", BranchName, r.Err)
 		}
 	} else {
-		if r := executil.Run(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
+		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
 			return fmt.Errorf("worktree add (detached): %w", r.Err)
 		}
-		if r := executil.Run(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
+		if r := executil.RunQuiet(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
 			return fmt.Errorf("checkout --orphan %s: %w", staging, r.Err)
 		}
-		if r := executil.Run(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
+		if r := executil.RunQuiet(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
 			return fmt.Errorf("clear orphan worktree: %w", r.Err)
 		}
 	}
@@ -310,7 +315,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return err
 	}
-	if r := executil.Run(ctx, tmp, "git", "add", rel); !r.Ok() {
+	if r := executil.RunQuiet(ctx, tmp, "git", "add", rel); !r.Ok() {
 		return fmt.Errorf("git add: %w", r.Err)
 	}
 	// Nothing staged means the fetched branch already carries this exact
@@ -319,7 +324,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	// commit"), so this is success, not an error. Different content (notably a
 	// poisoned `{}` entry being healed by a real report) stages a change and
 	// proceeds to overwrite as usual.
-	if executil.Run(ctx, tmp, "git", "diff", "--cached", "--quiet").Ok() {
+	if executil.RunQuiet(ctx, tmp, "git", "diff", "--cached", "--quiet").Ok() {
 		return nil
 	}
 	commitR := executil.RunEnv(ctx, tmp, []string{
@@ -329,7 +334,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	if !commitR.Ok() {
 		return fmt.Errorf("git commit: %w", commitR.Err)
 	}
-	if r := executil.Run(ctx, tmp, "git", "push", "origin", staging+":refs/heads/"+BranchName); !r.Ok() {
+	if r := executil.RunQuiet(ctx, tmp, "git", "push", "origin", staging+":refs/heads/"+BranchName); !r.Ok() {
 		return fmt.Errorf("git push: %w", r.Err)
 	}
 	return nil

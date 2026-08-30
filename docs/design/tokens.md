@@ -120,19 +120,32 @@ The canonical surface. This is a specification.
 | `→` | context line | `#6E7594` | never a verdict |
 | `$` | a command the reader can run | `#A98BFF` | — |
 
+**The Exit column describes the verdict, not the row.** A run has exactly one
+verdict — it is the last line — and that verdict owns the exit code; a row's
+glyph only says how much attention the row wants. The two come apart because
+several states want amber while voting differently: a referral exits 2, but an
+unmeasured or dropped measurement is amber and votes for nothing. An unmeasured
+gate has to be visibly distinct from one that passed, and it has never failed a
+build. `internal/ui` is the single implementation of both halves.
+
 - Row shape is glyph, space, label, leader dots, value — **leaders align the value
   column at 34 characters**.
 - `--no-color` drops colour and keeps every glyph.
-- The last line is always the verdict plus duration (`gate passed in 12.4s`), and on a
-  parity run also `identical to CI #4821`.
+- The last line is always the command, the verdict and the duration
+  (`scan passed in 12.4s`, `review referred in 0.3s`). Parity runs do not exist
+  yet, so the `identical to CI #4821` suffix is unimplemented.
 - A failure prints reason, then cause, then a runnable next step.
 
-**This grammar is not yet what the binary emits, and adopting it is a breaking change
-to a parsed interface.** `lydite/actions`'s `tool_result()` matches
-`^\[(PASS|FAIL)\] <name>$` anchored at both ends, and detail lines are indented so a
-finding containing a bracketed word cannot be mistaken for a status line. Any move to
-glyphs has to change the action's parser in the same release, or every consumer's PR
-comment silently loses its verdict. See ADR 0012.
+**This grammar is what the binary emits**, from `internal/ui`, for `scan`,
+`coverage` and `review` alike.
+
+Anything automated reads `--json` instead, and never the text. That separation
+is why the human surface is free to change: the grammar sat specified but
+unimplemented for as long as its only consumer parsed the terminal output, and
+paying that off once was the precondition for adopting it at all. Detail lines
+are still indented, for a reason that outlives the regex — a scanner finding
+quotes source, which can contain anything the source contains, including
+something shaped like a verdict.
 
 ## Copy and voice
 

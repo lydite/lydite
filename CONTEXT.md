@@ -51,12 +51,17 @@ A check a change must satisfy to merge, which the change's author clears by doin
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
 
 **Referral**:
-lydite's decision that a change needs human review before it merges. A referral names no defect and is not an accusation: most referrals mean only that no **Exemption** matched. It is resolved by a human, never by the author making further changes, which is exactly what distinguishes it from a **Gate**.
-_Avoid_: "escalation", "block" (a referral asserts nothing is wrong), "warning" (a referral is not advisory — nothing merges past it).
+lydite's decision that a change needs human review before it merges. A referral names no defect and is not an accusation: most referrals mean only that no **Exemption** matched. It makes no demand, so unlike a **Gate** there is no work that satisfies it — the author can still change the change until it matches a declared shape, but nothing they can do to *this* change clears it. It is also the only lydite verdict that is pending rather than terminal: it is resolved by a **Clearance**, which lives outside the repository.
+_Avoid_: "escalation", "block" (a referral asserts nothing is wrong), "warning" (a referral is not advisory — nothing merges past it), "failure" (a **Gate** fails; a referral does not).
 
 **Exemption**:
 A declared shape of change that merges without a **Referral** — a README-only edit, a dependency bump with a clean SCA run. Exemptions are an allowlist: a change matching none of them is referred, so the set states positively what may merge unattended rather than trying to enumerate what may not. The set is therefore the whole risk model; there is no separate score or threshold.
 _Avoid_: "rule", "ignore", and especially "suppression" — a suppression is a finding-level annotation in the scanned code, and an *input* to referral rather than a way around one.
+
+**Disqualifier**:
+Evidence in a change that vetoes any **Exemption** match, so the change is referred however boring its shape. Disqualifiers are not measurements of the code: they are signs that something tried to make a verdict go away — a net-new suppression annotation, a newly skipped test, an edit to lydite's own configuration or to CI. They live in their own list rather than as conditions inside each exemption, because otherwise every future exemption would have to remember every disqualifier and forgetting one would be silent. The built-in set cannot be switched off; a repo's own list only adds to it.
+_Note_: a disqualifier must be readable off the diff. Anything the author merely *asserts* about their own change — a commit-message marker, an "equivalent mutant" annotation — may add a referral but may never remove one, since an agent can simply decline to assert it. See [ADR 0014](docs/adr/0014-evidence-only-referral-matching.md).
+_Avoid_: "veto rule", "blocker", and using it for a **Gate** failure — a failing gate is the author's to clear, a disqualifier is not.
 
 **Clearance**:
 A human's resolution of a **Referral**, bound to the exact revision it was given for. Because it names a revision, any further change to the branch voids it: a clearance is never standing permission for a pull request.

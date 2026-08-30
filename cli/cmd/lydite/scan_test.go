@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/ui"
 )
 
 // The "auto" path needs a real repo with an origin/main to resolve against, so
@@ -45,43 +47,81 @@ func TestResolveDiffBase(t *testing.T) {
 // A failing check whose findings never streamed must print them. Biome sends
 // its report to a file so the JSON cannot be corrupted by its own chatter,
 // which means nothing reaches the terminal on its own — printing a bare
-// "[FAIL] biome(.)" left the developer to re-run the pinned toolchain by hand
-// to find out what was wrong, and put nothing in the PR comment either.
+// status line left the developer to re-run the pinned toolchain by hand to
+// find out what was wrong, and put nothing in the PR comment either.
 func TestReportPrintsDetailForFailingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	err := report(cmd, []executil.Result{
+	err := report(cmd, ui.NewReport("scan"), []executil.Result{
 		{
 			Name:   "biome(.)",
 			Detail: "src/bad.ts:1  lint/security/noGlobalEval  eval() is dangerous\nsrc/bad.ts:4  lint/correctness/noUnusedVariables  unused",
 			Err:    errors.New("2 finding(s)"),
 		},
-	})
+	}, false, true)
 	if err == nil {
 		t.Fatal("a failing check must still return an error")
 	}
-	for _, want := range []string{"[FAIL] biome(.)", "noGlobalEval", "eval() is dangerous", "noUnusedVariables"} {
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("a failing gate must exit 1, got %v", err)
+	}
+	for _, want := range []string{"✗ biome(.)", "noGlobalEval", "eval() is dangerous", "noUnusedVariables"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report output missing %q:\n%s", want, out.String())
 		}
 	}
 }
 
-// action.yml's tool_result() matches "^\[(PASS|FAIL)\] <name>$" anchored at
-// both ends to decide a tool's verdict. A finding whose message happens to
-// contain that shape must not be able to forge one, which is what indenting
-// every detail line buys.
+// The JSON report is what anything automated reads, so it must carry the
+// same verdict and the same findings as the text — a machine surface that
+// can disagree with the human one is worse than no machine surface.
+func TestReportJSONCarriesVerdictAndDetail(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
+		{Name: "biome(.)", Detail: "src/bad.ts:1  noGlobalEval", Err: errors.New("1 finding(s)")},
+	}, true, false)
+	var got struct {
+		Command string `json:"command"`
+		Verdict string `json:"verdict"`
+		Exit    int    `json:"exit"`
+		Rows    []struct {
+			Status string   `json:"status"`
+			Label  string   `json:"label"`
+			Detail []string `json:"detail"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("the machine report must be valid JSON: %v\n%s", err, out.String())
+	}
+	if got.Command != "scan" || got.Verdict != "fail" || got.Exit != 1 {
+		t.Errorf("got command=%q verdict=%q exit=%d, want scan/fail/1", got.Command, got.Verdict, got.Exit)
+	}
+	if len(got.Rows) != 1 || got.Rows[0].Status != "fail" || got.Rows[0].Label != "biome(.)" {
+		t.Fatalf("unexpected rows: %+v", got.Rows)
+	}
+	if len(got.Rows[0].Detail) != 1 || !strings.Contains(got.Rows[0].Detail[0], "noGlobalEval") {
+		t.Errorf("the finding must survive into JSON, got %+v", got.Rows[0].Detail)
+	}
+}
+
+// A finding's own message is attacker-adjacent text: it can contain anything
+// the scanned source contains, including something shaped like a verdict. A
+// detail line is indented so it can never begin a line the way a status row
+// does, which is what stops a finding from forging one.
 func TestReportDetailCannotForgeAStatusLine(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, []executil.Result{
-		{Name: "biome(.)", Detail: "[PASS] biome(.)", Err: errors.New("1 finding(s)")},
-	})
+	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
+		{Name: "biome(.)", Detail: "✓ biome(.) ... passed", Err: errors.New("1 finding(s)")},
+	}, false, true)
 	statusLines := 0
 	for _, line := range strings.Split(out.String(), "\n") {
-		if strings.HasPrefix(line, "[PASS] ") || strings.HasPrefix(line, "[FAIL] ") {
+		if strings.HasPrefix(line, "✓ ") || strings.HasPrefix(line, "✗ ") {
 			statusLines++
 		}
 	}
@@ -96,10 +136,10 @@ func TestReportPrintsNoDetailForPassingOrStreamingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
 		{Name: "biome(.)", Detail: "should not appear"},
 		{Name: "semgrep", Output: "already streamed to the terminal", Err: errors.New("findings")},
-	})
+	}, false, true)
 	for _, unwanted := range []string{"should not appear", "already streamed"} {
 		if strings.Contains(out.String(), unwanted) {
 			t.Errorf("report printed %q:\n%s", unwanted, out.String())
