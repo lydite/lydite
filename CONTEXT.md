@@ -46,7 +46,25 @@ _Note_: because snapshots are not retained, "when did this finding first appear?
 **Gap**:
 An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.
 
+**Gate**:
+A check a change must satisfy to merge, which the change's author clears by doing more work — adding an assertion that kills a surviving mutant, raising patch coverage. Gates are meant to be iterated against, including by an agent, because every way of satisfying one improves the code. Contrast **Referral**.
+_Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
+
+**Referral**:
+lydite's decision that a change needs human review before it merges. A referral names no defect and is not an accusation: most referrals mean only that no **Exemption** matched. It is resolved by a human, never by the author making further changes, which is exactly what distinguishes it from a **Gate**.
+_Avoid_: "escalation", "block" (a referral asserts nothing is wrong), "warning" (a referral is not advisory — nothing merges past it).
+
+**Exemption**:
+A declared shape of change that merges without a **Referral** — a README-only edit, a dependency bump with a clean SCA run. Exemptions are an allowlist: a change matching none of them is referred, so the set states positively what may merge unattended rather than trying to enumerate what may not. The set is therefore the whole risk model; there is no separate score or threshold.
+_Avoid_: "rule", "ignore", and especially "suppression" — a suppression is a finding-level annotation in the scanned code, and an *input* to referral rather than a way around one.
+
+**Clearance**:
+A human's resolution of a **Referral**, bound to the exact revision it was given for. Because it names a revision, any further change to the branch voids it: a clearance is never standing permission for a pull request.
+_Avoid_: "approval" — GitHub's review approval is a different mechanism, with different rules about who may give one.
+
 ## Flagged ambiguities
+**"Threshold"** for referral — there is none, deliberately. Because **Exemption**s are an allowlist and the default is to refer, lydite computes no riskiness score and has nothing to tune. `coverage.tolerance` and `coverage.patch.tolerance` are **Gate** knobs and say nothing about whether a change is referred.
+
 **"Threshold"** — the original patch-coverage feature request proposed a `coverage.patch.threshold` config (an arbitrary fixed percentage per language). This was superseded: patch coverage has no independent threshold — it always gates against the aggregate baseline (see **Patch coverage**). Only an `enabled: bool` (default `true`, opt-out) remains in config.
 
 ## Example dialogue
