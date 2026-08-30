@@ -860,7 +860,9 @@ Five properties are load-bearing and easy to weaken by accident:
   widens every existing one, destroying `git log .lydite.exemptions.yml` as the readable
   record of widenings that #15 exists to protect.
 - **Disqualifiers veto any match, and the built-in set cannot be removed.** A net-new
-  suppression annotation, a newly skipped or `.only`-focused test, a removed test, an edit to
+  suppression annotation, a newly skipped or `.only`-focused test, a removed test — deleted,
+  gutted, or renamed out of a test path, since `git mv foo_test.go foo_disabled.go` takes it
+  out of the runner's view leaving nothing deleted and no hunk to read — an edit to
   `.lydite.yml`/`.lydite.exemptions.yml`, an edit to `.github/workflows/`, and an edit to
   `.gitattributes`. The suppression list carries the whole-file and whole-crate forms
   (`#![allow(`, `#[expect(`, `@ts-nocheck`, `//nolint`, `//go:build ignore`) alongside the
@@ -874,6 +876,14 @@ Five properties are load-bearing and easy to weaken by accident:
   marker is deliberately *not* implemented, because nothing detects an undeclared API break and
   a claim-based veto works only for the author who would have declared anyway. The rule for any
   future addition: an author-controlled claim may add a referral, never remove one.
+- **The diff fails closed when it cannot be read.** A patch line longer than the scanner's
+  buffer — `--text` renders a binary blob or a minified bundle as one — aborts the run rather
+  than yielding an empty set of added lines, which would leave every content veto silent while
+  the path list stayed complete.
+- **Every git setting that decides what a diff says is pinned** (`core.quotePath`,
+  `diff.relative`, `diff.mnemonicPrefix`). Each is settable in a global gitconfig lydite does
+  not control, and `diff.relative` alone scopes the diff to `--dir` and strips the prefix from
+  what survives — dropping `.github/workflows/` out of a monorepo's paths entirely.
 - **The diff covers the whole repository, not just `--dir`.** Unlike `internal/coverage`, which
   scopes its diff with git's `--relative`, referral decides whether a *pull request* needs a
   human, and a workflow edit outside a monorepo's scan root is exactly what must not slip past.

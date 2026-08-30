@@ -66,3 +66,20 @@ func TestRunQuietStreamsNothing(t *testing.T) {
 		t.Errorf("RunQuiet lost the output, got %q", r.Output)
 	}
 }
+
+// RunQuiet's callers parse Output as data — a YAML document, a patch — so
+// stderr has to stay out of it. Git warns about an unreadable gitconfig on
+// stderr, and prepended to an exemptions file that turns a valid config into
+// a parse error.
+func TestRunQuietKeepsStderrOutOfOutput(t *testing.T) {
+	r := RunQuiet(context.Background(), t.TempDir(), "sh", "-c", "echo data; echo noise >&2")
+	if !r.Ok() {
+		t.Fatalf("sh: %v", r.Err)
+	}
+	if strings.TrimSpace(r.Output) != "data" {
+		t.Errorf("Output = %q, want just the stdout data", r.Output)
+	}
+	if strings.TrimSpace(r.Stderr) != "noise" {
+		t.Errorf("Stderr = %q, want the stderr text kept separately", r.Stderr)
+	}
+}

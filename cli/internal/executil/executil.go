@@ -30,6 +30,12 @@ type Result struct {
 	// Empty for every tool that prints its own findings — reprinting those
 	// would duplicate what already streamed.
 	Detail string
+	// Stderr is what the command wrote to stderr, kept apart from Output by
+	// RunQuiet only. Run deliberately merges the two, because for a scanner
+	// they are one stream of findings; RunQuiet's callers parse Output as
+	// data, and a git warning about an unreadable gitconfig prepended to a
+	// YAML document turns a valid exemptions file into a parse error.
+	Stderr string
 	Err    error
 }
 
@@ -69,11 +75,11 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
 	cmd.Dir = dir
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return Result{Name: name, Args: args, Output: buf.String(), Err: err}
+	return Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
 }
 
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {

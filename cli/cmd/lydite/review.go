@@ -150,7 +150,7 @@ func referralDetail(d referral.Decision, declared int) []string {
 	if d.Exemption != "" {
 		return []string{
 			"a disqualifier vetoes any exemption, and cannot be cleared by the change that produced it",
-			"remove the annotation above, or ask a human to clear this change",
+			remedyFor(d.Disqualifications),
 		}
 	}
 	var detail []string
@@ -169,6 +169,24 @@ func referralDetail(d referral.Decision, declared int) []string {
 		detail = append(detail, fmt.Sprintf("%s declares no exemptions, so every change is referred", referral.FileName))
 	}
 	return append(detail, "ask a human to clear this change")
+}
+
+// remedyFor names the way out that matches what actually fired. Only some
+// disqualifiers are annotations a change can drop; telling the author to
+// remove one when they edited a workflow file sends them looking for
+// something that is not there, and the remedy is the single actionable line
+// in the whole report.
+func remedyFor(ds []referral.Disqualification) string {
+	annotations := false
+	for _, d := range ds {
+		if d.Kind == "suppression added" || d.Kind == "test disabled" {
+			annotations = true
+		}
+	}
+	if annotations {
+		return "drop the annotation named above, or ask a human to clear this change"
+	}
+	return "these are not annotations a change can drop — ask a human to clear this change"
 }
 
 // resolveReviewBase turns --base into a full commit SHA, and refuses

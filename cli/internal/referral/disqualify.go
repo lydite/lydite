@@ -142,6 +142,15 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("tests removed", p, p+" deleted")
 		}
 	}
+	// A rename out of a test path takes the file out of the test runner's
+	// view exactly as a deletion does, and leaves nothing in Deleted or in
+	// Removed to notice: `git mv foo_test.go foo_disabled.go` produces a
+	// rename record and a patch with no hunks at all.
+	for _, r := range ch.Renamed {
+		if IsTestPath(r.From) && !IsTestPath(r.To) {
+			add("tests removed", r.From, r.From+" renamed to "+r.To)
+		}
+	}
 	for _, line := range ch.Removed {
 		if !IsTestPath(line.Path) {
 			continue
@@ -193,8 +202,16 @@ func containsAny(text string, tokens []string) (string, bool) {
 }
 
 // atWordStart reports whether the match at i begins a token rather than
-// continuing an identifier. Tokens that already start with punctuation
-// ("#nosec", "#[allow(") carry their own boundary and need no check.
+// continuing an identifier or a selector. Tokens that already start with
+// punctuation ("#nosec", "#[allow(") carry their own boundary and need no
+// check.
+//
+// A preceding "." disqualifies the match for the same reason a preceding
+// letter does: "test(" is a test declaration at the start of a statement and
+// a method call in "re.test(x)", and a veto that fires on ordinary code
+// teaches readers to ignore it. Every token here that legitimately contains
+// a selector carries it in the token itself ("t.Skip(", "it.skip("), so the
+// forms lydite means to catch are unaffected.
 func atWordStart(text string, i int) bool {
 	if i == 0 {
 		return true
@@ -202,7 +219,7 @@ func atWordStart(text string, i int) bool {
 	if !isIdentByte(text[i]) {
 		return true
 	}
-	return !isIdentByte(text[i-1])
+	return !isIdentByte(text[i-1]) && text[i-1] != '.'
 }
 
 func isIdentByte(b byte) bool {

@@ -258,7 +258,7 @@ func TestEmptyDocumentParsesToTheDayOneState(t *testing.T) {
 // would let a file be moved out of an exempt tree — or into one — while the
 // exemption still matched.
 func TestRenameContributesBothPaths(t *testing.T) {
-	got, _, err := parseNameStatus("R100\tdocs/old.md\tsrc/new.go\nM\tREADME.md\n")
+	got, _, _, err := parseNameStatus("R100\tdocs/old.md\tsrc/new.go\nM\tREADME.md\n")
 	if err != nil {
 		t.Fatalf("parseNameStatus: %v", err)
 	}
@@ -282,7 +282,10 @@ func TestParseDiffLinesSeparatesAdditionsFromRemovals(t *testing.T) {
 		"+\tadded line",
 		"-\tremoved line",
 	}, "\n")
-	got, removed := parseDiffLines(patch)
+	got, removed, err := parseDiffLines(patch)
+	if err != nil {
+		t.Fatalf("parseDiffLines: %v", err)
+	}
 	if len(got) != 1 || got[0].Path != "src/a.go" || got[0].Text != "\tadded line" {
 		t.Fatalf("got %+v, want the single added line in src/a.go", got)
 	}
@@ -360,7 +363,10 @@ func TestAddedContentCannotForgeAFileHeader(t *testing.T) {
 		"+*/",
 		"+const a = 1; // eslint-disable-line",
 	}, "\n")
-	added, _ := parseDiffLines(patch)
+	added, _, err := parseDiffLines(patch)
+	if err != nil {
+		t.Fatalf("parseDiffLines: %v", err)
+	}
 	for _, l := range added {
 		if l.Path != "evil.js" {
 			t.Fatalf("a content line changed the current file: %+v", added)
@@ -385,7 +391,10 @@ func TestAddedLineBeginningWithPlusPlusIsContent(t *testing.T) {
 		"@@ -1 +1 @@",
 		"++x; // eslint-disable-line",
 	}, "\n")
-	added, _ := parseDiffLines(patch)
+	added, _, err := parseDiffLines(patch)
+	if err != nil {
+		t.Fatalf("parseDiffLines: %v", err)
+	}
 	if len(added) != 1 || added[0].Text != "+x; // eslint-disable-line" {
 		t.Fatalf("got %+v, want the ++x line kept as content", added)
 	}
@@ -401,7 +410,10 @@ func TestFileHeaderPathDropsGitsPadding(t *testing.T) {
 		"@@ -1 +1 @@",
 		"+x // #nosec",
 	}, "\n")
-	added, _ := parseDiffLines(patch)
+	added, _, err := parseDiffLines(patch)
+	if err != nil {
+		t.Fatalf("parseDiffLines: %v", err)
+	}
 	if len(added) != 1 || added[0].Path != "my file.txt" {
 		t.Fatalf("got %+v, want path \"my file.txt\" with no trailing tab", added)
 	}
@@ -511,5 +523,84 @@ func TestManyDoubleStarsDoNotBlowUp(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Match did not terminate promptly on a pattern with many ** segments")
+	}
+}
+
+// A patch line longer than the scanner's buffer stops the scan. Returning
+// what was read so far would leave every content-based veto looking at an
+// empty diff while Paths, read from a separate command, stays complete — a
+// run that looks like a normal evaluation and found nothing. --text renders
+// a binary blob or a minified bundle as exactly such a line, so this needs
+// no attacker.
+func TestAnUnreadableDiffIsAnErrorNotAnEmptyOne(t *testing.T) {
+	huge := strings.Repeat("x", 11*1024*1024)
+	patch := strings.Join([]string{
+		"diff --git a/blob.bin b/blob.bin",
+		"--- /dev/null",
+		"+++ b/blob.bin",
+		"@@ -0,0 +1 @@",
+		"+" + huge,
+		"diff --git a/a.go b/a.go",
+		"--- a/a.go",
+		"+++ b/a.go",
+		"@@ -1 +1 @@",
+		"+foo() //nolint:all",
+	}, "\n")
+	if _, _, err := parseDiffLines(patch); err == nil {
+		t.Fatal("a diff the parser cannot read must be an error, not a silently empty result")
+	}
+}
+
+// A rename takes a test out of the runner's view exactly as a deletion does,
+// and leaves nothing in Deleted or Removed to notice.
+func TestRenamingATestAwayDisqualifies(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths:   []string{"src/foo_test.go", "src/foo_disabled.go"},
+		Renamed: []Rename{{From: "src/foo_test.go", To: "src/foo_disabled.go"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "tests removed" {
+		t.Fatalf("got %+v, want a tests-removed veto", d)
+	}
+	// Moving a test to another test path is reorganisation, not removal.
+	moved := Disqualifications(Change{
+		Paths:   []string{"src/foo_test.go", "tests/foo_test.go"},
+		Renamed: []Rename{{From: "src/foo_test.go", To: "tests/foo_test.go"}},
+	}, Disqualifiers{})
+	if len(moved) != 0 {
+		t.Errorf("moving a test between test paths must not veto, got %+v", moved)
+	}
+}
+
+// A veto that fires on ordinary code teaches readers to ignore it, so a
+// selector call is not a test declaration.
+func TestSelectorCallsAreNotTestDeclarations(t *testing.T) {
+	clean := Disqualifications(Change{
+		Paths:   []string{"src/a.spec.ts"},
+		Removed: []DiffLine{{Path: "src/a.spec.ts", Text: "  if (re.test(x)) {"}},
+	}, Disqualifiers{})
+	if len(clean) != 0 {
+		t.Errorf("re.test(x) is a method call, not a test, got %+v", clean)
+	}
+	real := Disqualifications(Change{
+		Paths:   []string{"src/a.spec.ts"},
+		Removed: []DiffLine{{Path: "src/a.spec.ts", Text: "test('adds', () => {"}},
+	}, Disqualifiers{})
+	if len(real) != 1 || real[0].Kind != "tests removed" {
+		t.Errorf("a removed test declaration must veto, got %+v", real)
+	}
+}
+
+// Renames come off --name-status, whose rename records carry both paths and
+// a similarity-suffixed status letter.
+func TestParseNameStatusCollectsRenamesAndDeletions(t *testing.T) {
+	_, deleted, renamed, err := parseNameStatus("R100\tsrc/a_test.go\tsrc/a.go\nD\tsrc/b_test.go\nM\tREADME.md\n")
+	if err != nil {
+		t.Fatalf("parseNameStatus: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "src/b_test.go" {
+		t.Errorf("deleted = %v, want [src/b_test.go]", deleted)
+	}
+	if len(renamed) != 1 || renamed[0] != (Rename{From: "src/a_test.go", To: "src/a.go"}) {
+		t.Errorf("renamed = %+v, want one src/a_test.go → src/a.go", renamed)
 	}
 }

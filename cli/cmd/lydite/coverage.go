@@ -282,6 +282,21 @@ func newCoverageCmd() *cobra.Command {
 			// directly rather than recomputing "git merge-base HEAD origin/main"
 			// a second time.
 			patchErr := patchReport(rep, cmd, ctx, dir, patchWanted, sources, sha, baseline, cfg.Coverage.Patch.Tolerance, ecosystems)
+			if patchErr != nil {
+				// A row, not a returned error. The aggregate gate above has
+				// already reached a verdict and put it in the report; letting
+				// this abort the run would discard that, print nothing under
+				// --json, and leave the pull request with no coverage result
+				// at all — a gate that did not run, indistinguishable from
+				// one that passed, which is the failure [UNMEASURED] exists
+				// to prevent.
+				rep.Add(ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "patch coverage",
+					Value:  "not measured — " + patchErr.Error(),
+				})
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: patch coverage could not be computed: %v\n", patchErr)
+			}
 			// The per-unit floor is what the line-weighted aggregate above
 			// cannot see: a unit small enough that having no tests at all
 			// barely moves the total. It gates on the units this run
@@ -289,10 +304,9 @@ func newCoverageCmd() *cobra.Command {
 			// absolute standard, not a ratchet, which is also why the
 			// record-on-main path above runs it and the other two gates.
 			floorReport(rep, cmd, units, cfg.Coverage.Floor, ecosystems)
-			// patchReport is the only one of the three that can still fail
-			// outright: it reads per-line data off disk. The gates' own
-			// verdicts travel as rows, so the report decides the exit code.
-			return patchErr
+			// Every gate's verdict travels as a row, so the report decides
+			// the exit code and this returns nothing.
+			return nil
 		},
 	}
 	// --dir stays a flag and cannot move into .lydite.yml: the file lives AT
