@@ -98,6 +98,20 @@ func capped(items []string) []string {
 // those have completely different remedies, and only one of them is a remedy
 // the author can apply.
 func addDecisionRows(report *ui.Report, d referral.Decision, declared int) {
+	// The one failing row this command has, and the only thing it reports
+	// that the author clears by doing more work rather than by fetching a
+	// human — which is what makes it a gate and not a referral.
+	if len(d.Bundled) > 0 {
+		report.Add(ui.Row{
+			Status: ui.StatusFail,
+			Label:  "exemption change not isolated",
+			Value:  fmt.Sprintf("%d other path(s) in the same change", len(d.Bundled)),
+			Detail: append(capped(d.Bundled),
+				referral.FileName+" must be the only path a change touches, so its history is the complete record of what may merge unread",
+				"split this into two pull requests"),
+		})
+	}
+
 	shown := d.Disqualifications
 	if len(shown) > listCap {
 		shown = shown[:listCap]
@@ -246,9 +260,16 @@ func resolveReviewBase(ctx context.Context, dir, base string) (string, error) {
 //
 // A change that widens the gate must get no benefit from its own widening.
 // Reading the file from the branch would let one pull request declare itself
-// exempt, which is the entire attack this ordering exists to remove. A
-// missing file is the day-one state, not an error — it simply declares no
-// exemptions, so everything is referred.
+// exempt, which is the entire attack this ordering exists to remove.
+//
+// An absent file is the day-one state and not an error: it declares no
+// exemptions, so everything is referred. A file that exists and cannot be
+// read is a different thing entirely, and the two are asked separately —
+// `cat-file -e` answers "is it there", and only then does `show` read it.
+// Collapsing them would make a broken read indistinguishable from an empty
+// allowlist, which is safe today only because the safe answer happens to
+// coincide; the moment an exemption exists, a silent read failure would
+// change the verdict with nothing said.
 func loadExemptionsAt(ctx context.Context, dir, base string) (referral.File, error) {
 	prefix, err := referral.RootRelative(ctx, dir)
 	if err != nil {
@@ -256,9 +277,13 @@ func loadExemptionsAt(ctx context.Context, dir, base string) (referral.File, err
 	}
 	repoPath := path.Join(prefix, referral.FileName)
 	spec := base + ":" + repoPath
+	if r := executil.RunQuiet(ctx, dir, "git", "cat-file", "-e", spec); !r.Ok() {
+		return referral.File{}, nil
+	}
 	r := executil.RunQuiet(ctx, dir, "git", "show", spec)
 	if !r.Ok() {
-		return referral.File{}, nil
+		return referral.File{}, fmt.Errorf("reading %s at %s: %w: %s",
+			repoPath, shortSHA(base), r.Err, strings.TrimSpace(r.Stderr))
 	}
 	return referral.Parse([]byte(r.Output), repoPath+" at "+shortSHA(base))
 }

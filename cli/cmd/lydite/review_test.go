@@ -79,14 +79,18 @@ func TestReviewReadsExemptionsFromTheBaseNotTheBranch(t *testing.T) {
 
 	out, err := runReview(t, dir, base)
 	if err == nil {
-		t.Fatalf("a branch that exempts itself must still be referred:\n%s", out)
+		t.Fatalf("a branch that exempts itself must not pass:\n%s", out)
+	}
+	// The isolation gate fires first here, because a branch writing itself
+	// an exemption alongside the code it wants exempted is exactly the shape
+	// isolation refuses. What this pins either way is that the branch's own
+	// file never granted anything.
+	if strings.Contains(out, "exempt:") {
+		t.Errorf("the branch's own exemption file must never grant a pass:\n%s", out)
 	}
 	var exit ui.ExitError
-	if !errors.As(err, &exit) || exit.Code != 2 {
-		t.Fatalf("a referral must exit 2, got %v", err)
-	}
-	if !strings.Contains(out, "review referred in") {
-		t.Errorf("expected a referral verdict, got:\n%s", out)
+	if !errors.As(err, &exit) || exit.Code == 0 {
+		t.Fatalf("expected a non-zero verdict, got %v", err)
 	}
 }
 
@@ -316,5 +320,64 @@ func TestCappedTruncatesWithACount(t *testing.T) {
 	}
 	if short := []string{"a", "b"}; len(capped(short)) != 2 {
 		t.Errorf("a list within the cap must pass through unchanged")
+	}
+}
+
+// Bundling a widening of the exemption set into a larger change fails,
+// rather than being referred: splitting the pull request is work the author
+// can do, which is what makes this a gate and not a referral.
+func TestReviewFailsWhenAnExemptionChangeIsBundled(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{
+			referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n",
+			"src/app.go":      "package src",
+		},
+	)
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("a bundled exemption change must fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "not isolated") || !strings.Contains(out, "src/app.go") {
+		t.Errorf("the failure must name what rode along, got:\n%s", out)
+	}
+}
+
+// On its own it is the isolated change the rule asks for, so it is referred
+// for a human to read — not failed.
+func TestReviewRefersAnIsolatedExemptionChange(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n"},
+	)
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an isolated exemption change must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, "not isolated") {
+		t.Errorf("an isolated change must not report a bundling failure:\n%s", out)
+	}
+}
+
+// An exemptions file that exists at the base and cannot be read is not the
+// same as one that is absent. Collapsing them is safe only while the
+// allowlist is empty, because the safe answer happens to coincide.
+func TestReviewErrorsWhenTheExemptionsFileCannotBeRead(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello", referral.FileName: "exemptions: [not-a-list-of-maps]\n"},
+		map[string]string{"README.md": "hello again"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("an unparseable exemptions file must be an error, got a verdict:\n%s", out)
+	}
+	var exit ui.ExitError
+	if errors.As(err, &exit) {
+		t.Fatalf("an unreadable allowlist produced a verdict (exit %d) rather than an error", exit.Code)
 	}
 }

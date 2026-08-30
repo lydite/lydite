@@ -825,7 +825,7 @@ flag list under a failed gate.
 ## Referral: `lydite review`
 
 `lydite review` decides whether a change may merge unattended. It runs no check — no
-scanner, no test suite — so it has no failure state: it emits pass or refer, and a malformed
+scanner, no test suite — so almost nothing in it is a failure: it emits pass or refer, and a malformed
 exemptions file or an unresolvable merge-base is an error, exit 1. See
 [ADR 0013](docs/adr/0013-referral-not-approval.md) for the model and
 [ADR 0014](docs/adr/0014-evidence-only-referral-matching.md) for what it matches on.
@@ -876,6 +876,20 @@ Five properties are load-bearing and easy to weaken by accident:
   marker is deliberately *not* implemented, because nothing detects an undeclared API break and
   a claim-based veto works only for the author who would have declared anyway. The rule for any
   future addition: an author-controlled claim may add a referral, never remove one.
+- **A change that edits the exemption set may edit nothing else**, and this is the one thing
+  `review` reports as a *failure* rather than a referral: the author clears it by splitting the
+  change in two, which is work they can do, and that is exactly what separates a gate from a
+  referral. Two properties already protect the file — the merge-base read, so a change gets no
+  benefit from its own widening, and the disqualifier, so such a change is always referred —
+  and neither closes the realistic attack, which is not a forged exemption but an unremarkable
+  one riding along in a large change approved for its other contents. What isolation buys is
+  that `git log .lydite.exemptions.yml` becomes the complete, reviewable record of every
+  widening. `.lydite.yml` deliberately carries no such requirement: report paths change
+  alongside code for honest reasons, and a rule that fires on ordinary work gets relaxed later.
+- **An absent exemptions file and an unreadable one are different questions**, asked
+  separately: `git cat-file -e` answers whether it is there, and only then does `git show` read
+  it. Collapsing them would make a broken read indistinguishable from an empty allowlist, which
+  is safe only while the allowlist *is* empty and the safe answer happens to coincide.
 - **The diff fails closed when it cannot be read.** A patch line longer than the scanner's
   buffer — `--text` renders a binary blob or a minified bundle as one — aborts the run rather
   than yielding an empty set of added lines, which would leave every content veto silent while
@@ -903,8 +917,7 @@ excluded, because silently deciding on HEAD while the developer is looking at ed
 the one way this command gives a confidently wrong answer.
 
 The verdict is computed and reported, and nothing in this repository enforces it against a
-merge: there is no clearance mechanism, and a pull request touching the exemptions file is not
-required to touch nothing else.
+merge: there is no clearance mechanism, so a referral blocks nothing on its own.
 
 ## Semgrep: token-bearing vs token-less runs
 

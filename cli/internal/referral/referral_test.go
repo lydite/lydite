@@ -604,3 +604,31 @@ func TestParseNameStatusCollectsRenamesAndDeletions(t *testing.T) {
 		t.Errorf("renamed = %+v, want one src/a_test.go → src/a.go", renamed)
 	}
 }
+
+// A change that edits the exemption set must edit nothing else. The attack
+// this closes is not a forged exemption but an unremarkable one riding along
+// in a large change approved for its other contents — after which the
+// widening is permanent and nobody read it.
+func TestBundledExemptionChangeIsReported(t *testing.T) {
+	d := Decide(Change{Paths: []string{FileName, "src/app.go"}}, File{})
+	if len(d.Bundled) != 1 || d.Bundled[0] != "src/app.go" {
+		t.Fatalf("Bundled = %v, want the path riding along", d.Bundled)
+	}
+
+	// Alone, it is the isolated change the rule asks for — still referred,
+	// because editing it is a disqualifier, but not a failure.
+	alone := Decide(Change{Paths: []string{FileName}}, File{})
+	if len(alone.Bundled) != 0 {
+		t.Errorf("an isolated exemption change must not be reported as bundled, got %v", alone.Bundled)
+	}
+	if !alone.Referred {
+		t.Error("editing the exemption set is still a disqualifier")
+	}
+
+	// .lydite.yml carries no isolation requirement: report paths change
+	// alongside code for honest reasons.
+	config := Decide(Change{Paths: []string{".lydite.yml", "src/app.go"}}, File{})
+	if len(config.Bundled) != 0 {
+		t.Errorf(".lydite.yml must carry no isolation requirement, got %v", config.Bundled)
+	}
+}
