@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/ui"
 )
 
 // A push to main that measures NOTHING must still record a baseline —
@@ -98,7 +100,7 @@ func TestCoverageOnMainRecordsFullyCarriedBaselineWhenNothingMeasured(t *testing
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("coverage on main with nothing measured: %v\nstdout: %s\nstderr: %s", err, out.String(), errOut.String())
 	}
-	if !strings.Contains(out.String(), "recorded coverage baseline") {
+	if !strings.Contains(out.String(), "baseline recorded") {
 		t.Errorf("expected a recorded-baseline line, got stdout: %q", out.String())
 	}
 
@@ -342,13 +344,30 @@ func TestEnabledEcosystemsDropsDisabledLanguages(t *testing.T) {
 	}
 }
 
+// reportText renders a report the way the assertions below read it: one
+// line per row, status name first. The status name rather than the glyph,
+// because three statuses share the "!" glyph on purpose and a test asserting
+// on the glyph could not tell a referral from an unmeasured gate.
+func reportText(rep *ui.Report) string {
+	var b strings.Builder
+	for _, row := range rep.Rows() {
+		fmt.Fprintf(&b, "%s %s: %s\n", row.Status, row.Label, row.Value)
+		for _, d := range row.Detail {
+			fmt.Fprintf(&b, "  %s\n", d)
+		}
+	}
+	return b.String()
+}
+
+// reportErr is the gate's verdict as an error, matching what the command
+// returns to main once the rows have been rendered.
+func reportErr(rep *ui.Report) error { return rep.Err() }
+
 func runDiffReport(t *testing.T, tolerance float64, current, baseline map[string]float64, detected ...detect.Ecosystem) (string, error) {
 	t.Helper()
-	cmd := &cobra.Command{}
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	err := diffReport(cmd, current, baseline, tolerance, detected)
-	return buf.String(), err
+	rep := ui.NewReport("coverage")
+	diffReport(rep, current, baseline, tolerance, detected)
+	return reportText(rep), reportErr(rep)
 }
 
 func TestDiffReportNewLanguage(t *testing.T) {
@@ -356,7 +375,7 @@ func TestDiffReportNewLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "[NEW]") || !strings.Contains(out, "go") {
+	if !strings.Contains(out, "new") || !strings.Contains(out, "go") {
 		t.Fatalf("expected a [NEW] line for go, got: %q", out)
 	}
 }
@@ -371,7 +390,7 @@ func TestDiffReportDroppedLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a dropped language must not fail the check on its own, got error: %v", err)
 	}
-	if !strings.Contains(out, "[DROPPED]") || !strings.Contains(out, "typescript") {
+	if !strings.Contains(out, "dropped") || !strings.Contains(out, "typescript") {
 		t.Fatalf("expected a [DROPPED] line mentioning typescript, got: %q", out)
 	}
 }
@@ -388,10 +407,10 @@ func TestDiffReportUnmeasuredWhenLanguageStillDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an unmeasured-but-detected language must not fail the check, got error: %v", err)
 	}
-	if !strings.Contains(out, "[UNMEASURED]") || !strings.Contains(out, "not measured this run") {
+	if !strings.Contains(out, "unmeasured") || !strings.Contains(out, "not measured this run") {
 		t.Fatalf("expected an [UNMEASURED] line for typescript, got: %q", out)
 	}
-	if strings.Contains(out, "[DROPPED]") {
+	if strings.Contains(out, "dropped") {
 		t.Fatalf("a detected language must not be reported as [DROPPED], got: %q", out)
 	}
 }
@@ -401,7 +420,7 @@ func TestDiffReportRegression(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a regressed language")
 	}
-	if !strings.Contains(out, "[FAIL]") {
+	if !strings.Contains(out, "fail") {
 		t.Fatalf("expected a [FAIL] line, got: %q", out)
 	}
 }
@@ -415,7 +434,7 @@ func TestDiffReportPassesWithinTolerance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a dip within the tolerance must not fail the gate, got error: %v", err)
 	}
-	if !strings.Contains(out, "[PASS]") {
+	if !strings.Contains(out, "pass") {
 		t.Fatalf("expected a [PASS] line for a within-tolerance dip, got: %q", out)
 	}
 }
@@ -427,7 +446,7 @@ func TestDiffReportFailsBeyondTolerance(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a dip beyond the tolerance")
 	}
-	if !strings.Contains(out, "[FAIL]") {
+	if !strings.Contains(out, "fail") {
 		t.Fatalf("expected a [FAIL] line for a beyond-tolerance dip, got: %q", out)
 	}
 }
@@ -495,7 +514,7 @@ func TestDiffReportPass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "[PASS]") {
+	if !strings.Contains(out, "pass") {
 		t.Fatalf("expected a [PASS] line, got: %q", out)
 	}
 }
@@ -506,28 +525,45 @@ func TestDiffReportPass(t *testing.T) {
 func TestDiffReportOnlyCountsRealRegressions(t *testing.T) {
 	current := map[string]float64{"go": 40, "rust": 60}
 	baseline := map[string]float64{"go": 50, "typescript": 85}
-	out, err := runDiffReport(t, 0, current, baseline)
-	if err == nil || !strings.Contains(err.Error(), "1") {
-		t.Fatalf("expected exactly 1 regressed language reported in the error, got: %v", err)
+	rep := ui.NewReport("coverage")
+	diffReport(rep, current, baseline, 0, nil)
+	out := reportText(rep)
+	if err := reportErr(rep); err == nil {
+		t.Fatalf("expected the run to fail, got: %v", err)
 	}
-	for _, want := range []string{"[FAIL]", "[NEW]", "[DROPPED]"} {
+	// Counted from the rows, not from the error text. The error is the
+	// verdict's exit code and says nothing about how many languages
+	// regressed, so asserting on its message would pass for any number.
+	failing := 0
+	for _, row := range rep.Rows() {
+		if row.Status == ui.StatusFail {
+			failing++
+		}
+	}
+	if failing != 1 {
+		t.Fatalf("expected exactly 1 regressed language, got %d:\n%s", failing, out)
+	}
+	for _, want := range []string{"fail", "new", "dropped"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got: %q", want, out)
 		}
 	}
 }
 
-func TestStatusPrefixColumnWidth(t *testing.T) {
-	cases := map[string]string{
-		"NEW":     "[NEW]     ",
-		"DROPPED": "[DROPPED] ",
-		"FAIL":    "[FAIL]    ",
-		"PASS":    "[PASS]    ",
+// The coverage gates share one renderer with every other command, so they
+// cannot drift apart on formatting. What is worth pinning is that they all
+// reach it: a gate that printed its own line would drift from the others on
+// every later change to the grammar.
+func TestCoverageRowsShareTheGrammar(t *testing.T) {
+	rep := ui.NewReport("coverage")
+	diffReport(rep, map[string]float64{"go": 50}, map[string]float64{"go": 50}, 0, []detect.Ecosystem{detect.Go})
+	var buf bytes.Buffer
+	if err := rep.WriteText(&buf, false); err != nil {
+		t.Fatalf("WriteText: %v", err)
 	}
-	for tag, want := range cases {
-		if got := statusPrefix(tag); got != want {
-			t.Errorf("statusPrefix(%q) = %q, want %q", tag, got, want)
-		}
+	line := strings.SplitN(buf.String(), "\n", 2)[0]
+	if !strings.HasPrefix(line, "✓ go ") || !strings.Contains(line, "....") {
+		t.Fatalf("expected a glyph row with leader dots, got %q", line)
 	}
 }
 
@@ -685,14 +721,15 @@ func TestPatchReportUnmeasuredWhenSourceMissing(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	err := patchReport(cmd, context.Background(), repo,
+	rep := ui.NewReport("coverage")
+	err := patchReport(rep, cmd, context.Background(), repo,
 		coverage.PatchWanted{Rust: true}, coverage.PatchSources{}, base,
 		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
 	if err != nil {
 		t.Fatalf("an unmeasured patch gate must not fail on its own, got: %v", err)
 	}
-	if !strings.Contains(out.String(), "[UNMEASURED]") || !strings.Contains(out.String(), "rust patch") {
-		t.Fatalf("expected an [UNMEASURED] rust patch line, got stdout: %q", out.String())
+	if got := reportText(rep); !strings.Contains(got, "unmeasured") || !strings.Contains(got, "rust patch") {
+		t.Fatalf("expected an unmeasured rust patch row, got: %q", got)
 	}
 	if !strings.Contains(errOut.String(), "rust-lcov-report") {
 		t.Fatalf("expected a stderr hint naming the missing wiring, got: %q", errOut.String())
@@ -710,14 +747,15 @@ func TestPatchReportUndetectedLanguageStaysSilent(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	err := patchReport(cmd, context.Background(), repo,
+	rep := ui.NewReport("coverage")
+	err := patchReport(rep, cmd, context.Background(), repo,
 		coverage.PatchWanted{Go: true, Rust: true}, coverage.PatchSources{}, base,
 		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Contains(out.String(), "go patch") || strings.Contains(errOut.String(), "go ") {
-		t.Fatalf("undetected go must stay silent, got stdout: %q stderr: %q", out.String(), errOut.String())
+	if got := reportText(rep); strings.Contains(got, "go patch") || strings.Contains(errOut.String(), "go ") {
+		t.Fatalf("undetected go must stay silent, got rows: %q stderr: %q", got, errOut.String())
 	}
 }
 
@@ -730,14 +768,15 @@ func TestPatchReportNoChangedLinesStaysSilent(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	err := patchReport(cmd, context.Background(), repo,
+	rep := ui.NewReport("coverage")
+	err := patchReport(rep, cmd, context.Background(), repo,
 		coverage.PatchWanted{Rust: true}, coverage.PatchSources{}, base,
 		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.String() != "" || errOut.String() != "" {
-		t.Fatalf("expected silence for a diff with no rust changes, got stdout: %q stderr: %q", out.String(), errOut.String())
+	if got := reportText(rep); got != "" || errOut.String() != "" {
+		t.Fatalf("expected silence for a diff with no rust changes, got rows: %q stderr: %q", got, errOut.String())
 	}
 }
 
@@ -798,10 +837,11 @@ func TestFormatReport(t *testing.T) {
 func runFloorReport(t *testing.T, floor float64, units ...coverage.Unit) (string, error) {
 	t.Helper()
 	cmd := &cobra.Command{}
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	err := floorReport(cmd, units, floor, []detect.Ecosystem{detect.Go, detect.Rust, detect.TypeScript})
-	return buf.String(), err
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	rep := ui.NewReport("coverage")
+	floorReport(rep, cmd, units, floor, []detect.Ecosystem{detect.Go, detect.Rust, detect.TypeScript})
+	return reportText(rep), reportErr(rep)
 }
 
 // The floor is opt-in: a repo that never set one must see no new line and no
@@ -827,7 +867,7 @@ func TestFloorReportFailsAUnitBelowTheFloor(t *testing.T) {
 	if err == nil {
 		t.Fatal("a unit at 0% against a 50% floor must fail the gate")
 	}
-	if !strings.Contains(out, "[FAIL]") || !strings.Contains(out, "packages/layout") {
+	if !strings.Contains(out, "fail") || !strings.Contains(out, "packages/layout") {
 		t.Errorf("expected a [FAIL] line naming packages/layout, got: %q", out)
 	}
 	if !strings.Contains(out, "0/8 lines") {
@@ -845,7 +885,7 @@ func TestFloorReportPassesWhenEveryUnitClears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("every unit clears the floor, got error: %v", err)
 	}
-	if !strings.Contains(out, "[PASS]") || !strings.Contains(out, "floor: 2 of 2 unit(s)") {
+	if !strings.Contains(out, "pass") || !strings.Contains(out, "floor: 2 of 2 unit(s)") {
 		t.Errorf("expected a single [PASS] summary line naming cleared-of-total, got: %q", out)
 	}
 }
@@ -861,18 +901,20 @@ func TestFloorReportNamesUnmeasuredUnits(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	err := floorReport(cmd, []coverage.Unit{
+	rep := ui.NewReport("coverage")
+	floorReport(rep, cmd, []coverage.Unit{
 		{Lang: "typescript", Dir: "packages/measured", Lines: coverage.LineCount{Covered: 90, Total: 100}},
 		{Lang: "typescript", Dir: "packages/skipped"},
 	}, 50, []detect.Ecosystem{detect.TypeScript})
-	if err != nil {
+	got := reportText(rep)
+	if err := reportErr(rep); err != nil {
 		t.Fatalf("an unmeasured unit must not fail the gate on its own, got: %v", err)
 	}
-	if !strings.Contains(out.String(), "[UNMEASURED]") || !strings.Contains(out.String(), "packages/skipped") {
-		t.Errorf("expected an [UNMEASURED] line naming packages/skipped, got: %q", out.String())
+	if !strings.Contains(got, "unmeasured") || !strings.Contains(got, "packages/skipped") {
+		t.Errorf("expected an unmeasured row naming packages/skipped, got: %q", got)
 	}
-	if !strings.Contains(out.String(), "floor: 1 of 2 unit(s)") {
-		t.Errorf("the PASS line must show cleared-of-total so a partial run is visible, got: %q", out.String())
+	if !strings.Contains(got, "1 of 2 unit(s)") {
+		t.Errorf("the passing row must show cleared-of-total so a partial run is visible, got: %q", got)
 	}
 	// Stderr, not stdout: action.yml's PR-comment builder scrapes bracketed
 	// tags from stdout with a pattern that is not line-anchored.
@@ -909,7 +951,7 @@ func TestFloorReportComparesAtDisplayPrecision(t *testing.T) {
 func TestFloorReportNamesTheRootUnit(t *testing.T) {
 	out, _ := runFloorReport(t, 90,
 		coverage.Unit{Lang: "go", Dir: "", Lines: coverage.LineCount{Covered: 1, Total: 10}})
-	if !strings.Contains(out, "go floor: . at 10.0%") {
+	if !strings.Contains(out, "go floor: .: 10.0%") {
 		t.Errorf("expected the root unit named \".\", got: %q", out)
 	}
 }
@@ -922,18 +964,20 @@ func TestFloorReportSkipsDisabledLanguages(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	err := floorReport(cmd, []coverage.Unit{
+	rep := ui.NewReport("coverage")
+	floorReport(rep, cmd, []coverage.Unit{
 		{Lang: "go", Dir: "", Lines: coverage.LineCount{Covered: 90, Total: 100}},
 		{Lang: "rust", Dir: "daemon", Lines: coverage.LineCount{Covered: 0, Total: 500}},
 	}, 60, []detect.Ecosystem{detect.Go})
-	if err != nil {
+	got := reportText(rep)
+	if err := reportErr(rep); err != nil {
 		t.Fatalf("a crate in a disabled language must not fail the floor gate, got: %v", err)
 	}
-	if strings.Contains(out.String(), "rust") {
-		t.Errorf("a disabled language must not appear in the floor report, got: %q", out.String())
+	if strings.Contains(got, "rust") {
+		t.Errorf("a disabled language must not appear in the floor report, got: %q", got)
 	}
-	if !strings.Contains(out.String(), "floor: 1 of 1 unit(s)") {
-		t.Errorf("the enabled language's unit must still be counted, got: %q", out.String())
+	if !strings.Contains(got, "1 of 1 unit(s)") {
+		t.Errorf("the enabled language's unit must still be counted, got: %q", got)
 	}
 }
 
@@ -984,13 +1028,13 @@ func TestCoverageOnMainRecordsBaselineThenGatesOnTheFloor(t *testing.T) {
 	cmd.SetArgs([]string{"--dir", repo})
 	err := cmd.Execute()
 
-	if !strings.Contains(out.String(), "recorded coverage baseline") {
+	if !strings.Contains(out.String(), "baseline recorded") {
 		t.Errorf("the baseline must be recorded even when the floor fails, got stdout: %q", out.String())
 	}
 	if err == nil {
 		t.Errorf("a unit at 0%% against a 50%% floor must fail the main run too, got nil\nstdout: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "[FAIL]") || !strings.Contains(out.String(), "floor") {
+	if !strings.Contains(out.String(), "fail") || !strings.Contains(out.String(), "floor") {
 		t.Errorf("expected a [FAIL] floor line on the main run, got stdout: %q", out.String())
 	}
 

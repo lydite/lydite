@@ -30,6 +30,12 @@ type Result struct {
 	// Empty for every tool that prints its own findings — reprinting those
 	// would duplicate what already streamed.
 	Detail string
+	// Stderr is what the command wrote to stderr, kept apart from Output by
+	// RunQuiet only. Run deliberately merges the two, because for a scanner
+	// they are one stream of findings; RunQuiet's callers parse Output as
+	// data, and a git warning about an unreadable gitconfig prepended to a
+	// YAML document turns a valid exemptions file into a parse error.
+	Stderr string
 	Err    error
 }
 
@@ -52,6 +58,30 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 	return run(ctx, dir, extraEnv, name, args...)
 }
 
+// RunQuiet captures output without streaming it.
+//
+// Run's streaming is right for a scanner, whose findings are the point and
+// should reach the terminal and the CI log as they happen. It is wrong for
+// plumbing whose output is data the caller parses: `git diff` would print the
+// entire patch into the middle of a report, and `git show` of a config file
+// would print the file. Those commands are read, not watched.
+// Unlike Run, some of RunQuiet's arguments are derived from CLI flags, so a
+// caller must resolve a user-supplied revision or path before passing it —
+// cmd/lydite's resolveReviewBase is the worked example. What holds
+// unconditionally, and is what the annotation below rests on, is that name is
+// a fixed literal at every call site and args reach the child as argv with no
+// shell, so there is no command injection here; argument injection is the
+// caller's to prevent.
+func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
+	cmd.Dir = dir
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	return Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
+}
+
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, never user input or shell-interpreted
 	cmd.Dir = dir
@@ -63,7 +93,7 @@ func run(ctx context.Context, dir string, extraEnv []string, name string, args .
 	// buffer writes must be locked.
 	var buf bytes.Buffer
 	captured := &lockedWriter{w: &buf}
-	cmd.Stdout = io.MultiWriter(os.Stdout, captured)
+	cmd.Stdout = io.MultiWriter(streamTarget, captured)
 	cmd.Stderr = io.MultiWriter(os.Stderr, captured)
 	err := cmd.Run()
 	return Result{Name: name, Args: args, Output: buf.String(), Err: err}
@@ -79,6 +109,19 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// streamTarget is where Run mirrors a command's live output. It is os.Stdout
+// so a developer watching a scan sees findings as they appear.
+//
+// Under --json, stdout carries a document and nothing else, so the commands
+// point this at stderr instead: the findings still reach the terminal and the
+// CI log, and the document stays parseable. Data on stdout, diagnostics on
+// stderr — the split every other tool makes.
+var streamTarget io.Writer = os.Stdout
+
+// StreamTo redirects live command output. Call it once, from the command
+// layer, before any Run; it is not safe to change while a command is running.
+func StreamTo(w io.Writer) { streamTarget = w }
 
 // Available reports whether name is resolvable on PATH.
 func Available(name string) bool {

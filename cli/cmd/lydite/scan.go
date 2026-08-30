@@ -16,15 +16,27 @@ import (
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/typescript"
+	"lydite/lydite/internal/ui"
 )
 
 func newScanCmd() *cobra.Command {
 	var dir, diffBase string
+	var asJSON, noColor bool
 	cmd := &cobra.Command{
-		Use:   "scan",
-		Short: "Run code-quality and security checks for every detected ecosystem",
+		Use: "scan",
+		// A non-zero verdict is an answer, not a misuse of the command and
+		// not a malfunction. Cobra prints usage and an "Error:" line for any
+		// error a RunE returns, which would bury the report under the flag
+		// list every time a gate failed. main owns error reporting.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Run code-quality and security checks for every detected ecosystem",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			// Started here rather than in report(), so the duration on the
+			// verdict line covers the scan and not just its rendering.
+			streamDiagnostics(asJSON)
+			rep := ui.NewReport("scan")
 
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -36,8 +48,16 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 			if len(ecosystems) == 0 {
-				_, err := fmt.Fprintln(cmd.OutOrStdout(), "no supported ecosystem detected under", dir)
-				return err
+				// Through the report, not around it: --json promises stdout
+				// carries a document and nothing else, and a bare sentence
+				// printed here is unparseable output on a path no scan of
+				// this repository ever reaches.
+				rep.Add(ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "scan",
+					Value:  "no supported ecosystem detected under " + dir,
+				})
+				return report(cmd, rep, nil, asJSON, noColor)
 			}
 
 			// Before anything shells out to cargo/go/npx: make sure each
@@ -88,10 +108,12 @@ func newScanCmd() *cobra.Command {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
 			}
 
-			return report(cmd, results)
+			return report(cmd, rep, results, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory to scan")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
+	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	cmd.Flags().StringVar(&diffBase, "diff-base", "", `only report findings introduced since this commit ("auto" resolves the merge-base with origin/main); empty scans everything`)
 	return cmd
 }
@@ -125,44 +147,34 @@ func resolveDiffBase(ctx context.Context, dir, diffBase string) (string, error) 
 	return baseSHA, nil
 }
 
-// report prints a pass/fail line per check and returns an error if any
-// check failed, so the process exit code reflects the aggregate result.
+// report renders one row per check in the grammar docs/design/tokens.md
+// specifies, and returns the run's exit code as an error so the process
+// reflects the verdict.
 //
 // A failing check also prints its Detail, which is the only place some
 // findings exist. Most tools stream their own output live through
 // executil.Run, so it is already on the terminal and in the log the action
 // captures; Biome does not, because lydite sends its report to a file so the
-// JSON cannot be corrupted by Biome's own chatter. Printing only "[FAIL]
-// biome(.)" left the developer to re-run the pinned toolchain by hand to find
-// out what was wrong, and put nothing in the PR comment either.
-//
-// Detail lines are indented, which is not cosmetic: action.yml's tool_result()
-// matches "^\[(PASS|FAIL)\] <name>$" anchored at both ends, so an indented
-// line can never be mistaken for a status line even when a finding's message
-// happens to contain one. The action's emit_error_output then inlines the tail
-// of this same stream into the PR comment, so the findings travel with it.
-func report(cmd *cobra.Command, results []executil.Result) error {
-	failed := 0
+// JSON cannot be corrupted by Biome's own chatter. Printing only a status
+// line left the developer to re-run the pinned toolchain by hand to find out
+// what was wrong, and put nothing in the PR comment either.
+func report(cmd *cobra.Command, rep *ui.Report, results []executil.Result, asJSON, noColor bool) error {
 	for _, r := range results {
-		status := "PASS"
+		status := ui.StatusPass
+		value := "passed"
+		var detail []string
 		if !r.Ok() {
-			status = "FAIL"
-			failed++
-		}
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "[%s] %s\n", status, r.Name); err != nil {
-			return err
-		}
-		if r.Ok() || strings.TrimSpace(r.Detail) == "" {
-			continue
-		}
-		for _, line := range strings.Split(strings.TrimRight(r.Detail, "\n"), "\n") {
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", line); err != nil {
-				return err
+			status, value = ui.StatusFail, "failed"
+			detail = strings.Split(strings.TrimRight(r.Detail, "\n"), "\n")
+			if len(detail) == 1 && strings.TrimSpace(detail[0]) == "" {
+				detail = nil
 			}
 		}
+		rep.Add(ui.Row{Status: status, Label: r.Name, Value: value, Detail: detail})
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d check(s) failed", failed)
+	out := cmd.OutOrStdout()
+	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {
+		return err
 	}
-	return nil
+	return rep.Err()
 }

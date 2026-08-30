@@ -115,24 +115,39 @@ The canonical surface. This is a specification.
 | Glyph | Meaning | Colour | Exit |
 |---|---|---|---|
 | `✓` | pass | `#16C79A` | 0 |
-| `!` | warn or drift | `#F0B429` | 2 |
+| `!` | referral, unmeasured, or dropped | `#F0B429` | 2 |
 | `✗` | fail | `#F2426E` | 1 |
 | `→` | context line | `#6E7594` | never a verdict |
 | `$` | a command the reader can run | `#A98BFF` | — |
 
+`$` is specified and unbuilt: no status in `internal/ui` renders it.
+
+**The Exit column describes the verdict, not the row.** A run has exactly one
+verdict — it is the last line — and that verdict owns the exit code; a row's
+glyph only says how much attention the row wants. The two come apart because
+several states want amber while voting differently: a referral exits 2, but an
+unmeasured or dropped measurement is amber and votes for nothing. An unmeasured
+gate has to be visibly distinct from one that passed, and it has never failed a
+build. `internal/ui` is the single implementation of both halves.
+
 - Row shape is glyph, space, label, leader dots, value — **leaders align the value
   column at 34 characters**.
 - `--no-color` drops colour and keeps every glyph.
-- The last line is always the verdict plus duration (`gate passed in 12.4s`), and on a
-  parity run also `identical to CI #4821`.
-- A failure prints reason, then cause, then a runnable next step.
+- The last line is always the command, the verdict and the duration
+  (`scan passed in 12.4s`, `review referred in 0.3s`). The `identical to CI #4821`
+  suffix belongs to parity runs, which are specified and unbuilt.
+- A **referral** prints reason, then cause, then a runnable next step. A scanner failure
+  prints the tool's own findings instead, which are the reason; extending the three-part form
+  to `scan` and `coverage` is specified but not built.
 
-**This grammar is not yet what the binary emits, and adopting it is a breaking change
-to a parsed interface.** `lydite/actions`'s `tool_result()` matches
-`^\[(PASS|FAIL)\] <name>$` anchored at both ends, and detail lines are indented so a
-finding containing a bracketed word cannot be mistaken for a status line. Any move to
-glyphs has to change the action's parser in the same release, or every consumer's PR
-comment silently loses its verdict. See ADR 0012.
+**This grammar is what the binary emits**, from `internal/ui`, for `scan`,
+`coverage` and `review` alike.
+
+Anything automated reads `--json` instead, and never the text — which is what
+keeps the human surface free to change without coordinating a release
+elsewhere. Detail lines are indented for a reason independent of any parser: a
+scanner finding quotes source, which can contain anything the source contains,
+including something shaped like a verdict.
 
 ## Copy and voice
 
