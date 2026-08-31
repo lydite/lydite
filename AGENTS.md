@@ -28,6 +28,8 @@ cli/                           # the Go module (module path lydite/lydite); ever
 cli/cmd/lydite/                # the lydite CLI (scan, review, coverage, version, update)
 cli/internal/ui/               # the output grammar every command renders through, plus --json
 cli/internal/referral/         # exemptions, disqualifiers, the referral decision (see Referral below)
+cli/internal/clearance/        # the comment surface and the clearance decision (see Clearance below)
+cli/internal/forge/            # the hosting platform: commit statuses, permission, comments
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -916,8 +918,66 @@ from identical inputs. A dirty working tree gets its own row saying the uncommit
 excluded, because silently deciding on HEAD while the developer is looking at edited files is
 the one way this command gives a confidently wrong answer.
 
-The verdict is computed and reported, and nothing in this repository enforces it against a
-merge: there is no clearance mechanism, so a referral blocks nothing on its own.
+## Clearance: `/lydite clear`
+
+A referral is resolved by a person commenting on the pull request, never by the author
+pushing more code. `lydite clearance` is that surface and `internal/clearance` is its
+decision; `internal/forge` is the only thing that talks to the platform. See
+[ADR 0015](docs/adr/0015-clearance-binds-to-a-commit.md).
+
+`review --publish` records the verdict as the **`lydite/referral` commit status** and as
+the pull request's standing comment. The status is the whole record: a clearance is a
+state change on that context at one commit, and nothing else stores it.
+
+Six properties are load-bearing:
+
+- **A clearance names one commit.** Not the tree, and not the shape of the verdict. Any
+  push produces a new head carrying no status, so the clearance evaporates with no state
+  of its own — including after a rebase that changes nothing. Both alternatives require
+  lydite to hold that two revisions are the same change, and a clearance resting on that
+  inference is one the inference can be wrong about.
+- **A referral publishes `pending`, never `failure`.** A required check blocks on
+  anything but `success`, so this softens nothing; it is the accurate word, and a gate
+  fails where a referral does not. `stateFor` is the single place that mapping lives.
+- **The status is read before it is written.** Re-running `review` after a clearance
+  comment cannot change the answer — a referral re-evaluated is still a referral — so the
+  only thing recomputation would buy is telling a referral apart from the isolation gate,
+  and the standing status already carries that. Reading it means a `failure` is not
+  clearable by comment, and that no pull-request content is fetched at comment time.
+- **The commenter must have push permission**, read from the platform rather than from
+  the comment. The repository is public, so without it any account could clear anything.
+  This is a floor and not the whole trust — whoever holds the credentials satisfies it,
+  which is what [#25](https://github.com/lydite/lydite/issues/25) closes.
+- **A head that moved after the comment is refused.** A status created after the comment
+  cannot be one the person read. Both timestamps are the platform's, so neither is the
+  author's to set. `/lydite clear <sha>` names a revision explicitly and overrides the
+  ordering, since naming it is the stronger statement.
+- **Only the first line of a comment is parsed.** A reply that quotes an earlier comment
+  carries its text, and scanning the whole body would let a quoted `/lydite clear` clear
+  a change nobody meant to.
+
+`.github/workflows/lydite-clearance.yml` runs on `issue_comment`, so it always executes
+the **default branch's** copy and the deciding logic is never the pull request's to edit.
+Nothing in it checks out the pull request's code, and nothing in it may start to: the job
+holds a writing token. Its job-level `if:` is evaluated before a runner is allocated, so a
+comment not addressed to lydite costs nothing rather than costing a short job.
+
+**The status blocks no merge yet.** Making it a required check is one field on a ruleset
+`gt` renders and hardcodes to `ci-gate` alone, so it cannot be set from this repository —
+see [#34](https://github.com/lydite/lydite/issues/34). Until then the loop is published
+and flipped correctly and enforces nothing, which is a temporary state rather than the
+design. `/lydite exempt` is likewise held back, in
+[#33](https://github.com/lydite/lydite/issues/33), because what it should emit is
+undecided rather than unbuilt.
+
+The pull-request comment follows `docs/design/reference/surfaces.dc.html`: verdict badge,
+one-sentence headline, a `Check / Head / Base` table, named list sections, and a footer
+rule. Which facts fill the columns is lydite's to choose — a referral has no
+measurements, so the head column carries what the change contains and the base column
+what was read out of the merge-base. The design's footer also claims parity with the
+reader's local run; **nothing can establish that yet** (see #27), so it is absent rather
+than asserted. `ui.Marker` identifies the standing comment for editing, by a marker in the
+body rather than by author, because the author is whoever's token posted it.
 
 ## Semgrep: token-bearing vs token-less runs
 

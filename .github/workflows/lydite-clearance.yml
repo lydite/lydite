@@ -1,0 +1,67 @@
+# Answers a lydite command posted on a pull request.
+#
+# `/lydite clear` resolves the referral standing on the pull request's current
+# head; `/lydite explain` restates it. A clearance names one revision, so any
+# push produces a new head carrying no verdict and the clearance does not
+# travel with the branch.
+#
+# An issue_comment workflow always runs from the default branch's copy of this
+# file, so the deciding logic is never the pull request's to edit. Nothing here
+# checks out the pull request's code, and nothing here may start doing so: this
+# job holds a writing token, and running code from the branch it is deciding
+# about is how that token is taken. lydite reads the diff through the API and
+# never executes anything out of the change.
+name: lydite clearance
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+# Serialised per pull request, and never cancelled: two commands arriving
+# together must not race to publish on the same context, and dropping one
+# would leave a person believing they had cleared something.
+concurrency:
+  group: lydite-clearance-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  clearance:
+    name: clearance
+    # Evaluated before a runner is allocated, so every comment that is not
+    # addressed to lydite — which is nearly all of them — costs nothing at
+    # all rather than costing a short job.
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/lydite')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: write
+    steps:
+      # The default branch, which is what this event checks out and what this
+      # job must run. Shallow on purpose: the decision is made from the
+      # platform's API rather than from a diff, so no history is needed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache: true
+
+      - name: build lydite
+        working-directory: cli
+        run: go build -o /tmp/lydite ./cmd/lydite
+
+      # The event payload is passed as the platform wrote it. Reading it whole
+      # rather than forwarding fields keeps the commenter, the timestamp and
+      # the pull request from being re-derived by a step that could get one of
+      # them wrong.
+      - name: answer the comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: /tmp/lydite clearance --event "$GITHUB_EVENT_PATH"

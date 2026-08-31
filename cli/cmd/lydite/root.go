@@ -30,6 +30,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newScanCmd(),
 		newReviewCmd(),
+		newClearanceCmd(),
 		newCoverageCmd(),
 		newVersionCmd(),
 		newUpdateCmd(),
