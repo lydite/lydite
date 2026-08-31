@@ -84,7 +84,11 @@ func badge(v Verdict) string {
 func (c Comment) Render() string {
 	var b strings.Builder
 	b.WriteString(Marker + "\n")
-	fmt.Fprintf(&b, "<img src=%q width=\"20\" align=\"left\" alt=\"lydite\">\n\n", markURL)
+	// A heading rather than a floated image: the mark scales with the
+	// heading's own type, and nothing below it wraps around a float. The
+	// asset is 64px, so 28 stays crisp on a 2x display instead of being
+	// upscaled.
+	fmt.Fprintf(&b, "### <img src=%q width=\"28\" align=\"top\" alt=\"\"> lydite\n\n", markURL)
 
 	b.WriteString(badge(c.Verdict))
 	if c.Headline != "" {
