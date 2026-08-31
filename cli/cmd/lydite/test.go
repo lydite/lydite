@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
@@ -45,6 +47,14 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
+			// Before selection and before anything runs, because the gate
+			// asks whether the declaration is complete and that question
+			// does not depend on which components this invocation chose —
+			// or on there being any. A repository that declares none is
+			// exactly the one whose every source file is orphaned, and a
+			// gate it never saw would be the failure it exists to catch.
+			rep.Add(orphanRow(cmd.Context(), dir, file))
+
 			selected, err := file.Select(components)
 			if err != nil {
 				return err
@@ -359,6 +369,56 @@ func env(c component.Component) []string {
 	// failure can be reproduced from.
 	sort.Strings(out)
 	return out
+}
+
+// orphanRow runs the orphan gate and renders its verdict.
+//
+// It fails, rather than referring: a source file under no component is
+// something the author clears by doing work they can do — declaring the
+// component, or writing the exclude that says this code is tested by nobody
+// and someone decided that. Both leave a line in a file whose history is the
+// record of what gets tested.
+//
+// A tree that is not a git repository reports unmeasured and passes. The gate
+// is preparation for nothing and blocks nobody in that state, and turning a
+// working `lydite test` in an exported tarball into a hard failure would be
+// the gate firing on ordinary work. Distinct from a pass, because a gate that
+// did not run must never read as one.
+func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
+	const label = "orphans"
+	res, err := orphan.Find(ctx, dir, file)
+	if errors.Is(err, orphan.ErrNoRepository) {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no git repository"}
+	}
+	if errors.Is(err, orphan.ErrNoFiles) {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no source files found"}
+	}
+	if err != nil {
+		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
+	}
+	for _, e := range res.UnusedExcludes {
+		// The rule, not a guess at what was meant. Deriving a suggestion from
+		// the pattern produces advice that cannot be followed as soon as the
+		// pattern is not a bare directory name: "tools/gen.go" becomes
+		// "tools/gen.go/**", and a stale exclude whose file was deleted —
+		// the other reason one covers nothing — has no better spelling at all.
+		fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file. Patterns are anchored, so a subtree is spelled \"dir/**\"\n", component.FileName, e)
+	}
+	if len(res.Orphans) == 0 {
+		return ui.Row{Status: ui.StatusPass, Label: label, Value: fmt.Sprintf("none in %d source file(s)", res.Scanned)}
+	}
+	// Every orphan, not a sample. The author's next action is to decide
+	// which component each one belongs to, and a truncated list turns that
+	// into a second run to discover the rest.
+	detail := make([]string, 0, len(res.Orphans)+1)
+	detail = append(detail, res.Orphans...)
+	detail = append(detail, "declare a component covering these, or add them to "+component.FileName+"'s excludes")
+	return ui.Row{
+		Status: ui.StatusFail,
+		Label:  label,
+		Value:  fmt.Sprintf("%d under no component", len(res.Orphans)),
+		Detail: detail,
+	}
 }
 
 // renderTestReport renders and returns the verdict as an exit code.

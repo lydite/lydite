@@ -35,6 +35,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/runner"
 )
 
@@ -145,6 +146,18 @@ func (c Component) Lang() runner.Lang {
 // File is the parsed component declaration.
 type File struct {
 	Components []Component `yaml:"components"`
+	// Excludes are paths the orphan gate does not require a component for.
+	// A source file under no component's Dir and matching none of these is
+	// an orphan, and the author clears it by declaring a component or
+	// writing the exclude.
+	//
+	// They live here rather than in config.FileName because an exclude is a
+	// statement about what gets tested, which is the one thing this file
+	// exists to record. Its history is then the complete account of every
+	// widening — both the components that were added and the code that was
+	// declared untestable — where splitting the two across files would
+	// leave each half readable and neither answering the question.
+	Excludes []string `yaml:"excludes,omitempty"`
 }
 
 // Load reads the component declaration from root, validating it against the
@@ -220,7 +233,36 @@ func (f File) validate(source string) error {
 			return err
 		}
 	}
+	if err := f.validateExcludes(source); err != nil {
+		return err
+	}
 	return f.validateDeps(source)
+}
+
+// validateExcludes rejects an exclude that is malformed or that names
+// something outside the scan root.
+//
+// A malformed pattern is rejected rather than treated as matching nothing,
+// the same stance pathmatch.ValidatePattern takes for the exemption set: an
+// exclude that silently covers nothing leaves the file it was written for
+// orphaned, and the author has already said what they meant.
+func (f File) validateExcludes(source string) error {
+	for i, e := range f.Excludes {
+		where := fmt.Sprintf("%s: excludes[%d]", source, i)
+		if e == "" {
+			return fmt.Errorf("%s: is empty", where)
+		}
+		if path.IsAbs(e) || filepath.IsAbs(e) || strings.HasPrefix(e, "~") {
+			return fmt.Errorf("%s: %q must be relative to the scan root", where, e)
+		}
+		if e == ".." || strings.HasPrefix(e, "../") {
+			return fmt.Errorf("%s: %q escapes the scan root", where, e)
+		}
+		if err := pathmatch.ValidatePattern(e); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
+		}
+	}
+	return nil
 }
 
 // validateInvocation requires exactly one of runner and command.

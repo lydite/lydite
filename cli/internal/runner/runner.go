@@ -76,6 +76,34 @@ const (
 	TypeScript Lang = "typescript"
 )
 
+// sourceExts is the file extensions each language's source is written in.
+//
+// The orphan gate reads this to decide whether a file is code some component
+// ought to be testing, which is a question lydite can only ask about a
+// language it has a runner for: a Python file is not code any component could
+// claim, so demanding an exclude for one is paperwork for a question lydite
+// cannot act on either way.
+//
+// It lives beside the Lang constants so the two cannot come apart. A language
+// that gains a runner and no extensions is one whose files the gate is blind
+// to, and TestEveryLangHasSourceExts refuses that.
+var sourceExts = map[Lang][]string{
+	Go:         {".go"},
+	Rust:       {".rs"},
+	TypeScript: {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"},
+}
+
+// SourceExts returns every extension the languages lydite runs are written
+// in, lowercase and dot-prefixed, sorted.
+func SourceExts() []string {
+	var out []string
+	for _, exts := range sourceExts {
+		out = append(out, exts...)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Variant is which of the three forms of a suite is wanted.
 type Variant string
 

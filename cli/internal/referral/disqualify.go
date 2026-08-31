@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"lydite/lydite/internal/pathmatch"
 )
 
 // Disqualification is one reason a change may not take the unattended path,
@@ -167,7 +169,7 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("CI workflow edited", p, p)
 		}
 		for _, pattern := range extra.Paths {
-			if Match(pattern, p) {
+			if pathmatch.Match(pattern, p) {
 				add("declared disqualifying path", p, fmt.Sprintf("%s matches %s", p, pattern))
 				break
 			}

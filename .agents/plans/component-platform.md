@@ -10,10 +10,10 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | # | Issue | Deliverable | Prompt | State |
 |---|---|---|---|---|
 | 0 | #38 | Proving ground: polyglot repo in the `lydite` org | `pr0-proving-ground.md` | done — [lydite/proving-ground](https://github.com/lydite/proving-ground) |
-| 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | in review — #39 |
+| 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | done — #39 |
+| 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | done |
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
-| 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | not started |
-| 4 | — | Scheduler: resource-constrained queue, port locks, local driver | — | not started |
+| 4 | — | Scheduler: resource-constrained queue, port locks, local driver | `pr4-scheduler.md` | not started |
 | 5 | — | Affected selection; full run on the default branch | — | not started |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | — | not started |
 | 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
@@ -24,11 +24,10 @@ Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
 until step 0 existed, because two of its three runners had nothing to run
 against otherwise.
 
-**Step 3 is folded into step 1, and that is why the table is out of order.**
-Both of the proving ground's service-declaring components are the ones the
-cargo runner would exercise, so "the cargo runner has been executed once" and
-"lydite can start a component's services" turned out to be the same
-requirement. Step 2 is next, on its own.
+**Step 3 is folded into step 1.** Both of the proving ground's
+service-declaring components are the ones the cargo runner would exercise, so
+"the cargo runner has been executed once" and "lydite can start a component's
+services" turned out to be the same requirement.
 
 ## Why the proving ground gates PR 1
 
@@ -54,7 +53,8 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
 
 - lydite orchestrates; it never learns to run anyone's tests.
 - A component is the unit its build tool treats as a whole, not a deployable.
-- Components are declared, never discovered. Orphan source files are the guard.
+- Components are declared, never discovered. Orphan source files are the guard,
+  and the guard is a path question — no manifest read, no source parsed.
 - `lang` is derived from `runner`.
 - Unknown keys in component config are rejected.
 - Services are a compose file; lydite owns no service schema and no hard-coded
@@ -118,8 +118,9 @@ could: it also expresses a Corepack-pinned flow and a monorepo install that no
 single manager name implies. `internal/nodedeps` is where that rule lives, so
 the coverage gate and the test run cannot disagree about it.
 
-Open, for when `setup` lands at step 3: `typescript.install` is a repository-wide
-key while `setup` is per component, and the two will overlap.
+Open: `typescript.install` is a repository-wide key while a component's
+`setup` is per component, and a JavaScript component can express its install
+either way.
 
 ## What step 1 left for later
 
@@ -158,6 +159,33 @@ components' container lifecycles.
 what the PR comment at step 8 needs, and it is why the path travels as a field
 rather than only inside prose a human reads.
 
+## What the orphan gate settled
+
+Three questions ADR 0016 left to the implementation, decided against the
+proving ground rather than in the abstract:
+
+- **A file counts only in a language lydite has a runner for.** The extension
+  set sits beside the `Lang` constants in `internal/runner`, so a language
+  gaining a runner and no extensions is one the gate is blind to. The
+  calibration is the proving ground: six files there sit under no component
+  and exactly one must fire. A README, a LICENSE, a Makefile, an OpenAPI
+  document and a shell script are not code a component could claim.
+- **Excludes live in `components.yml`.** An exclude states what goes untested,
+  which is the one thing that file records, so its history stays the whole
+  account of every widening rather than half of one.
+- **The gate runs in `lydite test`, before selection and before any component
+  runs.** Whether the declaration is complete does not depend on which
+  components an invocation chose or on there being any — a repository
+  declaring none is exactly the one whose every source file is orphaned.
+
+The file list comes from git rather than a walk. A walk needs its own list of
+directories to skip, which is a second copy of a judgement `.gitignore`
+already holds, and the copy that drifts starts calling build output source.
+
+`internal/pathmatch` now holds the anchored matcher `internal/referral` had.
+Both decide something consequential off a path, and two matchers agree until
+one learns about a pattern form the other has not.
+
 ## Known traps
 
 - **#36 before step 6.** Adding `-coverpkg` and moving coverage onto components
@@ -172,3 +200,8 @@ rather than only inside prose a human reads.
   Both exit 1. Build before testing, or the mutation score silently inflates.
 - **The local scheduler is the path CI never runs.** Agent skills requiring a
   local run before opening a pull request are what exercise it.
+- **The proving ground's correct verdict is not all-green.** Its
+  `ci-end2end.yml` job asserts the orphan gate *fails* on `scripts/seed.ts`
+  and stays silent on the excluded `generated/client.ts`. A change that makes
+  that job green by removing either file has removed a branch of the gate from
+  observation, not fixed anything.

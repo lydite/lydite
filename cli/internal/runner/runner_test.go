@@ -276,3 +276,19 @@ func TestNextestLinuxTargetsAreStatic(t *testing.T) {
 		}
 	}
 }
+
+// A language with a runner and no source extensions is one the orphan gate
+// cannot see, so its files would go undeclared while the gate reported a
+// clean pass — the declared list failing open, one level down.
+func TestEveryLangHasSourceExts(t *testing.T) {
+	for _, r := range registry {
+		if len(sourceExts[r.Lang]) == 0 {
+			t.Errorf("runner %q is %q, which has no source extensions", r.Name, r.Lang)
+		}
+	}
+	for _, e := range SourceExts() {
+		if !strings.HasPrefix(e, ".") || e != strings.ToLower(e) {
+			t.Errorf("extension %q must be lowercase and dot-prefixed", e)
+		}
+	}
+}
