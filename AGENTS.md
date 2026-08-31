@@ -34,6 +34,7 @@ cli/internal/forge/            # the hosting platform: commit statuses, permissi
 internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
 internal/runner/                # a runner name to its plain/instrumented/build-only invocations
 internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
+internal/cargotool/             # pinned cargo subcommands: version parsing and the install
 internal/compose/               # the services a component's suite needs (see Services below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
@@ -178,6 +179,24 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   JavaScript test run has no compile step and a syntactically broken mutant would read as a test
   failure.
 
+**A component's runner is pinned and installed, exactly like a scanner.** A test
+runner left to whatever a machine happens to carry decides which tests run and what
+a failure looks like, so a verdict would vary by runner — and unlike a stale scanner
+an absent one is not a degradation but a component that cannot run at all
+(`error: no such command: nextest`). `internal/cargotool` holds the version parsing
+and the version-keyed install both `internal/rust` and `internal/runner` use, so the
+rule exists once. The invocation stays `cargo nextest run` rather than an absolute
+path into the cache, because that is what a reader can re-run from a failure detail;
+`Invocation.Env` prepends the pinned binary's directory to PATH, so an older one
+already on the machine cannot win.
+
+Building it from source is around seven minutes, and ~4 seconds once cached — so a
+consumer caching `~/.cache/lydite` is not an optimisation here but the difference
+between a usable pipeline and an unusable one. lydite's own `proving ground` job
+caches it, keyed on the pin manifests so a Dependabot bump misses and installs what
+it just pinned. `cargo-llvm-cov` is still **not** installed, which is the gap that
+poisons a baseline under `coverage.source: run`.
+
 **A JavaScript component is installed before it is run.** A fresh checkout has
 no `node_modules` and every import fails before a single test is collected, so the
 `vitest` and `jest` runners carry a `Prepare` step and the others carry none —
@@ -212,6 +231,34 @@ Where a runner emits JUnit, the invocation names where it lands: the quality-his
 ([#26](https://github.com/lydite/lydite/issues/26)) records test counts, which no coverage report
 carries.
 
+
+### Output: captured, not streamed
+
+Every component's output goes to `.lydite-reports/<name>/test.log` under the scan
+root — the suite, the install, the setup and teardown commands, and the container
+lifecycle. A failing row carries the last 40 lines under it and names the log; a
+passing row names the log in `--json` and says nothing in the terminal.
+
+**This is the opposite of what the scanners do, and the difference is real.** A
+scanner's findings *are* the result, so `executil.Run` streams them live. A test
+suite's output is thousands of lines of passing tests, and a CI log carrying all
+of it buries the one component that failed under the container lifecycle of the
+ones that did not — which is exactly how a `no such command: nextest` ends up
+fifty lines above the verdict that reports it. `executil.RunOutput` is the version
+that writes to a caller-chosen writer, and the caller is the component's log.
+
+The tail is under the row deliberately, duplicating what the log holds. A reader
+looking at a red row should not have to scroll, and a reader who needs more than
+40 lines has the path. `ui.Row.Log` carries that path into `--json` — it is not
+rendered in the text grammar, since a failing row already names it where the
+reader is looking and a passing one would put a path nobody wants on every line
+of a clean run. A consumer cannot parse a path back out of prose, which is what
+lets a PR comment link the output of the one component that failed.
+
+`--stream` mirrors everything to stderr as well. It exists for the case a captured
+file cannot serve: a suite that hangs prints nothing until it is killed. Stderr and
+never stdout, because stdout carries the report and, under `--json`, a document a
+suite's output would make unparseable.
 
 ### Services: a compose file, and no schema of lydite's own
 
@@ -450,6 +497,7 @@ Dependabot watches, colocated with the package that uses it:
 |---|---|---|
 | @biomejs/biome | `internal/typescript/biome-pin/package.json` + lock | the manifest itself (`npm ci`) |
 | cargo-audit | `internal/rust/cargo-audit-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
+| cargo-nextest | `internal/runner/cargo-nextest-pin/Cargo.toml` | parsed by `internal/runner/pins.go` |
 | cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
 | gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -203,5 +204,62 @@ func TestNamesIsSorted(t *testing.T) {
 	got := Names()
 	if !slices.IsSorted(got) {
 		t.Errorf("Names = %v, want sorted so an error message reads the same every time", got)
+	}
+}
+
+// The pin has to reach the invocation, or the version in the manifest is
+// documentation and the runner is whatever the machine happens to carry.
+func TestCargoNextestIsPinned(t *testing.T) {
+	if cargoNextest.Version == "" {
+		t.Fatal("no version parsed from the pin manifest")
+	}
+	if v := cargoNextest.Version; v[0] < '0' || v[0] > '9' {
+		t.Errorf("version = %q, want a bare version with cargo's `=` operator stripped", v)
+	}
+	dir, err := cargoNextest.BinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Prepended, so an older cargo-nextest already on the machine cannot win.
+	env := nextestEnv()
+	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+dir+string(os.PathListSeparator)) {
+		t.Fatalf("nextestEnv = %v, want the pinned bin dir first on PATH", env)
+	}
+	for _, name := range []Name{CargoNextest, CargoLLVMCovNextest} {
+		r, _ := Lookup(name)
+		if r.Prepare == nil {
+			t.Errorf("%s installs nothing, so it runs whatever is on the machine", name)
+		}
+		inv := argv(t, name, Plain)
+		if !slices.Equal(inv.Env, env) {
+			t.Errorf("%s's plain variant env = %v, want the pinned PATH", name, inv.Env)
+		}
+	}
+}
+
+// `cargo nextest` is how cargo finds a subcommand, and it is the invocation a
+// reader can re-run from a failure detail — an absolute path into a
+// version-keyed cache is neither.
+func TestCargoInvocationStaysTypeable(t *testing.T) {
+	if got := line(argv(t, CargoNextest, Plain)); got != "cargo nextest run" {
+		t.Errorf("plain = %q, want the invocation a person would type", got)
+	}
+}
+
+// The install is the pinned version, and never a bare `cargo install
+// cargo-nextest` that resolves to whatever is latest.
+func TestCargoNextestInstallIsPinnedAndLocked(t *testing.T) {
+	if cargoNextest.Installed() {
+		t.Skip("the pinned runner is already in this machine's cache")
+	}
+	steps := installCargoNextest("", "")
+	if len(steps) != 1 || steps[0].Name != "cargo" {
+		t.Fatalf("install = %v, want one cargo invocation", steps)
+	}
+	joined := strings.Join(steps[0].Args, " ")
+	for _, want := range []string{"install", "--locked", cargoNextest.Version} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("install = %q, want it to carry %q", joined, want)
+		}
 	}
 }

@@ -44,6 +44,13 @@ dependabot:
     directory: /cli/internal/rust/cargo-deny-pin
     note: |
       cargo-deny (internal/rust).
+  - ecosystem: cargo
+    directory: /cli/internal/runner/cargo-nextest-pin
+    note: |
+      cargo-nextest (internal/runner), the test runner a component declaring
+      the cargo-nextest runner is run with. Pinned for the reason the scanners
+      are: whatever version a machine carries decides which tests run and what
+      a failure looks like.
   - ecosystem: gomod
     directory: /cli/internal/golang/go-pin
     note: |

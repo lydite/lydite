@@ -78,6 +78,16 @@ type Row struct {
 	// lines, which is also what keeps a finding whose own message contains
 	// a glyph from being read as a verdict.
 	Detail []string
+	// Log is where the whole of what this row's work printed was written,
+	// relative to the scan root. Empty for a row that ran no command.
+	//
+	// It is not rendered in the text grammar — a failing row already carries
+	// the path in its Detail, where the reader is looking, and a passing row
+	// showing one would put a path nobody wants on every line of a clean run.
+	// It is in the document because a consumer cannot parse a path back out
+	// of prose: this is what lets a PR comment link the output of the one
+	// component that failed.
+	Log string
 }
 
 // valueColumn is where every row's value begins. Fixed rather than computed

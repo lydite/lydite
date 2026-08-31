@@ -2,6 +2,7 @@ package compose
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -108,7 +109,7 @@ func TestWaitHealthyRefusesAServiceWithNoHealthcheck(t *testing.T) {
 	_, err := Load(context.Background(), dir, component.Component{
 		Name: "web", Dir: ".",
 		Compose: component.Compose{Up: []string{"cache"}, Wait: component.WaitHealthy},
-	})
+	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "declares no healthcheck") {
 		t.Fatalf("want a refusal naming the missing healthcheck, got %v", err)
 	}
@@ -125,7 +126,7 @@ func TestWaitDefaultsToHealthy(t *testing.T) {
 	dir := writeFile(t, "compose.yaml", withHealthcheck)
 	_, err := Load(context.Background(), dir, component.Component{
 		Name: "web", Dir: ".", Compose: component.Compose{Up: []string{"cache"}},
-	})
+	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "declares no healthcheck") {
 		t.Fatalf("want the healthy default to apply, got %v", err)
 	}
@@ -135,7 +136,7 @@ func TestUpNamingAnUndeclaredServiceIsRefused(t *testing.T) {
 	dir := writeFile(t, "compose.yaml", withHealthcheck)
 	_, err := Load(context.Background(), dir, component.Component{
 		Name: "web", Dir: ".", Compose: component.Compose{Up: []string{"ghost"}, Wait: component.WaitNone},
-	})
+	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "does not declare") {
 		t.Fatalf("want a refusal naming the missing service, got %v", err)
 	}

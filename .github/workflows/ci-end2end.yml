@@ -66,6 +66,18 @@ jobs:
           go-version-file: cli/go.mod
           cache: true
 
+      # lydite installs the pinned cargo-nextest itself, and building it from
+      # source is ~7 minutes. Cached, that is a one-time cost per pin bump
+      # rather than a cost per run — which is the same thing consumers are told
+      # to cache, so this job runs the arrangement it recommends. Keyed on the
+      # pin manifests, so a Dependabot bump misses the cache and installs the
+      # version it just pinned rather than reusing the one it replaced.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-tools-${{ runner.os }}-${{ hashFiles('cli/internal/**/Cargo.toml', 'cli/internal/**/go.mod', 'cli/internal/**/requirements.txt') }}
+          restore-keys: lydite-tools-${{ runner.os }}-
+
       - name: build lydite
         working-directory: cli
         run: go build -o /tmp/lydite ./cmd/lydite
@@ -78,6 +90,19 @@ jobs:
       # carries the docker compose plugin the probe finds.
       - name: lydite test (proving ground)
         run: /tmp/lydite test --dir proving-ground
+
+      # Each component's whole output, for when the tail under its row is not
+      # enough. lydite captures rather than streams, so this is the only copy —
+      # which is the trade: a passing run's log stays out of the job log
+      # entirely, and a failing one is a download away rather than buried in
+      # someone else's container lifecycle.
+      - name: collect component logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-component-logs
+          path: proving-ground/.lydite-reports/
+          if-no-files-found: ignore
 
   # The single job the branch-protection ruleset actually requires. Individual
   # job names (lint, build & test, ...) are an implementation detail that

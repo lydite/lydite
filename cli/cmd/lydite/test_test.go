@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,7 +180,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row := runComponent(context.Background(), root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}, cfg, false)
+	}, cfg, false, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -208,7 +209,7 @@ func TestTeardownRunsWhenSetupFails(t *testing.T) {
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false)
+	}, config.Default(), false, false)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -225,7 +226,7 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	row := runComponent(context.Background(), root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false)
+	}, config.Default(), false, false)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -241,7 +242,7 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	row := runComponent(context.Background(), root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false)
+	}, config.Default(), false, false)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -255,7 +256,7 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	row := runComponent(context.Background(), root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false)
+	}, config.Default(), false, false)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -270,7 +271,7 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}, config.Default(), false)
+	}, config.Default(), false, false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -284,9 +285,90 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 	root := fixtureRepo(t, "components: []\n")
-	stop, _, ok := services(context.Background(), root, "test(fixture)", component.Component{Name: "fixture", Dir: "mod"}, false)
+	stop, _, ok := services(context.Background(), root, "test(fixture)", component.Component{Name: "fixture", Dir: "mod"}, false, openLog(root, "fixture", false))
 	if !ok {
 		t.Fatal("a component with no compose block must not be probed for a runtime")
 	}
 	stop()
+}
+
+// The cause has to be next to the verdict: a reader looking at a red row must
+// not have to scroll past another component's container lifecycle to find out
+// what happened, which is what a real CI log does to them.
+func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+	}, config.Default(), false, false)
+
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v", row)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "the cause") {
+		t.Errorf("detail = %q, want the failing output under the row", detail)
+	}
+	if row.Log == "" {
+		t.Fatal("a failing row must name where the whole output is")
+	}
+	if !strings.Contains(detail, row.Log) {
+		t.Errorf("detail = %q, want it to name the log at %q", detail, row.Log)
+	}
+	body, err := os.ReadFile(filepath.Join(root, row.Log))
+	if err != nil {
+		t.Fatalf("reading the log: %v", err)
+	}
+	if !strings.Contains(string(body), "the cause") {
+		t.Errorf("log = %q, want the whole output captured", body)
+	}
+}
+
+// Everything is captured, always — under --json the terminal carries a
+// document and nothing else, so the log is the only place the output exists.
+func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+	}, config.Default(), false, false)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v", row)
+	}
+	if row.Log == "" {
+		t.Fatal("a passing row must still name its log")
+	}
+	if _, err := os.Stat(filepath.Join(root, row.Log)); err != nil {
+		t.Errorf("log not written: %v", err)
+	}
+	// But it stays out of the prose: a path on every line of a clean run is
+	// noise nobody asked for.
+	if len(row.Detail) != 0 {
+		t.Errorf("detail = %v, want a passing row to carry none", row.Detail)
+	}
+}
+
+// A component failing must not reprint its whole suite under the row.
+func TestTailIsBounded(t *testing.T) {
+	var lines []string
+	for i := range 500 {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	got := tail(strings.Join(lines, "\n"))
+	if len(got) != tailLines {
+		t.Fatalf("tail returned %d lines, want %d", len(got), tailLines)
+	}
+	// The last lines, since that is where a runner's summary and the failure
+	// above it are.
+	if got[len(got)-1] != "line 499" {
+		t.Errorf("tail ends at %q, want the end of the output", got[len(got)-1])
+	}
+}
+
+func TestTailOfNothingIsNothing(t *testing.T) {
+	if got := tail(""); got != nil {
+		t.Errorf("tail(\"\") = %v, want nothing", got)
+	}
+	if got := tail("\n\n"); got != nil {
+		t.Errorf("tail of blank lines = %v, want nothing", got)
+	}
 }

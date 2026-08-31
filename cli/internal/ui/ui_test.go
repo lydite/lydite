@@ -179,10 +179,24 @@ func TestDetailLinesCannotForgeAStatusRow(t *testing.T) {
 // The JSON document is what anything automated reads, so its keys are a
 // published contract rather than an incidental encoding of whatever the
 // renderer happens to hold.
+// A row that ran no command has no log, and a key carrying an empty string
+// would have a consumer link nowhere.
+func TestJSONOmitsAnEmptyLog(t *testing.T) {
+	var buf bytes.Buffer
+	rep := NewReport("scan")
+	rep.Add(Row{Status: StatusPass, Label: "gosec", Value: "passed"})
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	if strings.Contains(buf.String(), `"log"`) {
+		t.Errorf("document carries an empty log key: %s", buf.String())
+	}
+}
+
 func TestJSONKeysArePartOfTheContract(t *testing.T) {
 	var buf bytes.Buffer
 	rep := NewReport("scan")
-	rep.Add(Row{Status: StatusFail, Label: "biome(.)", Value: "failed", Detail: []string{"a finding"}})
+	rep.Add(Row{Status: StatusFail, Label: "biome(.)", Value: "failed", Detail: []string{"a finding"}, Log: ".lydite-reports/cli/test.log"})
 	if err := rep.WriteJSON(&buf); err != nil {
 		t.Fatalf("WriteJSON: %v", err)
 	}
@@ -203,7 +217,7 @@ func TestJSONKeysArePartOfTheContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a row object, got %v", rows[0])
 	}
-	for _, key := range []string{"status", "label", "value", "detail"} {
+	for _, key := range []string{"status", "label", "value", "detail", "log"} {
 		if _, ok := row[key]; !ok {
 			t.Errorf("the row is missing the %q key: %s", key, buf.String())
 		}

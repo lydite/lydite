@@ -14,6 +14,7 @@ package compose
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -256,6 +257,7 @@ type Stack struct {
 	project string
 	up      []string
 	wait    component.Wait
+	out     io.Writer
 }
 
 // Load reads a component's compose declaration and validates it against the
@@ -264,7 +266,12 @@ type Stack struct {
 // dir is the component's directory, which the declared file path is relative
 // to and which compose runs in — so a relative path inside the compose file
 // resolves the way it does when a person runs compose there by hand.
-func Load(ctx context.Context, dir string, c component.Component) (*Stack, error) {
+//
+// out is where the runtime's own progress goes. It is the component's log
+// rather than the terminal, because forty lines of image pulls and container
+// lifecycle between one component's verdict and the next is what makes a CI
+// log unreadable, and none of it is worth reading unless something failed.
+func Load(ctx context.Context, dir string, c component.Component, out io.Writer) (*Stack, error) {
 	path, err := composePath(dir, c)
 	if err != nil {
 		return nil, err
@@ -322,6 +329,7 @@ func Load(ctx context.Context, dir string, c component.Component) (*Stack, error
 		project: "lydite-" + c.Name,
 		up:      up,
 		wait:    wait,
+		out:     out,
 	}, nil
 }
 
@@ -341,7 +349,7 @@ func (s *Stack) Up(ctx context.Context) error {
 		args = append(args, "--wait")
 	}
 	args = append(args, s.up...)
-	if res := executil.Run(ctx, s.dir, s.runtime.Name, s.runtime.argv(args...)...); !res.Ok() {
+	if res := executil.RunOutput(ctx, s.dir, nil, s.out, s.runtime.Name, s.runtime.argv(args...)...); !res.Ok() {
 		return fmt.Errorf("%s up: %w", s.runtime, res.Err)
 	}
 	return nil
@@ -356,7 +364,7 @@ func (s *Stack) Up(ctx context.Context) error {
 // next component's to bind.
 func (s *Stack) Down(ctx context.Context) error {
 	args := []string{"--project-name", s.project, "--file", s.file.Path, "down", "--volumes"}
-	if res := executil.Run(ctx, s.dir, s.runtime.Name, s.runtime.argv(args...)...); !res.Ok() {
+	if res := executil.RunOutput(ctx, s.dir, nil, s.out, s.runtime.Name, s.runtime.argv(args...)...); !res.Ok() {
 		return fmt.Errorf("%s down: %w", s.runtime, res.Err)
 	}
 	return nil

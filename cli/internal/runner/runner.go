@@ -31,6 +31,7 @@
 package runner
 
 import (
+	"os"
 	"path"
 	"sort"
 
@@ -102,6 +103,11 @@ type Invocation struct {
 	// Optional marks a preparation step whose failure is not the run
 	// failing. A suite invocation is never optional.
 	Optional bool
+	// Env is "KEY=value" entries the command needs on top of the caller's
+	// own. It carries the cache directory of a pinned tool onto PATH, so the
+	// invocation stays the one a reader could type — `cargo nextest run`,
+	// not an absolute path into a version-keyed cache.
+	Env []string
 }
 
 // Runner is what lydite knows about one test command.
@@ -128,8 +134,8 @@ type Runner struct {
 // registry is the whole set, keyed by declared name.
 var registry = map[Name]Runner{
 	GoTest:              {Name: GoTest, Lang: Go, Build: buildGoTest},
-	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest},
-	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest},
+	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest, Prepare: installCargoNextest},
+	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest, Prepare: installCargoNextest},
 	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest, Prepare: installNodeDeps},
 	Jest:                {Name: Jest, Lang: TypeScript, Build: buildJest, Prepare: installNodeDeps},
 }
@@ -210,6 +216,7 @@ func buildCargoNextest(variant Variant, args []string) (Invocation, bool) {
 			Name:        "cargo",
 			Args:        append([]string{"nextest", "run"}, args...),
 			JUnitReport: nextestJUnit,
+			Env:         nextestEnv(),
 		}, true
 	case Instrumented:
 		return llvmCovNextest(args), true
@@ -253,7 +260,41 @@ func llvmCovNextest(args []string) Invocation {
 		}, args...),
 		CoverageReport: json,
 		JUnitReport:    nextestJUnit,
+		Env:            nextestEnv(),
 	}
+}
+
+// installCargoNextest installs the pinned runner unless the cache already has
+// that exact version.
+//
+// The override is ignored: typescript.install describes a JavaScript
+// workspace's own install flow, and there is no equivalent for a tool lydite
+// pins — a repository able to substitute its own cargo-nextest would be back
+// to a runner whose version varies by machine.
+func installCargoNextest(_, _ string) []Invocation {
+	if cargoNextest.Installed() {
+		return nil
+	}
+	argv, err := cargoNextest.InstallArgv()
+	if err != nil {
+		return nil
+	}
+	return []Invocation{{Name: "cargo", Args: argv}}
+}
+
+// nextestEnv puts the pinned binary first on PATH.
+//
+// PATH rather than invoking the binary directly, because `cargo nextest` is
+// how cargo finds a subcommand, and it is the invocation a reader can re-run
+// from the failure detail — an absolute path into a version-keyed cache is
+// neither. Prepended, so an older cargo-nextest already on the machine cannot
+// win.
+func nextestEnv() []string {
+	dir, err := cargoNextest.BinDir()
+	if err != nil {
+		return nil
+	}
+	return []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
 // installNodeDeps is the install internal/nodedeps resolves from the

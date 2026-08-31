@@ -2,8 +2,8 @@ package rust
 
 import (
 	_ "embed"
-	"fmt"
-	"strings"
+
+	"lydite/lydite/internal/cargotool"
 )
 
 // One manifest per tool: cargo-audit and cargo-deny cannot resolve in a shared
@@ -24,70 +24,10 @@ var (
 // that nothing ever ages out is a scanner that quietly goes stale while still
 // reporting [PASS].
 var (
-	cargoAuditVersion = mustPinnedVersion(cargoAuditManifest, "cargo-audit")
-	cargoDenyVersion  = mustPinnedVersion(cargoDenyManifest, "cargo-deny")
+	cargoAuditVersion = cargotool.MustPinnedVersion(cargoAuditManifest, "cargo-audit")
+	cargoDenyVersion  = cargotool.MustPinnedVersion(cargoDenyManifest, "cargo-deny")
 )
 
-// pinnedVersion extracts `crate = "=x.y.z"` from the embedded manifest's
-// [dependencies] table.
-//
-// Two lines of TOML do not justify a TOML dependency, but they do justify being
-// strict on two counts. An unparseable manifest must fail loudly rather than
-// yield "", which would turn into `cargo install cargo-audit@` — a confusing
-// failure far from its cause, or worse, an install of whatever version is
-// latest. And the scan must be scoped to [dependencies]: the manifest also
-// carries `version = "0.0.0"` and `name = "..."` in its [package] table, so a
-// section-blind parser answers a lookup with unrelated package metadata.
-func pinnedVersion(manifest []byte, crate string) (string, error) {
-	inDeps := false
-	for line := range strings.Lines(string(manifest)) {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			inDeps = line == "[dependencies]"
-			continue
-		}
-		if !inDeps {
-			continue
-		}
-		name, rest, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(name) != crate {
-			continue
-		}
-		v := strings.TrimSpace(rest)
-		// Strip a trailing inline comment before unquoting. Without this,
-		// `cargo-audit = "=0.22.2" # note` survives as `0.22.2" # note` and is
-		// handed to `cargo install --version` — a corrupt value where the doc
-		// above promises a loud failure. This repo already appends `# nosemgrep:`
-		// comments to config lines elsewhere, so it is not a hypothetical shape.
-		if i := strings.Index(v, "#"); i >= 0 {
-			v = strings.TrimSpace(v[:i])
-		}
-		unquoted, ok := strings.CutPrefix(v, `"`)
-		if !ok {
-			return "", fmt.Errorf("%s: version for %s is not a quoted string", crate, crate)
-		}
-		v, ok = strings.CutSuffix(unquoted, `"`)
-		if !ok {
-			return "", fmt.Errorf("%s: version for %s has no closing quote", crate, crate)
-		}
-		// The `=` prefix is cargo's exact-version requirement operator; lydite
-		// wants the bare version to hand to `cargo install --version`.
-		v = strings.TrimPrefix(v, "=")
-		if v == "" {
-			return "", fmt.Errorf("%s has an empty version", crate)
-		}
-		return v, nil
-	}
-	return "", fmt.Errorf("no [dependencies] entry for %s", crate)
-}
-
-func mustPinnedVersion(manifest []byte, crate string) string {
-	v, err := pinnedVersion(manifest, crate)
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
+// The parsing and the install both live in internal/cargotool, because the
+// component test runners pin cargo subcommands the same way and a second copy
+// of either would drift from this one.

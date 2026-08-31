@@ -133,6 +133,10 @@ type jsonRow struct {
 	Label  string   `json:"label"`
 	Value  string   `json:"value,omitempty"`
 	Detail []string `json:"detail,omitempty"`
+	// Log is the path to everything this row's work printed. A consumer
+	// linking it is the whole reason it travels here and not only in the
+	// prose a human reads.
+	Log string `json:"log,omitempty"`
 }
 
 type jsonReport struct {

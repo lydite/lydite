@@ -127,12 +127,30 @@ key while `setup` is per component, and the two will overlap.
   happens: lydite's own CI depends on `source: report` today, and removing the
   key before coverage moves onto components would leave the repository unable
   to gate itself.
+- **`cargo-llvm-cov` is still not installed.** `cargo-nextest` now is, pinned via
+  `internal/cargotool`, but the instrumented Rust variant needs llvm-cov and
+  nothing provisions it — which is the gap that silently caches an empty
+  baseline under `coverage.source: run`. It belongs with step 6, where the
+  instrumented variant is first actually run.
 - **The run is sequential.** `internal/compose` reads each stack's published
   host ports, which is what step 4's port lock needs, but nothing consumes them
   yet — two components publishing the same port would collide today if they ran
   at once, and nothing runs at once.
 - **`internal/detect` is untouched.** Scan and coverage still discover their own
   units; step 7 is where they learn it from the component instead.
+
+## A component's output is captured, not streamed
+
+`lydite test` writes every component's output to `.lydite-reports/<name>/test.log`
+and puts the last 40 lines under a failing row. The scanners stream, because their
+findings are the result; a suite's output is thousands of lines of passing tests,
+and the first CI run against the proving ground proved the cost — `error: no such
+command: nextest` sat fifty lines above the verdict that reported it, between two
+components' container lifecycles.
+
+`ui.Row.Log` carries the path into `--json`, so a consumer can link it. That is
+what the PR comment at step 8 needs, and it is why the path travels as a field
+rather than only inside prose a human reads.
 
 ## Known traps
 

@@ -58,6 +58,18 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 	return run(ctx, dir, extraEnv, name, args...)
 }
 
+// RunOutput runs a command writing its combined stdout and stderr to out, and
+// captures the same into the returned Result.
+//
+// It exists for output that is only worth reading when it fails. A scanner's
+// findings are the point and stream live through Run; a test suite's output is
+// thousands of lines of passing tests, and a CI log carrying all of it buries
+// the one component that failed among the ones that did not. The caller
+// decides what out is — a log file, or a log file and the terminal both.
+func RunOutput(ctx context.Context, dir string, extraEnv []string, out io.Writer, name string, args ...string) Result {
+	return runTo(ctx, dir, extraEnv, out, out, name, args...)
+}
+
 // RunQuiet captures output without streaming it.
 //
 // Run's streaming is right for a scanner, whose findings are the point and
@@ -83,18 +95,27 @@ func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
 }
 
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, never user input or shell-interpreted
+	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, name, args...)
+}
+
+func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, name string, args ...string) Result {
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	// Stdout and Stderr being distinct writers makes os/exec copy each stream
 	// on its own goroutine, and both feed the same capture buffer — so the
-	// buffer writes must be locked.
+	// buffer writes must be locked. The destinations are locked too, since
+	// they may be the same writer.
 	var buf bytes.Buffer
 	captured := &lockedWriter{w: &buf}
-	cmd.Stdout = io.MultiWriter(streamTarget, captured)
-	cmd.Stderr = io.MultiWriter(os.Stderr, captured)
+	out, errOut := &lockedWriter{w: stdout}, &lockedWriter{w: stderr}
+	if stdout == stderr {
+		errOut = out
+	}
+	cmd.Stdout = io.MultiWriter(out, captured)
+	cmd.Stderr = io.MultiWriter(errOut, captured)
 	err := cmd.Run()
 	return Result{Name: name, Args: args, Output: buf.String(), Err: err}
 }
