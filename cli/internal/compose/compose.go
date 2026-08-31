@@ -373,14 +373,28 @@ var conventionalFiles = []string{"compose.yaml", "compose.yml", "docker-compose.
 // compose searches them: a repository whose file is named docker-compose.yml
 // works when a person runs compose by hand, and a lydite that only knew one
 // name would report that file as missing.
+//
+// The result is absolute, and that is load-bearing rather than tidiness. The
+// compose command runs with its working directory set to the component root,
+// so a path relative to lydite's own working directory would be resolved a
+// second time against the component and land at dir/dir/compose.yaml. It only
+// holds together when --dir happens to be absolute, which is the shape a local
+// run tends to have and a CI checkout does not.
 func composePath(dir string, c component.Component) (string, error) {
+	abs := func(p string) (string, error) {
+		a, err := filepath.Abs(p)
+		if err != nil {
+			return "", fmt.Errorf("%s: resolving %s: %w", c.Name, p, err)
+		}
+		return a, nil
+	}
 	if c.Compose.File != "" {
-		return filepath.Join(dir, filepath.FromSlash(c.Compose.File)), nil
+		return abs(filepath.Join(dir, filepath.FromSlash(c.Compose.File)))
 	}
 	for _, name := range conventionalFiles {
 		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err == nil {
-			return p, nil
+			return abs(p)
 		}
 	}
 	return "", fmt.Errorf("%s declares compose services but %s holds none of %s — name it with compose.file",

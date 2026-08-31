@@ -151,8 +151,44 @@ func TestConventionalFileNamesAreSearched(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got != filepath.Join(dir, name) {
-			t.Errorf("%s: composePath = %q", name, got)
+		want, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s: composePath = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// The compose command runs with its working directory set to the component
+// root, so a path relative to lydite's own working directory is resolved a
+// second time and lands at dir/dir/compose.yaml. It holds together only when
+// --dir happens to be absolute, which is the shape a local run tends to have
+// and a CI checkout does not.
+func TestComposePathIsAbsoluteUnderARelativeDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "rust"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "rust", "compose.yaml"), []byte(withHealthcheck), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	for _, c := range []component.Component{
+		{Name: "tally", Dir: "rust"},
+		{Name: "tally", Dir: "rust", Compose: component.Compose{File: "./compose.yaml"}},
+	} {
+		got, err := composePath(c.Dir, c)
+		if err != nil {
+			t.Fatalf("composePath: %v", err)
+		}
+		if !filepath.IsAbs(got) {
+			t.Errorf("composePath = %q, want an absolute path", got)
+		}
+		if _, err := os.Stat(got); err != nil {
+			t.Errorf("composePath = %q, which does not resolve: %v", got, err)
 		}
 	}
 }
