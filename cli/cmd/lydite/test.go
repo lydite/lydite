@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
@@ -33,6 +34,10 @@ the component's to declare.`,
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("test")
 
+			cfg, err := config.Load(dir)
+			if err != nil {
+				return err
+			}
 			file, err := component.Load(dir)
 			if err != nil {
 				return err
@@ -54,7 +59,7 @@ the component's to declare.`,
 			}
 
 			for _, c := range selected {
-				rep.Add(runComponent(cmd.Context(), dir, c))
+				rep.Add(runComponent(cmd.Context(), dir, c, cfg))
 			}
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
@@ -73,7 +78,7 @@ the component's to declare.`,
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, c component.Component) ui.Row {
+func runComponent(ctx context.Context, root string, c component.Component, cfg config.Config) ui.Row {
 	label := "test(" + c.Name + ")"
 	if c.Compose.Declared() {
 		return ui.Row{
@@ -104,6 +109,9 @@ func runComponent(ctx context.Context, root string, c component.Component) ui.Ro
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+	if row, ok := prepare(ctx, dir, label, c, cfg); !ok {
+		return row
+	}
 	res := executil.RunEnv(ctx, dir, env(c), inv.Name, inv.Args...)
 	if res.Ok() {
 		return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed"}
@@ -117,6 +125,35 @@ func runComponent(ctx context.Context, root string, c component.Component) ui.Ro
 		Value:  "failed",
 		Detail: []string{strings.Join(append([]string{inv.Name}, inv.Args...), " ") + " in " + c.Dir},
 	}
+}
+
+// prepare runs whatever the runner needs in place before the suite, and
+// reports a failing row rather than letting the suite start without it.
+//
+// A JavaScript suite run without its node_modules fails at import, naming the
+// tests rather than the absent dependencies — the same misattribution a suite
+// run without its database produces, and the same reason to stop first.
+func prepare(ctx context.Context, dir, label string, c component.Component, cfg config.Config) (ui.Row, bool) {
+	r, ok := runner.Lookup(c.Runner)
+	if !ok || r.Prepare == nil {
+		return ui.Row{}, true
+	}
+	for _, step := range r.Prepare(dir, cfg.TypeScript.Install) {
+		res := executil.RunEnv(ctx, dir, env(c), step.Name, step.Args...)
+		if res.Ok() || step.Optional {
+			continue
+		}
+		return ui.Row{
+			Status: ui.StatusFail,
+			Label:  label,
+			Value:  "dependencies not installed",
+			Detail: []string{
+				strings.Join(append([]string{step.Name}, step.Args...), " ") + " failed in " + c.Dir,
+				"Set typescript.install in " + config.FileName + " if this component installs differently.",
+			},
+		}, false
+	}
+	return ui.Row{}, true
 }
 
 // invocation is the plain variant of a component's suite: the fast path, and

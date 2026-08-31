@@ -33,6 +33,7 @@ cli/internal/clearance/        # the comment surface and the clearance decision 
 cli/internal/forge/            # the hosting platform: commit statuses, permission, comments
 internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
 internal/runner/                # a runner name to its plain/instrumented/build-only invocations
+internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -176,12 +177,35 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   JavaScript test run has no compile step and a syntactically broken mutant would read as a test
   failure.
 
+**A JavaScript component is installed before it is run.** A fresh checkout has
+no `node_modules` and every import fails before a single test is collected, so the
+`vitest` and `jest` runners carry a `Prepare` step and the others carry none —
+`go test` and `cargo` fetch what a build needs on the way past. The rule lives in
+`internal/nodedeps` because the coverage gate asks the same question of the same
+tree, and two copies would answer it identically until one learned about a package
+manager the other had not. The lockfile is the declaration (`package-lock.json` →
+npm, `yarn.lock` → yarn, `pnpm-lock.yaml` → pnpm); every detected form is a
+*frozen* install, since one that may rewrite the lockfile would have lydite change
+what the repository resolves to and then gate the result. A root carrying two
+lockfiles resolves to nothing rather than a guessed priority order, and
+`typescript.install` is how such a repository says what it means. There is
+deliberately **no key naming the package manager**: the lockfile already states it,
+and a second statement could only drift.
+
+An install that fails stops the suite, with a row saying so. A JavaScript suite run
+without its dependencies fails at import, naming the tests rather than what is
+actually missing — the same misattribution a suite run without its database
+produces.
+
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
 a foreign toolchain tests the machine it runs on. **Two of the three languages therefore have no
 repository here to run against** — `web/` is empty and the only `Cargo.toml` files are pin
-manifests, deliberately not components — so the cargo and vitest runners are exercised for real
-only by `lydite/proving-ground` ([#38](https://github.com/lydite/lydite/issues/38)).
+manifests, deliberately not components. `ci-end2end.yml`'s `proving ground` job closes that for
+TypeScript, running `lydite test` against [`lydite/proving-ground`](https://github.com/lydite/proving-ground)
+on a checkout with no `node_modules`. The cargo runner is still argv-only: both of that
+repository's Rust and Go-API components declare compose services, which `lydite test` refuses,
+so its first real execution comes with `internal/compose`.
 
 Where a runner emits JUnit, the invocation names where it lands: the quality-history ledger
 ([#26](https://github.com/lydite/lydite/issues/26)) records test counts, which no coverage report

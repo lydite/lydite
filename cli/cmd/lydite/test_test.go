@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
@@ -24,7 +25,7 @@ func TestAComponentDeclaringServicesFailsRatherThanRunning(t *testing.T) {
 		Dir:     ".",
 		Runner:  runner.GoTest,
 		Compose: component.Compose{Up: []string{"db"}},
-	})
+	}, config.Default())
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -36,7 +37,7 @@ func TestAComponentDeclaringServicesFailsRatherThanRunning(t *testing.T) {
 func TestAComponentDeclaringSetupFailsRatherThanRunning(t *testing.T) {
 	row := runComponent(context.Background(), t.TempDir(), component.Component{
 		Name: "api", Dir: ".", Runner: runner.GoTest, Setup: []string{"make migrate"},
-	})
+	}, config.Default())
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -190,5 +191,37 @@ func write(t *testing.T, root, rel, body string) {
 	}
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A JavaScript suite run without its node_modules fails at import, naming the
+// tests rather than the absent dependencies.
+func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "web/package.json", `{"name":"web"}`)
+	// The install is the typescript.install override, so the row under test
+	// is lydite's attribution of a failed install rather than any package
+	// manager's behaviour — internal/nodedeps covers the detection.
+	cfg := config.Default()
+	cfg.TypeScript.Install = "exit 3"
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "web", Dir: "web", Runner: runner.Vitest,
+	}, cfg)
+	if row.Status != ui.StatusFail {
+		t.Fatalf("status = %q, want a failure", row.Status)
+	}
+	if row.Value != "dependencies not installed" {
+		t.Errorf("value = %q, want the install named rather than the suite", row.Value)
+	}
+}
+
+// A Go component has nothing to install, so nothing runs ahead of its suite.
+func TestAGoComponentHasNoPreparationStep(t *testing.T) {
+	r, ok := runner.Lookup(runner.GoTest)
+	if !ok {
+		t.Fatal("no go-test runner")
+	}
+	if r.Prepare != nil {
+		t.Error("go-test declares a preparation step it does not need")
 	}
 }

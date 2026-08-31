@@ -33,6 +33,8 @@ package runner
 import (
 	"path"
 	"sort"
+
+	"lydite/lydite/internal/nodedeps"
 )
 
 // Name identifies a runner in a component declaration.
@@ -97,6 +99,9 @@ type Invocation struct {
 	// quality-history ledger records test counts, which is a number no
 	// coverage report carries.
 	JUnitReport string
+	// Optional marks a preparation step whose failure is not the run
+	// failing. A suite invocation is never optional.
+	Optional bool
 }
 
 // Runner is what lydite knows about one test command.
@@ -108,6 +113,16 @@ type Runner struct {
 	// Build constructs one variant's invocation, with args from the
 	// component declaration placed ahead of anything the variant adds.
 	Build func(variant Variant, args []string) (Invocation, bool)
+	// Prepare is what has to run in the component's directory before any
+	// variant will work, or nil when the toolchain needs nothing.
+	//
+	// Only the JavaScript runners have one. A fresh checkout has no
+	// node_modules and every import fails before a single test is collected,
+	// while `go test` and `cargo` fetch what a build needs on the way past.
+	// It lives on the runner rather than in the command so the command layer
+	// carries no per-language branch — the thing this registry exists to
+	// remove.
+	Prepare func(dir, override string) []Invocation
 }
 
 // registry is the whole set, keyed by declared name.
@@ -115,8 +130,8 @@ var registry = map[Name]Runner{
 	GoTest:              {Name: GoTest, Lang: Go, Build: buildGoTest},
 	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest},
 	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest},
-	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest},
-	Jest:                {Name: Jest, Lang: TypeScript, Build: buildJest},
+	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest, Prepare: installNodeDeps},
+	Jest:                {Name: Jest, Lang: TypeScript, Build: buildJest, Prepare: installNodeDeps},
 }
 
 // Lookup returns the runner a component declared.
@@ -239,6 +254,20 @@ func llvmCovNextest(args []string) Invocation {
 		CoverageReport: json,
 		JUnitReport:    nextestJUnit,
 	}
+}
+
+// installNodeDeps is the install internal/nodedeps resolves from the
+// component root's lockfile, or from the typescript.install override.
+//
+// An empty result is not a failure: a root no single lockfile identifies has
+// nothing lydite can install without guessing, and guessing writes a lockfile
+// the repository does not use.
+func installNodeDeps(dir, override string) []Invocation {
+	var out []Invocation
+	for _, cmd := range nodedeps.Commands(dir, override) {
+		out = append(out, Invocation{Name: cmd.Argv[0], Args: cmd.Argv[1:], Optional: cmd.Optional})
+	}
+	return out
 }
 
 // buildVitest runs through the package manager's own binary directory rather

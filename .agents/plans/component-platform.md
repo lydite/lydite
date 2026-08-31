@@ -67,6 +67,49 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   And nothing names a JavaScript package manager or workspace filter, so whether
   `vitest` runs at the workspace root or per package can only be said in `args`.
 
+## Toolchains are resolved per ecosystem, not per component
+
+`internal/toolchain.Requirements` reads every manifest under the scan root and
+returns **one requirement per language**. A component is a build unit that
+states its own versions, so the component model makes per-component resolution
+the natural shape — and `lydite test` provisions nothing at all today.
+
+What that costs right now, measured against the code rather than assumed:
+
+- **Go and Rust are fine.** Go's directive is a minimum and the toolchain is
+  backward-compatible, so the highest directive across modules builds all of
+  them. Rust already resolves per crate at *invocation* time, because rustup
+  reads `rust-toolchain.toml` from the directory cargo runs in and
+  `RUSTUP_TOOLCHAIN` is set only for a `.lydite/config.yml` override. The one
+  rough edge is that only the highest channel is pre-materialised, so a crate
+  on an older one has rustup install it in the middle of `cargo clippy` —
+  which is what pre-materialising exists to avoid.
+- **Node is the real gap.** One runtime is installed, at the highest
+  `engines.node` found. Two workspaces needing Node 20 and Node 24 both get 24.
+- **TypeScript's own version is not a toolchain and needs nothing.** The
+  compiler is a devDependency of each workspace, Biome parses TypeScript with
+  its own parser and depends on no compiler package, and both the test runner
+  and `tsc --noEmit` resolve out of the component directory. A repository
+  mixing TypeScript 5 and 7 across components already works.
+
+Belongs with step 7, where scan learns its units from the component.
+
+## The package manager is not a configuration key
+
+The lockfile is the declaration. `package-lock.json`, `yarn.lock` and
+`pnpm-lock.yaml` are committed facts, so a key naming the manager could only
+restate one and then drift from it — the same argument that keeps toolchain
+versions in the repository's own manifests.
+
+The single case detection cannot answer is a root carrying two lockfiles, and
+`typescript.install` already answers it, more completely than a manager name
+could: it also expresses a Corepack-pinned flow and a monorepo install that no
+single manager name implies. `internal/nodedeps` is where that rule lives, so
+the coverage gate and the test run cannot disagree about it.
+
+Open, for when `setup` lands at step 3: `typescript.install` is a repository-wide
+key while `setup` is per component, and the two will overlap.
+
 ## What step 1 left for later
 
 - **`coverage.source` survives.** ADR 0016 removes it, and step 6 is where that

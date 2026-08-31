@@ -321,33 +321,6 @@ func TestFindReportForUnitCandidateFallbackRelativeToCrateDir(t *testing.T) {
 	}
 }
 
-func TestResolvePackageManager(t *testing.T) {
-	cases := []struct {
-		name      string
-		lockfiles []string
-		wantMgr   string
-		wantOK    bool
-	}{
-		{"npm", []string{"package-lock.json"}, "npm", true},
-		{"yarn", []string{"yarn.lock"}, "yarn", true},
-		{"pnpm", []string{"pnpm-lock.yaml"}, "pnpm", true},
-		{"none", nil, "", false},
-		{"ambiguous both present", []string{"package-lock.json", "yarn.lock"}, "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			for _, lf := range tc.lockfiles {
-				write(t, dir, lf, "")
-			}
-			mgr, ok := resolvePackageManager(dir)
-			if ok != tc.wantOK || mgr != tc.wantMgr {
-				t.Fatalf("resolvePackageManager = (%q, %v), want (%q, %v)", mgr, ok, tc.wantMgr, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestTsWorkspaceRootsDedupesNestedPackages(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "yarn.lock", "")
