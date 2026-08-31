@@ -350,8 +350,14 @@ file lydite does not own.
 ### The scheduler: ports are the only thing that serialises
 
 Components run concurrently. `internal/scheduler` bounds how many at once and
-holds a lock on each host port a component's compose services publish, so two
-components publishing the same one run in sequence. It takes plain data — an item
+holds a lock on what a component occupies while it runs: each host port its
+compose services publish, and its own directory. Two components sharing either
+run in sequence. Both conflicts are physical — the second would fail to bind
+the port, and two components rooted at one tree install into, build in and
+write their output to it at once, where an `npm ci` removing and recreating a
+`node_modules` another is importing from is not a race either suite can report
+honestly. `component.validate` enforces unique names, not unique directories,
+so a repository may legitimately declare two components over one root. It takes plain data — an item
 is a name and a set of ports — and the caller supplies the function that runs one,
 so the constraint is testable without a container runtime and the port-conflict
 predicate has one implementation rather than one here and another in the planner
@@ -380,6 +386,14 @@ them would cost parallelism to express a claim their author never made — and w
 need a policy for what a dependent does when its dependency fails, which is new
 surface bought with nothing. `TestDependsOnDoesNotSerialise` holds it.
 
+**An interrupted run is an error, not a verdict.** The rows for components that
+never started are `unmeasured`, which does not vote, so a run cut short by a CI
+job timeout would otherwise report no failures and exit 0 — half the repository
+untested, reading as a green gate, which is worse than the process dying where
+it stood. `runComponents` returns an error naming how many never ran, and
+`main.go` exits 1 on it. The report is still written, because it is what says
+which components did run.
+
 **A failure never cancels the rest.** `lydite test` is a gate, and somebody
 clearing one wants every failure in a single run rather than N runs paying the
 container startup each time. GitHub Actions already has `fail-fast` on the matrix,
@@ -404,9 +418,11 @@ observed maximum concurrency and names each pair that shared a port. The observe
 number is the point — every assertion about port locks is satisfied by a run that
 never had two components going at once, so a report that cannot distinguish the
 two is a report that proves nothing. `.github/assert-proving-ground.py` holds the
-proving ground to a maximum of at least 2 and to having serialised `go/api` and
-`rust` on 5432, which they publish under services deliberately named `db` and
-`postgres` so a lock keyed on names fails there.
+proving ground to a maximum of at least 2 and to having serialised `tally` and
+`api` on 5432 — the components rooted at `rust/` and `go/api/`, which publish it
+under services deliberately named `postgres` and `db`, so a lock keyed on
+service names fails there. The row names components, never directories or
+services, which is the only one of the three that is unique by construction.
 
 ### The orphan gate: what makes the declaration trustworthy
 

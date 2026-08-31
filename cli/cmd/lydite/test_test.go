@@ -569,7 +569,9 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, config.Default(), 3, false, rep)
+	if err := runComponents(context.Background(), root, declared, config.Default(), 3, false, rep); err != nil {
+		t.Fatalf("runComponents: %v", err)
+	}
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -593,15 +595,17 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 // internal/scheduler's own test, which forces the overlap with a barrier.
 func TestDependsOnDoesNotSerialise(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "sdk/go.mod", "module sdk\n\ngo 1.26\n")
+	write(t, root, "cli/go.mod", "module cli\n\ngo 1.26\n")
 	declared := []component.Component{
-		{Name: "sdk", Dir: "mod", Runner: runner.GoTest},
-		{Name: "cli", Dir: "mod", Runner: runner.GoTest, DependsOn: []string{"sdk"}},
+		{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
+		{Name: "cli", Dir: "cli", Runner: runner.GoTest, DependsOn: []string{"sdk"}},
 	}
 	plans := planComponents(context.Background(), root, declared, false)
 	var items []scheduler.Item
 	for _, p := range plans {
 		defer p.log.Close()
-		items = append(items, scheduler.Item{Name: p.c.Name, Ports: p.ports})
+		items = append(items, scheduler.Item{Name: p.c.Name, Dir: p.c.Dir, Ports: p.ports})
 	}
 	if got := scheduler.Conflicts(items); len(got) != 0 {
 		t.Fatalf("Conflicts = %v, want none: a depends_on edge is not a port", got)
@@ -622,7 +626,17 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+	err := runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+	// An interrupted run is an error rather than a verdict: it never reached
+	// one. The unmeasured rows below do not vote, so without this a run cut
+	// short by a CI job timeout would report no failures and exit 0 — half the
+	// repository untested, reading as a green gate.
+	if err == nil {
+		t.Fatal("a run interrupted before every component started must not report success")
+	}
+	if !strings.Contains(err.Error(), "2 of 2") {
+		t.Errorf("err = %v, want the count that never ran", err)
+	}
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -637,10 +651,11 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	if seen != len(declared) {
 		t.Fatalf("%d component rows, want %d: a component that never ran must still be reported", seen, len(declared))
 	}
-	// An unmeasured row must not vote: nothing failed here, the run was
-	// cancelled.
+	// The rows themselves stay unmeasured and do not vote: nothing failed,
+	// and a component that never ran is not a failing one. What carries the
+	// interruption is the error above, which is what decides the exit code.
 	if rep.ExitCode() != 0 {
-		t.Errorf("exit code = %d, want 0: a cancelled component is not a failure", rep.ExitCode())
+		t.Errorf("exit code = %d: a component that never ran is not a failing one", rep.ExitCode())
 	}
 }
 
@@ -649,7 +664,8 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
 	row := scheduleRow(scheduler.Outcome{
 		MaxConcurrent: 3,
-		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", Port: 5432}},
+		Started:       4,
+		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", On: "port 5432"}},
 	}, 4, 4)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)

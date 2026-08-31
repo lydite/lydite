@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -80,8 +81,15 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
-			runComponents(cmd.Context(), dir, selected, cfg, limit, stream, rep)
-			return renderTestReport(cmd, rep, asJSON, noColor)
+			interrupted := runComponents(cmd.Context(), dir, selected, cfg, limit, stream, rep)
+			rendered := renderTestReport(cmd, rep, asJSON, noColor)
+			// The report is written either way — it is what says which
+			// components did run — but an interrupted run is an error rather
+			// than a verdict, because it never reached one.
+			if interrupted != nil {
+				return interrupted
+			}
+			return rendered
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
@@ -164,7 +172,13 @@ type componentPlan struct {
 // depends on it, and ordering by whichever finished first would put this run's
 // timing into the document, so two runs of the same declaration would produce
 // different reports.
-func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+//
+// It returns an error when the run was interrupted before every component
+// started. The unstarted rows are `unmeasured`, which does not vote, so
+// without this a run cut short by a CI job timeout would report no failures
+// and exit 0 — a run that tested half the repository reading as a green gate,
+// which is worse than the process dying where it stood.
+func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) error {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -188,7 +202,7 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 			Value:  "not run",
 			Detail: []string{"the run ended before this component started"},
 		}
-		items = append(items, scheduler.Item{Name: p.c.Name, Ports: p.ports})
+		items = append(items, scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Ports: p.ports})
 		index = append(index, i)
 	}
 
@@ -201,6 +215,12 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 	for _, r := range rows {
 		rep.Add(r)
 	}
+
+	unstarted := len(items) - outcome.Started
+	if ctx.Err() != nil && unstarted > 0 {
+		return fmt.Errorf("interrupted: %d of %d component(s) never ran", unstarted, len(items))
+	}
+	return nil
 }
 
 // planComponents opens each component's log and loads the stack of any that
@@ -268,13 +288,13 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 // — can see the constraint was reached rather than merely declared.
 func scheduleRow(outcome scheduler.Outcome, components, limit int) ui.Row {
 	value := fmt.Sprintf("%d component(s), max %d concurrent", components, outcome.MaxConcurrent)
-	if len(outcome.Conflicts) > 0 {
-		value += fmt.Sprintf(", %d pair(s) serialised", len(outcome.Conflicts))
+	if pairs := scheduler.Pairs(outcome.Conflicts); pairs > 0 {
+		value += fmt.Sprintf(", %d pair(s) serialised", pairs)
 	}
 	row := ui.Row{Status: ui.StatusPass, Label: "schedule", Value: value}
 	for _, c := range outcome.Conflicts {
 		row.Detail = append(row.Detail,
-			fmt.Sprintf("%s and %s serialised on port %d", c.A, c.B, c.Port))
+			fmt.Sprintf("%s and %s serialised on %s", c.A, c.B, c.On))
 	}
 	if limit == 1 && components > 1 {
 		row.Detail = append(row.Detail, "--concurrency 1: components ran one at a time")
@@ -303,11 +323,6 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		return prepared
 	}
 
-	// Both teardowns are deferred before anything starts, so every path out
-	// of here runs them — including a setup that failed halfway, which is
-	// when a half-applied migration most needs undoing. Leaked containers
-	// poison the next local run, and the port they hold is the next
-	// component's to bind.
 	// Deferred before anything starts, so every path out of here tears the
 	// stack down — including a setup that failed halfway, which is when a
 	// half-applied migration most needs undoing.

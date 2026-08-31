@@ -93,9 +93,16 @@ def main(path: str, checkout: str) -> int:
                 f"schedule reports max {concurrent} concurrent: nothing ever ran at once, so the "
                 "port lock was never contended and every assertion about it here is vacuous"
             )
-        detail = " ".join(schedule.get("detail", []))
+        # One whole line has to say it, in either order. Joining the detail
+        # and testing for each name separately passes on a report whose lines
+        # are "tally and web ... 5432" and "api and db ... 6379" — neither of
+        # which is the pair this exists to observe.
         a, b = EXPECTED_SERIALISED
-        if not (a in detail and b in detail and str(CONTENDED_PORT) in detail):
+        want = re.compile(
+            rf"(?:{re.escape(a)} and {re.escape(b)}|{re.escape(b)} and {re.escape(a)})"
+            rf" serialised on port {CONTENDED_PORT}$"
+        )
+        if not any(want.match(line) for line in schedule.get("detail", [])):
             failures.append(
                 f"schedule detail {schedule.get('detail')!r} does not record {a} and {b} being "
                 f"serialised on port {CONTENDED_PORT} — they publish it under differently named "

@@ -18,21 +18,43 @@ package scheduler
 import (
 	"context"
 	"sort"
+	"strconv"
 	"sync"
 )
 
-// Item is one unit of work: what to call it, and the host ports it holds for
-// as long as it runs.
+// Item is one unit of work and the things it holds for as long as it runs.
 //
-// The ports are the whole of the constraint. Two items publishing the same one
-// cannot run together — not because of anything they mean to each other, but
-// because the second would fail to bind.
+// Both are physical, which is the whole of the constraint. Two items
+// publishing the same host port cannot run together because the second would
+// fail to bind; two rooted at the same directory cannot because they install
+// into, build in and write their output to one tree — an `npm ci` removing and
+// recreating a node_modules another item is importing from is not a race
+// either of their suites can report honestly.
+//
+// Nothing logical belongs here. Two items that merely mean something to each
+// other are not in conflict, and serialising them would cost parallelism to
+// express a claim their author never made.
 type Item struct {
 	Name  string
+	Dir   string
 	Ports []int
 }
 
-// Conflict is a pair of items that share a host port, and the port they share.
+// locks are what an item holds while it runs, named the way a report should
+// say them.
+func (it Item) locks() []string {
+	var out []string
+	if it.Dir != "" {
+		out = append(out, "directory "+it.Dir)
+	}
+	for _, p := range it.Ports {
+		out = append(out, "port "+strconv.Itoa(p))
+	}
+	return out
+}
+
+// Conflict is a pair of items that hold something in common, and what they
+// hold.
 //
 // It is derived from the declaration rather than observed at run time, so it
 // says the same thing whether or not the two ever came close to overlapping.
@@ -41,7 +63,9 @@ type Item struct {
 // reached it.
 type Conflict struct {
 	A, B string
-	Port int
+	// On is what the two hold in common, phrased for a report: "port 5432",
+	// "directory web".
+	On string
 }
 
 // Outcome is what a run of the scheduler can say about itself afterwards.
@@ -53,9 +77,15 @@ type Conflict struct {
 type Outcome struct {
 	MaxConcurrent int
 	Conflicts     []Conflict
+	// Started is how many items the run actually reached. It is less than the
+	// number given only when the context was cancelled, and a caller needs it
+	// to tell a run that finished from one that was cut short — the two
+	// otherwise differ by nothing a report can see.
+	Started int
 }
 
-// Conflicts returns every pair of items sharing a host port.
+// Conflicts returns every pair of items holding something in common, once per
+// thing they share.
 //
 // The planner uses this to keep such a pair out of one shard, where they would
 // serialise; the scheduler uses it for the report. Both read the same
@@ -65,28 +95,40 @@ func Conflicts(items []Item) []Conflict {
 	var out []Conflict
 	for i := range items {
 		for j := i + 1; j < len(items); j++ {
-			for _, port := range shared(items[i].Ports, items[j].Ports) {
-				out = append(out, Conflict{A: items[i].Name, B: items[j].Name, Port: port})
+			for _, on := range shared(items[i].locks(), items[j].locks()) {
+				out = append(out, Conflict{A: items[i].Name, B: items[j].Name, On: on})
 			}
 		}
 	}
 	return out
 }
 
-// shared returns the host ports two items both publish, sorted so a report
-// reads the same on every run.
-func shared(a, b []int) []int {
-	set := make(map[int]struct{}, len(a))
-	for _, p := range a {
-		set[p] = struct{}{}
+// Pairs counts the distinct pairs among conflicts, which is not the number of
+// conflicts: two components sharing both a Postgres port and a Redis port are
+// one pair the scheduler serialises, and reporting them as two would say the
+// run did more sequencing than it did.
+func Pairs(conflicts []Conflict) int {
+	seen := make(map[[2]string]struct{}, len(conflicts))
+	for _, c := range conflicts {
+		seen[[2]string{c.A, c.B}] = struct{}{}
 	}
-	var out []int
-	for _, p := range b {
-		if _, ok := set[p]; ok {
-			out = append(out, p)
+	return len(seen)
+}
+
+// shared returns what two items both hold, sorted so a report reads the same on
+// every run.
+func shared(a, b []string) []string {
+	set := make(map[string]struct{}, len(a))
+	for _, l := range a {
+		set[l] = struct{}{}
+	}
+	var out []string
+	for _, l := range b {
+		if _, ok := set[l]; ok {
+			out = append(out, l)
 		}
 	}
-	sort.Ints(out)
+	sort.Strings(out)
 	return out
 }
 
@@ -112,7 +154,7 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 	var (
 		mu      sync.Mutex
 		cond    = sync.NewCond(&mu)
-		held    = make(map[int]struct{})
+		held    = make(map[string]struct{})
 		running int
 		out     = Outcome{Conflicts: Conflicts(items)}
 	)
@@ -124,9 +166,9 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		pending[i] = i
 	}
 
-	free := func(ports []int) bool {
-		for _, p := range ports {
-			if _, taken := held[p]; taken {
+	free := func(locks []string) bool {
+		for _, l := range locks {
+			if _, taken := held[l]; taken {
 				return false
 			}
 		}
@@ -141,7 +183,7 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		// what is already running still has to be waited for.
 		if running < limit && ctx.Err() == nil {
 			for k, idx := range pending {
-				if free(items[idx].Ports) {
+				if free(items[idx].locks()) {
 					next = k
 					break
 				}
@@ -149,7 +191,7 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		}
 		if next == -1 {
 			// Nothing startable. This cannot wait forever: with nothing
-			// running no port is held, so the first pending item is always
+			// running no lock is held, so the first pending item is always
 			// startable — unless the context is done, and then the only wait
 			// is for the items still finishing, each of which broadcasts.
 			if running == 0 {
@@ -161,10 +203,11 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 
 		idx := pending[next]
 		pending = append(pending[:next], pending[next+1:]...)
-		for _, p := range items[idx].Ports {
-			held[p] = struct{}{}
+		for _, l := range items[idx].locks() {
+			held[l] = struct{}{}
 		}
 		running++
+		out.Started++
 		if running > out.MaxConcurrent {
 			out.MaxConcurrent = running
 		}
@@ -172,8 +215,8 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		go func(idx int) {
 			defer func() {
 				mu.Lock()
-				for _, p := range items[idx].Ports {
-					delete(held, p)
+				for _, l := range items[idx].locks() {
+					delete(held, l)
 				}
 				running--
 				cond.Broadcast()

@@ -118,7 +118,11 @@ components:
 
 lydite owns no service schema and hard-codes no container runtime: it probes for docker or podman
 and names the one it found. `wait: healthy` needs the compose service to declare a healthcheck, and
-is refused rather than quietly downgraded when it does not. `--keep-services` leaves them running.
+is refused rather than quietly downgraded when it does not.
+
+Components run concurrently. `--concurrency` bounds how many at once (4 by default, or `max` for
+one slot per selected component), and two components that publish the same host port — or that are
+rooted at the same directory — run one after the other, because those conflicts are physical.
 
 Components are declared rather than discovered, because the declaration is the reviewable
 statement of what gets tested and its history is the record of every change to that. See

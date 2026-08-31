@@ -126,7 +126,7 @@ func TestSharedPortSerialises(t *testing.T) {
 	if out.MaxConcurrent < 2 {
 		t.Fatalf("MaxConcurrent = %d: nothing ever ran at once, so the port lock was never contended", out.MaxConcurrent)
 	}
-	if len(out.Conflicts) != 1 || out.Conflicts[0].Port != 5432 {
+	if len(out.Conflicts) != 1 || out.Conflicts[0].On != "port 5432" {
 		t.Fatalf("Conflicts = %v, want the one pair on 5432", out.Conflicts)
 	}
 }
@@ -278,5 +278,56 @@ func TestConflictsPairsEverySharedPort(t *testing.T) {
 		if c.A != "a" || c.B != "b" {
 			t.Fatalf("unexpected pair %v", c)
 		}
+	}
+	// Two ports shared by one pair is one pair serialised, not two. A report
+	// counting conflicts would say the run did more sequencing than it did.
+	if n := Pairs(got); n != 1 {
+		t.Fatalf("Pairs = %d, want 1", n)
+	}
+}
+
+// Two components rooted at one directory install into, build in and write
+// their output to one tree, so they cannot run at once however their ports are
+// arranged. An npm ci removing and recreating a node_modules another component
+// is importing from is not a race either suite can report honestly.
+func TestSameDirectorySerialises(t *testing.T) {
+	items := []Item{
+		{Name: "unit", Dir: "web"},
+		{Name: "integration", Dir: "web"},
+		{Name: "api", Dir: "go/api"},
+	}
+	got := Conflicts(items)
+	if len(got) != 1 || got[0].On != "directory web" {
+		t.Fatalf("Conflicts = %v, want the two web components on their directory", got)
+	}
+
+	var mu sync.Mutex
+	var log []string
+	release := make(chan struct{})
+	entered := map[string]chan struct{}{
+		"unit": make(chan struct{}), "integration": make(chan struct{}), "api": make(chan struct{}),
+	}
+	done, out := runAsync(items, len(items), func(_ context.Context, i int) {
+		name := items[i].Name
+		mu.Lock()
+		log = append(log, name+":enter")
+		mu.Unlock()
+		close(entered[name])
+		<-release
+		mu.Lock()
+		log = append(log, name+":exit")
+		mu.Unlock()
+	})
+	waitFor(t, "unit to start", entered["unit"])
+	waitFor(t, "api to start alongside it", entered["api"])
+	close(release)
+	waitFor(t, "the run to finish", done)
+
+	a, b := interval(t, log, "unit"), interval(t, log, "integration")
+	if a.start < b.end && b.start < a.end {
+		t.Fatalf("unit %v and integration %v overlap in one directory: %v", a, b, log)
+	}
+	if out.MaxConcurrent < 2 {
+		t.Fatalf("MaxConcurrent = %d: nothing ran at once, so the lock was never contended", out.MaxConcurrent)
 	}
 }
