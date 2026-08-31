@@ -34,6 +34,7 @@ cli/internal/forge/            # the hosting platform: commit statuses, permissi
 internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
 internal/runner/                # a runner name to its plain/instrumented/build-only invocations
 internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
+internal/compose/               # the services a component's suite needs (see Services below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -71,9 +72,9 @@ a lydite-managed cache directory rather than trusting whatever's already on the 
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
 self-update (checksum-verified binary replacement, refuses on dev builds, passive update nudge on
 every other command). `lydite coverage` has been verified end-to-end against this repo's own real
-`lydite` branch on GitHub, not just a local fixture. `lydite test` runs a component's suite and
-nothing else yet — a component declaring `compose` services or `setup`/`teardown` commands fails
-with a message naming what is missing rather than running its tests without them.
+`lydite` branch on GitHub, not just a local fixture. `lydite test` runs each component's suite in
+turn, starting the compose services and running the `setup`/`teardown` commands it declares;
+running them in parallel under a port-aware scheduler is what remains.
 
 ## CI
 
@@ -201,15 +202,68 @@ Nothing in `internal/runner` executes anything, and its tests assert argv — th
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
 a foreign toolchain tests the machine it runs on. **Two of the three languages therefore have no
 repository here to run against** — `web/` is empty and the only `Cargo.toml` files are pin
-manifests, deliberately not components. `ci-end2end.yml`'s `proving ground` job closes that for
-TypeScript, running `lydite test` against [`lydite/proving-ground`](https://github.com/lydite/proving-ground)
-on a checkout with no `node_modules`. The cargo runner is still argv-only: both of that
-repository's Rust and Go-API components declare compose services, which `lydite test` refuses,
-so its first real execution comes with `internal/compose`.
+manifests, deliberately not components. `ci-end2end.yml`'s `proving ground` job closes that,
+running `lydite test` against every component of
+[`lydite/proving-ground`](https://github.com/lydite/proving-ground) on a bare checkout — no
+`node_modules`, no services started, nothing prepared by the workflow, because a step doing either
+would hide the case a consumer actually hits.
 
 Where a runner emits JUnit, the invocation names where it lands: the quality-history ledger
 ([#26](https://github.com/lydite/lydite/issues/26)) records test counts, which no coverage report
 carries.
+
+
+### Services: a compose file, and no schema of lydite's own
+
+`internal/compose` starts what a component's suite needs and stops it again.
+lydite owns **no service schema**: images, ports, environment and healthchecks are
+compose's job already, and a second description here could only agree redundantly
+or drift.
+
+It hard-codes **no container runtime** either. Which implementation is present is a
+property of the machine, not of the repository — podman on a laptop, docker on a
+runner — so `Probe` tries `docker compose`, `podman compose`, then the standalone
+`docker-compose`, and the run says which it chose on stderr. It *runs* each
+candidate rather than looking it up on PATH: `docker` exists on a machine whose
+daemon is stopped and on one with no compose plugin, and neither can start a
+service. A component declaring no services is never probed at all, so a repository
+without services runs on a machine with no container engine.
+
+**`wait: healthy` requires a declared healthcheck, and is refused without one**
+rather than degrading to `started`. A suite racing a database that is not yet
+listening is the flakiest thing a pipeline can contain, and the failure is
+attributed to the test rather than to the wait. It is also the default, so a
+component that says nothing gets the strict answer. The waiting itself is compose's
+`--wait`, not lydite polling `ps`: the healthcheck in the file is what defines
+ready, and a second implementation here would be lydite deciding what healthy
+means. `started` and `none` produce the same invocation, because `up --detach`
+already returns only once every container has started — the distinction is the
+repository's statement of intent, and `healthy` is the one that changes the command.
+
+**Teardown runs on every path out**, including a `setup` that failed halfway, which
+is when a half-applied migration most needs undoing. It is `down --volumes`: a suite
+that truncates and reseeds is deterministic only if it starts from nothing. Both
+teardowns get a context of their own, because the run's may already be cancelled and
+a cancelled teardown is the leak this exists to prevent. A failing `teardown` command
+turns a passing component into a failing one — it has left state the next run
+inherits — but never masks a failure that already happened, since the earlier one is
+what the reader has to act on.
+
+Each component's stack gets its own compose project (`lydite-<name>`), so two
+components cannot adopt each other's containers and teardown removes exactly what
+this run started. Published **host ports** are read while the file is open, in both
+of compose's port syntaxes: the scheduler serialises two components that publish the
+same one, and the conflict is physical — two services called `db` on different ports
+do not collide, and a `db` and a `postgres` on the same port do.
+
+`--keep-services` leaves them running. It is a flag and never a key in the
+declaration, because whether to keep services between runs is a choice about one
+invocation rather than a fact about the repository.
+
+Unknown keys in a compose file are **accepted**, unlike everywhere else lydite parses
+YAML. The file is compose's, not lydite's, and rejecting a key lydite has no opinion
+about would make lydite's version the ceiling on what a repository may write in a
+file lydite does not own.
 
 ## Configuration
 

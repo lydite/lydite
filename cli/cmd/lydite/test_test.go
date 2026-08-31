@@ -16,33 +16,6 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
-// A suite executed without the database it declared reports failures that
-// name the tests instead of the missing service, and a green run is worse
-// still: it would mean the declaration was ignored and nobody was told.
-func TestAComponentDeclaringServicesFailsRatherThanRunning(t *testing.T) {
-	row := runComponent(context.Background(), t.TempDir(), component.Component{
-		Name:    "api",
-		Dir:     ".",
-		Runner:  runner.GoTest,
-		Compose: component.Compose{Up: []string{"db"}},
-	}, config.Default())
-	if row.Status != ui.StatusFail {
-		t.Fatalf("status = %q, want a failure", row.Status)
-	}
-	if !strings.Contains(strings.Join(row.Detail, " "), "compose services") {
-		t.Errorf("detail = %v, want it to name the services", row.Detail)
-	}
-}
-
-func TestAComponentDeclaringSetupFailsRatherThanRunning(t *testing.T) {
-	row := runComponent(context.Background(), t.TempDir(), component.Component{
-		Name: "api", Dir: ".", Runner: runner.GoTest, Setup: []string{"make migrate"},
-	}, config.Default())
-	if row.Status != ui.StatusFail {
-		t.Fatalf("status = %q, want a failure", row.Status)
-	}
-}
-
 // The plain variant is the fast path, and the only one `lydite test` wants.
 func TestInvocationIsThePlainVariant(t *testing.T) {
 	inv, err := invocation(component.Component{Runner: runner.GoTest, Args: []string{"-race", "./..."}})
@@ -206,7 +179,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row := runComponent(context.Background(), root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}, cfg)
+	}, cfg, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -224,4 +197,96 @@ func TestAGoComponentHasNoPreparationStep(t *testing.T) {
 	if r.Prepare != nil {
 		t.Error("go-test declares a preparation step it does not need")
 	}
+}
+
+// Teardown undoes what setup did, so it has to run on the path where setup
+// failed halfway — a half-applied migration is exactly what needs undoing.
+func TestTeardownRunsWhenSetupFails(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	marker := filepath.Join(root, "torn-down")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+		Setup:    []string{"exit 7"},
+		Teardown: []string{"touch " + marker},
+	}, config.Default(), false)
+	if row.Status != ui.StatusFail || row.Value != "setup failed" {
+		t.Fatalf("row = %+v, want the setup named as the failure", row)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("teardown must run even when setup failed")
+	}
+}
+
+// Leftover data makes the next run depend on the last one.
+func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
+	marker := filepath.Join(root, "torn-down")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+		Teardown: []string{"touch " + marker},
+	}, config.Default(), false)
+	if row.Status != ui.StatusFail || row.Value != "failed" {
+		t.Fatalf("row = %+v, want the suite named as the failure", row)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("teardown must run when the suite failed")
+	}
+}
+
+// A teardown that fails has left state behind for the next run to inherit,
+// so it fails a component that otherwise passed.
+func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+		Teardown: []string{"exit 4"},
+	}, config.Default(), false)
+	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
+		t.Fatalf("row = %+v, want the teardown named", row)
+	}
+}
+
+// It never masks a failure that already happened: the earlier one is what
+// the reader has to act on.
+func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+		Teardown: []string{"exit 4"},
+	}, config.Default(), false)
+	if row.Value != "failed" {
+		t.Errorf("value = %q, want the suite failure to survive", row.Value)
+	}
+}
+
+// Setup runs before the suite, not alongside it.
+func TestSetupRunsBeforeTheSuite(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	row := runComponent(context.Background(), root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+		// The suite reads what setup wrote, so it can only pass if the
+		// ordering holds.
+		Setup: []string{"echo 1 > setup-ran"},
+		Args:  []string{"-run", "TestFoo", "./..."},
+	}, config.Default(), false)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v", row)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mod", "setup-ran")); err != nil {
+		t.Error("setup must run in the component directory, before the suite")
+	}
+}
+
+// A component declaring no services needs no runtime, so a repository without
+// one runs on a machine with no container engine at all.
+func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+	root := fixtureRepo(t, "components: []\n")
+	stop, _, ok := services(context.Background(), root, "test(fixture)", component.Component{Name: "fixture", Dir: "mod"}, false)
+	if !ok {
+		t.Fatal("a component with no compose block must not be probed for a runtime")
+	}
+	stop()
 }

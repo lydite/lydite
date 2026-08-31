@@ -1,8 +1,8 @@
-# Session prompt — step 2: the orphan-file gate, then `internal/compose`
+# Session prompt — step 2: the orphan-file gate
 
 A declared component list fails open: nothing breaks when it goes stale, so new
 code is simply never tested and the build stays green. The orphan gate closes
-that. `internal/compose` then gives a component the services its suite needs.
+that.
 
 ## Setup
 
@@ -16,8 +16,8 @@ root; run all go and golangci-lint commands from there.
     git switch -c feat/orphan-gate origin/main
 
 **Verify step 1 is merged first** — it carries `internal/component`,
-`internal/runner`, `lydite test` and the `.lydite/` layout everything below
-builds on. If it is not merged, stop and say so.
+`internal/runner`, `internal/compose`, `lydite test` and the `.lydite/` layout
+everything below builds on. If it is not merged, stop and say so.
 
 ## Read before planning
 
@@ -28,12 +28,12 @@ builds on. If it is not merged, stop and say so.
 - `CONTEXT.md` — the `Component` and `Gate` entries. Terminology is policed in
   this repo.
 - `.agents/plans/component-platform.md` — the rolling plan and its known traps.
-- `cli/internal/component/` and `cli/internal/runner/` — what a component
-  already declares, including the `compose` block that currently only fails.
+- `cli/internal/component/`, `cli/internal/runner/` and `cli/internal/compose/`
+  — what a component already declares and what already runs from it.
 
 ## The task
 
-### 1. The orphan-file gate
+### The orphan-file gate
 
 Every source file must fall under some component's `dir` or an explicit
 exclude. A file under neither is an orphan, and the gate is cleared by
@@ -62,37 +62,20 @@ Open, and yours to settle in the challenge interview:
   gate that only runs when a component runs is a gate a component-free
   repository never sees.
 
-### 2. `internal/compose`
-
-A component's services are a compose file: lydite owns no service schema, and
-must not grow one. Images, ports, environment and healthchecks are compose's
-job already.
-
-- **Probe for a runtime; never hard-code one.** podman on a laptop, docker on a
-  runner — the implementation is a property of the machine, not the repository.
-  Name which one was chosen, on stderr.
-- **`wait: healthy` requires a declared healthcheck, and refuses without one**
-  rather than degrading to `started`. A suite racing a database that is not yet
-  listening is the flakiest thing a pipeline can contain, and the failure is
-  attributed to the test rather than to the wait.
-- **Teardown runs even when the run fails.** Leaked containers poison the next
-  local run.
-- Read `ports:` while the file is open. Step 4's scheduler locks on published
-  host ports, and nothing else in the file has to be parsed twice.
-- `setup` and `teardown` commands cover what is not a container — migrations,
-  fixtures, cleanup.
-
-`--keep-services` is an invocation choice, not a repository fact, so it is a
-flag and never a key in the file.
-
-Wire both into `lydite test`, replacing the failing rows a component declaring
-`compose`, `setup` or `teardown` gets today.
-
 ## Out of scope
 
-The parallel scheduler and port locks (step 4), affected selection, `lydite
-matrix`, rewiring `scan` or `coverage` onto components, deleting
-`internal/detect`, removing `coverage.source`, and all of mutation.
+The parallel scheduler and port locks (step 4) — `internal/compose` already
+reads each stack's published host ports, so that step consumes them rather than
+adding the parse. Also affected selection, `lydite matrix`, rewiring `scan` or
+`coverage` onto components, deleting `internal/detect`, removing
+`coverage.source`, and all of mutation.
+
+## One thing step 1 left open, and it is yours if you touch it
+
+`typescript.install` in `.lydite/config.yml` is repository-wide, while `setup`
+is per component, and the two now overlap: a JavaScript component could express
+its install either way. Decide which is the one place, or say plainly why both
+survive.
 
 ## Non-negotiable workflow rules
 
@@ -115,6 +98,6 @@ matrix`, rewiring `scan` or `coverage` onto components, deleting
 ## Finally
 
 Update `.agents/plans/component-platform.md` to mark step 2 done, and write
-`.agents/plans/pr3-scheduler.md` as the prompt for the next session, in the
-same shape as this one: the resource-constrained queue, port locks, and the
-local driver.
+`.agents/plans/pr4-scheduler.md` as the prompt for the next session, in the
+same shape as this one: the resource-constrained queue, the port locks built on
+`compose.Stack.HostPorts`, and the local driver.

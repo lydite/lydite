@@ -47,7 +47,7 @@ version with `LYDITE_VERSION=1.2.3 curl ... | sh`. Update in place any time with
 
 ```sh
 lydite scan --dir .          # run every check for every ecosystem detected under --dir (default ".")
-lydite test --dir .          # run each declared component's test suite
+lydite test --dir .          # run each declared component's test suite, services and all
 lydite coverage --dir .      # diff current coverage against the cached baseline for the PR's base commit
 lydite version
 lydite update                 # self-update to the latest release
@@ -100,6 +100,25 @@ components:
 The runner names the test command and thereby the language: `go-test`, `cargo-nextest`,
 `cargo-llvm-cov-nextest`, `vitest`, `jest`, or a raw `command:` for anything else. lydite
 orchestrates around that command and never learns to run anyone's tests.
+
+A component whose suite needs services points at a compose file, and lydite brings them up before
+the suite and takes them down after it — including when the run fails:
+
+```yaml
+components:
+  - name: api
+    dir: go/api
+    runner: go-test
+    compose:
+      file: ./compose.yaml
+      up: [db]
+      wait: healthy      # healthy | started | none
+    setup: ["make migrate"]
+```
+
+lydite owns no service schema and hard-codes no container runtime: it probes for docker or podman
+and names the one it found. `wait: healthy` needs the compose service to declare a healthcheck, and
+is refused rather than quietly downgraded when it does not. `--keep-services` leaves them running.
 
 Components are declared rather than discovered, because the declaration is the reviewable
 statement of what gets tested and its history is the record of every change to that. See

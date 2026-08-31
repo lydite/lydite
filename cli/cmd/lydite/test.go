@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
@@ -19,7 +21,7 @@ import (
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor bool
+	var asJSON, noColor, keepServices bool
 	cmd := &cobra.Command{
 		Use:           "test",
 		SilenceUsage:  true,
@@ -59,7 +61,7 @@ the component's to declare.`,
 			}
 
 			for _, c := range selected {
-				rep.Add(runComponent(cmd.Context(), dir, c, cfg))
+				rep.Add(runComponent(cmd.Context(), dir, c, cfg, keepServices))
 			}
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
@@ -68,6 +70,10 @@ the component's to declare.`,
 	cmd.Flags().StringSliceVar(&components, "component", nil, "component to run; repeatable, and every declared component by default")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
+	// A flag and never a key in the component declaration: whether to leave
+	// services up between runs is a choice about this invocation, not a fact
+	// about the repository.
+	cmd.Flags().BoolVar(&keepServices, "keep-services", false, "leave each component's compose services running after the suite")
 	return cmd
 }
 
@@ -78,30 +84,8 @@ the component's to declare.`,
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, c component.Component, cfg config.Config) ui.Row {
+func runComponent(ctx context.Context, root string, c component.Component, cfg config.Config, keep bool) (row ui.Row) {
 	label := "test(" + c.Name + ")"
-	if c.Compose.Declared() {
-		return ui.Row{
-			Status: ui.StatusFail,
-			Label:  label,
-			Value:  "services not started",
-			Detail: []string{
-				c.Name + " declares compose services, and lydite starts none.",
-				"Start them yourself and run the suite directly, or drop the compose block if the suite does not need it.",
-			},
-		}
-	}
-	if len(c.Setup) > 0 || len(c.Teardown) > 0 {
-		return ui.Row{
-			Status: ui.StatusFail,
-			Label:  label,
-			Value:  "setup not run",
-			Detail: []string{
-				c.Name + " declares setup or teardown commands, and lydite runs none.",
-				"Run them yourself around the suite, or drop them if the suite does not need them.",
-			},
-		}
-	}
 
 	inv, err := invocation(c)
 	if err != nil {
@@ -109,22 +93,108 @@ func runComponent(ctx context.Context, root string, c component.Component, cfg c
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-	if row, ok := prepare(ctx, dir, label, c, cfg); !ok {
-		return row
+	if prepared, ok := prepare(ctx, dir, label, c, cfg); !ok {
+		return prepared
 	}
-	res := executil.RunEnv(ctx, dir, env(c), inv.Name, inv.Args...)
-	if res.Ok() {
-		return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed"}
+
+	// Both teardowns are deferred before anything starts, so every path out
+	// of here runs them — including a setup that failed halfway, which is
+	// when a half-applied migration most needs undoing. Leaked containers
+	// poison the next local run, and the port they hold is the next
+	// component's to bind.
+	stop, started, ok := services(ctx, dir, label, c, keep)
+	if !ok {
+		return started
 	}
-	// The runner streamed its own failures live, so the detail here names
-	// what was run rather than repeating output that is already on the
-	// terminal and in the CI log.
-	return ui.Row{
-		Status: ui.StatusFail,
-		Label:  label,
-		Value:  "failed",
-		Detail: []string{strings.Join(append([]string{inv.Name}, inv.Args...), " ") + " in " + c.Dir},
+	defer stop()
+	defer func() {
+		// Teardown gets a context of its own, because the run's may already
+		// be cancelled and a cancelled teardown is the leak this prevents.
+		failed, ok := runCommands(context.WithoutCancel(ctx), dir, label, c, "teardown", c.Teardown)
+		// A failing teardown turns a passing component into a failing one —
+		// it has left state behind that the next run will inherit — but it
+		// never masks a failure that already happened, because the earlier
+		// one is what the reader has to act on.
+		if !ok && row.Status == ui.StatusPass {
+			row = failed
+		}
+	}()
+
+	if failed, ok := runCommands(ctx, dir, label, c, "setup", c.Setup); !ok {
+		return failed
 	}
+
+	if res := executil.RunEnv(ctx, dir, env(c), inv.Name, inv.Args...); !res.Ok() {
+		// The runner streamed its own failures live, so the detail here names
+		// what was run rather than repeating output already on the terminal
+		// and in the CI log.
+		return ui.Row{
+			Status: ui.StatusFail,
+			Label:  label,
+			Value:  "failed",
+			Detail: []string{strings.Join(append([]string{inv.Name}, inv.Args...), " ") + " in " + c.Dir},
+		}
+	}
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed"}
+}
+
+// services starts the component's compose services and returns the teardown
+// to run once the suite is done.
+//
+// A component that declares none needs no runtime and gets no probe, so a
+// repository with no services runs on a machine with no container engine at
+// all.
+//
+// Failing to start is reported as the component failing rather than being
+// pushed into the suite: a suite run against an absent database reports errors
+// naming the tests, which is the one outcome worse than an unstarted service.
+func services(ctx context.Context, dir, label string, c component.Component, keep bool) (func(), ui.Row, bool) {
+	if !c.Compose.Declared() {
+		return func() {}, ui.Row{}, true
+	}
+	fail := func(err error) (func(), ui.Row, bool) {
+		return nil, ui.Row{Status: ui.StatusFail, Label: label, Value: "services not started", Detail: []string{err.Error()}}, false
+	}
+	stack, err := compose.Load(ctx, dir, c)
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Fprintf(os.Stderr, "lydite: %s services via %s\n", c.Name, stack.Runtime())
+	if err := stack.Up(ctx); err != nil {
+		return fail(err)
+	}
+	return func() {
+		if keep {
+			fmt.Fprintf(os.Stderr, "lydite: %s services left running\n", c.Name)
+			return
+		}
+		// Teardown gets a context of its own: the run's may already be
+		// cancelled, and a cancelled teardown is the leak this exists to
+		// prevent.
+		if err := stack.Down(context.WithoutCancel(ctx)); err != nil {
+			fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", c.Name, err)
+		}
+	}, ui.Row{}, true
+}
+
+// runCommands runs a component's setup or teardown list, in order, stopping
+// at the first failure.
+//
+// Through a shell, because these are free-form and repository-authored: a
+// migration is `make migrate && ./seed.sh`, which argv cannot express.
+func runCommands(ctx context.Context, dir, label string, c component.Component, kind string, cmds []string) (ui.Row, bool) {
+	for _, cmd := range cmds {
+		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- the command comes from the scanned repository's own component declaration, authored by whoever configured lydite for that repo, not from remote input
+		if res := executil.RunEnv(ctx, dir, env(c), "sh", "-c", cmd); !res.Ok() {
+			return ui.Row{
+				Status: ui.StatusFail,
+				Label:  label,
+				Value:  kind + " failed",
+				Detail: []string{cmd + " failed in " + c.Dir},
+			}, false
+		}
+	}
+	return ui.Row{}, true
 }
 
 // prepare runs whatever the runner needs in place before the suite, and

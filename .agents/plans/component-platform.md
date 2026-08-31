@@ -11,8 +11,8 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 |---|---|---|---|---|
 | 0 | #38 | Proving ground: polyglot repo in the `lydite` org | `pr0-proving-ground.md` | done — [lydite/proving-ground](https://github.com/lydite/proving-ground) |
 | 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | in review — #39 |
-| 2 | — | Orphan-file gate, then `internal/compose` | `pr2-orphan-gate.md` | not started |
-| 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr2-orphan-gate.md` | not started |
+| 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
+| 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | not started |
 | 4 | — | Scheduler: resource-constrained queue, port locks, local driver | — | not started |
 | 5 | — | Affected selection; full run on the default branch | — | not started |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | — | not started |
@@ -20,10 +20,15 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 8 | — | `lydite matrix`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
-Steps 0 and 1 run in parallel, in separate worktrees. Step 1 cannot merge until
-step 0 exists, because two of its three runners have nothing to run against
-otherwise — it stays a draft until `lydite/proving-ground` has a job exercising
-the cargo and vitest runners for real.
+Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
+until step 0 existed, because two of its three runners had nothing to run
+against otherwise.
+
+**Step 3 is folded into step 1, and that is why the table is out of order.**
+Both of the proving ground's service-declaring components are the ones the
+cargo runner would exercise, so "the cargo runner has been executed once" and
+"lydite can start a component's services" turned out to be the same
+requirement. Step 2 is next, on its own.
 
 ## Why the proving ground gates PR 1
 
@@ -36,6 +41,12 @@ shape, and `ci-end2end` is the only job that runs anything for real.
 Without a repository to run against, the Rust and TypeScript runners merge with
 their argv asserted and never once executed: a check reporting PASS having never
 run, which is the failure ADR 0006 exists to prevent, one level up.
+
+`ci-end2end`'s `proving ground` job is what closes it, running `lydite test`
+against every component of a bare checkout. Nothing in that job prepares the
+tree — no dependency install, no services started — because a runner that only
+works after the workflow has done that is one the job would never catch failing
+for a consumer.
 
 ## Decisions that are settled
 
@@ -116,12 +127,10 @@ key while `setup` is per component, and the two will overlap.
   happens: lydite's own CI depends on `source: report` today, and removing the
   key before coverage moves onto components would leave the repository unable
   to gate itself.
-- **`lydite test` runs no services and no setup.** A component declaring
-  `compose`, `setup` or `teardown` fails with a message naming what is missing.
-  Running its suite without them is the one thing that must not happen: the
-  failures would name the tests rather than the absent database, and a pass
-  would mean the declaration was ignored and nobody was told.
-- **The run is sequential.** The scheduler is step 4.
+- **The run is sequential.** `internal/compose` reads each stack's published
+  host ports, which is what step 4's port lock needs, but nothing consumes them
+  yet — two components publishing the same port would collide today if they ran
+  at once, and nothing runs at once.
 - **`internal/detect` is untouched.** Scan and coverage still discover their own
   units; step 7 is where they learn it from the component instead.
 

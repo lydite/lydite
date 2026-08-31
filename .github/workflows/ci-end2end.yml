@@ -43,9 +43,9 @@ jobs:
 
   # lydite's own repository can exercise one runner. `web/` is empty and the
   # only Cargo.toml files are pin manifests, which are deliberately not
-  # components — so without a foreign repository the TypeScript runner would
-  # merge with its argv asserted and never once executed, which is a check
-  # reporting a pass having never run.
+  # components — so without a foreign repository the cargo and vitest runners
+  # would merge with their argv asserted and never once executed, which is a
+  # check reporting a pass having never run.
   #
   # proving-ground is that repository. It is checked out rather than vendored
   # because lydite has to run against it as a foreign repo: a fixture inside
@@ -70,23 +70,14 @@ jobs:
         working-directory: cli
         run: go build -o /tmp/lydite ./cmd/lydite
 
-      # No dependency install step here on purpose: lydite installs a
-      # JavaScript component's dependencies itself, from the lockfile, and a
-      # runner that only works after the workflow has prepared the tree is one
-      # this job would never catch failing for a consumer.
+      # Nothing prepares the tree first, and that is the point. lydite installs
+      # a JavaScript component's dependencies itself and starts each
+      # component's compose services itself, so a step here doing either would
+      # hide the case a consumer actually hits. Two of the four components
+      # bring up postgres and wait for it to report healthy; ubuntu-latest
+      # carries the docker compose plugin the probe finds.
       - name: lydite test (proving ground)
-        run: /tmp/lydite test --dir proving-ground --component sdk --component web
-
-      # A component whose services lydite cannot start must fail, not run its
-      # suite without them and report on whatever happens. Asserted here
-      # rather than only in a unit test, because what is being checked is the
-      # verdict a real declaration produces.
-      - name: a component declaring services refuses to run
-        run: |
-          if /tmp/lydite test --dir proving-ground --component tally; then
-            echo "tally ran its suite without the services it declares"
-            exit 1
-          fi
+        run: /tmp/lydite test --dir proving-ground
 
   # The single job the branch-protection ruleset actually requires. Individual
   # job names (lint, build & test, ...) are an implementation detail that
