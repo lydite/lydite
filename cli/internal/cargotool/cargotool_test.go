@@ -1,6 +1,15 @@
 package cargotool
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -107,4 +116,114 @@ func TestNotInstalledWhenTheBinaryIsAbsent(t *testing.T) {
 	if (Tool{Name: "cargo-does-not-exist", Version: "9.9.9"}).Installed() {
 		t.Error("Installed reported a tool that was never installed")
 	}
+}
+
+// installPrebuilt is the path that turns a seven-minute source build into a
+// three-second download, so it is worth testing end to end rather than only
+// asserting the URLs it would fetch.
+func TestInstallPrebuiltVerifiesAndStages(t *testing.T) {
+	archive := tarGzOneFile(t, "cargo-fake", "#!/bin/sh\necho fake\n")
+	sum := sha256.Sum256(archive)
+	srv := serve(t, archive, hex.EncodeToString(sum[:])+"  cargo-fake.tar.gz\n")
+
+	root := filepath.Join(t.TempDir(), "cargo-fake-1.0.0")
+	tool := Tool{Name: "cargo-fake", Version: "1.0.0", Prebuilt: assetAt(srv)}
+	if err := tool.installPrebuilt(t.Context(), root); err != nil {
+		t.Fatalf("installPrebuilt: %v", err)
+	}
+	bin := filepath.Join(root, "bin", "cargo-fake")
+	info, err := os.Stat(bin)
+	if err != nil {
+		t.Fatalf("binary not installed: %v", err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("mode = %v, want the binary executable", info.Mode())
+	}
+	// Staged into a sibling and renamed, so an interrupted download cannot
+	// leave a directory the next run reads as a finished install.
+	entries, err := os.ReadDir(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("staging directory left behind: %v", entries)
+	}
+}
+
+// lydite is about to put this binary on PATH and execute it, so an archive
+// that does not match its published digest must never be unpacked.
+func TestInstallPrebuiltRefusesAChecksumMismatch(t *testing.T) {
+	srv := serve(t, tarGzOneFile(t, "cargo-fake", "payload"), strings.Repeat("0", 64)+"  cargo-fake.tar.gz\n")
+	root := filepath.Join(t.TempDir(), "cargo-fake-1.0.0")
+	tool := Tool{Name: "cargo-fake", Version: "1.0.0", Prebuilt: assetAt(srv)}
+	if err := tool.installPrebuilt(t.Context(), root); err == nil {
+		t.Fatal("installPrebuilt accepted an archive whose digest did not match")
+	}
+	if _, err := os.Stat(root); err == nil {
+		t.Error("a refused download left an install directory behind")
+	}
+}
+
+// An archive that does not contain the binary is refused rather than left as
+// an empty install directory the next run treats as complete.
+func TestInstallPrebuiltRefusesAnArchiveWithoutTheBinary(t *testing.T) {
+	archive := tarGzOneFile(t, "something-else", "x")
+	sum := sha256.Sum256(archive)
+	srv := serve(t, archive, hex.EncodeToString(sum[:])+"  a.tar.gz\n")
+	root := filepath.Join(t.TempDir(), "cargo-fake-1.0.0")
+	tool := Tool{Name: "cargo-fake", Version: "1.0.0", Prebuilt: assetAt(srv)}
+	if err := tool.installPrebuilt(t.Context(), root); err == nil {
+		t.Fatal("installPrebuilt accepted an archive holding no binary")
+	}
+}
+
+// A platform the publisher ships nothing for is not an error: the source
+// build still works, just slowly.
+func TestNoPrebuiltForThisPlatformIsNotAFailure(t *testing.T) {
+	tool := Tool{Name: "cargo-fake", Version: "1.0.0", Prebuilt: func(string) (Asset, bool) { return Asset{}, false }}
+	err := tool.installPrebuilt(t.Context(), filepath.Join(t.TempDir(), "x"))
+	if !errors.Is(err, errNoPrebuilt) {
+		t.Fatalf("err = %v, want errNoPrebuilt so the caller builds from source", err)
+	}
+}
+
+func serve(t *testing.T, archive []byte, checksum string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sha256") {
+			_, _ = w.Write([]byte(checksum))
+			return
+		}
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func assetAt(srv *httptest.Server) func(string) (Asset, bool) {
+	return func(string) (Asset, bool) {
+		return Asset{URL: srv.URL + "/a.tar.gz", ChecksumURL: srv.URL + "/a.sha256"}, true
+	}
+}
+
+func tarGzOneFile(t *testing.T, name, body string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

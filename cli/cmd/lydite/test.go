@@ -300,26 +300,23 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 	return ui.Row{}, true
 }
 
-// prepare runs whatever the runner needs in place before the suite, and
-// reports a failing row rather than letting the suite start without it.
+// prepare puts what the runner needs in place, and reports a failing row
+// rather than letting the suite start without it.
 //
 // A JavaScript suite run without its node_modules fails at import, naming the
-// tests rather than the absent dependencies — the same misattribution a suite
-// run without its database produces, and the same reason to stop first.
+// tests rather than the absent dependencies, and a Rust one without its pinned
+// runner fails with `no such command` — the same misattribution a suite run
+// without its database produces, and the same reason to stop first.
 func prepare(ctx context.Context, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
 	}
-	for _, step := range r.Prepare(dir, cfg.TypeScript.Install) {
-		res := executil.RunOutput(ctx, dir, append(env(c), step.Env...), log.out, step.Name, step.Args...)
-		if res.Ok() || step.Optional {
-			continue
+	if err := r.Prepare(ctx, dir, cfg.TypeScript.Install, log.out); err != nil {
+		row := failure(label, log, err.Error(), "not prepared", "")
+		if r.Lang == runner.TypeScript {
+			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
 		}
-		row := failure(label, log,
-			strings.Join(append([]string{step.Name}, step.Args...), " ")+" failed in "+c.Dir,
-			"dependencies not installed", res.Output)
-		row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
 		return row, false
 	}
 	return ui.Row{}, true

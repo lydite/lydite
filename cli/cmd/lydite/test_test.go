@@ -184,8 +184,11 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
-	if row.Value != "dependencies not installed" {
-		t.Errorf("value = %q, want the install named rather than the suite", row.Value)
+	if row.Value != "not prepared" {
+		t.Errorf("value = %q, want the preparation named rather than the suite", row.Value)
+	}
+	if !strings.Contains(strings.Join(row.Detail, " "), config.FileName) {
+		t.Errorf("detail = %v, want the override named as the way out", row.Detail)
 	}
 }
 

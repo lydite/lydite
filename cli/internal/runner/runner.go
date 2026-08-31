@@ -25,12 +25,16 @@
 // second, which is why a component either names a runner or opts out of the
 // derived variants entirely.
 //
-// Nothing here executes anything. It builds argv, and its tests assert argv,
-// matching internal/rust and internal/typescript: a unit test that shells out
-// to a foreign toolchain tests the machine it runs on.
+// Building a variant executes nothing: it returns argv, and the tests assert
+// argv, matching internal/rust and internal/typescript — a unit test that
+// shells out to a foreign toolchain tests the machine it runs on. Preparing a
+// runner is the one thing here that does real work, because provisioning a
+// pinned tool is not expressible as a command someone else runs.
 package runner
 
 import (
+	"context"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -119,16 +123,21 @@ type Runner struct {
 	// Build constructs one variant's invocation, with args from the
 	// component declaration placed ahead of anything the variant adds.
 	Build func(variant Variant, args []string) (Invocation, bool)
-	// Prepare is what has to run in the component's directory before any
-	// variant will work, or nil when the toolchain needs nothing.
+	// Prepare puts in place what the runner needs before any variant will
+	// work, or is nil when it needs nothing.
 	//
-	// Only the JavaScript runners have one. A fresh checkout has no
-	// node_modules and every import fails before a single test is collected,
-	// while `go test` and `cargo` fetch what a build needs on the way past.
 	// It lives on the runner rather than in the command so the command layer
 	// carries no per-language branch — the thing this registry exists to
-	// remove.
-	Prepare func(dir, override string) []Invocation
+	// remove. dir is the component's directory, override is
+	// typescript.install, and out is where a step's own output goes.
+	//
+	// Two runners need one, for unrelated reasons. A JavaScript component has
+	// no node_modules on a fresh checkout and every import fails before a test
+	// is collected; a Rust component needs the pinned cargo-nextest, which is
+	// not a degradation when absent but a component that cannot run at all.
+	// `go test` needs nothing — its toolchain fetches what a build needs on
+	// the way past.
+	Prepare func(ctx context.Context, dir, override string, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
@@ -271,15 +280,8 @@ func llvmCovNextest(args []string) Invocation {
 // workspace's own install flow, and there is no equivalent for a tool lydite
 // pins — a repository able to substitute its own cargo-nextest would be back
 // to a runner whose version varies by machine.
-func installCargoNextest(_, _ string) []Invocation {
-	if cargoNextest.Installed() {
-		return nil
-	}
-	argv, err := cargoNextest.InstallArgv()
-	if err != nil {
-		return nil
-	}
-	return []Invocation{{Name: "cargo", Args: argv}}
+func installCargoNextest(ctx context.Context, _, _ string, out io.Writer) error {
+	return cargoNextest.Install(ctx, out)
 }
 
 // nextestEnv puts the pinned binary first on PATH.
@@ -297,18 +299,14 @@ func nextestEnv() []string {
 	return []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
-// installNodeDeps is the install internal/nodedeps resolves from the
+// installNodeDeps runs the install internal/nodedeps resolves from the
 // component root's lockfile, or from the typescript.install override.
 //
-// An empty result is not a failure: a root no single lockfile identifies has
+// Doing nothing is not a failure: a root no single lockfile identifies has
 // nothing lydite can install without guessing, and guessing writes a lockfile
 // the repository does not use.
-func installNodeDeps(dir, override string) []Invocation {
-	var out []Invocation
-	for _, cmd := range nodedeps.Commands(dir, override) {
-		out = append(out, Invocation{Name: cmd.Argv[0], Args: cmd.Argv[1:], Optional: cmd.Optional})
-	}
-	return out
+func installNodeDeps(ctx context.Context, dir, override string, out io.Writer) error {
+	return nodedeps.Install(ctx, dir, override, out)
 }
 
 // buildVitest runs through the package manager's own binary directory rather

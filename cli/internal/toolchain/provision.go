@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"lydite/lydite/internal/download"
 	"lydite/lydite/internal/executil"
 )
 
@@ -138,7 +139,7 @@ type goRelease struct {
 // SHA-256 from Go's own release index rather than from anything alongside the
 // download.
 func downloadGo(ctx context.Context, version, staging string) error {
-	index, err := fetch(ctx, "https://go.dev/dl/?mode=json&include=all")
+	index, err := download.Fetch(ctx, "https://go.dev/dl/?mode=json&include=all")
 	if err != nil {
 		return err
 	}
@@ -154,11 +155,11 @@ func downloadGo(ctx context.Context, version, staging string) error {
 			if f.OS != runtime.GOOS || f.Arch != runtime.GOARCH || f.Kind != "archive" {
 				continue
 			}
-			data, err := downloadVerified(ctx, "https://go.dev/dl/"+f.Filename, f.SHA256)
+			data, err := download.Verified(ctx, "https://go.dev/dl/"+f.Filename, f.SHA256)
 			if err != nil {
 				return err
 			}
-			return extractTarGz(data, staging)
+			return download.ExtractTarGz(data, staging, 1)
 		}
 		return fmt.Errorf("go toolchain %s has no %s/%s archive", version, runtime.GOOS, runtime.GOARCH)
 	}
@@ -286,7 +287,7 @@ func downloadNode(ctx context.Context, version, staging string) error {
 	base := "https://nodejs.org/dist/" + version
 	name := fmt.Sprintf("node-%s-%s-%s.tar.gz", version, nodeOS(), nodeArch())
 
-	sums, err := fetch(ctx, base+"/SHASUMS256.txt")
+	sums, err := download.Fetch(ctx, base+"/SHASUMS256.txt")
 	if err != nil {
 		return err
 	}
@@ -301,11 +302,11 @@ func downloadNode(ctx context.Context, version, staging string) error {
 	if want == "" {
 		return fmt.Errorf("node %s publishes no %s", version, name)
 	}
-	data, err := downloadVerified(ctx, base+"/"+name, want)
+	data, err := download.Verified(ctx, base+"/"+name, want)
 	if err != nil {
 		return err
 	}
-	return extractTarGz(data, staging)
+	return download.ExtractTarGz(data, staging, 1)
 }
 
 // nodeOS and nodeArch translate Go's platform names into the ones nodejs.org

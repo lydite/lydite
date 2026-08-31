@@ -16,9 +16,12 @@ package nodedeps
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"lydite/lydite/internal/executil"
 )
@@ -123,19 +126,19 @@ func Commands(root, override string) []Command {
 	}
 }
 
-// Install runs the install for root and reports the first command that
-// failed, or nil when there was nothing to do.
+// Install runs the install for root, writing each command's output to out, and
+// reports the first command that failed or nil when there was nothing to do.
 //
 // Whether a failure is fatal is the caller's to decide, and the two callers
 // answer differently: the coverage gate omits a package it cannot measure,
 // while a test run that proceeds after a failed install reports import errors
 // naming the tests rather than the missing dependencies.
-func Install(ctx context.Context, root, override string) error {
+func Install(ctx context.Context, root, override string, out io.Writer) error {
 	for _, cmd := range Commands(root, override) {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
-		res := executil.Run(ctx, root, cmd.Argv[0], cmd.Argv[1:]...)
+		res := executil.RunOutput(ctx, root, nil, out, cmd.Argv[0], cmd.Argv[1:]...)
 		if !res.Ok() && !cmd.Optional {
-			return res.Err
+			return fmt.Errorf("%s: %w", strings.Join(cmd.Argv, " "), res.Err)
 		}
 	}
 	return nil

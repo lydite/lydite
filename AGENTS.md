@@ -35,6 +35,7 @@ internal/component/             # .lydite/components.yml: what a repo builds and
 internal/runner/                # a runner name to its plain/instrumented/build-only invocations
 internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
 internal/cargotool/             # pinned cargo subcommands: version parsing and the install
+internal/download/              # fetch, checksum-verify and unpack an archive safely
 internal/compose/               # the services a component's suite needs (see Services below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
@@ -190,12 +191,31 @@ path into the cache, because that is what a reader can re-run from a failure det
 `Invocation.Env` prepends the pinned binary's directory to PATH, so an older one
 already on the machine cannot win.
 
-Building it from source is around seven minutes, and ~4 seconds once cached — so a
-consumer caching `~/.cache/lydite` is not an optimisation here but the difference
-between a usable pipeline and an unusable one. lydite's own `proving ground` job
-caches it, keyed on the pin manifests so a Dependabot bump misses and installs what
-it just pinned. `cargo-llvm-cov` is still **not** installed, which is the gap that
-poisons a baseline under `coverage.source: run`.
+**The prebuilt release is taken first, and `cargo install` is the fallback.** Building
+cargo-nextest from source is around seven minutes; the published archive is three
+seconds, and a cold cache end to end is eleven. That is not a speed-up but the
+difference between a first run someone waits through and one they abandon. The
+digest comes from the release's own `.sha256` and is checked before a byte reaches
+a caller — lydite is about to put this binary on PATH and execute it — and the
+install stages into a sibling directory and is renamed into place, so an interrupted
+download cannot leave a directory the next run reads as complete. A platform nextest
+publishes nothing for, a blocked download, or a digest that does not match all fall
+back to the source build, saying so on stderr rather than silently making a first run
+seven minutes long. Linux takes the **musl** target: a musl-linked static binary runs
+on a glibc distribution as well as on Alpine, and the reverse is not true.
+
+`internal/download` holds the fetching, verifying and unpacking that
+`internal/toolchain` already had, because the parts that must not vary between the two
+callers are the security-relevant ones — a second copy of a path-traversal guard is a
+second chance to get it wrong, and only one of the copies would be found. Its
+`ExtractTarGz` takes the number of leading components to strip: a toolchain tarball
+wraps everything in one directory, and a single-binary release tarball has no wrapper
+at all, where stripping would discard the only entry.
+
+Caching `~/.cache/lydite` still matters, and lydite's own `proving ground` job does it,
+keyed on the pin manifests so a Dependabot bump misses and installs what it just
+pinned. `cargo-llvm-cov` is still **not** installed, which is the gap that poisons a
+baseline under `coverage.source: run`.
 
 **A JavaScript component is installed before it is run.** A fresh checkout has
 no `node_modules` and every import fails before a single test is collected, so the

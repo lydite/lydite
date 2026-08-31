@@ -127,6 +127,12 @@ key while `setup` is per component, and the two will overlap.
   happens: lydite's own CI depends on `source: report` today, and removing the
   key before coverage moves onto components would leave the repository unable
   to gate itself.
+- **Prebuilt first, source as the fallback.** cargo-nextest from source is seven
+  minutes and the published archive is three, so `internal/cargotool` downloads
+  the release and verifies its digest, falling back to `cargo install` for a
+  platform with no release or a download that fails. `internal/download` holds
+  the fetch/verify/unpack that `internal/toolchain` already had, because a
+  second copy of a path-traversal guard is a second chance to get it wrong.
 - **`cargo-llvm-cov` is still not installed.** `cargo-nextest` now is, pinned via
   `internal/cargotool`, but the instrumented Rust variant needs llvm-cov and
   nothing provisions it — which is the gap that silently caches an empty

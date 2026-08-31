@@ -2,6 +2,7 @@ package runner
 
 import (
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -246,20 +247,32 @@ func TestCargoInvocationStaysTypeable(t *testing.T) {
 	}
 }
 
-// The install is the pinned version, and never a bare `cargo install
-// cargo-nextest` that resolves to whatever is latest.
-func TestCargoNextestInstallIsPinnedAndLocked(t *testing.T) {
-	if cargoNextest.Installed() {
-		t.Skip("the pinned runner is already in this machine's cache")
+// The prebuilt release is what makes a first run tolerable: building
+// cargo-nextest from source is around seven minutes and the archive is three
+// seconds. A platform nextest publishes nothing for reports false and falls
+// back to the source build rather than failing.
+func TestNextestPrebuiltCoversEveryPlatformLyditeShipsFor(t *testing.T) {
+	if _, ok := nextestTargets[runtime.GOOS+"/"+runtime.GOARCH]; !ok {
+		t.Fatalf("no prebuilt target for %s/%s, which lydite ships a binary for", runtime.GOOS, runtime.GOARCH)
 	}
-	steps := installCargoNextest("", "")
-	if len(steps) != 1 || steps[0].Name != "cargo" {
-		t.Fatalf("install = %v, want one cargo invocation", steps)
+	asset, ok := nextestRelease(cargoNextest.Version)
+	if !ok {
+		t.Fatal("nextestRelease reported nothing for this platform")
 	}
-	joined := strings.Join(steps[0].Args, " ")
-	for _, want := range []string{"install", "--locked", cargoNextest.Version} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("install = %q, want it to carry %q", joined, want)
+	if !strings.Contains(asset.URL, cargoNextest.Version) {
+		t.Errorf("asset URL = %q, want the pinned version in it", asset.URL)
+	}
+	if !strings.HasSuffix(asset.URL, ".tar.gz") || !strings.HasSuffix(asset.ChecksumURL, ".sha256") {
+		t.Errorf("asset = %+v, want a tarball and its checksum", asset)
+	}
+}
+
+// Linux takes the musl build: a musl-linked static binary runs on a glibc
+// distribution as well as on Alpine, and the reverse is not true.
+func TestNextestLinuxTargetsAreStatic(t *testing.T) {
+	for platform, target := range nextestTargets {
+		if strings.HasPrefix(platform, "linux/") && !strings.Contains(target, "musl") {
+			t.Errorf("%s uses %q, which will not run on a musl distribution", platform, target)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -703,7 +704,7 @@ func tsWorkspaceRoots(dir string, pkgDirs []string) []string {
 // whose coverage cannot be measured is omitted rather than failed.
 func tsInstall(ctx context.Context, roots []string, override string) {
 	for _, root := range roots {
-		_ = nodedeps.Install(ctx, root, override)
+		_ = nodedeps.Install(ctx, root, override, io.Discard)
 	}
 }
 
