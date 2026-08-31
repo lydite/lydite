@@ -32,7 +32,7 @@ jobs:
         run: go build ./...
 
       # -coverprofile so the lydite stage reads a report instead of running
-      # the suite again. .lydite.yml here declares `report`, and lydite exits
+      # the suite again. .lydite/config.yml here declares `report`, and lydite exits
       # rather than shrugging when told to read one nothing produced.
       - name: go test
         run: go test -race -coverprofile=coverage.out ./...

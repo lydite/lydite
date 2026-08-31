@@ -21,7 +21,7 @@ import (
 // one call site per command and means the resolution happens exactly once per
 // invocation, not once per discovered module.
 //
-// Only *enabled* ecosystems are passed. A language turned off in .lydite.yml
+// Only *enabled* ecosystems are passed. A language turned off in .lydite/config.yml
 // is one whose tools will never run, so provisioning a toolchain for it would
 // be a download in service of nothing — and on a repo that disabled Rust
 // precisely because its runner has no Rust, an actively unhelpful one.
@@ -39,7 +39,7 @@ func ensureToolchains(ctx context.Context, cmd *cobra.Command, dir string, cfg c
 	return env.Activate()
 }
 
-// toolchainOverrides maps .lydite.yml onto the toolchain package's input.
+// toolchainOverrides maps .lydite/config.yml onto the toolchain package's input.
 // The mapping is explicit rather than internal/toolchain importing
 // internal/config, so config stays a leaf that every other package can depend
 // on without a cycle.

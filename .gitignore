@@ -11,6 +11,9 @@ go.work.sum
 # goreleaser build artifacts
 dist/
 
+# Reports a component's runner is asked to write
+.lydite-reports/
+
 # Agentic toolkit generated config
 /.claude/
 /CLAUDE.md

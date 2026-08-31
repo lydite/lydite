@@ -14,6 +14,7 @@ go test -race ./...            # run tests
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
 go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
+go run ./cmd/lydite test --dir ..  # run each declared component's suite (--dir is the scan root)
 
 # The Go module is rooted at cli/, so every command above runs from there.
 
@@ -25,13 +26,15 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 
 ```
 cli/                           # the Go module (module path lydite/lydite); every go command runs here
-cli/cmd/lydite/                # the lydite CLI (scan, review, coverage, version, update)
+cli/cmd/lydite/                # the lydite CLI (scan, test, review, coverage, version, update)
 cli/internal/ui/               # the output grammar every command renders through, plus --json
 cli/internal/referral/         # exemptions, disqualifiers, the referral decision (see Referral below)
 cli/internal/clearance/        # the comment surface and the clearance decision (see Clearance below)
 cli/internal/forge/            # the hosting platform: commit statuses, permission, comments
+internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
+internal/runner/                # a runner name to its plain/instrumented/build-only invocations
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
-internal/config/                # .lydite.yml loading (opt-outs + pipeline shape — see Configuration below)
+internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
 internal/rust/                  # clippy, cargo-audit, cargo-deny
 internal/typescript/            # pinned Biome, the only TS linter (see Linters)
@@ -44,6 +47,8 @@ assets/                        # the shipped logo set — the action's PR commen
                                 #   lydite-mark-64.png by raw URL (see below)
 docs/design/                    # tokens, surface specs, and the reference prototypes (see Design)
 docs/release-notes/             # _header.md + one <tag>.md per release that needs one (see Release notes)
+.lydite/                       # every file that configures lydite: config.yml, components.yml,
+                                #   exemptions.yml
 .goreleaser.yml                 # build/release config (v2 schema)
 .golangci.yml                   # lint config (v2 schema)
 .github/workflows/{ci,release}.yml
@@ -59,13 +64,15 @@ scripts/install.sh              # curl|sh installer shipped with every release
 
 ## Status
 
-All five subcommands (`scan`, `review`, `coverage`, `version`, `update`) are fully implemented — every check
+All six subcommands (`scan`, `test`, `review`, `coverage`, `version`, `update`) are fully implemented — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
 self-update (checksum-verified binary replacement, refuses on dev builds, passive update nudge on
 every other command). `lydite coverage` has been verified end-to-end against this repo's own real
-`lydite` branch on GitHub, not just a local fixture.
+`lydite` branch on GitHub, not just a local fixture. `lydite test` runs a component's suite and
+nothing else yet — a component declaring `compose` services or `setup`/`teardown` commands fails
+with a message naming what is missing rather than running its tests without them.
 
 ## CI
 
@@ -92,11 +99,104 @@ longer need to pin `go-version` on lydite's account. Keep the pins here regardle
 mechanism covers them, and `self-scan` benefits from the pin holding independently of the feature
 it is dogfooding.
 
+
+## Components: `.lydite/components.yml` and `lydite test`
+
+A repository declares its **components**, and lydite builds, tests, measures and gates each one.
+`internal/component` parses the declaration and `internal/runner` turns a runner name into
+invocations; `lydite test` runs the suites. See
+[ADR 0016](docs/adr/0016-components-and-lydite-run-tests.md).
+
+```yaml
+components:
+  - name: cli                      # unique; names the matrix job and every report row
+    dir: cli                       # component root, relative to the scan root
+    runner: go-test                # implies the language
+    args: ["-race", "./..."]
+    watch: ["Makefile", "VERSION"] # paths outside dir that invalidate this component
+    depends_on: [sdk]              # declared, because the edge is not always derivable
+    env:
+      FOO: bar
+    compose:
+      file: ./docker/compose.yaml  # relative to the component root
+      up: [db]                     # default: every service in the file
+      wait: healthy                # healthy | started | none
+    setup: ["make migrate"]
+    teardown: ["rm -rf ./data"]
+    mutation: false                # opt-out; the default is true
+```
+
+**A component is the unit its build tool treats as a whole** — a Cargo workspace, a Go module, a
+JavaScript workspace — not a deployable. Nothing enforces it, because it cannot be read off a
+manifest; it is stated in the package doc because it is the rule most likely to be got wrong.
+Eleven crates behind one `cargo --workspace` invocation are one component: declared as three, the
+workspace compiles three times and provisions three copies of everything the suite needs.
+
+**`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
+second statement of the language could only disagree with the first.
+
+**Unknown keys are rejected**, the same stance `referral.Parse` and `config.validateLinter` take. A
+dropped key means a component configured differently from what its author wrote — a suite running
+without the environment it declared — while every run still reports a result.
+
+`Load` also validates against the tree: unique names, a `dir` that exists and does not escape the
+scan root, `depends_on` that resolves to declared components, and no cycles. A dangling edge is
+rejected rather than dropped, because the edge exists to make a dependent run on a change to its
+dependency and an edge naming nothing silently stops doing that while the dependent keeps passing.
+
+### Runners: three invocations of one suite
+
+`internal/runner` maps a runner name onto three variants of the same suite, because lydite needs
+all three and they must not disagree about which tests they run:
+
+| variant | why it exists |
+|---|---|
+| plain | the fast path — mutation runs the suite once per mutant |
+| instrumented | the coverage gate, and mutation's baseline |
+| build-only | tells an *unviable* mutant from a *killed* one; both exit non-zero |
+
+Deriving them from one declaration is the point. **Instrumentation is not a flag that can be
+spliced into an arbitrary command**: `go-test` appends `-coverprofile`, while `cargo-nextest`
+replaces the runner outright with `cargo llvm-cov`. That is why a component either names a runner
+or supplies a raw `command:`, which opts out of the derived variants entirely.
+
+- `go-test` — plain `go test`; instrumented adds `-coverprofile` **and `-coverpkg=./...`**;
+  build-only is `go build`. Without `-coverpkg` Go instruments only the package under test, so code
+  exercised solely through another package's tests reads as uncovered and a pull request whose new
+  code is fully exercised from its caller fails the patch gate on correct work
+  ([#36](https://github.com/lydite/lydite/issues/36)).
+- `cargo-nextest` — instrumented is `cargo llvm-cov nextest`, exporting `--json` (the aggregate
+  totals) *and* `--lcov` (the per-line hits the patch gate reads) from one run: the JSON export has
+  no per-line data at all, so neither is derivable from the other. Build-only is `cargo build
+  --all-targets`, because `cargo build` alone never compiles the test targets and a test-only
+  compilation error is exactly what separates an unviable mutant from a killed one.
+- `cargo-llvm-cov-nextest` — the same, with the plain variant already instrumented, for a
+  repository that has decided to pay for instrumentation once.
+- `vitest` and `jest` — instrumented adds `--coverage`; build-only is `tsc --noEmit`, since a
+  JavaScript test run has no compile step and a syntactically broken mutant would read as a test
+  failure.
+
+Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
+`internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
+a foreign toolchain tests the machine it runs on. **Two of the three languages therefore have no
+repository here to run against** — `web/` is empty and the only `Cargo.toml` files are pin
+manifests, deliberately not components — so the cargo and vitest runners are exercised for real
+only by `lydite/proving-ground` ([#38](https://github.com/lydite/lydite/issues/38)).
+
+Where a runner emits JUnit, the invocation names where it lands: the quality-history ledger
+([#26](https://github.com/lydite/lydite/issues/26)) records test counts, which no coverage report
+carries.
+
 ## Configuration
 
-`.lydite.yml` at the scan root is optional and carries all the config. It does two things, and
-tuning severity or suppressing individual findings is neither of them (that's what a fix-up pass +
-inline `#nosec`/`nosemgrep` annotations in the scanned repo are for):
+Every file that configures lydite lives in `.lydite/` at the scan root: `config.yml` here,
+`components.yml` above, and `exemptions.yml` under Referral below. One directory rather than a
+family of dotfiles beside it, because a dotfile next to a dot-directory that both configure the
+same tool is an arrangement nobody can predict the shape of from either half.
+
+`.lydite/config.yml` is optional and does two things, and tuning severity or suppressing
+individual findings is neither of them (that's what a fix-up pass + inline `#nosec`/`nosemgrep`
+annotations in the scanned repo are for):
 
 - **Opt out** of what lydite's zero-config default already does (scan everything detected, every
   check enabled), plus the numeric gate knobs (`coverage.tolerance`, `coverage.patch.tolerance`).
@@ -204,7 +304,7 @@ inside that window, and the window moves only when upstream ships support for a 
 bumped `typescript` across the ceiling anyway and merged, after which `npm ci` on the
 committed lockfile failed with `ERESOLVE` and every consumer with TypeScript got an install
 error instead of a lint result. CI stayed green throughout, because lydite's own repo has no
-TypeScript to scan: its only `package.json` files are the pin manifests, which `.lydite.yml`
+TypeScript to scan: its only `package.json` files are the pin manifests, which `.lydite/config.yml`
 excludes by name, so `self-scan` cannot reach that code path. Biome parses TypeScript with its
 own Rust parser and depends on no compiler package, so `biome-pin` has no peer range to cross
 and the failure class does not exist for it.
@@ -300,7 +400,7 @@ install` never shares a graph between two tools, so the conflict is invisible in
 `internal/rust`'s `TestPinManifestsAreSeparate` guards against a well-meaning consolidation.
 
 **Adding a new pin means three edits, not one:** the manifest, a `.github/dependabot.yml` entry,
-and an exclude in lydite's own `.lydite.yml`. The manifests are real `package.json`/`Cargo.toml`/
+and an exclude in lydite's own `.lydite/config.yml`. The manifests are real `package.json`/`Cargo.toml`/
 `go.mod` files, so CI's self-scan would otherwise treat each as a package to lint, a crate to audit
 or a module to scan. `internal/config`'s `TestPinDirectoriesAreExcluded` covers only the exclude
 half — it never reads `dependabot.yml`, and it discovers pins by a `*-pin` directory-name suffix, so
@@ -321,7 +421,7 @@ It was a robustness and determinism gap, not an outage — a self-hosted or cont
 Go fails at `go install`, the version used is whatever the image ships rather than what the repo
 declares, and with no shared module cache every run re-downloads.
 
-**Versions come from the repo's own manifests, never from `.lydite.yml`.**
+**Versions come from the repo's own manifests, never from `.lydite/config.yml`.**
 
 | Ecosystem | Version source |
 |---|---|
@@ -332,7 +432,7 @@ declares, and with no shared module cache every run re-downloads.
 Those files are already authoritative and already enforced by the language's own tooling, so a
 second copy in lydite's config could only agree redundantly or drift silently — and a stale
 duplicate is worse than none, because it reads as authoritative. `toolchain.{go,rust,node}` in
-`.lydite.yml` exist purely as a deliberate local **override**, which is a different thing from a
+`.lydite/config.yml` exist purely as a deliberate local **override**, which is a different thing from a
 parallel source of truth. `toolchain.enabled: false` keeps the diagnostics and skips the
 downloads.
 
@@ -379,7 +479,7 @@ Each ecosystem provisions differently, and only one of the three downloads anyth
   by reading `rust-toolchain.toml` from the directory cargo runs in, which covers the normal case
   for free — `internal/rust` and `internal/coverage` both run cargo inside the crate directory, so
   the file lydite read is the file rustup reads. A version supplied by `toolchain.rust` in
-  `.lydite.yml` has no such file, so rustup cannot see it and would install the requested channel
+  `.lydite/config.yml` has no such file, so rustup cannot see it and would install the requested channel
   and then go on running the old default. `Requirement.Overridden` marks that case and
   `provisionRust` sets `RUSTUP_TOOLCHAIN` **only** then: applying it whenever a channel came from a
   manifest would override rustup's own per-crate selection — the thing `internal/rust` says not to
@@ -443,7 +543,7 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   clobbers a fresher same-commit entry with an ancestor's stale value — and a shallow depth-1
   checkout can still see it) before walking first-parent ancestors, best-effort, skipping poisoned
   `{}` entries. A language that's genuinely gone — source deleted, or `enabled: false` in
-  `.lydite.yml` (`enabledEcosystems` strips disabled languages from the detected set) — is no
+  `.lydite/config.yml` (`enabledEcosystems` strips disabled languages from the detected set) — is no
   longer *detected*, so its entry still dies with it; only "the code is there but this run didn't
   measure it" carries forward. The `recorded coverage baseline` line names anything carried, and an
   unmeasured language *no* prior had is named in a stderr warning (shallow history is the usual
@@ -502,7 +602,7 @@ generated cache data, not source, needs no PR/review and never pollutes main's h
   `// Code generated ... DO NOT EDIT.` convention (<https://golang.org/s/generatedcode>) rather than
   a filename pattern — the same signal golangci-lint and Codecov use. Without it the gate measures
   code generation rather than testing: wardnet's regenerated REST client was 983 of one PR's 1007
-  changed Go lines and pinned its SDK module's aggregate at 2%. Note `go.exclude` in `.lydite.yml`
+  changed Go lines and pinned its SDK module's aggregate at 2%. Note `go.exclude` in `.lydite/config.yml`
   cannot do this job — it narrows module *discovery*, not what is inside a module.
 - **An empty baseline is never cached, and an empty cached baseline is a miss.** `Compute` silently
   omits any language whose tooling it can't run (deliberate — a repo with no coverage tooling
@@ -636,7 +736,7 @@ is actually making. The never-execute promise is unchanged and still guarded by
 
 **Where it lives is the point** (see [ADR 0003](docs/adr/0003-coverage-source-in-config.md)).
 `coverage.source` is a property of how a repo's pipeline is built
-— one answer, true for every workflow in that repo — so it belongs in `.lydite.yml` at the scan
+— one answer, true for every workflow in that repo — so it belongs in `.lydite/config.yml` at the scan
 root, not restated at each call site. The composite action therefore has *no* input for it:
 `action.yml` passes only `--dir`, and `--dir` is the one thing that can't move into the file, since
 the file lives at the scan root and lydite must know the root before it can read its own config.
@@ -668,7 +768,7 @@ worktree, but also any other `SourceRun` invocation) has no `node_modules` a pri
 already installed. `internal/coverage.resolvePackageManager` auto-detects npm/yarn/pnpm from the
 root's lockfile (`package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`); a root with more than one
 recognized lockfile is treated as ambiguous and install is skipped there rather than guessing a
-priority order. `typescript.install` in `.lydite.yml` overrides auto-detection entirely with an
+priority order. `typescript.install` in `.lydite/config.yml` overrides auto-detection entirely with an
 explicit shell command (e.g. `corepack enable && yarn install --immutable`), for Corepack-pinned or
 otherwise nonstandard install flows auto-detection can't infer, or to resolve an ambiguous root.
 `internal/coverage.tsWorkspaceRoots` dedupes so a shared root serving multiple nested packages is
@@ -689,7 +789,7 @@ coverage.patch.tolerance` — its own knob, deliberately independent of `coverag
 loosening the noisy aggregate gate never silently weakens this one). A language
 with no aggregate baseline yet is reported informationally (`new`), not failed, mirroring
 aggregate's own handling of a first-time-seen language. It's opt-out, not opt-in, per language, via
-`.lydite.yml`:
+`.lydite/config.yml`:
 
 ```yaml
 coverage:
@@ -832,7 +932,7 @@ exemptions file or an unresolvable merge-base is an error, exit 1. See
 [ADR 0013](docs/adr/0013-referral-not-approval.md) for the model and
 [ADR 0014](docs/adr/0014-evidence-only-referral-matching.md) for what it matches on.
 
-The model is an allowlist and the default is to refer. `.lydite.exemptions.yml` at the scan
+The model is an allowlist and the default is to refer. `.lydite/exemptions.yml` at the scan
 root declares shapes of change that merge unattended; with no file, or an empty one, every
 change is referred, which is the correct day-one state rather than a broken one.
 
@@ -859,13 +959,13 @@ Five properties are load-bearing and easy to weaken by accident:
 - **All-or-nothing, against a single exemption.** Every changed path must be covered by one
   exemption. Matching on *any* path would let an agent staple a README tweak onto a dangerous
   change; matching on the *union* of two exemptions would mean adding a narrow entry silently
-  widens every existing one, destroying `git log .lydite.exemptions.yml` as the readable
+  widens every existing one, destroying `git log .lydite/exemptions.yml` as the readable
   record of widenings that #15 exists to protect.
 - **Disqualifiers veto any match, and the built-in set cannot be removed.** A net-new
   suppression annotation, a newly skipped or `.only`-focused test, a removed test — deleted,
   gutted, or renamed out of a test path, since `git mv foo_test.go foo_disabled.go` takes it
   out of the runner's view leaving nothing deleted and no hunk to read — an edit to
-  `.lydite.yml`/`.lydite.exemptions.yml`, an edit to `.github/workflows/`, and an edit to
+  any file under `.lydite/`, an edit to `.github/workflows/`, and an edit to
   `.gitattributes`. The suppression list carries the whole-file and whole-crate forms
   (`#![allow(`, `#[expect(`, `@ts-nocheck`, `//nolint`, `//go:build ignore`) alongside the
   per-line ones, because the broad form is strictly more powerful than the narrow one it would
@@ -885,8 +985,8 @@ Five properties are load-bearing and easy to weaken by accident:
   benefit from its own widening, and the disqualifier, so such a change is always referred —
   and neither closes the realistic attack, which is not a forged exemption but an unremarkable
   one riding along in a large change approved for its other contents. What isolation buys is
-  that `git log .lydite.exemptions.yml` becomes the complete, reviewable record of every
-  widening. `.lydite.yml` deliberately carries no such requirement: report paths change
+  that `git log .lydite/exemptions.yml` becomes the complete, reviewable record of every
+  widening. `.lydite/config.yml` deliberately carries no such requirement: report paths change
   alongside code for honest reasons, and a rule that fires on ordinary work gets relaxed later.
 - **An absent exemptions file and an unreadable one are different questions**, asked
   separately: `git cat-file -e` answers whether it is there, and only then does `git show` read
@@ -1023,7 +1123,7 @@ per-repo judgment call.
 the wrong direction: it is what couples the human surface to a parser in another repository.
 
 Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
-lydite's usage is uniform enough (`.lydite.yml` already carries all the config) that the action
+lydite's usage is uniform enough (`.lydite/config.yml` already carries all the config) that the action
 owns the whole install → run → report flow: install lydite, run `scan`/`coverage` (each toggleable
 independently via `run-scan`/`run-coverage`), post one sticky PR comment summarizing both (upsert,
 not a fresh comment every run — via `marocchino/sticky-pull-request-comment`), and optionally

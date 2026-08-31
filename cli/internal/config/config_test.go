@@ -351,7 +351,11 @@ func TestLoadInvalidYAML(t *testing.T) {
 
 func write(t *testing.T, dir, contents string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(contents), 0o600); err != nil {
+	p := filepath.Join(dir, filepath.FromSlash(FileName))
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -417,7 +421,7 @@ func TestLoadRejectsUnknownLinter(t *testing.T) {
 	}
 }
 
-// The floor is opt-in: absent from .lydite.yml it must be 0, which disables
+// The floor is opt-in: absent from .lydite/config.yml it must be 0, which disables
 // the gate. A default above 0 would fail existing repos on a lydite upgrade
 // over a gap they never agreed to gate on.
 func TestCoverageFloorDefaultsToDisabled(t *testing.T) {

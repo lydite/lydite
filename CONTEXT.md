@@ -18,7 +18,7 @@ The aggregate coverage value cached on the `lydite` branch for a specific main-b
 A source line that a language's own coverage tool (`go tool cover`, `cargo llvm-cov`, Istanbul) reports an entry for. Comments, blank lines, imports, and braces are never coverable — they simply never appear in a coverage report, so patch coverage's denominator (coverable changed lines) excludes them automatically, without lydite doing any language-aware filtering itself.
 
 **Linter**:
-The engine backing lydite's TypeScript check: Biome, and only Biome. `typescript.linter` in `.lydite.yml` accepts `biome` alone; the retired `eslint` value is rejected with an error rather than accepted and quietly run under Biome.
+The engine backing lydite's TypeScript check: Biome, and only Biome. `typescript.linter` in `.lydite/config.yml` accepts `biome` alone; the retired `eslint` value is rejected with an error rather than accepted and quietly run under Biome.
 _Note_: the TypeScript check gates on **correctness** as well as security, so it is not "security findings only" the way the other language checks are. The ESLint stack it replaced covered a different set of security rules — Node/backend heuristics with no Biome equivalent — so this is a change in what is gated, not only in what runs it. See [ADR 0008](docs/adr/0008-biome-as-the-only-typescript-linter.md).
 _Avoid_: "linting mode", "the TS linter setting", describing Biome as opt-in.
 

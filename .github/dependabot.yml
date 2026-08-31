@@ -47,7 +47,7 @@ updates:
   # years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
   # pins".
   #
-  # Each pin directory is also excluded in .lydite.yml: they are real
+  # Each pin directory is also excluded in .lydite/config.yml: they are real
   # manifests, so detection would otherwise treat them as packages to lint or
   # modules to scan.
   - package-ecosystem: "npm"

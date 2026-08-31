@@ -17,11 +17,11 @@
 //
 //   - The version comes from what the repository already states — the `go`
 //     and `toolchain` directives in every discovered go.mod, the channel in
-//     rust-toolchain.toml, engines.node or .nvmrc. Never from .lydite.yml.
+//     rust-toolchain.toml, engines.node or .nvmrc. Never from .lydite/config.yml.
 //     Those files are already authoritative and tool-enforced, so a second
 //     copy in lydite's config could only agree redundantly or drift
 //     silently, and a stale duplicate is worse than none because it reads as
-//     authoritative. .lydite.yml can override, which is an explicit local
+//     authoritative. .lydite/config.yml can override, which is an explicit local
 //     exception rather than a parallel source of truth.
 //   - An ambient toolchain that already satisfies the declared version is
 //     used as-is. Downloading a toolchain that is already present and correct
@@ -49,7 +49,7 @@ import (
 	"lydite/lydite/internal/detect"
 )
 
-// Overrides is the .lydite.yml-supplied part of toolchain resolution, passed
+// Overrides is the .lydite/config.yml-supplied part of toolchain resolution, passed
 // in rather than imported so internal/config stays a leaf this package
 // doesn't depend on.
 type Overrides struct {

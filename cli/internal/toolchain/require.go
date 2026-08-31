@@ -15,12 +15,12 @@ import (
 // Requirement is the language toolchain one detected ecosystem needs, read
 // from what the repository already declares.
 //
-// Version is deliberately not sourced from .lydite.yml. Every one of these
+// Version is deliberately not sourced from .lydite/config.yml. Every one of these
 // files is already the authoritative, tool-enforced statement of the version
 // — `go build` honours go.mod, rustup honours rust-toolchain.toml, npm
 // honours engines.node — so a second copy in lydite's config could only ever
 // agree redundantly or disagree silently. A stale duplicate is worse than no
-// duplicate: it reads as authoritative. .lydite.yml can override (see
+// duplicate: it reads as authoritative. .lydite/config.yml can override (see
 // config.Toolchain), which is a different thing — an explicit, local
 // exception rather than a parallel source of truth.
 type Requirement struct {
@@ -37,7 +37,7 @@ type Requirement struct {
 	// requirement can be traced without guessing which of several manifests
 	// won.
 	Source string
-	// Overridden records that .lydite.yml supplied the version rather than a
+	// Overridden records that .lydite/config.yml supplied the version rather than a
 	// manifest. It matters for Rust: rustup selects a toolchain by reading
 	// rust-toolchain.toml from the directory cargo runs in, so a version that
 	// exists only in lydite's config is one rustup cannot see and has to be
@@ -94,12 +94,12 @@ func Requirements(root string, ecosystems []detect.Ecosystem, cfg Overrides) ([]
 			// verbatim.
 			if v == "" && e != detect.Rust {
 				return nil, fmt.Errorf(
-					"toolchain.%s in .lydite.yml: %q is not a version lydite can compare against an installed toolchain",
+					"toolchain.%s in .lydite/config.yml: %q is not a version lydite can compare against an installed toolchain",
 					overrideKey(e), override)
 			}
 			req.Version = v
 			req.Raw = override
-			req.Source = "toolchain." + overrideKey(e) + " in .lydite.yml"
+			req.Source = "toolchain." + overrideKey(e) + " in .lydite/config.yml"
 			req.Overridden = true
 		}
 		out = append(out, req)
@@ -108,7 +108,7 @@ func Requirements(root string, ecosystems []detect.Ecosystem, cfg Overrides) ([]
 }
 
 // overrideKey names an ecosystem as it is spelled under `toolchain:` in
-// .lydite.yml. TypeScript's key is `node`, because what is being overridden
+// .lydite/config.yml. TypeScript's key is `node`, because what is being overridden
 // is the Node runtime, not the TypeScript compiler — the ecosystem's name and
 // its toolchain's name are the one place these diverge.
 func overrideKey(e detect.Ecosystem) string {

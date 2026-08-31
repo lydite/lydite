@@ -215,7 +215,7 @@ func provisionRust(ctx context.Context, req Requirement, ambient string, present
 	// cargo inside the crate directory, so the file lydite read is the file
 	// rustup reads.
 	//
-	// An override has no such file. The version exists only in .lydite.yml,
+	// An override has no such file. The version exists only in .lydite/config.yml,
 	// rustup cannot see it, and without being told it would install the
 	// requested channel and then go on running the old default — reporting
 	// success for a toolchain nothing actually uses. RUSTUP_TOOLCHAIN is the

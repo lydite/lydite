@@ -1,4 +1,4 @@
-// Package config loads .lydite.yml, an optional config file: lydite's
+// Package config loads .lydite/config.yml, an optional config file: lydite's
 // default (no file present) is to scan everything it detects with every
 // check enabled and to produce coverage itself. The file cannot tune
 // severity or suppress individual findings (that's what a fix-up pass +
@@ -27,8 +27,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// FileName is the config file lydite looks for at the scan root.
-const FileName = ".lydite.yml"
+// Dir is the directory at the scan root holding every file that configures
+// lydite: this file, the exemption set (referral.FileName) and the component
+// declaration (component.FileName).
+//
+// One directory rather than a family of dotfiles at the root, because a
+// dotfile beside a dot-directory that both configure the same tool is an
+// arrangement whose shape nobody can predict from either half.
+const Dir = ".lydite"
+
+// FileName is the config file lydite looks for, relative to the scan root.
+const FileName = Dir + "/config.yml"
 
 // Language is the opt-out surface for one of the three supported ecosystems.
 type Language struct {
@@ -213,7 +222,7 @@ type PatchCoverage struct {
 type Coverage struct {
 	// Source says who produces the coverage data: lydite itself
 	// (SourceRun, the default) or a prior CI job (SourceReport). This lives
-	// in .lydite.yml rather than in a CLI flag or action input because it
+	// in the config file rather than in a CLI flag or action input because it
 	// is a property of how the repo's pipeline is built, not of a single
 	// invocation — the same answer holds for every run in that repo.
 	//
@@ -322,7 +331,7 @@ func Default() Config {
 	}
 }
 
-// Load reads .lydite.yml from root if present, merging it onto Default().
+// Load reads the config file from root if present, merging it onto Default().
 // A missing file is not an error — it's the common case. Merge semantics:
 // yaml.Unmarshal only overwrites fields explicitly present in the file, so a
 // section omitted entirely (or a key omitted within a present section) keeps

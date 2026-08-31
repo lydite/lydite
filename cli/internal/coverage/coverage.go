@@ -502,7 +502,7 @@ func findReportForUnit(dir, unitDir, unitRelDir string, overrides ReportOverride
 // yields the scan root directory itself, and a bare existence check accepts a
 // directory — so the lookup would answer "found" with a path no parser can
 // read, instead of either missing or falling back to the conventional
-// candidates. Both `report: ""` in .lydite.yml and `--go-report ""` on the
+// candidates. Both `report: ""` in .lydite/config.yml and `--go-report ""` on the
 // command line can produce it.
 func resolveOverride(dir, override string) (string, bool) {
 	if strings.TrimSpace(override) == "" {
@@ -738,7 +738,7 @@ func tsWorkspaceRoots(dir string, pkgDirs []string) []string {
 func tsInstall(ctx context.Context, roots []string, override string) {
 	for _, root := range roots {
 		if override != "" {
-			executil.Run(ctx, root, "sh", "-c", override) // #nosec G204 -- override comes from the target repo's own .lydite.yml, authored by whoever configured lydite for that repo, not remote/untrusted input
+			executil.Run(ctx, root, "sh", "-c", override) // #nosec G204 -- override comes from the target repo's own .lydite/config.yml, authored by whoever configured lydite for that repo, not remote/untrusted input
 			continue
 		}
 		manager, ok := resolvePackageManager(root)

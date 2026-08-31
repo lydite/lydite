@@ -32,16 +32,43 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"lydite/lydite/internal/config"
 )
 
 // FileName is the exemptions file, read from the scan root.
 //
-// It is separate from .lydite.yml because a pull request touching it may
-// touch nothing else, and that isolation must not extend to ordinary config
-// like coverage report paths, which legitimately change alongside code.
-const FileName = ".lydite.exemptions.yml"
+// It is its own file inside config.Dir rather than a section of
+// config.FileName because a pull request touching it may touch nothing else,
+// and that isolation must not extend to ordinary config like coverage report
+// paths, which legitimately change alongside code.
+const FileName = config.Dir + "/exemptions.yml"
+
+// IsExemptionsPath reports whether a repository-root-relative path is an
+// exemptions file.
+//
+// Matching the whole path under config.Dir, not just its base name: a bare
+// base-name test would read any exemptions.yml anywhere in the tree as the
+// file that decides what merges unattended. It is not anchored to the
+// repository root either, because the referral diff covers the whole
+// repository while lydite may be scanning a subdirectory of it — a monorepo's
+// declaration lives at source/.lydite/exemptions.yml and is still the one
+// that governs its own scan root.
+func IsExemptionsPath(p string) bool {
+	return p == FileName || strings.HasSuffix(p, "/"+FileName)
+}
+
+// InConfigDir reports whether a repository-root-relative path is a file
+// lydite is configured by: anything directly inside a config.Dir directory.
+//
+// The whole directory, so a component declaration or an exemption set counts
+// as lydite configuration alongside config.FileName. A file lydite reads to
+// decide what it checks is exactly the thing a change must not quietly alter.
+func InConfigDir(p string) bool { return path.Base(path.Dir(p)) == config.Dir }
 
 // Exemption is one declared shape of change that merges unattended.
 //
@@ -49,7 +76,7 @@ const FileName = ".lydite.exemptions.yml"
 // change is covered by two exemptions but by neither alone: that is referred.
 // Under the other reading the file becomes one global path allowlist, and
 // adding a narrow entry silently widens every existing entry by union — at
-// which point `git log .lydite.exemptions.yml` stops being readable one entry
+// which point `git log` on the exemptions file stops being readable one entry
 // at a time, which is the audit artefact the allowlist model exists to
 // produce.
 type Exemption struct {
@@ -96,7 +123,7 @@ type Disqualifiers struct {
 	Paths []string `yaml:"paths"`
 }
 
-// File is the parsed .lydite.exemptions.yml. Its zero value is the correct
+// File is the parsed exemptions file. Its zero value is the correct
 // day-one state: no exemptions, so everything is referred.
 type File struct {
 	Exemptions    []Exemption   `yaml:"exemptions"`

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-
-	"lydite/lydite/internal/config"
 )
 
 // Disqualification is one reason a change may not take the unattended path,
@@ -161,7 +159,7 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 	}
 	for _, p := range ch.Paths {
 		switch {
-		case path.Base(p) == config.FileName || path.Base(p) == FileName:
+		case InConfigDir(p):
 			add("lydite config edited", p, p)
 		case path.Base(p) == gitAttributes:
 			add("diff rendering edited", p, p)

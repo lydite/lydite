@@ -309,7 +309,7 @@ func newCoverageCmd() *cobra.Command {
 			return nil
 		},
 	}
-	// --dir stays a flag and cannot move into .lydite.yml: the file lives AT
+	// --dir stays a flag and cannot move into .lydite/config.yml: the file lives AT
 	// the scan root, so lydite has to know the root before it can read its
 	// own config. Everything else about coverage production now has a home in
 	// that file, and the flags below are the local-dev/one-off escape hatch.
@@ -319,30 +319,30 @@ func newCoverageCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sourceFlag, "source", "",
 		`who produces the coverage data: "run" (lydite executes each ecosystem's test suite
 itself) or "report" (a prior CI job already produced one; lydite only parses it). Defaults to
-coverage.source in .lydite.yml, which is where this normally belongs — it's a property of how
+coverage.source in .lydite/config.yml, which is where this normally belongs — it's a property of how
 the repo's pipeline is built, not of one invocation. Falls back to "run" with no file.`)
 	cmd.Flags().StringVar(&testsMode, "tests", "",
 		`deprecated alias for --source: "run" maps to --source=run, "skip" to --source=report`)
-	if err := cmd.Flags().MarkDeprecated("tests", `use --source ("skip" is now "report"), or set coverage.source in .lydite.yml`); err != nil {
+	if err := cmd.Flags().MarkDeprecated("tests", `use --source ("skip" is now "report"), or set coverage.source in .lydite/config.yml`); err != nil {
 		panic(err) // only errors on a flag name that doesn't exist, which is a programming error
 	}
 	cmd.Flags().StringArrayVar(&goReport, "go-report", nil,
 		`path (relative to --dir) to an existing go coverage profile; only used with --source=report.
-Overrides coverage.go.report in .lydite.yml, which is the usual home for it. Repeatable. A bare
+Overrides coverage.go.report in .lydite/config.yml, which is the usual home for it. Repeatable. A bare
 path applies only when exactly one Go module is discovered under --dir; for multiple modules,
 disambiguate with "<moduleDir>=<path>" (moduleDir relative to --dir), e.g.
 --go-report wctl=coverage/wctl.out. Default per module: search coverage.out, cover.out, c.out
 relative to that module's directory`)
 	cmd.Flags().StringArrayVar(&rustReport, "rust-report", nil,
 		`path (relative to --dir) to an existing cargo-llvm-cov JSON export; only used with --source=report.
-Overrides coverage.rust.report in .lydite.yml. Repeatable. A bare path applies only when exactly one
+Overrides coverage.rust.report in .lydite/config.yml. Repeatable. A bare path applies only when exactly one
 Rust crate/workspace is discovered under --dir; for multiple crates, disambiguate with
 "<crateDir>=<path>" (crateDir relative to --dir), e.g.
 --rust-report daemon=daemon/coverage/daemon-llvm-cov.json. Default per crate: search
 coverage/llvm-cov.json, llvm-cov.json, target/llvm-cov/llvm-cov.json relative to that crate's directory`)
 	cmd.Flags().StringArrayVar(&rustLCOVReport, "rust-lcov-report", nil,
 		`path (relative to --dir) to an existing cargo-llvm-cov lcov export, used for Rust patch coverage;
-only used with --source=report. Overrides coverage.rust.lcov in .lydite.yml. Repeatable, same
+only used with --source=report. Overrides coverage.rust.lcov in .lydite/config.yml. Repeatable, same
 bare-vs-"<crateDir>=<path>" syntax as --rust-report.
 Default per crate: search coverage/lcov.info, lcov.info, target/llvm-cov/lcov.info relative to that
 crate's directory`)
@@ -351,7 +351,7 @@ crate's directory`)
 
 // resolveSource settles who produces coverage for this invocation, in
 // descending precedence: --source, then the deprecated --tests, then
-// coverage.source in .lydite.yml, which config.Default() already resolved to
+// coverage.source in .lydite/config.yml, which config.Default() already resolved to
 // SourceRun when the file is absent or silent.
 //
 // Both flags default to "" rather than to "run" so that "unset" is
@@ -391,7 +391,7 @@ func resolveSource(cmd *cobra.Command, sourceFlag, testsMode string, fromFile co
 	}
 }
 
-// resolveReports merges the report-path flags over .lydite.yml's
+// resolveReports merges the report-path flags over .lydite/config.yml's
 // coverage.{go,rust} sections. Precedence is per language and per kind, not
 // per key: passing --rust-report replaces the file's rust.report wholesale
 // rather than merging entry-by-entry into it. Merging would make a flag
@@ -941,7 +941,7 @@ func diffReport(rep *ui.Report, current, baseline map[string]float64, tolerance 
 // names what is missing.
 //
 // The report is scoped to enabled ecosystems. coverage.Compute measures every
-// language it detects without consulting `enabled:` in .lydite.yml, so its
+// language it detects without consulting `enabled:` in .lydite/config.yml, so its
 // units can include a language the repo opted out of gating — and a per-unit
 // gate turns that into one build failure per crate for a language nobody
 // asked to be gated on. enabled is the caller's answer, so the filter belongs
@@ -1032,7 +1032,7 @@ func printNoCoverage(rep *ui.Report, source coverage.Source) {
 	rep.Add(row)
 }
 
-// enabledEcosystems drops languages disabled in .lydite.yml from the
+// enabledEcosystems drops languages disabled in .lydite/config.yml from the
 // detected set. For the coverage gate, `enabled: false` means "stop gating
 // this language", so it must behave exactly like source removal: undetected,
 // its baseline entry dies on the next record instead of being carried
@@ -1100,7 +1100,7 @@ func mergeCarried(current map[string]float64, unmeasured []string, prior map[str
 // worktree missing tooling) must not shrink the baseline: recording only what
 // was measured silently drops the unmeasured language from every later PR's
 // gate. An undetected language is never carried — its source left the tree
-// (or it was disabled in .lydite.yml), so its entry dies with it. Anything
+// (or it was disabled in .lydite/config.yml), so its entry dies with it. Anything
 // that stayed unfilled is named on stderr rather than dropped in silence.
 func carryForwardBaseline(ctx context.Context, cmd *cobra.Command, dir, sha string, detected []detect.Ecosystem, current map[string]float64, tolerance float64) (map[string]float64, []string, error) {
 	unmeasured := unmeasuredLanguages(detected, current)

@@ -137,7 +137,7 @@ func TestFindReportOverrideMissing(t *testing.T) {
 // the scan root directory, and a bare os.Stat accepts a directory — so the
 // lookup would answer "found" with something no parser can read, instead of
 // missing or falling back to the conventional candidates. `report: ""` in
-// .lydite.yml and `--go-report ""` both produce it.
+// .lydite/config.yml and `--go-report ""` both produce it.
 func TestFindReportEmptyOverrideIsAMissNotTheScanRoot(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "coverage.out", "mode: set\n")
