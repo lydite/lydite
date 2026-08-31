@@ -205,7 +205,7 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 
 	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
 		i := index[k]
-		rows[i] = runComponent(ctx, root, plans[i], cfg, stream)
+		rows[i] = runComponent(ctx, root, plans[i], cfg)
 	})
 
 	rep.Add(scheduleRow(outcome, len(items), limit))
@@ -265,6 +265,18 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 			}
 		}
 		if probeFailed {
+			// A probe runs candidate `docker compose version` invocations
+			// under the run's context, so an interrupt kills every one of
+			// them and looks exactly like a machine with no container
+			// runtime. Reporting that would be a confident wrong answer
+			// about the machine, and would report an interrupted run as a
+			// component that failed — the plan stays runnable instead, and
+			// the scheduler starts nothing on a cancelled context, so it
+			// lands on the `not run` row where it belongs.
+			if ctx.Err() != nil {
+				plans[i] = p
+				continue
+			}
 			plans[i] = fail(fmt.Errorf("%s declares compose services: %w", c.Name, probeErr))
 			continue
 		}
@@ -322,7 +334,7 @@ func scheduleRow(outcome scheduler.Outcome, components, limit int) ui.Row {
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, stream bool) (row ui.Row) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config) (row ui.Row) {
 	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
 
@@ -486,6 +498,10 @@ type prefixWriter struct {
 	// onEmit replaces the write to stderr. Only a test sets it: capturing the
 	// process's own stderr is not something two tests can do at once.
 	onEmit func(line []byte)
+	// delay overrides partialLineDelay. Only a test sets it: an assertion
+	// about whole lines must not depend on the machine having got round to
+	// the next write inside the production deadline.
+	delay time.Duration
 
 	mu    sync.Mutex
 	buf   []byte
@@ -510,19 +526,39 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 
 // arm schedules the leftover of a line to be shown if nothing completes it.
 // Called with w.mu held.
+//
+// The deadline runs from when the pending line began, not from the last write.
+// Restarting it on every write would measure silence instead, and a runner
+// redrawing a progress display with a carriage return and no newline writes
+// every few tens of milliseconds for minutes — so the deadline would never
+// expire, nothing would reach the terminal, and the buffer would hold every
+// byte of it.
 func (w *prefixWriter) arm() {
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
 	if len(w.buf) == 0 {
+		if w.timer != nil {
+			w.timer.Stop()
+			w.timer = nil
+		}
 		return
 	}
-	w.timer = time.AfterFunc(partialLineDelay, func() {
+	if w.timer != nil {
+		return
+	}
+	w.timer = time.AfterFunc(w.partialLineDelay(), func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
+		w.timer = nil
 		w.flush()
 	})
+}
+
+// partialLineDelay is how long this writer waits; a test sets its own so the
+// assertion does not depend on how fast the machine ran the loop.
+func (w *prefixWriter) partialLineDelay() time.Duration {
+	if w.delay > 0 {
+		return w.delay
+	}
+	return partialLineDelay
 }
 
 // Flush writes a trailing line that never ended in a newline, which is what a

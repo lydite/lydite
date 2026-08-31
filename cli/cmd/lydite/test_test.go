@@ -313,7 +313,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg, false)
+	}), cfg)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -345,7 +345,7 @@ func TestTeardownRunsWhenSetupFails(t *testing.T) {
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -362,7 +362,7 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -378,7 +378,7 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -392,7 +392,7 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -407,7 +407,7 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -441,7 +441,7 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default())
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -471,7 +471,7 @@ func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default())
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -694,7 +694,7 @@ func rowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
 // process is killed withholds the output somebody turned the flag on to see.
 func TestAnUnterminatedLineIsShownAnyway(t *testing.T) {
 	var got []byte
-	w := &prefixWriter{prefix: "web | "}
+	w := &prefixWriter{prefix: "web | ", delay: time.Millisecond}
 	// emit writes to stderr in production; the test reads what it formatted
 	// rather than capturing the process's stderr, which no other test could
 	// then share.
@@ -725,7 +725,11 @@ func TestAnUnterminatedLineIsShownAnyway(t *testing.T) {
 // whatever boundary the child happened to flush at.
 func TestACompletedLineIsNotSplit(t *testing.T) {
 	var lines []string
-	w := &prefixWriter{prefix: "web | "}
+	// A deadline long enough that the assertion is about the newline and not
+	// about how fast this loop ran: every other test here depends on
+	// synchronisation rather than timing, and one that did not would go flaky
+	// on a loaded runner years from now.
+	w := &prefixWriter{prefix: "web | ", delay: time.Hour}
 	w.onEmit = func(line []byte) { lines = append(lines, string(line)) }
 	for _, chunk := range []string{"ok  ", "web ", "(cached)\n"} {
 		if _, err := w.Write([]byte(chunk)); err != nil {
@@ -735,5 +739,39 @@ func TestACompletedLineIsNotSplit(t *testing.T) {
 	w.Flush()
 	if len(lines) != 1 || lines[0] != "ok  web (cached)" {
 		t.Fatalf("lines = %q, want one whole line", lines)
+	}
+}
+
+// The deadline runs from when the pending line began, not from the last write.
+// A runner redrawing a progress display writes continuously without ever
+// emitting a newline, and a deadline restarted on each write would never
+// expire — nothing would reach the terminal, and the buffer would hold every
+// byte of it.
+func TestContinuousOutputWithNoNewlineIsStillShown(t *testing.T) {
+	emitted := make(chan []byte, 8)
+	w := &prefixWriter{prefix: "web | ", delay: 20 * time.Millisecond}
+	w.onEmit = func(line []byte) { emitted <- append([]byte(nil), line...) }
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = w.Write([]byte("\rdownloading"))
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	select {
+	case line := <-emitted:
+		if len(line) == 0 {
+			t.Fatal("emitted an empty line")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a continuously written line was never shown: the deadline is measuring silence, not the line's age")
 	}
 }
