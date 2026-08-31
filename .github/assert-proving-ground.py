@@ -14,9 +14,8 @@ would then look exactly like a repository that had nothing to exclude.
 `generated/client.ts` is a real source file under no component that the
 declaration excludes, so it must never appear.
 
-The same standard applies to the scheduler. `go/api` and `rust` both publish
-host port 5432, under services named `db` and `postgres` — differently on
-purpose, so a lock keyed on service names passes this repository while being
+The same standard applies to the scheduler. `tally` and `api` both publish host
+port 5432, under services named `postgres` and `db` — differently on purpose, so a lock keyed on service names passes this repository while being
 wrong. Asserting the exit code would prove nothing: a scheduler that ran
 everything one at a time satisfies every claim about port locks without once
 having taken one. So the observed concurrency and the serialised pair are
@@ -42,11 +41,12 @@ import sys
 EXPECTED_ORPHANS = ["scripts/seed.ts"]
 # Under no component and excluded: the gate must stay silent about it.
 EXPECTED_EXCLUDED = ["generated/client.ts"]
-# Two components publish this host port, under services deliberately named
-# differently (`db` and `postgres`), so a lock keyed on service names would
-# miss the collision and fail mid-run on a bind error.
+# The components rooted at `rust/` and `go/api/` both publish this host port,
+# under services deliberately named differently (`postgres` and `db`), so a
+# lock keyed on service names would miss the collision and fail mid-run on a
+# bind error.
 CONTENDED_PORT = 5432
-EXPECTED_SERIALISED = ("go/api", "rust")
+EXPECTED_SERIALISED = ("tally", "api")
 
 
 def concurrency(value: str) -> int | None:
