@@ -52,6 +52,11 @@ A component is **the unit that language's own build tool treats as a whole**: a 
 _Note_: components are declared rather than derived, so the declaration is reviewable and its history records every change to what gets tested. A source file under no component's directory is a **Gate** — the author clears it by declaring a component or excluding the path. Without that check a declared list fails open: nothing breaks when it goes stale, so new code is simply never tested and the build stays green.
 _Avoid_: "package", "module", "project", "workspace" — each already names something specific in one language's tooling, and a component is the thing that spans all three. Avoid "service" for a component: a component may contain several services, and `services` names what its tests depend on.
 
+**Proving ground**:
+A repository that exists only to be run against, holding the shapes lydite must handle rather than code anyone deploys. It is the ground truth for behaviour that is not a function and so cannot be unit-tested — a CI matrix fanning out, affected selection over a real diff, two components contending for a port — and for the languages lydite's own repository cannot exercise. Its correct verdict is not all-green: a gate that never fires against it is a gate nothing has observed.
+_Note_: it is deliberately awkward. Every shape in it is one that changed a design decision, so tidying one removes the evidence for that decision. What keeps it honest is being run on a schedule by the tool it validates — a proving ground nothing exercises drifts silently, and a stale one is worse than none because it still reports success.
+_Avoid_: "fixture" and "test data" for the repository as a whole — both suggest something living inside the tree under test, and the point is that lydite runs against it as a foreign repository. Avoid "example" and "demo": nothing here is meant to be copied or shown.
+
 **Gate**:
 A check a change must satisfy to merge, which the change's author clears by doing more work — adding an assertion that kills a surviving mutant, raising patch coverage. Gates are meant to be iterated against, including by an agent, because every way of satisfying one improves the code. Contrast **Referral**.
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
