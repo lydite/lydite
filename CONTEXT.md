@@ -46,6 +46,12 @@ _Note_: because snapshots are not retained, "when did this finding first appear?
 **Gap**:
 An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.
 
+**Component**:
+The unit lydite schedules, builds, tests and gates: one language rooted at one directory, declared in `.lydite/components.yml`. Components are what run in parallel — as CI matrix jobs, or as local processes — and a component carries its runner, the services that runner needs, and its per-component opt-outs.
+A component is **the unit that language's own build tool treats as a whole**: a Cargo workspace, a Go module, a JavaScript workspace. It is not a deployable, and the two come apart routinely — eleven crates behind one `cargo --workspace` invocation are one component, because splitting them means compiling eleven times and provisioning eleven copies of everything the suite needs. Splitting below the build unit costs far more than the parallelism it buys.
+_Note_: components are declared rather than derived, so the declaration is reviewable and its history records every change to what gets tested. A source file under no component's directory is a **Gate** — the author clears it by declaring a component or excluding the path. Without that check a declared list fails open: nothing breaks when it goes stale, so new code is simply never tested and the build stays green.
+_Avoid_: "package", "module", "project", "workspace" — each already names something specific in one language's tooling, and a component is the thing that spans all three. Avoid "service" for a component: a component may contain several services, and `services` names what its tests depend on.
+
 **Gate**:
 A check a change must satisfy to merge, which the change's author clears by doing more work — adding an assertion that kills a surviving mutant, raising patch coverage. Gates are meant to be iterated against, including by an agent, because every way of satisfying one improves the code. Contrast **Referral**.
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
