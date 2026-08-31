@@ -1,0 +1,79 @@
+# Publishes this change's referral verdict as the lydite/referral commit
+# status, and as the pull request's standing comment.
+#
+# Deliberately outside the gt pipeline rather than a stage in it. A stage
+# reports once, when the job finishes, and a referral is resolved afterwards
+# by a person — so there would be nothing left for a comment to flip. It also
+# needs `statuses: write`, which ci-orchestration does not grant its stages
+# and cannot be widened from a called workflow.
+#
+# The status blocks no merge yet: making it a required check is one field on
+# a ruleset that gt renders and hardcodes to ci-gate alone. See #34.
+name: lydite referral
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# One verdict per revision. A superseded push is about to be re-decided, and
+# two runs racing to publish on the same context would leave whichever
+# finished last standing rather than whichever is current.
+concurrency:
+  group: lydite-referral-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  referral:
+    name: referral
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The verdict is the record a clearance acts on.
+      statuses: write
+      # The standing comment is edited in place rather than appended to.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The referral is computed from <merge-base>..HEAD, so the history
+          # reaching that merge-base has to be present. A shallow checkout
+          # resolves no merge-base and the run fails rather than deciding
+          # from a diff that describes something else.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache: true
+
+      - name: build lydite
+        working-directory: cli
+        run: go build -o /tmp/lydite ./cmd/lydite
+
+      # Runs from the repository root: --dir locates the exemptions file, and
+      # the diff a referral reads covers the whole repository regardless.
+      #
+      # `review` exits 2 on a referral and 1 on the isolation gate, and both
+      # are answers rather than malfunctions — the verdict is carried by the
+      # status this step just published, so the step itself must not fail the
+      # job over one. Anything above 2 is lydite failing to reach an answer,
+      # which must still fail the job.
+      #
+      # The exit code is captured with `|| verdict=$?` rather than read from
+      # `$?` on the next line, because the runner invokes this with `bash -e`:
+      # a bare command exiting non-zero ends the step before any line after it
+      # runs, and `set +e` here would also disarm the failure this step does
+      # want to report.
+      - name: publish the referral verdict
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          verdict=0
+          /tmp/lydite review --dir . --publish || verdict=$?
+          if [ "$verdict" -gt 2 ]; then
+            exit "$verdict"
+          fi

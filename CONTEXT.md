@@ -65,7 +65,8 @@ _Note_: a disqualifier must be readable off the diff. Anything the author merely
 _Avoid_: "veto rule", "blocker", and using it for a **Gate** failure — a failing gate is the author's to clear, a disqualifier is not.
 
 **Clearance**:
-A human's resolution of a **Referral**, bound to the exact revision it was given for. Because it names a revision, any further change to the branch voids it: a clearance is never standing permission for a pull request.
+A human's resolution of a **Referral**, bound to the exact revision it was given for. The revision is one commit, not the tree it produces and not the shape of the verdict: a clearance carries no notion of two revisions being "the same change", so any further change to the branch — a rebase that alters nothing, included — voids it. A clearance is never standing permission for a pull request.
+The human is someone with write access to the repository, established from the hosting platform rather than from anything the commenter says about themselves. That is a floor and not the whole of the trust: whoever holds the repository's credentials can give a clearance, which is what makes it conventional today.
 _Avoid_: "approval" — GitHub's review approval is a different mechanism, with different rules about who may give one.
 
 ## Flagged ambiguities

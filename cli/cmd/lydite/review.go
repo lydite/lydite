@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/referral"
@@ -15,8 +16,8 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base string
-	var asJSON, noColor bool
+	var dir, base, eventPath string
+	var asJSON, noColor, doPublish bool
 	cmd := &cobra.Command{
 		Use: "review",
 		// A non-zero verdict is an answer, not a misuse of the command and
@@ -51,6 +52,7 @@ referred — including a correct one.`,
 				return err
 			}
 
+			decision := referral.Decide(change, file)
 			if referral.Dirty(ctx, dir) {
 				report.Add(ui.Row{
 					Status: ui.StatusUnmeasured,
@@ -58,7 +60,20 @@ referred — including a correct one.`,
 					Value:  "not included in this verdict",
 				})
 			}
-			addDecisionRows(report, referral.Decide(change, file), len(file.Exemptions))
+			addDecisionRows(report, decision, len(file.Exemptions))
+
+			// Published after the rows are added and from the report's own
+			// verdict, so the status a machine reads and the report a person
+			// reads are the same value rather than two derivations of it.
+			if doPublish {
+				target, err := resolvePublishTarget(eventPath)
+				if err != nil {
+					return err
+				}
+				if err := publish(ctx, target, decision, change, len(file.Exemptions), report.Verdict(), baseSHA); err != nil {
+					return err
+				}
+			}
 
 			if err := report.Write(cmd.OutOrStdout(), asJSON, ui.ColorEnabled(cmd.OutOrStdout(), noColor)); err != nil {
 				return err
@@ -70,6 +85,11 @@ referred — including a correct one.`,
 	cmd.Flags().StringVar(&base, "base", "auto", `commit this change is measured against ("auto" resolves the merge-base with origin/main)`)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
+	// Publishing is off by default and errors rather than skipping when the
+	// platform's environment is absent, so a local review can neither post
+	// by accident nor appear to have posted when it did not.
+	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status and the pull request's standing comment")
+	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
 	return cmd
 }
 
