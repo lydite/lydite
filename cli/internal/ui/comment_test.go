@@ -89,3 +89,14 @@ func TestCommentOmitsAnEmptySection(t *testing.T) {
 		t.Fatal("an empty section was rendered")
 	}
 }
+
+// The mark is rendered at the asset's own size rather than scaled down, and
+// carries both dimensions so the comment does not reflow once it loads.
+func TestCommentRendersTheMarkAtItsNativeSize(t *testing.T) {
+	body := Comment{Verdict: VerdictPass}.Render()
+	for _, want := range []string{`width="64"`, `height="64"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the mark is missing %s:\n%s", want, body)
+		}
+	}
+}

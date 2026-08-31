@@ -84,11 +84,11 @@ func badge(v Verdict) string {
 func (c Comment) Render() string {
 	var b strings.Builder
 	b.WriteString(Marker + "\n")
-	// A heading rather than a floated image: the mark scales with the
-	// heading's own type, and nothing below it wraps around a float. The
-	// asset is 64px, so 28 stays crisp on a 2x display instead of being
-	// upscaled.
-	fmt.Fprintf(&b, "### <img src=%q width=\"28\" align=\"top\" alt=\"\"> lydite\n\n", markURL)
+	// Rendered at the asset's own 64px rather than scaled down: the mark is
+	// the first thing identifying whose verdict this is, and both dimensions
+	// are given so the row's height is known before the image loads and the
+	// comment does not reflow under the reader.
+	fmt.Fprintf(&b, "<img src=%q width=\"64\" height=\"64\" align=\"left\" alt=\"lydite\">\n\n", markURL)
 
 	b.WriteString(badge(c.Verdict))
 	if c.Headline != "" {
