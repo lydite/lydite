@@ -16,11 +16,12 @@ root; run all go and golangci-lint commands from there.
     git fetch origin main
     git switch -c feat/scheduler origin/main
 
-**Verify steps 1 and 2 are merged first.** Step 1 carries `internal/component`,
-`internal/runner`, `internal/compose`, `internal/nodedeps`,
-`internal/cargotool`, `internal/download` and `lydite test`. Step 2 carries
-`internal/orphan` and `internal/pathmatch`. If either is missing, stop and say
-so.
+**Verify steps 1 and 2 are merged first.** Step 1 (#39) carries
+`internal/component`, `internal/runner`, `internal/compose`,
+`internal/nodedeps`, `internal/cargotool`, `internal/download` and `lydite
+test`. Step 2 (#42) carries `internal/orphan`, `internal/pathmatch`, the
+`excludes` key, the `orphans` row and `.github/assert-proving-ground.py`. If
+either is missing, stop and say so.
 
 **First commit: correct the plan.** `.agents/plans/component-platform.md`
 should say step 4 is in progress and name this file as its prompt.
@@ -92,10 +93,11 @@ that serialises them on the *name* passes this repository while being wrong,
 which is why the names differ. A run that is green without ever having
 serialised those two proves nothing — assert the ordering, not the exit code.
 
-Its `ci-end2end.yml` job already asserts a verdict rather than an exit code
-(see `.github/assert-proving-ground.py`); extend that rather than adding a
-second assertion mechanism beside it. **Editing CI requires asking the user
-first.**
+Its `ci-end2end.yml` job already asserts a verdict rather than an exit code:
+`.github/assert-proving-ground.py` takes the report and the checkout path, and
+holds the orphan gate to firing on `scripts/seed.ts` while staying silent on
+the excluded `generated/client.ts`. Extend it rather than adding a second
+assertion mechanism beside it. **Editing CI requires asking the user first.**
 
 ## Out of scope
 
@@ -138,6 +140,30 @@ mutation (step 9).
   — gosec and semgrep gate this repository — and `gt repo check`.
 - Ask before editing CI.
 
+## The failure class step 2 kept producing
+
+Two review rounds on the orphan gate found ten defects, and all but one were
+the same shape: **a check that could not run reading as a check that passed.**
+Not one changed a verdict on a correct repository, and every one of them would
+have made an incorrect repository look fine.
+
+- `git ls-files` exits zero and prints nothing when the scan root is itself
+  ignored, so the gate reported `none in 0 source file(s)` — clean, having
+  examined nothing.
+- The CI assertion checked that an excluded file was *absent* from the report.
+  A file that had been deleted satisfied that equally, so the branch it existed
+  to exercise could stop running with the job still green.
+- A git failure built its message from stdout, where git writes nothing, so a
+  real error surfaced as a bare `exit status 128`.
+
+This step is more exposed to that shape than step 2 was, not less. A scheduler
+that never runs two components at once passes every test about port locks
+without ever having taken one, and a green run proves nothing about a
+constraint that was never reached. **Assert that the thing happened, not that
+nothing went wrong** — the count of concurrent components, the observed
+ordering of the two colliding stacks, the lock actually being contended. An
+assertion satisfied by the feature being absent is not an assertion.
+
 ## Working mode
 
 - Verify a claim before making it. #39 shipped a path-doubling bug that every
@@ -147,6 +173,9 @@ mutation (step 9).
 - A concurrency bug that passes once has not passed. `go test -race` is the
   floor, not the proof; a scheduler test that depends on real timing is one
   that goes flaky in someone else's CI six weeks from now.
+- Run `/code-review` before proposing the PR, and again after acting on it.
+  Step 2 went through two rounds and both found real defects in work that
+  built, tested and linted clean.
 - Prefer one shared implementation over two that agree today. `internal/nodedeps`,
   `internal/cargotool`, `internal/download` and `internal/pathmatch` all exist
   for that reason.
