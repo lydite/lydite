@@ -22,6 +22,14 @@ A third repo — a `lydite/go` mirror — was considered and rejected. There is 
 import, so a published module path would buy nothing while costing sync automation and a second
 tag namespace for `v1` to go stale in.
 
+`lydite/proving-ground` is a third repo, and the rule above does not reach it. That rule is about
+*release* coupling: `cli/`, `web/` and `worker/` ship as one artifact from one tag, so they must
+not be able to drift apart. The proving ground ships nothing — it is never released, never
+imported, and consumed only by CI, so there is no tag for it to drift from. It is also the one
+thing that cannot be a directory in the monorepo: lydite has to run against it as a *foreign*
+repository, and a fixture living inside the tree lydite scans would be scanned as part of lydite.
+See [ADR 0016](0016-components-and-lydite-run-tests.md) for what it validates.
+
 ## The module path stays non-fetchable
 
 `go.mod` is renamed `lydite/lydite` -> `lydite/lydite` and remains deliberately not a URL.

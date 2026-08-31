@@ -9,7 +9,7 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 
 | # | Issue | Deliverable | Prompt | State |
 |---|---|---|---|---|
-| 0 | #38 | Proving ground: polyglot repo in the `lydite` org | `pr0-proving-ground.md` | not started |
+| 0 | #38 | Proving ground: polyglot repo in the `lydite` org | `pr0-proving-ground.md` | done — [lydite/proving-ground](https://github.com/lydite/proving-ground) |
 | 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | not started |
 | 2 | — | Orphan-file gate | — | not started |
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | — | not started |
@@ -58,8 +58,13 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
 
 - Mutation's operator catalogue — how far past binary operators and boolean
   literals, given each operator multiplies runtime. Belongs with step 9.
-- ADR 0010 needs a line reconciling a third repository with its "Two repos, not
-  three" section: a proving ground ships nothing and is never released.
+- Two questions the schema raised on first contact with a repository, both for
+  step 1 to settle. `cargo-llvm-cov-nextest` is listed as a runner name beside
+  `cargo-nextest`, but instrumentation is a *derived variant* and Rust's
+  instrumented variant already replaces the runner with `cargo llvm-cov` — so a
+  component declaring it has an instrumented variant of an instrumented runner.
+  And nothing names a JavaScript package manager or workspace filter, so whether
+  `vitest` runs at the workspace root or per package can only be said in `args`.
 
 ## Known traps
 
