@@ -78,11 +78,22 @@ func Find(ctx context.Context, root string, f component.File) (Result, error) {
 	used := make([]bool, len(f.Excludes))
 	res := Result{Scanned: len(files)}
 	for _, p := range files {
-		if coveredByComponent(p, f.Components) {
-			continue
+		// Every matching exclude is marked, and matching is asked of every
+		// file rather than only the uncovered ones. Both halves keep the
+		// unused warning honest: an exclude whose files all happen to sit
+		// inside a component covers them all the same, and of two excludes
+		// that overlap, stopping at the first would report the second as
+		// covering nothing. Either would put a warning on a correct
+		// declaration, on every run, which is how a diagnostic teaches
+		// people to ignore it.
+		excluded := false
+		for i, e := range f.Excludes {
+			if pathmatch.Match(e, p) {
+				used[i] = true
+				excluded = true
+			}
 		}
-		if i, ok := matchExclude(p, f.Excludes); ok {
-			used[i] = true
+		if excluded || coveredByComponent(p, f.Components) {
 			continue
 		}
 		res.Orphans = append(res.Orphans, p)
@@ -108,22 +119,6 @@ func coveredByComponent(file string, components []component.Component) bool {
 		}
 	}
 	return false
-}
-
-// matchExclude returns the index of the first exclude covering the file.
-//
-// The patterns are anchored, so "scripts" covers the path "scripts" and not
-// a file inside it; a directory is spelled "scripts/**". That is deliberately
-// stricter than gitignore, for the reason pathmatch gives: these decide what
-// goes untested, and a pattern silently covering more than it appears to is
-// the failure the whole gate exists to prevent.
-func matchExclude(file string, excludes []string) (int, bool) {
-	for i, e := range excludes {
-		if pathmatch.Match(e, file) {
-			return i, true
-		}
-	}
-	return 0, false
 }
 
 // filepath normalises a declared dir to the forward-slash form every path
@@ -152,6 +147,16 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 	return files, nil
 }
 
+// firstLine is the first non-empty line of s, trimmed.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // lsFiles asks git for the paths it knows about, relative to root.
 //
 // -z rather than newline-separated output, so a path containing a newline or
@@ -165,8 +170,12 @@ func lsFiles(ctx context.Context, root string) ([]string, error) {
 		if !executil.RunQuiet(ctx, root, "git", "rev-parse", "--is-inside-work-tree").Ok() {
 			return nil, ErrNoRepository
 		}
-		if out := strings.TrimSpace(res.Output); out != "" {
-			return nil, errors.New(out)
+		// git writes its diagnostics to stderr, which RunQuiet keeps apart
+		// from stdout — reading Output here would report an empty string and
+		// leave the row saying only "exit status 129". The first line is the
+		// error; what follows it is a usage dump nobody acts on.
+		if msg := firstLine(res.Stderr); msg != "" {
+			return nil, errors.New(msg)
 		}
 		return nil, res.Err
 	}

@@ -205,3 +205,54 @@ func equal(got, want []string) bool {
 	}
 	return true
 }
+
+// An exclude covers files whether or not a component also covers them, so a
+// pattern whose every match happens to sit inside a component's dir has not
+// "covered no file". Warning about it would put a line on stderr on every run
+// of a correct declaration, which is how a diagnostic teaches people to
+// ignore it.
+func TestAnExcludeMatchingInsideAComponentIsNotUnused(t *testing.T) {
+	root := repo(t, map[string]string{"cli/api.gen.go": "package cli\n", "cli/main.go": "package cli\n"})
+	res := find(t, root, component.File{
+		Components: []component.Component{{Name: "cli", Dir: "cli"}},
+		Excludes:   []string{"**/*.gen.go"},
+	})
+	if len(res.UnusedExcludes) != 0 {
+		t.Errorf("unused = %v, want none — the pattern matches cli/api.gen.go", res.UnusedExcludes)
+	}
+}
+
+// Two excludes that overlap are both used. Stopping at the first match would
+// report the second as covering nothing, on a declaration that is correct.
+func TestOverlappingExcludesAreBothUsed(t *testing.T) {
+	root := repo(t, map[string]string{"generated/client.ts": "export const c = 1\n"})
+	res := find(t, root, component.File{Excludes: []string{"generated/**", "generated/client.ts"}})
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans = %v, want none", res.Orphans)
+	}
+	if len(res.UnusedExcludes) != 0 {
+		t.Errorf("unused = %v, want none — both patterns match the file", res.UnusedExcludes)
+	}
+}
+
+// git's diagnostics go to stderr, so an error built from stdout is an empty
+// string and the reader is left with a bare exit status and no reason.
+func TestAGitFailureIsReportedWithItsMessage(t *testing.T) {
+	root := repo(t, map[string]string{"a.go": "package a\n"})
+	// A corrupt index, rather than a broken .git: `git rev-parse` never
+	// reads the index, so it still reports a work tree and the run reaches
+	// the failure this is about instead of ErrNoRepository.
+	if err := os.WriteFile(filepath.Join(root, ".git", "index"), []byte("not an index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := orphan.Find(context.Background(), root, component.File{})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if errors.Is(err, orphan.ErrNoRepository) {
+		t.Fatalf("err = %v, want the ls-files failure rather than a missing repository", err)
+	}
+	if !strings.Contains(err.Error(), "index") {
+		t.Errorf("err = %v, want git's own message naming the bad index, not a bare exit status", err)
+	}
+}

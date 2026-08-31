@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +112,11 @@ func TestComponentFlagSelects(t *testing.T) {
 
 // --json promises stdout carries a document and nothing else, including on
 // the path where a repository has declared no components at all.
+//
+// The tree is not a git repository, so the orphan gate reports unmeasured and
+// the verdict below is about the empty declaration alone. In a real
+// repository declaring nothing, every source file is an orphan and the run
+// fails — which is the gate working, not a contradiction of this test.
 func TestNoComponentsIsReportedThroughTheReport(t *testing.T) {
 	out, err := runTestCmd(t, t.TempDir(), "--json")
 	if err != nil {
@@ -127,7 +133,7 @@ func TestNoComponentsIsReportedThroughTheReport(t *testing.T) {
 		t.Fatalf("stdout is not a JSON document: %v\n%s", err, out)
 	}
 	if doc.Verdict != "pass" {
-		t.Errorf("verdict = %q, want a pass: declaring nothing is not a failure", doc.Verdict)
+		t.Errorf("verdict = %q, want a pass: an empty declaration is not itself a failure", doc.Verdict)
 	}
 	var declared bool
 	for _, r := range doc.Rows {
@@ -182,6 +188,72 @@ func fixtureRepo(t *testing.T, declaration string) string {
 	write(t, root, "mod/go.mod", "module fixture\n\ngo 1.26\n")
 	write(t, root, "mod/fixture.go", "package fixture\n\n// Foo is what the fixture's test exercises.\nfunc Foo() int { return 1 }\n")
 	write(t, root, "mod/fixture_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\tif Foo() != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	return root
+}
+
+// The shape .github/assert-proving-ground.py reads. That script is the only
+// thing standing between the orphan gate silently breaking and a green
+// proving-ground job, and it matches on the row's value prefix and on detail
+// carrying bare paths — so a rewording of either is a contract change, and
+// this is where it is caught rather than in another repository's CI.
+func TestOrphanRowCarriesTheCountAndThePaths(t *testing.T) {
+	root := gitRepo(t, map[string]string{
+		".lydite/components.yml": "components:\n  - name: cli\n    dir: cli\n    runner: go-test\n",
+		"cli/main.go":            "package main\n",
+		"scripts/seed.ts":        "export const s = 1\n",
+	})
+	out, err := runTestCmd(t, root, "--json", "--component", "cli")
+	if err == nil {
+		t.Error("an orphan must fail the run")
+	}
+	row := jsonRowByLabel(t, out, "orphans")
+	if row.Status != string(ui.StatusFail) {
+		t.Errorf("status = %q, want %q", row.Status, ui.StatusFail)
+	}
+	if !strings.HasPrefix(row.Value, "1 ") {
+		t.Errorf("value = %q, want it to start with the orphan count", row.Value)
+	}
+	var named bool
+	for _, d := range row.Detail {
+		if d == "scripts/seed.ts" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("detail = %v, want a bare path naming the orphan", row.Detail)
+	}
+}
+
+// An exclude clears an orphan, and the run passes. The other half of the
+// same contract: a gate that can only fail is one nobody can satisfy.
+func TestAnExcludeClearsAnOrphan(t *testing.T) {
+	root := gitRepo(t, map[string]string{
+		".lydite/components.yml": "components:\n  - name: cli\n    dir: cli\n    runner: go-test\nexcludes: [\"scripts/**\"]\n",
+		"cli/main.go":            "package main\n",
+		"scripts/seed.ts":        "export const s = 1\n",
+	})
+	out, _ := runTestCmd(t, root, "--json", "--component", "cli")
+	row := jsonRowByLabel(t, out, "orphans")
+	if row.Status != string(ui.StatusPass) {
+		t.Errorf("status = %q, want %q — the exclude covers the only orphan", row.Status, ui.StatusPass)
+	}
+}
+
+// gitRepo writes the files and initialises a repository, because the orphan
+// gate reads the file list from git.
+func gitRepo(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, body := range files {
+		write(t, root, rel, body)
+	}
+	for _, args := range [][]string{{"init", "--quiet"}, {"add", "-A"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
 	return root
 }
 

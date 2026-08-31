@@ -371,7 +371,6 @@ func env(c component.Component) []string {
 	return out
 }
 
-// renderTestReport renders and returns the verdict as an exit code.
 // orphanRow runs the orphan gate and renders its verdict.
 //
 // It fails, rather than referring: a source file under no component is
@@ -395,6 +394,14 @@ func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
 	}
 	for _, e := range res.UnusedExcludes {
+		// The "did you mean a subtree" hint only fits a pattern that is not
+		// already one. A stale "generated/**", left behind when the file it
+		// named was deleted, is the other reason an exclude covers nothing —
+		// and advising "generated/**/**" for it would be nonsense.
+		if strings.HasSuffix(e, "/**") {
+			fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file\n", component.FileName, e)
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file — a directory is spelled %q\n", component.FileName, e, strings.TrimSuffix(e, "/")+"/**")
 	}
 	if len(res.Orphans) == 0 {
@@ -414,6 +421,7 @@ func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
 	}
 }
 
+// renderTestReport renders and returns the verdict as an exit code.
 func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) error {
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {

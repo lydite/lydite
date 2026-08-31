@@ -104,16 +104,6 @@ func SourceExts() []string {
 	return out
 }
 
-// Langs returns every language lydite has a runner for, sorted.
-func Langs() []Lang {
-	out := make([]Lang, 0, len(sourceExts))
-	for l := range sourceExts {
-		out = append(out, l)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
-
 // Variant is which of the three forms of a suite is wanted.
 type Variant string
 
