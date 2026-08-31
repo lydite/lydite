@@ -129,8 +129,36 @@ func TestNoComponentsIsReportedThroughTheReport(t *testing.T) {
 	if doc.Verdict != "pass" {
 		t.Errorf("verdict = %q, want a pass: declaring nothing is not a failure", doc.Verdict)
 	}
-	if len(doc.Rows) != 1 || doc.Rows[0].Status != string(ui.StatusUnmeasured) {
-		t.Errorf("rows = %+v, want one unmeasured row", doc.Rows)
+	var declared bool
+	for _, r := range doc.Rows {
+		if strings.Contains(r.Value, "no components declared") {
+			declared = true
+			if r.Status != string(ui.StatusUnmeasured) {
+				t.Errorf("status = %q, want %q", r.Status, ui.StatusUnmeasured)
+			}
+		}
+	}
+	if !declared {
+		t.Errorf("rows = %+v, want one saying no components are declared", doc.Rows)
+	}
+}
+
+// A tree that is not a git repository leaves the orphan gate with no way to
+// know which files the repository contains, and it says so rather than
+// passing. A gate that did not run must never read as one that did.
+func TestOrphanGateOutsideAGitRepositoryIsUnmeasured(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components:\n  - name: fixture\n    dir: .\n    runner: go-test\n")
+	out, err := runTestCmd(t, root, "--json")
+	if err == nil {
+		t.Log("the fixture component itself may pass or fail; only the orphan row matters here")
+	}
+	row := jsonRowByLabel(t, out, "orphans")
+	if row.Status != string(ui.StatusUnmeasured) {
+		t.Errorf("status = %q, want %q — an unrunnable gate is not a passing one", row.Status, ui.StatusUnmeasured)
+	}
+	if !strings.Contains(row.Value, "git") {
+		t.Errorf("value = %q, want it to name the missing repository", row.Value)
 	}
 }
 
@@ -155,6 +183,37 @@ func fixtureRepo(t *testing.T, declaration string) string {
 	write(t, root, "mod/fixture.go", "package fixture\n\n// Foo is what the fixture's test exercises.\nfunc Foo() int { return 1 }\n")
 	write(t, root, "mod/fixture_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\tif Foo() != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
 	return root
+}
+
+// jsonRowByLabel finds one row in the report document, so a test asserts on
+// the row it is about rather than on the whole report's shape — which every
+// gate added to the command would otherwise change.
+func jsonRowByLabel(t *testing.T, out, label string) struct {
+	Status string   `json:"status"`
+	Label  string   `json:"label"`
+	Value  string   `json:"value"`
+	Detail []string `json:"detail"`
+} {
+	t.Helper()
+	type row = struct {
+		Status string   `json:"status"`
+		Label  string   `json:"label"`
+		Value  string   `json:"value"`
+		Detail []string `json:"detail"`
+	}
+	var doc struct {
+		Rows []row `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not a JSON document: %v\n%s", err, out)
+	}
+	for _, r := range doc.Rows {
+		if r.Label == label {
+			return r
+		}
+	}
+	t.Fatalf("no %q row in %+v", label, doc.Rows)
+	return row{}
 }
 
 func write(t *testing.T, root, rel, body string) {

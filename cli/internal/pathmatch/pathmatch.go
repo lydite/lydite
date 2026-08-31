@@ -1,4 +1,19 @@
-package referral
+// Package pathmatch is the anchored path-pattern syntax lydite's declarations
+// are written in: the exemption and disqualifier lists in
+// .lydite/exemptions.yml, and the orphan-gate excludes in
+// .lydite/components.yml.
+//
+// One implementation rather than two that agree today. Both callers decide
+// something consequential off a path — what may merge unread, and what may go
+// untested — and two matchers would agree until one of them learned about a
+// pattern form the other had not, in a way neither's tests would show.
+//
+// A pattern is matched against a forward-slash relative path, and which root
+// it is relative to belongs to the caller: referral matches
+// repository-root-relative paths so that a workflow edit outside a monorepo's
+// scan root cannot slip past, while a component exclude is scan-root-relative
+// like every other path in that file.
+package pathmatch
 
 import (
 	"fmt"
@@ -6,14 +21,7 @@ import (
 	"strings"
 )
 
-// Match reports whether pattern covers a repository-root-relative,
-// forward-slash path.
-//
-// Repository root, not scan root, and the distinction is not academic: the
-// referral diff deliberately covers the whole repository so that a workflow
-// edit outside a monorepo's scan root cannot slip past, so the paths reaching
-// here carry no --dir prefix stripped. A repository scanned with --dir source
-// writes "source/README.md", not "README.md".
+// Match reports whether pattern covers a forward-slash relative path.
 //
 // The syntax is deliberately a subset, and anchored:
 //
@@ -28,9 +36,9 @@ import (
 // The anchoring is where this parts company with gitignore, whose slash-less
 // patterns float to any depth. Floating is the right default for a list of
 // things to skip, where over-matching costs nothing. It is the wrong default
-// here: these patterns decide what merges without a human, so a pattern that
-// silently covers more than it appears to is the whole failure mode. Every
-// widening should have to be written down.
+// here: these patterns decide what merges without a human and what goes
+// untested, so a pattern that silently covers more than it appears to is the
+// whole failure mode. Every widening should have to be written down.
 func Match(pattern, target string) bool {
 	p, t := strings.Split(pattern, "/"), strings.Split(target, "/")
 	// Each (pattern index, target index) pair has one answer, so memoising
@@ -80,9 +88,9 @@ func matchSegments(pattern, target []string, seen map[[2]int]bool) bool {
 //
 // Rejecting at load time rather than treating a malformed pattern as
 // "matches nothing" is not about fail-closed — a pattern matching nothing
-// refers more, not less. It is done because the author clearly meant
-// something, and an exemption that silently does nothing is an exemption
-// nobody will notice is broken.
+// refers more and excludes less, not the reverse. It is done because the
+// author clearly meant something, and a pattern that silently does nothing is
+// one nobody will notice is broken.
 func ValidatePattern(pattern string) error {
 	for _, segment := range strings.Split(pattern, "/") {
 		if segment == "**" {

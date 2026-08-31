@@ -38,6 +38,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/pathmatch"
 )
 
 // FileName is the exemptions file, read from the scan root.
@@ -98,7 +99,7 @@ func (e Exemption) Covers(changed []string) bool {
 	for _, c := range changed {
 		matched := false
 		for _, p := range e.Paths {
-			if Match(p, c) {
+			if pathmatch.Match(p, c) {
 				matched = true
 				break
 			}
@@ -176,13 +177,13 @@ func (f File) validate(source string) error {
 			return fmt.Errorf("%s (%s): at least one path pattern is required", where, e.Name)
 		}
 		for _, p := range e.Paths {
-			if err := ValidatePattern(p); err != nil {
+			if err := pathmatch.ValidatePattern(p); err != nil {
 				return fmt.Errorf("%s (%s): %w", where, e.Name, err)
 			}
 		}
 	}
 	for _, p := range f.Disqualifiers.Paths {
-		if err := ValidatePattern(p); err != nil {
+		if err := pathmatch.ValidatePattern(p); err != nil {
 			return fmt.Errorf("%s: disqualifiers: %w", source, err)
 		}
 	}

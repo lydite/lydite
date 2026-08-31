@@ -267,3 +267,34 @@ func write(t *testing.T, root, rel, body string) {
 		t.Fatal(err)
 	}
 }
+
+// An exclude that lydite cannot parse is rejected where it is written, not
+// treated as one that matches nothing. A pattern matching nothing leaves the
+// file it was written for orphaned, and the author has already said what they
+// meant.
+func TestMalformedExcludeIsRejected(t *testing.T) {
+	if _, err := Parse([]byte("excludes: [\"src/[unclosed\"]\n"), FileName); err == nil {
+		t.Error("a malformed exclude glob must be rejected at load time")
+	}
+}
+
+// An exclude naming something outside the scan root describes a file the
+// repository does not contain, so nothing about it is reviewable from the
+// declaration and no orphan it could clear exists.
+func TestExcludeMustStayInsideTheScanRoot(t *testing.T) {
+	for _, bad := range []string{"/etc/passwd", "../outside/**", "~/secrets", ""} {
+		if _, err := Parse([]byte("excludes: [\""+bad+"\"]\n"), FileName); err == nil {
+			t.Errorf("exclude %q must be rejected", bad)
+		}
+	}
+}
+
+func TestExcludesParse(t *testing.T) {
+	f, err := Parse([]byte("components: []\nexcludes: [\"scripts/**\", \"tools/gen.go\"]\n"), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(f.Excludes) != 2 {
+		t.Errorf("excludes = %v, want two", f.Excludes)
+	}
+}
