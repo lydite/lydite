@@ -60,14 +60,20 @@ jobs:
       # `review` exits 2 on a referral and 1 on the isolation gate, and both
       # are answers rather than malfunctions — the verdict is carried by the
       # status this step just published, so the step itself must not fail the
-      # job over one.
+      # job over one. Anything above 2 is lydite failing to reach an answer,
+      # which must still fail the job.
+      #
+      # The exit code is captured with `|| verdict=$?` rather than read from
+      # `$?` on the next line, because the runner invokes this with `bash -e`:
+      # a bare command exiting non-zero ends the step before any line after it
+      # runs, and `set +e` here would also disarm the failure this step does
+      # want to report.
       - name: publish the referral verdict
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
-          /tmp/lydite review --dir . --publish
-          verdict=$?
+          verdict=0
+          /tmp/lydite review --dir . --publish || verdict=$?
           if [ "$verdict" -gt 2 ]; then
             exit "$verdict"
           fi
