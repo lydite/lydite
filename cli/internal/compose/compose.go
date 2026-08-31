@@ -272,6 +272,21 @@ type Stack struct {
 // lifecycle between one component's verdict and the next is what makes a CI
 // log unreadable, and none of it is worth reading unless something failed.
 func Load(ctx context.Context, dir string, c component.Component, out io.Writer) (*Stack, error) {
+	rt, err := Probe(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s declares compose services: %w", c.Name, err)
+	}
+	return LoadWith(rt, dir, c, out)
+}
+
+// LoadWith is Load against a runtime the caller has already found.
+//
+// A caller loading every component's stack before any of them starts probes
+// once for the run rather than once per component: which compose
+// implementation is on the machine is a property of the machine, and asking
+// three candidate binaries the same question per component is work whose
+// answer cannot differ.
+func LoadWith(rt Runtime, dir string, c component.Component, out io.Writer) (*Stack, error) {
 	path, err := composePath(dir, c)
 	if err != nil {
 		return nil, err
@@ -316,12 +331,8 @@ func Load(ctx context.Context, dir string, c component.Component, out io.Writer)
 		}
 	}
 
-	runtime, err := Probe(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%s declares compose services: %w", c.Name, err)
-	}
 	return &Stack{
-		runtime: runtime,
+		runtime: rt,
 		file:    file,
 		dir:     dir,
 		// Per component, so two components' stacks cannot adopt each other's

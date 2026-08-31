@@ -15,6 +15,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/ui"
 )
 
@@ -309,9 +310,9 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	// manager's behaviour — internal/nodedeps covers the detection.
 	cfg := config.Default()
 	cfg.TypeScript.Install = "exit 3"
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}, cfg, false, false)
+	}), cfg, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -339,11 +340,11 @@ func TestAGoComponentHasNoPreparationStep(t *testing.T) {
 func TestTeardownRunsWhenSetupFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -357,10 +358,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -373,10 +374,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 // so it fails a component that otherwise passed.
 func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -387,10 +388,10 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -399,13 +400,13 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 // Setup runs before the suite, not alongside it.
 func TestSetupRunsBeforeTheSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		// The suite reads what setup wrote, so it can only pass if the
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -419,9 +420,14 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 	root := fixtureRepo(t, "components: []\n")
-	stop, _, ok := services(context.Background(), root, "test(fixture)", component.Component{Name: "fixture", Dir: "mod"}, false, openLog(root, "fixture", false))
+	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, false)
+	if len(plans) != 1 || !plans[0].ready {
+		t.Fatalf("a component with no compose block must not be probed for a runtime: %+v", plans)
+	}
+	defer plans[0].log.Close()
+	stop, _, ok := startServices(context.Background(), plans[0], "test(fixture)")
 	if !ok {
-		t.Fatal("a component with no compose block must not be probed for a runtime")
+		t.Fatal("a component with no services must start none")
 	}
 	stop()
 }
@@ -432,9 +438,9 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -462,9 +468,9 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 // document and nothing else, so the log is the only place the output exists.
 func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}, config.Default(), false, false)
+	}), config.Default(), false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -504,5 +510,155 @@ func TestTailOfNothingIsNothing(t *testing.T) {
 	}
 	if got := tail("\n\n"); got != nil {
 		t.Errorf("tail of blank lines = %v, want nothing", got)
+	}
+}
+
+// planFor builds the plan runComponent takes. Every component in these tests
+// declares no services, so nothing is probed and no stack is loaded.
+func planFor(t *testing.T, root string, c component.Component) componentPlan {
+	t.Helper()
+	log := openLog(root, c.Name, false, len(c.Name))
+	t.Cleanup(log.Close)
+	return componentPlan{c: c, log: log, ready: true}
+}
+
+func TestResolveConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		flag     string
+		selected int
+		want     int
+		wantErr  bool
+	}{
+		{flag: "4", selected: 9, want: 4},
+		{flag: "1", selected: 9, want: 1},
+		{flag: "max", selected: 9, want: 9},
+		// "max" over an empty selection still has to be a usable bound.
+		{flag: "max", selected: 0, want: 1},
+		{flag: "0", selected: 9, wantErr: true},
+		{flag: "-2", selected: 9, wantErr: true},
+		// Refused rather than defaulted: a typo that silently ran anyway
+		// would have lydite ignore something the caller said.
+		{flag: "all", selected: 9, wantErr: true},
+	} {
+		got, err := resolveConcurrency(tc.flag, tc.selected)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("resolveConcurrency(%q) = %d, want an error", tc.flag, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("resolveConcurrency(%q, %d) = %d, %v; want %d", tc.flag, tc.selected, got, err, tc.want)
+		}
+	}
+}
+
+// Rows are in declaration order, never completion order: a reader diffing two
+// runs depends on it, and ordering by whichever finished first would put this
+// run's timing into the document.
+//
+// The names are deliberately not in alphabetical order, so a report that had
+// been sorted rather than kept in place fails this too.
+func TestRowsAreInDeclarationOrder(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	var declared []component.Component
+	for _, name := range []string{"charlie", "alpha", "bravo"} {
+		write(t, root, name+"/go.mod", "module "+name+"\n\ngo 1.26\n")
+		write(t, root, name+"/x_test.go", "package "+name+"\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n")
+		declared = append(declared, component.Component{Name: name, Dir: name, Runner: runner.GoTest})
+	}
+
+	rep := ui.NewReport("test")
+	runComponents(context.Background(), root, declared, config.Default(), 3, false, rep)
+
+	var got []string
+	for _, r := range rep.Rows() {
+		if strings.HasPrefix(r.Label, "test(") {
+			got = append(got, r.Label)
+		}
+	}
+	want := []string{"test(charlie)", "test(alpha)", "test(bravo)"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+}
+
+// depends_on is an invalidation edge and never a build-order one. The
+// scheduler must not read it: lydite passes no artifact between components, so
+// ordering them would cost parallelism to express a claim their author never
+// made.
+//
+// The assertion is that the edge contributes nothing the scheduler could
+// serialise on. That two items with no conflict then genuinely run at once is
+// internal/scheduler's own test, which forces the overlap with a barrier.
+func TestDependsOnDoesNotSerialise(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	declared := []component.Component{
+		{Name: "sdk", Dir: "mod", Runner: runner.GoTest},
+		{Name: "cli", Dir: "mod", Runner: runner.GoTest, DependsOn: []string{"sdk"}},
+	}
+	plans := planComponents(context.Background(), root, declared, false)
+	var items []scheduler.Item
+	for _, p := range plans {
+		defer p.log.Close()
+		items = append(items, scheduler.Item{Name: p.c.Name, Ports: p.ports})
+	}
+	if got := scheduler.Conflicts(items); len(got) != 0 {
+		t.Fatalf("Conflicts = %v, want none: a depends_on edge is not a port", got)
+	}
+}
+
+// A component the run never reached reports that it did not run, rather than
+// being dropped. A truncated run that omitted rows would read as a complete
+// run over fewer components, and a check that could not run must never read as
+// one that did.
+func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	declared := []component.Component{
+		{Name: "a", Dir: "mod", Runner: runner.GoTest},
+		{Name: "b", Dir: "mod", Runner: runner.GoTest},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rep := ui.NewReport("test")
+	runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+
+	seen := 0
+	for _, r := range rep.Rows() {
+		if !strings.HasPrefix(r.Label, "test(") {
+			continue
+		}
+		seen++
+		if r.Status != ui.StatusUnmeasured || r.Value != "not run" {
+			t.Errorf("row = %+v, want an unmeasured `not run`", r)
+		}
+	}
+	if seen != len(declared) {
+		t.Fatalf("%d component rows, want %d: a component that never ran must still be reported", seen, len(declared))
+	}
+	// An unmeasured row must not vote: nothing failed here, the run was
+	// cancelled.
+	if rep.ExitCode() != 0 {
+		t.Errorf("exit code = %d, want 0: a cancelled component is not a failure", rep.ExitCode())
+	}
+}
+
+// The row says what the scheduler did, because the observed concurrency is
+// what separates a scheduler that ran from one that only claims to.
+func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
+	row := scheduleRow(scheduler.Outcome{
+		MaxConcurrent: 3,
+		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", Port: 5432}},
+	}, 4, 4)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v", row)
+	}
+	if !strings.Contains(row.Value, "max 3 concurrent") {
+		t.Errorf("value = %q, want the observed concurrency", row.Value)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "go/api and rust serialised on port 5432") {
+		t.Errorf("detail = %q, want the contended pair named", detail)
 	}
 }

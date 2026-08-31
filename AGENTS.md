@@ -39,6 +39,7 @@ internal/nodedeps/              # how a JavaScript workspace's dependencies get 
 internal/cargotool/             # pinned cargo subcommands: version parsing and the install
 internal/download/              # fetch, checksum-verify and unpack an archive safely
 internal/compose/               # the services a component's suite needs (see Services below)
+internal/scheduler/             # port locks and the concurrency bound (see The scheduler below)
 internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
 internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
@@ -76,9 +77,9 @@ a lydite-managed cache directory rather than trusting whatever's already on the 
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
 self-update (checksum-verified binary replacement, refuses on dev builds, passive update nudge on
 every other command). `lydite coverage` has been verified end-to-end against this repo's own real
-`lydite` branch on GitHub, not just a local fixture. `lydite test` runs each component's suite in
-turn, starting the compose services and running the `setup`/`teardown` commands it declares;
-running them in parallel under a port-aware scheduler is what remains.
+`lydite` branch on GitHub, not just a local fixture. `lydite test` runs each component's suite,
+starting the compose services and running the `setup`/`teardown` commands it declares, and runs
+them concurrently under a port-aware scheduler.
 
 ## CI
 
@@ -282,6 +283,14 @@ file cannot serve: a suite that hangs prints nothing until it is killed. Stderr 
 never stdout, because stdout carries the report and, under `--json`, a document a
 suite's output would make unparseable.
 
+Each mirrored line is prefixed with its component's name, padded so the separators
+align, and whole lines are written under one process-wide lock — components run at
+once, so an unlabelled line belongs to nobody and a prefix on half a line is worse
+than none. The prefix is on the mirror only: the log stays a faithful copy of what
+the suite printed, which is what a CI job uploads and a report links. A trailing
+line that never ended in a newline is flushed on close, since a suite killed
+part-way through printing is exactly the case `--stream` exists for.
+
 ### Services: a compose file, and no schema of lydite's own
 
 `internal/compose` starts what a component's suite needs and stops it again.
@@ -325,14 +334,79 @@ of compose's port syntaxes: the scheduler serialises two components that publish
 same one, and the conflict is physical — two services called `db` on different ports
 do not collide, and a `db` and a `postgres` on the same port do.
 
-`--keep-services` leaves them running. It is a flag and never a key in the
-declaration, because whether to keep services between runs is a choice about one
-invocation rather than a fact about the repository.
+`compose.Load` probes for a runtime; `compose.LoadWith` takes one the caller already
+found. `lydite test` loads every selected component's stack before any of them starts,
+because a stack is the only thing that knows its component's ports and the scheduler
+needs all of them before it can decide what may run together — so the probe happens
+once for the run rather than once per component, and compose's own validation lands
+before the first container instead of mid-run. A run whose components declare no
+services probes nothing at all.
 
 Unknown keys in a compose file are **accepted**, unlike everywhere else lydite parses
 YAML. The file is compose's, not lydite's, and rejecting a key lydite has no opinion
 about would make lydite's version the ceiling on what a repository may write in a
 file lydite does not own.
+
+### The scheduler: ports are the only thing that serialises
+
+Components run concurrently. `internal/scheduler` bounds how many at once and
+holds a lock on each host port a component's compose services publish, so two
+components publishing the same one run in sequence. It takes plain data — an item
+is a name and a set of ports — and the caller supplies the function that runs one,
+so the constraint is testable without a container runtime and the port-conflict
+predicate has one implementation rather than one here and another in the planner
+that groups shards ([ADR 0017](docs/adr/0017-shards-the-scheduler-and-the-planner.md)).
+
+**A CI job holds a shard — a set of components — not a single component.** Under
+one component per job nothing in CI ever contends for a port, so the lock's only
+exercise would be a local run somebody has to remember to do. `ci-end2end.yml`'s
+proving ground job runs all four components in one process, which is what gives
+the lock an automated end-to-end assertion at all.
+
+**`--concurrency` defaults to 4 and is deliberately not derived from `NumCPU`.**
+Every runner lydite drives is already internally parallel — `go test` fans out at
+`GOMAXPROCS`, `cargo nextest` runs tests concurrently, vitest forks workers — so
+one component already tries to use the whole machine and `NumCPU` of them
+oversubscribe it quadratically. The symptom is timing-sensitive tests going flaky,
+which reads as a bad suite rather than as a bad bound. It is not 1 either: a
+scheduler that never runs two components at once passes every assertion about port
+locks without once having taken one. `max` is one slot per selected component. It
+is a flag and never a key in `.lydite/config.yml`, for the reason a repository
+does not state how many cores a machine has.
+
+**`depends_on` is not a scheduling input.** It is an invalidation edge, declared
+for affected selection; lydite passes no artifact between components, so ordering
+them would cost parallelism to express a claim their author never made — and would
+need a policy for what a dependent does when its dependency fails, which is new
+surface bought with nothing. `TestDependsOnDoesNotSerialise` holds it.
+
+**A failure never cancels the rest.** `lydite test` is a gate, and somebody
+clearing one wants every failure in a single run rather than N runs paying the
+container startup each time. GitHub Actions already has `fail-fast` on the matrix,
+at the layer that can cancel other machines.
+
+**Rows are in declaration order, never completion order.** Workers write into
+their own slot and the rows are added after the wait, so two runs of the same
+declaration produce the same document; completion order would put this run's
+timing into it.
+
+**An interrupt cancels the context rather than killing the process.** `main.go`
+uses `signal.NotifyContext`, so a component already running still reaches its
+deferred teardown — a signal that skipped those defers would leave one stack per
+started component holding the ports the next run has to bind, and the leak would
+surface as an unrelated failure one run later. The scheduler starts nothing
+further once the context is done, and a component it never reached is reported
+`unmeasured` with `not run` rather than dropped: a truncated run that omitted rows
+would read as a complete run over fewer components.
+
+**The `schedule` row is how the run says what it actually did.** It carries the
+observed maximum concurrency and names each pair that shared a port. The observed
+number is the point — every assertion about port locks is satisfied by a run that
+never had two components going at once, so a report that cannot distinguish the
+two is a report that proves nothing. `.github/assert-proving-ground.py` holds the
+proving ground to a maximum of at least 2 and to having serialised `go/api` and
+`rust` on 5432, which they publish under services deliberately named `db` and
+`postgres` so a lock keyed on names fails there.
 
 ### The orphan gate: what makes the declaration trustworthy
 

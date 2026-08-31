@@ -107,9 +107,11 @@ and the failure is attributed to the test rather than to the wait.
 
 `setup` and `teardown` commands cover what is not a container — migrations,
 fixtures, cleanup. Teardown runs even when the run fails; leaked containers
-poison the next local run. Keeping services up between runs is an invocation
-choice rather than a repository fact, so it is `--keep-services` on the command
-line and not a key in the file.
+poison the next local run. Nothing keeps a stack alive between runs:
+[ADR 0017](0017-shards-the-scheduler-and-the-planner.md) records why the
+`--keep-services` this section originally described does not survive the port
+lock, and why `down --volumes` makes it a determinism question rather than only
+a scheduling one.
 
 ## Scheduling is resource-constrained
 
