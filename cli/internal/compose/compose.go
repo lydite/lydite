@@ -323,21 +323,27 @@ type Stack struct {
 // lifecycle between one component's verdict and the next is what makes a CI
 // log unreadable, and none of it is worth reading unless something failed.
 func Load(ctx context.Context, dir string, c component.Component, out io.Writer) (*Stack, error) {
-	rt, err := Probe(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%s declares compose services: %w", c.Name, err)
-	}
-	return LoadWith(rt, dir, c, out)
+	return LoadWith(func() (Runtime, error) { return Probe(ctx) }, dir, c, out)
 }
 
-// LoadWith is Load against a runtime the caller has already found.
+// RuntimeSource yields the compose implementation to run a stack with.
 //
-// A caller loading every component's stack before any of them starts probes
-// once for the run rather than once per component: which compose
-// implementation is on the machine is a property of the machine, and asking
-// three candidate binaries the same question per component is work whose
-// answer cannot differ.
-func LoadWith(rt Runtime, dir string, c component.Component, out io.Writer) (*Stack, error) {
+// It is a function rather than a Runtime so that it is consulted only after
+// the declaration has been checked. Probing first would mask every declaration
+// error behind the state of the machine: a compose.up naming a service the
+// file does not declare would be reported as an absent container runtime, and
+// this package's own tests would pass or fail depending on whether the
+// developer running them happens to have docker installed.
+//
+// A caller loading every component's stack before any of them starts passes
+// one memoised source, so the run probes once rather than once per component:
+// which implementation is on the machine is a property of the machine, and
+// asking three candidate binaries the same question per component is work
+// whose answer cannot differ.
+type RuntimeSource func() (Runtime, error)
+
+// LoadWith is Load against a caller-supplied runtime source.
+func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.Writer) (*Stack, error) {
 	path, err := composePath(dir, c)
 	if err != nil {
 		return nil, err
@@ -382,6 +388,12 @@ func LoadWith(rt Runtime, dir string, c component.Component, out io.Writer) (*St
 		}
 	}
 
+	// Last, so a declaration this package can reject on its own is rejected
+	// on its own.
+	rt, err := runtime()
+	if err != nil {
+		return nil, fmt.Errorf("%s declares compose services: %w", c.Name, err)
+	}
 	return &Stack{
 		runtime: rt,
 		file:    file,

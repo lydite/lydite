@@ -240,31 +240,36 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 		}
 	}
 
-	var rt compose.Runtime
-	var probed, probeFailed bool
-	var probeErr error
+	// Probed at most once for the whole run, and only if a declaration gets
+	// far enough to need it: compose.LoadWith consults this after validating,
+	// so a compose.up naming a service the file does not declare is reported
+	// as that rather than as the machine having no container engine.
+	var (
+		rt       compose.Runtime
+		probeErr error
+		probed   bool
+	)
+	runtime := func() (compose.Runtime, error) {
+		if !probed {
+			probed = true
+			rt, probeErr = compose.Probe(ctx)
+			if probeErr == nil {
+				fmt.Fprintf(os.Stderr, "lydite: services via %s\n", rt)
+			}
+		}
+		return rt, probeErr
+	}
 
 	plans := make([]componentPlan, len(selected))
 	for i, c := range selected {
 		p := componentPlan{c: c, log: openLog(root, c.Name, stream, width), ready: true}
-		label := "test(" + c.Name + ")"
-		fail := func(err error) componentPlan {
-			p.row = failure(label, p.log, err.Error(), "services not started", "")
-			p.ready = false
-			return p
-		}
 		if !c.Compose.Declared() {
 			plans[i] = p
 			continue
 		}
-		if !probed {
-			rt, probeErr = compose.Probe(ctx)
-			probed, probeFailed = true, probeErr != nil
-			if !probeFailed {
-				fmt.Fprintf(os.Stderr, "lydite: services via %s\n", rt)
-			}
-		}
-		if probeFailed {
+		dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+		stack, err := compose.LoadWith(runtime, dir, c, p.log.out)
+		if err != nil {
 			// A probe runs candidate `docker compose version` invocations
 			// under the run's context, so an interrupt kills every one of
 			// them and looks exactly like a machine with no container
@@ -273,17 +278,11 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 			// component that failed — the plan stays runnable instead, and
 			// the scheduler starts nothing on a cancelled context, so it
 			// lands on the `not run` row where it belongs.
-			if ctx.Err() != nil {
-				plans[i] = p
-				continue
+			if ctx.Err() == nil {
+				p.row = failure("test("+c.Name+")", p.log, err.Error(), "services not started", "")
+				p.ready = false
 			}
-			plans[i] = fail(fmt.Errorf("%s declares compose services: %w", c.Name, probeErr))
-			continue
-		}
-		dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-		stack, err := compose.LoadWith(rt, dir, c, p.log.out)
-		if err != nil {
-			plans[i] = fail(err)
+			plans[i] = p
 			continue
 		}
 		p.stack, p.ports = stack, stack.HostPorts()
@@ -512,6 +511,7 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.buf = append(w.buf, p...)
+	emitted := false
 	for {
 		i := bytes.IndexByte(w.buf, '\n')
 		if i < 0 {
@@ -519,6 +519,16 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 		}
 		w.emit(w.buf[:i])
 		w.buf = w.buf[i+1:]
+		emitted = true
+	}
+	// A deadline armed for a line that has since been completed does not
+	// belong to what is pending now: it would fire early and split the new
+	// line, which is the thing buffering exists to prevent. The deadline
+	// belongs to the line that is waiting, so it restarts whenever a
+	// different one starts waiting.
+	if emitted && w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
 	}
 	w.arm()
 	return len(p), nil

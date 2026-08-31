@@ -344,8 +344,14 @@ directly. A lock computed from `compose.up` alone would leave that port unheld,
 and the next component to want it fails mid-run on the bind error the lock
 exists to prevent.
 
-`compose.Load` probes for a runtime; `compose.LoadWith` takes one the caller already
-found. `lydite test` loads every selected component's stack before any of them starts,
+`compose.Load` probes for a runtime; `compose.LoadWith` takes a
+`RuntimeSource` the caller supplies. It is a function rather than a `Runtime`
+so that it is consulted **after** the declaration has been checked: probing
+first masks every declaration error behind the state of the machine, so a
+`compose.up` naming a service the file does not declare reports an absent
+container runtime instead — and `internal/compose`'s own tests then pass or
+fail depending on whether the developer running them happens to have docker
+installed. `lydite test` loads every selected component's stack before any of them starts,
 because a stack is the only thing that knows its component's ports and the scheduler
 needs all of them before it can decide what may run together — so the probe happens
 once for the run rather than once per component, and compose's own validation lands

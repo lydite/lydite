@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -419,7 +420,10 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 // A component declaring no services needs no runtime, so a repository without
 // one runs on a machine with no container engine at all.
 func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// PATH is replaced rather than prepended to: leaving the real one behind
+	// keeps docker and podman resolvable, so a planner that probed anyway
+	// would find one and the assertion below would hold either way.
+	t.Setenv("PATH", t.TempDir())
 	root := fixtureRepo(t, "components: []\n")
 	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, false)
 	if len(plans) != 1 || !plans[0].ready {
@@ -773,5 +777,37 @@ func TestContinuousOutputWithNoNewlineIsStillShown(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a continuously written line was never shown: the deadline is measuring silence, not the line's age")
+	}
+}
+
+// A deadline armed for a line that has since been completed does not belong to
+// the line waiting now. Keeping it fires early and splits the new line, which
+// is the mid-line split buffering exists to prevent.
+func TestTheDeadlineFollowsThePendingLine(t *testing.T) {
+	var lines []string
+	var mu sync.Mutex
+	w := &prefixWriter{prefix: "web | ", delay: 150 * time.Millisecond}
+	w.onEmit = func(line []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, string(line))
+	}
+
+	// A partial line, then — just before its deadline — a write that
+	// completes it and starts another.
+	if _, err := w.Write([]byte("PASS")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := w.Write([]byte(" ok\nrunning batch 2 of 9")); err != nil {
+		t.Fatal(err)
+	}
+	// Past the first line's deadline, comfortably short of the second's.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 1 || lines[0] != "PASS ok" {
+		t.Fatalf("lines = %q, want only the completed line: the second was split by the first line's deadline", lines)
 	}
 }
