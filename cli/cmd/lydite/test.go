@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -81,15 +82,8 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
-			interrupted := runComponents(cmd.Context(), dir, selected, cfg, limit, stream, rep)
-			rendered := renderTestReport(cmd, rep, asJSON, noColor)
-			// The report is written either way — it is what says which
-			// components did run — but an interrupted run is an error rather
-			// than a verdict, because it never reached one.
-			if interrupted != nil {
-				return interrupted
-			}
-			return rendered
+			runComponents(cmd.Context(), dir, selected, cfg, limit, stream, rep)
+			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
@@ -173,12 +167,15 @@ type componentPlan struct {
 // timing into the document, so two runs of the same declaration would produce
 // different reports.
 //
-// It returns an error when the run was interrupted before every component
-// started. The unstarted rows are `unmeasured`, which does not vote, so
-// without this a run cut short by a CI job timeout would report no failures
-// and exit 0 — a run that tested half the repository reading as a green gate,
-// which is worse than the process dying where it stood.
-func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) error {
+// An interrupted run fails through the `schedule` row rather than through a
+// returned error. The unstarted rows are `unmeasured`, which does not vote, so
+// a run cut short by a CI job timeout would otherwise carry no failing row —
+// and `--json` would publish `"verdict": "pass"` for a run that tested half the
+// repository. Anything automated reads that document and never the terminal, so
+// a truncation visible only in the process exit code is a truncation the PR
+// comment renders green. `ui.Report.ExitCode` stays the single place the
+// mapping lives.
+func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -202,7 +199,7 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 			Value:  "not run",
 			Detail: []string{"the run ended before this component started"},
 		}
-		items = append(items, scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Ports: p.ports})
+		items = append(items, itemFor(p))
 		index = append(index, i)
 	}
 
@@ -215,12 +212,17 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 	for _, r := range rows {
 		rep.Add(r)
 	}
+}
 
-	unstarted := len(items) - outcome.Started
-	if ctx.Err() != nil && unstarted > 0 {
-		return fmt.Errorf("interrupted: %d of %d component(s) never ran", unstarted, len(items))
-	}
-	return nil
+// itemFor is what the scheduler locks on: the component's root, cleaned so
+// `./web`, `web/` and `web` are one directory, and the host ports its services
+// publish.
+//
+// One construction, because a second one that agreed today would come apart
+// the day the normalisation changed — and the test built on the copy would
+// keep passing.
+func itemFor(p componentPlan) scheduler.Item {
+	return scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Ports: p.ports}
 }
 
 // planComponents opens each component's log and loads the stack of any that
@@ -286,12 +288,23 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 // components going at once, because the lock is never taken. The conflicting
 // pairs are named beside it, so a reader — and the proving ground's assertion
 // — can see the constraint was reached rather than merely declared.
+//
+// A run that did not start every component it was given fails here, and this
+// is the only row that can carry that. The components that never ran are
+// `unmeasured`, which does not vote, and the ones that did run passed — so
+// without a failing row a truncated run publishes a passing verdict, and the
+// gate reads green having tested part of the repository.
 func scheduleRow(outcome scheduler.Outcome, components, limit int) ui.Row {
-	value := fmt.Sprintf("%d component(s), max %d concurrent", components, outcome.MaxConcurrent)
-	if pairs := scheduler.Pairs(outcome.Conflicts); pairs > 0 {
-		value += fmt.Sprintf(", %d pair(s) serialised", pairs)
+	row := ui.Row{Status: ui.StatusPass, Label: "schedule"}
+	if outcome.Started < components {
+		row.Status = ui.StatusFail
+		row.Value = fmt.Sprintf("interrupted after %d of %d component(s)", outcome.Started, components)
+	} else {
+		row.Value = fmt.Sprintf("%d component(s), max %d concurrent", components, outcome.MaxConcurrent)
 	}
-	row := ui.Row{Status: ui.StatusPass, Label: "schedule", Value: value}
+	if pairs := scheduler.Pairs(outcome.Conflicts); pairs > 0 {
+		row.Value += fmt.Sprintf(", %d pair(s) serialised", pairs)
+	}
 	for _, c := range outcome.Conflicts {
 		row.Detail = append(row.Detail,
 			fmt.Sprintf("%s and %s serialised on %s", c.A, c.B, c.On))
@@ -450,6 +463,18 @@ func (l *componentLog) streamed(stream bool) *componentLog {
 // all.
 var stderrMu sync.Mutex
 
+// partialLineDelay is how long an unterminated line waits before it is shown
+// anyway.
+//
+// Buffering to a newline is what makes a prefix meaningful, but a suite that
+// prints `running 412 tests...` and then hangs has written no newline — and
+// watching a hang is the one thing --stream exists for, so holding that line
+// until the process is killed withholds exactly the output somebody turned the
+// flag on to see. Long enough that ordinary output is not split mid-line,
+// short enough that a person watching a stalled run does not conclude nothing
+// was printed.
+const partialLineDelay = 500 * time.Millisecond
+
 // prefixWriter labels each complete line with its component and writes it to
 // stderr under stderrMu.
 //
@@ -458,10 +483,18 @@ var stderrMu sync.Mutex
 // scatter the label through the middle of the output.
 type prefixWriter struct {
 	prefix string
-	buf    []byte
+	// onEmit replaces the write to stderr. Only a test sets it: capturing the
+	// process's own stderr is not something two tests can do at once.
+	onEmit func(line []byte)
+
+	mu    sync.Mutex
+	buf   []byte
+	timer *time.Timer
 }
 
 func (w *prefixWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.buf = append(w.buf, p...)
 	for {
 		i := bytes.IndexByte(w.buf, '\n')
@@ -471,13 +504,42 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 		w.emit(w.buf[:i])
 		w.buf = w.buf[i+1:]
 	}
+	w.arm()
 	return len(p), nil
+}
+
+// arm schedules the leftover of a line to be shown if nothing completes it.
+// Called with w.mu held.
+func (w *prefixWriter) arm() {
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	if len(w.buf) == 0 {
+		return
+	}
+	w.timer = time.AfterFunc(partialLineDelay, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.flush()
+	})
 }
 
 // Flush writes a trailing line that never ended in a newline, which is what a
 // suite killed part-way through printing leaves behind — and is the line most
 // worth seeing.
 func (w *prefixWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.flush()
+}
+
+// flush is called with w.mu held.
+func (w *prefixWriter) flush() {
 	if len(w.buf) > 0 {
 		w.emit(w.buf)
 		w.buf = nil
@@ -485,6 +547,10 @@ func (w *prefixWriter) Flush() {
 }
 
 func (w *prefixWriter) emit(line []byte) {
+	if w.onEmit != nil {
+		w.onEmit(line)
+		return
+	}
 	stderrMu.Lock()
 	defer stderrMu.Unlock()
 	fmt.Fprintf(os.Stderr, "%s%s\n", w.prefix, line)

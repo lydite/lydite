@@ -238,3 +238,49 @@ func writeFile(t *testing.T, name, body string) string {
 	}
 	return dir
 }
+
+// compose starts a named service's depends_on graph too, so a component that
+// names only an `app` still holds whatever that app's database publishes. A
+// lock computed from the named services alone leaves that port unheld, and the
+// second component to want it fails mid-run on the bind error the lock exists
+// to prevent.
+func TestHostPortsFollowsDependsOn(t *testing.T) {
+	const file = `
+services:
+  app:
+    image: app
+    depends_on: [db]
+  db:
+    image: postgres
+    ports: ["5432:5432"]
+  cache:
+    image: redis
+    depends_on:
+      queue:
+        condition: service_healthy
+    ports: ["6379:6379"]
+  queue:
+    image: rabbit
+    ports: ["5672:5672"]
+  unrelated:
+    image: x
+    ports: ["9999:9999"]
+`
+	f, err := Parse([]byte(file), "compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.HostPorts([]string{"app"})
+	if len(got) != 1 || got[0] != 5432 {
+		t.Errorf("HostPorts([app]) = %v, want the database it pulls in", got)
+	}
+	// The long syntax is a mapping of name to condition; the condition says
+	// when to start, not what to start.
+	got = f.HostPorts([]string{"cache"})
+	if len(got) != 2 || got[0] != 5672 || got[1] != 6379 {
+		t.Errorf("HostPorts([cache]) = %v, want its own port and the queue's", got)
+	}
+	if got := f.HostPorts([]string{"app"}); len(got) != 1 {
+		t.Errorf("HostPorts([app]) = %v, want nothing from an unrelated service", got)
+	}
+}

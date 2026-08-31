@@ -287,9 +287,12 @@ Each mirrored line is prefixed with its component's name, padded so the separato
 align, and whole lines are written under one process-wide lock — components run at
 once, so an unlabelled line belongs to nobody and a prefix on half a line is worse
 than none. The prefix is on the mirror only: the log stays a faithful copy of what
-the suite printed, which is what a CI job uploads and a report links. A trailing
-line that never ended in a newline is flushed on close, since a suite killed
-part-way through printing is exactly the case `--stream` exists for.
+the suite printed, which is what a CI job uploads and a report links. A line that has not ended in a
+newline is shown anyway after half a second, and flushed unconditionally on
+close: a suite that prints `running 412 tests...` and then hangs has written no
+newline, and watching a hang is the one thing `--stream` is for — so holding
+that line until the process is killed withholds exactly the output somebody
+turned the flag on to see.
 
 ### Services: a compose file, and no schema of lydite's own
 
@@ -334,6 +337,13 @@ of compose's port syntaxes: the scheduler serialises two components that publish
 same one, and the conflict is physical — two services called `db` on different ports
 do not collide, and a `db` and a `postgres` on the same port do.
 
+`Stack.HostPorts` follows each named service's `depends_on` closure, because
+compose does: `compose up app` starts everything `app` depends on, and a `db`
+pulled in that way publishes its host port just as surely as one named
+directly. A lock computed from `compose.up` alone would leave that port unheld,
+and the next component to want it fails mid-run on the bind error the lock
+exists to prevent.
+
 `compose.Load` probes for a runtime; `compose.LoadWith` takes one the caller already
 found. `lydite test` loads every selected component's stack before any of them starts,
 because a stack is the only thing that knows its component's ports and the scheduler
@@ -351,8 +361,10 @@ file lydite does not own.
 
 Components run concurrently. `internal/scheduler` bounds how many at once and
 holds a lock on what a component occupies while it runs: each host port its
-compose services publish, and its own directory. Two components sharing either
-run in sequence. Both conflicts are physical — the second would fail to bind
+compose services publish, and its own directory tree. Two components sharing
+either run in sequence — the directory by containment rather than equality,
+since a component at the repository root and one rooted at `web/` are writing
+into the same files. Both conflicts are physical — the second would fail to bind
 the port, and two components rooted at one tree install into, build in and
 write their output to it at once, where an `npm ci` removing and recreating a
 `node_modules` another is importing from is not a race either suite can report
@@ -386,13 +398,15 @@ them would cost parallelism to express a claim their author never made — and w
 need a policy for what a dependent does when its dependency fails, which is new
 surface bought with nothing. `TestDependsOnDoesNotSerialise` holds it.
 
-**An interrupted run is an error, not a verdict.** The rows for components that
-never started are `unmeasured`, which does not vote, so a run cut short by a CI
-job timeout would otherwise report no failures and exit 0 — half the repository
-untested, reading as a green gate, which is worse than the process dying where
-it stood. `runComponents` returns an error naming how many never ran, and
-`main.go` exits 1 on it. The report is still written, because it is what says
-which components did run.
+**An interrupted run fails through the `schedule` row.** The rows for
+components that never started are `unmeasured`, which does not vote, so a run
+cut short by a CI job timeout would otherwise carry no failing row — and
+`--json` would publish `"verdict": "pass"` for a run that tested half the
+repository. Anything automated reads that document and never the terminal, so a
+truncation visible only in the process exit code is one the PR comment renders
+green. The `schedule` row is where it lands, because it is the row about the run
+rather than about any component, and `ui.Report.ExitCode` stays the single place
+the verdict-to-exit-code mapping lives.
 
 **A failure never cancels the rest.** `lydite test` is a gate, and somebody
 clearing one wants every failure in a single run rather than N runs paying the

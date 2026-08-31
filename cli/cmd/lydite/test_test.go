@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
@@ -569,9 +570,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	if err := runComponents(context.Background(), root, declared, config.Default(), 3, false, rep); err != nil {
-		t.Fatalf("runComponents: %v", err)
-	}
+	runComponents(context.Background(), root, declared, config.Default(), 3, false, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -605,7 +604,7 @@ func TestDependsOnDoesNotSerialise(t *testing.T) {
 	var items []scheduler.Item
 	for _, p := range plans {
 		defer p.log.Close()
-		items = append(items, scheduler.Item{Name: p.c.Name, Dir: p.c.Dir, Ports: p.ports})
+		items = append(items, itemFor(p))
 	}
 	if got := scheduler.Conflicts(items); len(got) != 0 {
 		t.Fatalf("Conflicts = %v, want none: a depends_on edge is not a port", got)
@@ -626,17 +625,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	err := runComponents(ctx, root, declared, config.Default(), 2, false, rep)
-	// An interrupted run is an error rather than a verdict: it never reached
-	// one. The unmeasured rows below do not vote, so without this a run cut
-	// short by a CI job timeout would report no failures and exit 0 — half the
-	// repository untested, reading as a green gate.
-	if err == nil {
-		t.Fatal("a run interrupted before every component started must not report success")
-	}
-	if !strings.Contains(err.Error(), "2 of 2") {
-		t.Errorf("err = %v, want the count that never ran", err)
-	}
+	runComponents(ctx, root, declared, config.Default(), 2, false, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -651,11 +640,21 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	if seen != len(declared) {
 		t.Fatalf("%d component rows, want %d: a component that never ran must still be reported", seen, len(declared))
 	}
-	// The rows themselves stay unmeasured and do not vote: nothing failed,
-	// and a component that never ran is not a failing one. What carries the
-	// interruption is the error above, which is what decides the exit code.
-	if rep.ExitCode() != 0 {
-		t.Errorf("exit code = %d: a component that never ran is not a failing one", rep.ExitCode())
+	// The truncation has to be in the document, not only in the process exit
+	// code: anything automated reads --json and never the terminal, so a run
+	// publishing "verdict": "pass" having tested nothing is a PR comment
+	// rendering a green gate. The component rows stay unmeasured — they did
+	// not fail, they did not run — and the schedule row is what fails.
+	schedule := rowByLabel(t, rep, "schedule")
+	if schedule.Status != ui.StatusFail {
+		t.Errorf("schedule row = %+v, want a failure: the run did not start every component", schedule)
+	}
+	if !strings.Contains(schedule.Value, "0 of 2") {
+		t.Errorf("schedule value = %q, want how many of the components actually started", schedule.Value)
+	}
+	if rep.Verdict() != ui.VerdictFail || rep.ExitCode() != 1 {
+		t.Errorf("verdict = %q, exit = %d; want a truncated run to publish a failure",
+			rep.Verdict(), rep.ExitCode())
 	}
 }
 
@@ -676,5 +675,65 @@ func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
 	detail := strings.Join(row.Detail, "\n")
 	if !strings.Contains(detail, "go/api and rust serialised on port 5432") {
 		t.Errorf("detail = %q, want the contended pair named", detail)
+	}
+}
+
+func rowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
+	t.Helper()
+	for _, r := range rep.Rows() {
+		if r.Label == label {
+			return r
+		}
+	}
+	t.Fatalf("no %q row in %v", label, rep.Rows())
+	return ui.Row{}
+}
+
+// Watching a hang is the one thing --stream exists for, and a suite that has
+// printed no newline yet is exactly the case: holding its line until the
+// process is killed withholds the output somebody turned the flag on to see.
+func TestAnUnterminatedLineIsShownAnyway(t *testing.T) {
+	var got []byte
+	w := &prefixWriter{prefix: "web | "}
+	// emit writes to stderr in production; the test reads what it formatted
+	// rather than capturing the process's stderr, which no other test could
+	// then share.
+	done := make(chan struct{})
+	w.onEmit = func(line []byte) {
+		got = append(append(got, line...), '\n')
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
+
+	if _, err := w.Write([]byte("running 412 tests...")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an unterminated line was never shown: a hanging suite prints nothing")
+	}
+	if string(got) != "running 412 tests...\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// A line that arrives in pieces is shown once, whole, rather than split at
+// whatever boundary the child happened to flush at.
+func TestACompletedLineIsNotSplit(t *testing.T) {
+	var lines []string
+	w := &prefixWriter{prefix: "web | "}
+	w.onEmit = func(line []byte) { lines = append(lines, string(line)) }
+	for _, chunk := range []string{"ok  ", "web ", "(cached)\n"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Flush()
+	if len(lines) != 1 || lines[0] != "ok  web (cached)" {
+		t.Fatalf("lines = %q, want one whole line", lines)
 	}
 }

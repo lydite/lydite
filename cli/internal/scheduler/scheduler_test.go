@@ -331,3 +331,54 @@ func TestSameDirectorySerialises(t *testing.T) {
 		t.Fatalf("MaxConcurrent = %d: nothing ran at once, so the lock was never contended", out.MaxConcurrent)
 	}
 }
+
+// A directory is a lock because its whole tree is written into, so containment
+// and not string equality is what decides. A component at the repository root
+// and one rooted at web/ are building in the same files.
+func TestNestedDirectoriesSerialise(t *testing.T) {
+	for _, tc := range []struct{ a, b, on string }{
+		{a: ".", b: "web", on: "directory ."},
+		{a: "web", b: "web/pkg", on: "directory web"},
+		{a: "web/pkg", b: "web", on: "directory web"},
+		{a: "web", b: "web", on: "directory web"},
+	} {
+		got := Conflicts([]Item{{Name: "a", Dir: tc.a}, {Name: "b", Dir: tc.b}})
+		if len(got) != 1 || got[0].On != tc.on {
+			t.Errorf("Conflicts(%q, %q) = %v, want one on %q", tc.a, tc.b, got, tc.on)
+		}
+	}
+	// Siblings, and a prefix that is not a path boundary, are not the same
+	// tree: `webx` is not inside `web`.
+	for _, tc := range []struct{ a, b string }{
+		{a: "web", b: "api"},
+		{a: "web", b: "webx"},
+		{a: "go/api", b: "go/sdk"},
+	} {
+		if got := Conflicts([]Item{{Name: "a", Dir: tc.a}, {Name: "b", Dir: tc.b}}); len(got) != 0 {
+			t.Errorf("Conflicts(%q, %q) = %v, want none", tc.a, tc.b, got)
+		}
+	}
+}
+
+// A directory lock is released when its item finishes, like a port. Two nested
+// components run one after the other and both run.
+func TestNestedDirectoryLockIsReleased(t *testing.T) {
+	items := []Item{{Name: "root", Dir: "."}, {Name: "web", Dir: "web"}}
+	var mu sync.Mutex
+	var log []string
+	out := Run(context.Background(), items, 2, func(_ context.Context, i int) {
+		mu.Lock()
+		log = append(log, items[i].Name+":enter")
+		mu.Unlock()
+		mu.Lock()
+		log = append(log, items[i].Name+":exit")
+		mu.Unlock()
+	})
+	if out.Started != 2 {
+		t.Fatalf("Started = %d, want both: a lock that is never released stalls the queue", out.Started)
+	}
+	a, b := interval(t, log, "root"), interval(t, log, "web")
+	if a.start < b.end && b.start < a.end {
+		t.Fatalf("root %v and web %v overlap: %v", a, b, log)
+	}
+}

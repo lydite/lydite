@@ -19,6 +19,7 @@ import (
 	"context"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -40,17 +41,37 @@ type Item struct {
 	Ports []int
 }
 
-// locks are what an item holds while it runs, named the way a report should
-// say them.
-func (it Item) locks() []string {
-	var out []string
-	if it.Dir != "" {
-		out = append(out, "directory "+it.Dir)
-	}
+// portLocks are the host ports an item holds, named the way a report says them.
+func (it Item) portLocks() []string {
+	out := make([]string, 0, len(it.Ports))
 	for _, p := range it.Ports {
 		out = append(out, "port "+strconv.Itoa(p))
 	}
 	return out
+}
+
+// dirsOverlap reports whether two component roots are the same tree or one
+// contains the other.
+//
+// Containment and not equality, because the reason a directory is a lock is
+// that its whole tree is written into: a component at the repository root
+// running `go test ./...` and one rooted at `web/` are building in the same
+// files, and a lock that compared the two strings would let them do it at
+// once. Paths arrive cleaned and slash-separated, and "." is the root, which
+// contains everything.
+func dirsOverlap(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return contains(a, b) || contains(b, a)
+}
+
+// contains reports whether outer is inner or an ancestor of it.
+func contains(outer, inner string) bool {
+	if outer == inner || outer == "." {
+		return true
+	}
+	return strings.HasPrefix(inner, outer+"/")
 }
 
 // Conflict is a pair of items that hold something in common, and what they
@@ -95,8 +116,17 @@ func Conflicts(items []Item) []Conflict {
 	var out []Conflict
 	for i := range items {
 		for j := i + 1; j < len(items); j++ {
-			for _, on := range shared(items[i].locks(), items[j].locks()) {
-				out = append(out, Conflict{A: items[i].Name, B: items[j].Name, On: on})
+			a, b := items[i], items[j]
+			if dirsOverlap(a.Dir, b.Dir) {
+				// The outer of the two, since that is the tree they share.
+				on := a.Dir
+				if contains(b.Dir, a.Dir) {
+					on = b.Dir
+				}
+				out = append(out, Conflict{A: a.Name, B: b.Name, On: "directory " + on})
+			}
+			for _, on := range shared(a.portLocks(), b.portLocks()) {
+				out = append(out, Conflict{A: a.Name, B: b.Name, On: on})
 			}
 		}
 	}
@@ -152,11 +182,12 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 	}
 
 	var (
-		mu      sync.Mutex
-		cond    = sync.NewCond(&mu)
-		held    = make(map[string]struct{})
-		running int
-		out     = Outcome{Conflicts: Conflicts(items)}
+		mu        sync.Mutex
+		cond      = sync.NewCond(&mu)
+		heldPorts = make(map[string]struct{})
+		heldDirs  []string
+		running   int
+		out       = Outcome{Conflicts: Conflicts(items)}
 	)
 
 	// Indices rather than items, so the slot a result belongs in survives the
@@ -166,9 +197,14 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		pending[i] = i
 	}
 
-	free := func(locks []string) bool {
-		for _, l := range locks {
-			if _, taken := held[l]; taken {
+	free := func(it Item) bool {
+		for _, d := range heldDirs {
+			if dirsOverlap(d, it.Dir) {
+				return false
+			}
+		}
+		for _, l := range it.portLocks() {
+			if _, taken := heldPorts[l]; taken {
 				return false
 			}
 		}
@@ -183,7 +219,7 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		// what is already running still has to be waited for.
 		if running < limit && ctx.Err() == nil {
 			for k, idx := range pending {
-				if free(items[idx].locks()) {
+				if free(items[idx]) {
 					next = k
 					break
 				}
@@ -203,8 +239,11 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 
 		idx := pending[next]
 		pending = append(pending[:next], pending[next+1:]...)
-		for _, l := range items[idx].locks() {
-			held[l] = struct{}{}
+		for _, l := range items[idx].portLocks() {
+			heldPorts[l] = struct{}{}
+		}
+		if items[idx].Dir != "" {
+			heldDirs = append(heldDirs, items[idx].Dir)
 		}
 		running++
 		out.Started++
@@ -215,8 +254,14 @@ func Run(ctx context.Context, items []Item, limit int, run func(context.Context,
 		go func(idx int) {
 			defer func() {
 				mu.Lock()
-				for _, l := range items[idx].locks() {
-					delete(held, l)
+				for _, l := range items[idx].portLocks() {
+					delete(heldPorts, l)
+				}
+				for k, d := range heldDirs {
+					if d == items[idx].Dir {
+						heldDirs = append(heldDirs[:k], heldDirs[k+1:]...)
+						break
+					}
 				}
 				running--
 				cond.Broadcast()

@@ -98,6 +98,10 @@ type Service struct {
 	// is physical — two services called `db` on different ports do not
 	// collide, and a `db` and a `postgres` on the same port do.
 	Ports []int
+	// DependsOn names the services compose starts alongside this one. They
+	// publish their host ports too, so the lock has to see them: a component
+	// naming only an `app` still holds whatever `app`'s database publishes.
+	DependsOn []string
 }
 
 // File is a parsed compose file.
@@ -118,13 +122,35 @@ func (f File) Service(name string) (Service, bool) {
 	return Service{}, false
 }
 
+// dependsOn reads a service's dependencies in either of compose's two
+// syntaxes: a sequence of names, or a mapping of name to condition. Only the
+// names matter here — the condition says when to start, not what to start.
+func dependsOn(n yaml.Node) []string {
+	var out []string
+	switch n.Kind {
+	case yaml.SequenceNode:
+		for _, item := range n.Content {
+			out = append(out, item.Value)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			out = append(out, n.Content[i].Value)
+		}
+	}
+	return out
+}
+
 // HostPorts returns every host port the named services publish, deduped and
 // sorted.
+//
+// It follows each named service's depends_on closure, because compose does:
+// `compose up app` starts everything `app` depends on, and a `db` pulled in
+// that way publishes its host port just as surely as one named directly. A
+// lock computed from the named services alone would leave that port unheld,
+// and the second component to want it fails mid-run on a bind error — which is
+// the failure the lock exists to prevent.
 func (f File) HostPorts(names []string) []int {
-	wanted := map[string]bool{}
-	for _, n := range names {
-		wanted[n] = true
-	}
+	wanted := f.closure(names)
 	seen := map[int]bool{}
 	var out []int
 	for _, s := range f.Services {
@@ -142,6 +168,29 @@ func (f File) HostPorts(names []string) []int {
 	return out
 }
 
+// closure is the named services plus everything they depend on, transitively.
+func (f File) closure(names []string) map[string]bool {
+	byName := make(map[string]Service, len(f.Services))
+	for _, s := range f.Services {
+		byName[s.Name] = s
+	}
+	out := make(map[string]bool, len(names))
+	var visit func(string)
+	visit = func(n string) {
+		if out[n] {
+			return
+		}
+		out[n] = true
+		for _, dep := range byName[n].DependsOn {
+			visit(dep)
+		}
+	}
+	for _, n := range names {
+		visit(n)
+	}
+	return out
+}
+
 // composeFile is the subset of the schema lydite reads. Everything else is
 // compose's business, and parsing more of it would be lydite growing the
 // service schema this design exists to avoid owning.
@@ -152,6 +201,7 @@ type composeFile struct {
 type composeService struct {
 	Healthcheck *yaml.Node  `yaml:"healthcheck"`
 	Ports       []yaml.Node `yaml:"ports"`
+	DependsOn   yaml.Node   `yaml:"depends_on"`
 }
 
 // Parse reads a compose file.
@@ -185,6 +235,7 @@ func Parse(data []byte, path string) (File, error) {
 			Name:        name,
 			Healthcheck: svc.Healthcheck != nil && svc.Healthcheck.Tag != "!!null",
 			Ports:       ports,
+			DependsOn:   dependsOn(svc.DependsOn),
 		})
 	}
 	return f, nil
