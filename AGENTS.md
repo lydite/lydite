@@ -32,6 +32,8 @@ cli/internal/referral/         # exemptions, disqualifiers, the referral decisio
 cli/internal/clearance/        # the comment surface and the clearance decision (see Clearance below)
 cli/internal/forge/            # the hosting platform: commit statuses, permission, comments
 internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
+internal/orphan/                # source files under no component and no exclude (see The orphan gate)
+internal/pathmatch/             # the anchored path-pattern syntax both declarations are written in
 internal/runner/                # a runner name to its plain/instrumented/build-only invocations
 internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
 internal/cargotool/             # pinned cargo subcommands: version parsing and the install
@@ -331,6 +333,78 @@ Unknown keys in a compose file are **accepted**, unlike everywhere else lydite p
 YAML. The file is compose's, not lydite's, and rejecting a key lydite has no opinion
 about would make lydite's version the ceiling on what a repository may write in a
 file lydite does not own.
+
+### The orphan gate: what makes the declaration trustworthy
+
+A declared list fails open. Nothing breaks when it goes stale, so a directory nobody
+declared is tested by nobody and the build stays green — the one failure mode a
+declared list has and a discovered one does not, and the reason ADR 0016 can choose
+declaration at all. `internal/orphan` closes it: **every source file must fall under
+some component's `dir` or an explicit exclude**, and one that falls under neither
+fails `lydite test`.
+
+It is a **Gate** in CONTEXT.md's sense and not a **Referral** — the author clears it by
+declaring the component, or by writing the exclude that says this code is tested by
+nobody and somebody decided that. Both leave a line in the file whose history is the
+record of what gets tested.
+
+```yaml
+components: [...]
+excludes: ["scripts/**", "tools/gen.go"]
+```
+
+**It is a path question and nothing else.** It reads no manifest, parses no source and
+asks `internal/detect` nothing, which is what lets it catch a whole undeclared
+directory holding no manifest yet — the case detection cannot see at all. A generated
+file is not special-cased for the same reason: recognising one means reading it, and a
+gate that starts reading files has to be right about every language it meets. The
+exclude is where a repository says so.
+
+**A file counts only when it is written in a language lydite has a runner for.** The
+extension set lives beside the `Lang` constants in `internal/runner`, so the two cannot
+come apart — a language that gains a runner and no extensions is one the gate is blind
+to, and `TestEveryLangHasSourceExts` refuses it. A `README.md`, a `LICENSE`, a
+`Makefile`, an OpenAPI document and a shell script are not code any component could
+claim, so requiring an exclude for one is paperwork for a question lydite cannot act on
+either way — and a gate that fires on ordinary work is one that gets switched off. The
+proving ground is the calibration: six files there sit under no component and exactly
+one, `scripts/seed.ts`, must fire.
+
+**The file list comes from git** — tracked, plus untracked ones git is not ignoring.
+Both halves matter. Tracked alone misses the file just written and not yet staged,
+which is the moment its author can most cheaply act on the answer; including ignored
+files reports every compiled artefact and every installed dependency as untested
+source. A filesystem walk would need its own list of directories to skip
+(`node_modules`, `target`, `dist`, `coverage`), which is a second copy of a judgement
+`.gitignore` already holds — and the copy that drifts is the one that starts calling
+build output source. Outside a git repository the gate reports `unmeasured` and passes,
+because a gate that could not run must never read as one that did.
+
+**Excludes live in `components.yml`, not `config.yml`.** An exclude states what goes
+untested, which is the one thing that file exists to record; splitting the two would
+leave each half readable and neither answering the question. They use the same anchored
+syntax as the exemption set, so a subtree is spelled `scripts/**` and a bare `scripts`
+covers the path of that name alone. An exclude covering no file is named on stderr
+rather than failing the build: it is very likely a directory name written where a
+pattern was needed, but it is also what an honest exclude becomes the day its file is
+deleted, and failing a build over tidying is how a gate earns a reputation for firing on
+ordinary work.
+
+**The gate runs before selection and before any component runs.** Whether the
+declaration is complete does not depend on which components an invocation chose, or on
+there being any — a repository that declares none is exactly the one whose every source
+file is orphaned, and a gate it never saw would be the failure it exists to catch. It
+takes no baseline and reads the same on the default branch as on a pull request, for
+the reason `coverage.floor` does: a file is under a component or it is not.
+
+**It does not catch a forgotten `depends_on` edge**, because there both components exist
+and no file is orphaned. Pushes to the default branch running every component is what
+covers that.
+
+`internal/pathmatch` holds the matcher, which `internal/referral` also uses. Both decide
+something consequential off a path — what may merge unread, and what may go untested —
+and two matchers would agree until one learned about a pattern form the other had not,
+in a way neither's tests would show.
 
 ## Configuration
 
@@ -1156,7 +1230,9 @@ the repository root and nothing else, any-depth matching is spelled `**/README.m
 monorepo scanned with `--dir source` writes `source/README.md` — the diff is not scoped to
 `--dir`, so the paths carry no prefix stripped. This parts company with gitignore on
 purpose — floating patterns are right for a skip list where over-matching is free, and wrong
-for a list that decides what merges without a human. Unknown YAML keys are rejected rather
+for a list that decides what merges without a human. The syntax itself is
+`internal/pathmatch`, shared with the orphan gate's excludes; which root a pattern is relative
+to belongs to each caller, and only referral's is the repository root. Unknown YAML keys are rejected rather
 than ignored, for the reason `config.validateLinter` rejects `linter: eslint`.
 
 The verdict is computed from `<merge-base>..HEAD`, so the local answer and the CI answer come
