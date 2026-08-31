@@ -100,6 +100,25 @@ func describe(d referral.Decision, verdict ui.Verdict) string {
 	}
 }
 
+// headline is the comment's one sentence under the badge.
+//
+// It is not the status description: the badge above it already says
+// "Referred", so repeating the word there spends the only sentence a reader
+// is given on something they can see. The status has no badge and must
+// therefore carry the verdict itself, which is why the two differ.
+func headline(d referral.Decision, verdict ui.Verdict, declared int) string {
+	switch {
+	case verdict == ui.VerdictFail:
+		return "the exemption set may be changed by a pull request that changes nothing else"
+	case verdict == ui.VerdictRefer:
+		return referralReason(d, declared) + " — comment `/lydite clear` to resolve"
+	case d.Empty:
+		return "no changes against the base"
+	default:
+		return "exempt: " + d.Exemption
+	}
+}
+
 // buildComment renders the standing verdict for the pull request.
 //
 // The table's columns follow the design: what was checked, what the head
@@ -110,7 +129,7 @@ func describe(d referral.Decision, verdict ui.Verdict) string {
 func buildComment(d referral.Decision, ch referral.Change, declared int, verdict ui.Verdict, base string) ui.Comment {
 	comment := ui.Comment{
 		Verdict:  verdict,
-		Headline: describe(d, verdict),
+		Headline: headline(d, verdict, declared),
 		Version:  version,
 		Base:     shortSHA(base),
 		Rows: []ui.CommentRow{
@@ -122,7 +141,7 @@ func buildComment(d referral.Decision, ch referral.Change, declared int, verdict
 	if len(d.Bundled) > 0 {
 		comment.Sections = append(comment.Sections, ui.CommentSection{
 			Title: "Bundled with the exemption change",
-			Items: code(capped(d.Bundled)),
+			Items: capped(code(d.Bundled)),
 		})
 	}
 	if vetoes := capped(kinds(d.Disqualifications)); len(vetoes) > 0 {
@@ -131,7 +150,7 @@ func buildComment(d referral.Decision, ch referral.Change, declared int, verdict
 	if len(d.Uncovered) > 0 {
 		comment.Sections = append(comment.Sections, ui.CommentSection{
 			Title: "Covered by no exemption",
-			Items: code(capped(d.Uncovered)),
+			Items: capped(code(d.Uncovered)),
 		})
 	}
 	return comment
@@ -145,7 +164,9 @@ func kinds(ds []referral.Disqualification) []string {
 	return out
 }
 
-// code wraps a path so a name containing markdown renders as itself.
+// code wraps each path so a name containing markdown renders as itself. It
+// runs before the list is capped, so the "and N more" line capping adds is
+// not itself formatted as a path.
 func code(items []string) []string {
 	out := make([]string, 0, len(items))
 	for _, item := range items {
