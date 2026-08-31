@@ -88,8 +88,21 @@ jobs:
       # hide the case a consumer actually hits. Two of the four components
       # bring up postgres and wait for it to report healthy; ubuntu-latest
       # carries the docker compose plugin the probe finds.
+      #
+      # The expected verdict is not all-green. `scripts/seed.ts` is under no
+      # component and carries no exclude on purpose, so the orphan gate has to
+      # fail on it — which is why this asserts the verdict rather than checking
+      # for the absence of one. A job that only checked `exit 0` would go green
+      # the day the gate stopped working, and that is the failure a proving
+      # ground exists to catch. The script also holds every component to a
+      # pass, so the expected failure cannot mask a runner that broke.
       - name: lydite test (proving ground)
-        run: /tmp/lydite test --dir proving-ground
+        run: |
+          status=0
+          /tmp/lydite test --dir proving-ground --json > report.json || status=$?
+          echo "lydite test exited $status"
+          cat report.json
+          python3 .github/assert-proving-ground.py report.json
 
       # Each component's whole output, for when the tail under its row is not
       # enough. lydite captures rather than streams, so this is the only copy —
