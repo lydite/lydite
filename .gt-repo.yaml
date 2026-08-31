@@ -15,7 +15,7 @@
 # this file stops tracking gt, which is why sync removes the ones that merely
 # restate it. Run 'gt repo config' to see the resolved spec, defaults included.
 
-gt_version: 1.5.0
+gt_version: 1.6.0
 dependabot:
   - ecosystem: gomod
     directory: /cli
@@ -32,7 +32,7 @@ dependabot:
       years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
       pins".
 
-      Each pin directory is also excluded in .lydite.yml: they are real
+      Each pin directory is also excluded in .lydite/config.yml: they are real
       manifests, so detection would otherwise treat them as packages to lint or
       modules to scan.
   - ecosystem: cargo
@@ -44,6 +44,13 @@ dependabot:
     directory: /cli/internal/rust/cargo-deny-pin
     note: |
       cargo-deny (internal/rust).
+  - ecosystem: cargo
+    directory: /cli/internal/runner/cargo-nextest-pin
+    note: |
+      cargo-nextest (internal/runner), the test runner a component declaring
+      the cargo-nextest runner is run with. Pinned for the reason the scanners
+      are: whatever version a machine carries decides which tests run and what
+      a failure looks like.
   - ecosystem: gomod
     directory: /cli/internal/golang/go-pin
     note: |

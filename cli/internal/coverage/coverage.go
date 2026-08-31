@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/nodedeps"
 )
 
 // Source says who produces the coverage data Compute returns: lydite
@@ -502,7 +504,7 @@ func findReportForUnit(dir, unitDir, unitRelDir string, overrides ReportOverride
 // yields the scan root directory itself, and a bare existence check accepts a
 // directory — so the lookup would answer "found" with a path no parser can
 // read, instead of either missing or falling back to the conventional
-// candidates. Both `report: ""` in .lydite.yml and `--go-report ""` on the
+// candidates. Both `report: ""` in .lydite/config.yml and `--go-report ""` on the
 // command line can produce it.
 func resolveOverride(dir, override string) (string, bool) {
 	if strings.TrimSpace(override) == "" {
@@ -654,44 +656,10 @@ type istanbulSummary struct {
 	} `json:"total"`
 }
 
-// tsLockfiles maps each recognized lockfile name to the package manager it
-// identifies.
-var tsLockfiles = map[string]string{
-	"package-lock.json": "npm",
-	"yarn.lock":         "yarn",
-	"pnpm-lock.yaml":    "pnpm",
-}
-
-// resolvePackageManager inspects root for exactly one recognized lockfile
-// (package-lock.json -> npm, yarn.lock -> yarn, pnpm-lock.yaml -> pnpm). If
-// more than one is present at the same root — often a sign of stale/leftover
-// files — resolution is ambiguous and returns ("", false) rather than
-// silently guessing a priority order; the caller skips auto-detected install
-// for that root entirely rather than picking one arbitrarily.
-func resolvePackageManager(root string) (string, bool) {
-	var found []string
-	for file, manager := range tsLockfiles {
-		if _, err := os.Stat(filepath.Join(root, file)); err == nil {
-			found = append(found, manager)
-		}
-	}
-	if len(found) != 1 {
-		return "", false
-	}
-	return found[0], true
-}
-
 // hasAnyLockfile reports whether dir contains any recognized lockfile,
 // regardless of ambiguity — used to find workspace roots, where presence is
 // what matters, not which single manager it identifies.
-func hasAnyLockfile(dir string) bool {
-	for file := range tsLockfiles {
-		if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
-			return true
-		}
-	}
-	return false
-}
+func hasAnyLockfile(dir string) bool { return nodedeps.HasLockfile(dir) }
 
 // tsWorkspaceRoots returns, for each pkgDir, the nearest ancestor directory
 // (including pkgDir itself, not walking above dir) containing a recognized
@@ -726,36 +694,17 @@ func tsWorkspaceRoots(dir string, pkgDirs []string) []string {
 	return roots
 }
 
-// tsInstall runs one install command per unique workspace root in roots,
-// before any test:coverage script executes. override, when non-empty
-// (cfg.TypeScript.Install), replaces auto-detection entirely and is run via
-// a shell at every root — a free-form user-authored command legitimately
-// needs shell semantics (&&, env expansion), unlike lydite's other,
-// hardcoded tool invocations. Failures are non-fatal here: tsCoverage's
-// existing per-package soft-omission (hasCoverageScript / test:coverage
-// failure) already handles a still-broken package after a failed or skipped
-// install.
+// tsInstall installs dependencies once per workspace root, so a fresh
+// checkout — the baseline worktree, or any other SourceRun invocation — has a
+// node_modules before any test:coverage script executes.
+//
+// Failures are non-fatal here: tsCoverage's per-package soft omission
+// (hasCoverageScript, or a failing test:coverage) already covers a package
+// that is still broken after a failed or skipped install, and a language
+// whose coverage cannot be measured is omitted rather than failed.
 func tsInstall(ctx context.Context, roots []string, override string) {
 	for _, root := range roots {
-		if override != "" {
-			executil.Run(ctx, root, "sh", "-c", override) // #nosec G204 -- override comes from the target repo's own .lydite.yml, authored by whoever configured lydite for that repo, not remote/untrusted input
-			continue
-		}
-		manager, ok := resolvePackageManager(root)
-		if !ok {
-			continue
-		}
-		switch manager {
-		case "npm":
-			executil.Run(ctx, root, "npm", "ci")
-		case "yarn":
-			// Best-effort: corepack may already be enabled, or absent on an
-			// older Node — either way, yarn install below still runs.
-			executil.Run(ctx, root, "corepack", "enable")
-			executil.Run(ctx, root, "yarn", "install", "--immutable")
-		case "pnpm":
-			executil.Run(ctx, root, "pnpm", "install", "--frozen-lockfile")
-		}
+		_ = nodedeps.Install(ctx, root, override, io.Discard)
 	}
 }
 

@@ -1,0 +1,12 @@
+# What lydite builds, tests and gates in its own repository.
+#
+# One component, because the Go module at cli/ is what `go test` treats as a
+# whole. The *-pin directories under it hold real manifests — a go.mod, a
+# package.json, a Cargo.toml — and are deliberately not components: they exist
+# so Dependabot can see the tool versions lydite pins, and nothing in them is
+# ever built or tested.
+components:
+  - name: cli
+    dir: cli
+    runner: go-test
+    args: ["-race", "./..."]

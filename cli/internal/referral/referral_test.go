@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"lydite/lydite/internal/config"
 )
 
 func TestMatchIsAnchoredAndSegmentAware(t *testing.T) {
@@ -140,7 +142,7 @@ exemptions:
 		},
 		{
 			"an edit to lydite's own config",
-			Change{Paths: []string{".lydite.yml"}},
+			Change{Paths: []string{config.FileName}},
 			"lydite config edited",
 		},
 		{
@@ -625,10 +627,52 @@ func TestBundledExemptionChangeIsReported(t *testing.T) {
 		t.Error("editing the exemption set is still a disqualifier")
 	}
 
-	// .lydite.yml carries no isolation requirement: report paths change
-	// alongside code for honest reasons.
-	config := Decide(Change{Paths: []string{".lydite.yml", "src/app.go"}}, File{})
-	if len(config.Bundled) != 0 {
-		t.Errorf(".lydite.yml must carry no isolation requirement, got %v", config.Bundled)
+	// The ordinary config file carries no isolation requirement: report
+	// paths change alongside code for honest reasons.
+	bundled := Decide(Change{Paths: []string{config.FileName, "src/app.go"}}, File{})
+	if len(bundled.Bundled) != 0 {
+		t.Errorf("%s must carry no isolation requirement, got %v", config.FileName, bundled.Bundled)
+	}
+}
+
+// A bare base-name test would read any config.yml or exemptions.yml anywhere
+// in the tree as the files that decide what lydite checks and what merges
+// unattended.
+func TestLyditeConfigMatchingIsNotByBaseName(t *testing.T) {
+	for _, p := range []string{"src/config.yml", "deploy/exemptions.yml", "config.yml"} {
+		if InConfigDir(p) {
+			t.Errorf("%s is not lydite configuration", p)
+		}
+		if IsExemptionsPath(p) {
+			t.Errorf("%s is not the exemption set", p)
+		}
+		if d := Decide(Change{Paths: []string{p}}, File{}); len(d.Bundled) != 0 {
+			t.Errorf("%s must carry no isolation requirement, got %v", p, d.Bundled)
+		}
+	}
+}
+
+// Every file under .lydite/ configures lydite, so an edit to the component
+// declaration is a disqualifier exactly as an edit to the config is: it
+// changes what gets tested.
+func TestEveryFileUnderTheConfigDirIsADisqualifier(t *testing.T) {
+	for _, p := range []string{config.Dir + "/components.yml", config.FileName, FileName, "source/" + config.Dir + "/config.yml"} {
+		d := Decide(Change{Paths: []string{p}}, File{Exemptions: []Exemption{{Name: "everything", Reason: "r", Paths: []string{"**"}}}})
+		if !d.Referred {
+			t.Errorf("%s must be a disqualifier", p)
+		}
+	}
+}
+
+// The referral diff covers the whole repository while lydite may scan a
+// subdirectory of it, so a monorepo's own declaration still governs its scan
+// root.
+func TestExemptionsPathIsRecognisedUnderAScanRoot(t *testing.T) {
+	if !IsExemptionsPath("source/" + FileName) {
+		t.Errorf("source/%s is an exemption set", FileName)
+	}
+	d := Decide(Change{Paths: []string{"source/" + FileName, "src/app.go"}}, File{})
+	if len(d.Bundled) != 1 || d.Bundled[0] != "src/app.go" {
+		t.Errorf("bundled = %v, want the non-exemption path", d.Bundled)
 	}
 }

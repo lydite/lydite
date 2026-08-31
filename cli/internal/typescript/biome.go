@@ -150,7 +150,7 @@ func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (execut
 		r.Err = fmt.Errorf("nested biome.json conflicts with lydite's bundled config")
 		r.Detail = "Biome refused to run: a biome.json below this package is treated as a second root config.\n" +
 			"Add \"root\": false to it (Biome's own requirement for nested configs), or exclude that\n" +
-			"directory via typescript.exclude in .lydite.yml."
+			"directory via typescript.exclude in .lydite/config.yml."
 		return r, nil
 	}
 

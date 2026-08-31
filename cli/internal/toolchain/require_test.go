@@ -223,7 +223,7 @@ func TestOverrideBeatsManifest(t *testing.T) {
 	if got.Version != "v1.27.0" {
 		t.Errorf("Version = %q, want the override v1.27.0", got.Version)
 	}
-	if !strings.Contains(got.Source, ".lydite.yml") {
+	if !strings.Contains(got.Source, ".lydite/config.yml") {
 		t.Errorf("Source = %q, want it to say the value came from config, not the manifest", got.Source)
 	}
 }

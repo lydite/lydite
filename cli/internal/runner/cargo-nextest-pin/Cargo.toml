@@ -1,0 +1,29 @@
+# Version pin for cargo-nextest, the test runner lydite installs with
+# `cargo install` for a component declaring the cargo-nextest runner.
+#
+# This crate is never built, published, or depended on: it exists so Dependabot's
+# `cargo` ecosystem can see the version and open bump PRs, and it is parsed at
+# runtime by internal/runner/pins.go so the version has exactly one home.
+#
+# A test runner is pinned for the same reason a scanner is. Whatever version
+# happens to be on a machine decides which tests run and what a failure looks
+# like, so a run whose runner varies by runner is a run whose verdict does too —
+# and unlike a scanner, an absent one is not a quiet degradation but a component
+# that cannot run at all.
+#
+# Its own manifest rather than a shared one, matching internal/rust: two cargo
+# tools that cannot resolve in one graph produce a manifest cargo errors on and
+# Dependabot silently skips, which is the "pin nothing ages out" failure the
+# whole arrangement exists to prevent.
+#
+# The empty [workspace] table stops cargo absorbing this into a workspace above it.
+[workspace]
+
+[package]
+name = "lydite-cargo-nextest-pin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cargo-nextest = "=0.9.143"

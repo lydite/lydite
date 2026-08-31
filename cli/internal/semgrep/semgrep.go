@@ -22,7 +22,7 @@ import (
 const AppTokenEnv = "SEMGREP_APP_TOKEN" // #nosec G101 -- this is an env var NAME, not a credential value
 
 // Check runs Semgrep against dir using the given ruleset config (e.g. "auto",
-// or a custom registry ref/path from .lydite.yml), failing on any finding.
+// or a custom registry ref/path from .lydite/config.yml), failing on any finding.
 //
 // When SEMGREP_APP_TOKEN is set in the environment, this runs `semgrep ci`
 // instead of `semgrep scan` — Semgrep's own diff-aware CI mode, which both

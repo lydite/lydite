@@ -29,6 +29,7 @@ func newRootCmd() *cobra.Command {
 	}
 	cmd.AddCommand(
 		newScanCmd(),
+		newTestCmd(),
 		newReviewCmd(),
 		newClearanceCmd(),
 		newCoverageCmd(),

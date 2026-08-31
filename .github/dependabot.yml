@@ -47,7 +47,7 @@ updates:
   # years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
   # pins".
   #
-  # Each pin directory is also excluded in .lydite.yml: they are real
+  # Each pin directory is also excluded in .lydite/config.yml: they are real
   # manifests, so detection would otherwise treat them as packages to lint or
   # modules to scan.
   - package-ecosystem: "npm"
@@ -85,6 +85,25 @@ updates:
   # cargo-deny (internal/rust).
   - package-ecosystem: "cargo"
     directory: "/cli/internal/rust/cargo-deny-pin"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+
+  # cargo-nextest (internal/runner), the test runner a component declaring
+  # the cargo-nextest runner is run with. Pinned for the reason the scanners
+  # are: whatever version a machine carries decides which tests run and what
+  # a failure looks like.
+  - package-ecosystem: "cargo"
+    directory: "/cli/internal/runner/cargo-nextest-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are

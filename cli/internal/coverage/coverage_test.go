@@ -137,7 +137,7 @@ func TestFindReportOverrideMissing(t *testing.T) {
 // the scan root directory, and a bare os.Stat accepts a directory — so the
 // lookup would answer "found" with something no parser can read, instead of
 // missing or falling back to the conventional candidates. `report: ""` in
-// .lydite.yml and `--go-report ""` both produce it.
+// .lydite/config.yml and `--go-report ""` both produce it.
 func TestFindReportEmptyOverrideIsAMissNotTheScanRoot(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "coverage.out", "mode: set\n")
@@ -318,33 +318,6 @@ func TestFindReportForUnitCandidateFallbackRelativeToCrateDir(t *testing.T) {
 	want := filepath.Join(crateDir, "coverage", "llvm-cov.json")
 	if !ok || got != want {
 		t.Fatalf("findReportForUnit = (%q, %v), want (%q, true)", got, ok, want)
-	}
-}
-
-func TestResolvePackageManager(t *testing.T) {
-	cases := []struct {
-		name      string
-		lockfiles []string
-		wantMgr   string
-		wantOK    bool
-	}{
-		{"npm", []string{"package-lock.json"}, "npm", true},
-		{"yarn", []string{"yarn.lock"}, "yarn", true},
-		{"pnpm", []string{"pnpm-lock.yaml"}, "pnpm", true},
-		{"none", nil, "", false},
-		{"ambiguous both present", []string{"package-lock.json", "yarn.lock"}, "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			for _, lf := range tc.lockfiles {
-				write(t, dir, lf, "")
-			}
-			mgr, ok := resolvePackageManager(dir)
-			if ok != tc.wantOK || mgr != tc.wantMgr {
-				t.Fatalf("resolvePackageManager = (%q, %v), want (%q, %v)", mgr, ok, tc.wantMgr, tc.wantOK)
-			}
-		})
 	}
 }
 

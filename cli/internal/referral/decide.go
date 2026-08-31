@@ -1,7 +1,5 @@
 package referral
 
-import "path"
-
 // Decision is the outcome of evaluating one change against the exemption
 // set.
 type Decision struct {
@@ -90,14 +88,14 @@ func Decide(ch Change, file File) Decision {
 // complete, reviewable record of every widening — the audit artefact the
 // allowlist model exists to produce.
 //
-// .lydite.yml deliberately carries no such requirement: report paths change
+// config.FileName deliberately carries no such requirement: report paths change
 // alongside code for honest reasons, and a rule that fires on ordinary work
 // is one that gets relaxed later.
 func bundledWithExemptions(paths []string) []string {
 	touchesExemptions := false
 	var others []string
 	for _, p := range paths {
-		if path.Base(p) == FileName {
+		if IsExemptionsPath(p) {
 			touchesExemptions = true
 			continue
 		}

@@ -59,9 +59,7 @@ func TestCoverageOnMainRecordsFullyCarriedBaselineWhenNothingMeasured(t *testing
 	}
 	// Coverage production is described by the repo's own config file, the way
 	// a real consumer does it now — not by a flag at the call site.
-	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte("coverage:\n  source: report\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeUnder(t, repo, config.FileName, "coverage:\n  source: report\n")
 	run(repo, "add", "-A")
 	run(repo, "commit", "-m", "code")
 	c1 := revParse(repo, "HEAD")
@@ -150,9 +148,7 @@ func TestComputeBaselineAtRunsTestsEvenWhenSourceIsReport(t *testing.T) {
 		// The very setting that must NOT reach the baseline worktree.
 		config.FileName: "coverage:\n  source: report\n",
 	} {
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeUnder(t, repo, name, body)
 	}
 	run(repo, "add", "-A")
 	run(repo, "commit", "-m", "fixture")
@@ -243,7 +239,7 @@ func TestCoverageFlagDefaultsLeaveConfigInCharge(t *testing.T) {
 	cmd := newCoverageCmd()
 	for _, name := range []string{"source", "tests"} {
 		if got := cmd.Flags().Lookup(name).DefValue; got != "" {
-			t.Errorf("--%s defaults to %q; it must default to empty so .lydite.yml is consulted", name, got)
+			t.Errorf("--%s defaults to %q; it must default to empty so .lydite/config.yml is consulted", name, got)
 		}
 	}
 }
@@ -331,7 +327,7 @@ func TestMergeCarried(t *testing.T) {
 	}
 }
 
-// enabledEcosystems makes `enabled: false` in .lydite.yml behave exactly
+// enabledEcosystems makes `enabled: false` in .lydite/config.yml behave exactly
 // like source removal for the coverage gate: the language stops being
 // "detected", so its baseline entry dies on the next record instead of being
 // carried forward (and [UNMEASURED]-reported) forever.
@@ -957,7 +953,7 @@ func TestFloorReportNamesTheRootUnit(t *testing.T) {
 }
 
 // coverage.Compute measures every language it detects without consulting
-// `enabled:` in .lydite.yml, so its units can carry a language the repo
+// `enabled:` in .lydite/config.yml, so its units can carry a language the repo
 // opted out of gating. A per-unit gate must not turn that into one build
 // failure per crate for a language nobody asked to be gated on.
 func TestFloorReportSkipsDisabledLanguages(t *testing.T) {
@@ -1011,9 +1007,7 @@ func TestCoverageOnMainRecordsBaselineThenGatesOnTheFloor(t *testing.T) {
 		"coverage.out":  "mode: set\nfixture/main.go:3.16,3.28 1 0\n",
 		config.FileName: "coverage:\n  source: report\n  floor: 50\n",
 	} {
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeUnder(t, repo, name, body)
 	}
 	run(repo, "add", "-A")
 	run(repo, "commit", "-m", "fixture")
@@ -1046,5 +1040,19 @@ func TestCoverageOnMainRecordsBaselineThenGatesOnTheFloor(t *testing.T) {
 	}
 	if r := executil.Run(ctx, repo, "git", "show", "origin/"+gitstate.BranchName+":"+gitstate.StatePath(tree)); !r.Ok() {
 		t.Errorf("no baseline recorded for tree %s despite the floor failure: %v", tree, r.Err)
+	}
+}
+
+// writeUnder writes a repository-relative path, creating the directories it
+// names — lydite's config files live under .lydite/, which a plain
+// Join-and-write would have no parent to write into.
+func writeUnder(t *testing.T, root, rel, body string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

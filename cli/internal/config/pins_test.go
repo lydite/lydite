@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestPinDirectoriesAreExcluded keeps lydite's own .lydite.yml honest.
+// TestPinDirectoriesAreExcluded keeps lydite's own .lydite/config.yml honest.
 //
 // The pin directories hold real package manifests — package.json, Cargo.toml,
 // go.mod — so detection treats each one as a package to lint, a crate to audit,
@@ -20,7 +20,7 @@ import (
 // initial detect.Ecosystems pass uses the merged list, while each language's own
 // discovery pass (rust.Check, typescript.Check, golang.Check) reads only its own.
 func TestPinDirectoriesAreExcluded(t *testing.T) {
-	// Three levels up, not two: the Go module lives in cli/, while .lydite.yml
+	// Three levels up, not two: the Go module lives in cli/, while .lydite/config.yml
 	// sits at the repository root because that is the scan root CI passes to
 	// --dir. Two levels reaches cli/, where Load finds no config and returns an
 	// empty one — which reads as "no pin directory is excluded" and fails here.
@@ -51,7 +51,7 @@ func TestPinDirectoriesAreExcluded(t *testing.T) {
 
 	cfg, err := Load(repoRoot)
 	if err != nil {
-		t.Fatalf("loading lydite's own .lydite.yml: %v", err)
+		t.Fatalf("loading lydite's own .lydite/config.yml: %v", err)
 	}
 
 	for _, lang := range []struct {
@@ -68,7 +68,7 @@ func TestPinDirectoriesAreExcluded(t *testing.T) {
 		}
 		for _, pin := range pinDirs {
 			if !excluded[pin] {
-				t.Errorf("%s.exclude in .lydite.yml is missing %q — CI's self-scan would scan it", lang.name, pin)
+				t.Errorf("%s.exclude in .lydite/config.yml is missing %q — CI's self-scan would scan it", lang.name, pin)
 			}
 		}
 	}

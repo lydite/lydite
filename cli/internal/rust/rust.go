@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 )
@@ -99,21 +100,26 @@ func named(name string, r executil.Result) executil.Result {
 // plainly `cargo-<name>` and must be run directly (not via `cargo <name>`,
 // which only finds cargo-* binaries already on PATH).
 func ensure(ctx context.Context, name, version string) (string, error) {
-	cacheDir, err := os.UserCacheDir()
+	tool := cargotool.Tool{Name: name, Version: version}
+	bin, err := tool.Binary()
 	if err != nil {
 		return "", err
 	}
-	root := filepath.Join(cacheDir, "lydite", name+"-"+version)
-	bin := filepath.Join(root, "bin", name)
-
-	if _, err := os.Stat(bin); err == nil {
+	if tool.Installed() {
 		return bin, nil
+	}
+	root, err := tool.Root()
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return "", err
 	}
-	r := executil.Run(ctx, "", "cargo", "install", "--locked", "--root", root, "--version", version, name)
-	if !r.Ok() {
+	argv, err := tool.InstallArgv()
+	if err != nil {
+		return "", err
+	}
+	if r := executil.Run(ctx, "", "cargo", argv...); !r.Ok() {
 		return "", r.Err
 	}
 	return bin, nil

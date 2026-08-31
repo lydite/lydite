@@ -47,6 +47,7 @@ version with `LYDITE_VERSION=1.2.3 curl ... | sh`. Update in place any time with
 
 ```sh
 lydite scan --dir .          # run every check for every ecosystem detected under --dir (default ".")
+lydite test --dir .          # run each declared component's test suite, services and all
 lydite coverage --dir .      # diff current coverage against the cached baseline for the PR's base commit
 lydite version
 lydite update                 # self-update to the latest release
@@ -56,7 +57,7 @@ lydite update                 # self-update to the latest release
 
 `lydite coverage` defaults to running each ecosystem's test suite itself — the right choice for
 local dev, one command and nothing to remember. A repo whose CI already runs a test job with
-coverage instrumentation on says so once, in `.lydite.yml`, and lydite becomes a pure consumer of
+coverage instrumentation on says so once, in `.lydite/config.yml`, and lydite becomes a pure consumer of
 that job's report instead of running the whole suite again:
 
 ```yaml
@@ -82,9 +83,50 @@ coverage:
 See [AGENTS.md](AGENTS.md#coverage) for exactly how the baseline is computed and cached, and why
 `coverage.source` exists.
 
+## Components
+
+`.lydite/components.yml` declares what a repository builds and tests. A component is the unit that
+language's own build tool treats as a whole — a Cargo workspace, a Go module, a JavaScript
+workspace — and `lydite test` runs each one's suite:
+
+```yaml
+components:
+  - name: cli
+    dir: cli
+    runner: go-test
+    args: ["-race", "./..."]
+```
+
+The runner names the test command and thereby the language: `go-test`, `cargo-nextest`,
+`cargo-llvm-cov-nextest`, `vitest`, `jest`, or a raw `command:` for anything else. lydite
+orchestrates around that command and never learns to run anyone's tests.
+
+A component whose suite needs services points at a compose file, and lydite brings them up before
+the suite and takes them down after it — including when the run fails:
+
+```yaml
+components:
+  - name: api
+    dir: go/api
+    runner: go-test
+    compose:
+      file: ./compose.yaml
+      up: [db]
+      wait: healthy      # healthy | started | none
+    setup: ["make migrate"]
+```
+
+lydite owns no service schema and hard-codes no container runtime: it probes for docker or podman
+and names the one it found. `wait: healthy` needs the compose service to declare a healthcheck, and
+is refused rather than quietly downgraded when it does not. `--keep-services` leaves them running.
+
+Components are declared rather than discovered, because the declaration is the reviewable
+statement of what gets tested and its history is the record of every change to that. See
+[ADR 0016](docs/adr/0016-components-and-lydite-run-tests.md).
+
 ## Configuration
 
-`.lydite.yml` at the repo root is optional — the default (no file) is to scan everything detected
+`.lydite/config.yml` at the repo root is optional — the default (no file) is to scan everything detected
 with every check enabled and to produce coverage by running the tests. Use it to disable a language
 entirely, exclude a path from detection, point Semgrep at a custom ruleset, or describe how the
 repo's coverage is produced:
@@ -149,7 +191,7 @@ false`) if a repo only wants one of them, or isn't ready to grant `contents: wri
 two optional tokens).
 
 Note there is no input for coverage production. Who produces coverage, and where its reports live,
-come from `.lydite.yml` at the scan root — the same answer for every workflow that calls the
+come from `.lydite/config.yml` at the scan root — the same answer for every workflow that calls the
 action, so it's stated once in the repo rather than restated at each call site. `dir` is the one
 thing that can't move there, since the file lives *at* the scan root and lydite has to be told the
 root before it can read its own config.

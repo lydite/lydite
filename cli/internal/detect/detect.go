@@ -32,7 +32,7 @@ var defaultSkipDirs = map[string]bool{
 	"dist": true, "vendor": true, "build": true,
 }
 
-// skipSet merges extra directory names (from .lydite.yml's exclude lists)
+// skipSet merges extra directory names (from .lydite/config.yml's exclude lists)
 // onto the built-in skip set.
 func skipSet(extra []string) map[string]bool {
 	if len(extra) == 0 {
