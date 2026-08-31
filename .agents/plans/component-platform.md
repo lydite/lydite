@@ -10,9 +10,9 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | # | Issue | Deliverable | Prompt | State |
 |---|---|---|---|---|
 | 0 | #38 | Proving ground: polyglot repo in the `lydite` org | `pr0-proving-ground.md` | done — [lydite/proving-ground](https://github.com/lydite/proving-ground) |
-| 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | in review — #39 |
-| 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
+| 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | done — #39 |
 | 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | not started |
+| 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
 | 4 | — | Scheduler: resource-constrained queue, port locks, local driver | — | not started |
 | 5 | — | Affected selection; full run on the default branch | — | not started |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | — | not started |
@@ -24,11 +24,10 @@ Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
 until step 0 existed, because two of its three runners had nothing to run
 against otherwise.
 
-**Step 3 is folded into step 1, and that is why the table is out of order.**
-Both of the proving ground's service-declaring components are the ones the
-cargo runner would exercise, so "the cargo runner has been executed once" and
-"lydite can start a component's services" turned out to be the same
-requirement. Step 2 is next, on its own.
+**Step 3 is folded into step 1.** Both of the proving ground's
+service-declaring components are the ones the cargo runner would exercise, so
+"the cargo runner has been executed once" and "lydite can start a component's
+services" turned out to be the same requirement. Step 2 is next, on its own.
 
 ## Why the proving ground gates PR 1
 
@@ -118,8 +117,9 @@ could: it also expresses a Corepack-pinned flow and a monorepo install that no
 single manager name implies. `internal/nodedeps` is where that rule lives, so
 the coverage gate and the test run cannot disagree about it.
 
-Open, for when `setup` lands at step 3: `typescript.install` is a repository-wide
-key while `setup` is per component, and the two will overlap.
+Open: `typescript.install` is a repository-wide key while a component's
+`setup` is per component, and a JavaScript component can express its install
+either way.
 
 ## What step 1 left for later
 
