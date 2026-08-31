@@ -370,6 +370,15 @@ either way — and a gate that fires on ordinary work is one that gets switched 
 proving ground is the calibration: six files there sit under no component and exactly
 one, `scripts/seed.ts`, must fire.
 
+**A language disabled in `.lydite/config.yml` is still checked.** `rust.enabled: false`
+says which checks run over a repository's Rust; it does not say that no component should
+test it. Reading it as both would let a repository drop a whole language out of this gate
+by changing what its linter looks at — a silent widening of what may go untested, in a
+file whose history is not the record of that. The exclude is how a repository says it, in
+one line, where a reviewer is already looking. (`floorReport` filters to enabled
+ecosystems and is the only gate that does; the reasons differ, and neither generalises to
+the other.)
+
 **The file list comes from git** — tracked, plus untracked ones git is not ignoring.
 Both halves matter. Tracked alone misses the file just written and not yet staged,
 which is the moment its author can most cheaply act on the answer; including ignored
@@ -377,8 +386,11 @@ files reports every compiled artefact and every installed dependency as untested
 source. A filesystem walk would need its own list of directories to skip
 (`node_modules`, `target`, `dist`, `coverage`), which is a second copy of a judgement
 `.gitignore` already holds — and the copy that drifts is the one that starts calling
-build output source. Outside a git repository the gate reports `unmeasured` and passes,
-because a gate that could not run must never read as one that did.
+build output source. Outside a git repository, and equally when git lists no source file
+at all, the gate reports `unmeasured` and passes: a scan root that is itself ignored — a
+vendored checkout, a `--dir` pointed at build output — sits inside a work tree and lists
+nothing while exiting zero, which would otherwise render as a green gate that had
+examined the whole repository. A gate that could not run must never read as one that did.
 
 **Excludes live in `components.yml`, not `config.yml`.** An exclude states what goes
 untested, which is the one thing that file exists to record; splitting the two would

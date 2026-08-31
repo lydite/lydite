@@ -102,7 +102,7 @@ jobs:
           /tmp/lydite test --dir proving-ground --json > report.json || status=$?
           echo "lydite test exited $status"
           cat report.json
-          python3 .github/assert-proving-ground.py report.json
+          python3 .github/assert-proving-ground.py report.json proving-ground
 
       # Each component's whole output, for when the tail under its row is not
       # enough. lydite captures rather than streams, so this is the only copy —

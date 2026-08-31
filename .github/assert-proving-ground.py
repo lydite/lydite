@@ -14,12 +14,19 @@ would then look exactly like a repository that had nothing to exclude.
 `generated/client.ts` is a real source file under no component that the
 declaration excludes, so it must never appear.
 
+Checking only that it is absent from the report would be vacuous: a file that
+has been deleted, renamed, or moved under a component is absent too, and the
+exclude path would then go unexercised with the job still green. So its
+presence in the checkout is asserted first. The pair — the file is there, and
+the gate stayed silent about it — is what says the exclude did the clearing.
+
 It reads --json rather than the terminal report. A text-scraping consumer
 makes every refinement to the human surface a two-repository release, which
 is the coupling --json exists to remove.
 """
 
 import json
+import os
 import sys
 
 # Under no component and not excluded: the gate must report it.
@@ -28,11 +35,22 @@ EXPECTED_ORPHANS = ["scripts/seed.ts"]
 EXPECTED_EXCLUDED = ["generated/client.ts"]
 
 
-def main(path: str) -> int:
+def main(path: str, checkout: str) -> int:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     rows = {r["label"]: r for r in doc["rows"]}
     failures = []
+
+    # The excluded file has to exist for its absence from the report to mean
+    # anything. Without this the assertion below passes on a repository that
+    # simply deleted it, and the exclude branch stops being exercised without
+    # anyone being told.
+    for excluded in EXPECTED_EXCLUDED:
+        if not os.path.isfile(os.path.join(checkout, excluded)):
+            failures.append(
+                f"{excluded} is not in the checkout — it exists to prove an exclude clears an "
+                "orphan, and without it that half of the gate is untested"
+            )
 
     orphans = rows.get("orphans")
     if orphans is None:
@@ -84,4 +102,4 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv[1], sys.argv[2]))

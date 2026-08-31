@@ -390,19 +390,19 @@ func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
 	if errors.Is(err, orphan.ErrNoRepository) {
 		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no git repository"}
 	}
+	if errors.Is(err, orphan.ErrNoFiles) {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no source files found"}
+	}
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
 	}
 	for _, e := range res.UnusedExcludes {
-		// The "did you mean a subtree" hint only fits a pattern that is not
-		// already one. A stale "generated/**", left behind when the file it
-		// named was deleted, is the other reason an exclude covers nothing —
-		// and advising "generated/**/**" for it would be nonsense.
-		if strings.HasSuffix(e, "/**") {
-			fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file\n", component.FileName, e)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file — a directory is spelled %q\n", component.FileName, e, strings.TrimSuffix(e, "/")+"/**")
+		// The rule, not a guess at what was meant. Deriving a suggestion from
+		// the pattern produces advice that cannot be followed as soon as the
+		// pattern is not a bare directory name: "tools/gen.go" becomes
+		// "tools/gen.go/**", and a stale exclude whose file was deleted —
+		// the other reason one covers nothing — has no better spelling at all.
+		fmt.Fprintf(os.Stderr, "lydite: %s: exclude %q covers no file. Patterns are anchored, so a subtree is spelled \"dir/**\"\n", component.FileName, e)
 	}
 	if len(res.Orphans) == 0 {
 		return ui.Row{Status: ui.StatusPass, Label: label, Value: fmt.Sprintf("none in %d source file(s)", res.Scanned)}

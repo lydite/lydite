@@ -129,10 +129,16 @@ func TestIgnoredFilesAreNotSource(t *testing.T) {
 		".gitignore":                    "node_modules/\ntarget/\n",
 		"web/node_modules/dep/index.js": "module.exports = 1\n",
 		"rust/target/debug/build.rs":    "fn main() {}\n",
+		// A declared component, so the tree is not empty: an empty one is
+		// its own state and would not exercise the skipping this is about.
+		"cli/main.go": "package main\n",
 	})
-	res := find(t, root, component.File{})
+	res := find(t, root, component.File{Components: []component.Component{{Name: "cli", Dir: "cli"}}})
 	if len(res.Orphans) != 0 {
 		t.Errorf("orphans = %v, want none", res.Orphans)
+	}
+	if res.Scanned != 1 {
+		t.Errorf("scanned = %d, want 1 — only cli/main.go is the repository's source", res.Scanned)
 	}
 }
 
@@ -254,5 +260,42 @@ func TestAGitFailureIsReportedWithItsMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "index") {
 		t.Errorf("err = %v, want git's own message naming the bad index, not a bare exit status", err)
+	}
+}
+
+// A scan root that is itself ignored is inside a work tree and lists nothing,
+// exiting zero. Reported as its own state rather than as a clean pass: a gate
+// that examined no file at all must never read as one that examined the
+// repository and found everything declared.
+func TestAnIgnoredScanRootIsNotACleanPass(t *testing.T) {
+	root := repo(t, map[string]string{
+		".gitignore":    "vendored/\n",
+		"a.go":          "package a\n",
+		"vendored/b.go": "package b\n",
+	})
+	_, err := orphan.Find(context.Background(), filepath.Join(root, "vendored"), component.File{})
+	if !errors.Is(err, orphan.ErrNoFiles) {
+		t.Errorf("err = %v, want ErrNoFiles", err)
+	}
+}
+
+// A repository holding no code in any language lydite runs is the same
+// state, reached honestly rather than by a misdirected --dir.
+func TestARepositoryWithNoSourceIsUnmeasurable(t *testing.T) {
+	root := repo(t, map[string]string{"README.md": "# docs\n", "LICENSE": "MIT\n"})
+	if _, err := orphan.Find(context.Background(), root, component.File{}); !errors.Is(err, orphan.ErrNoFiles) {
+		t.Errorf("err = %v, want ErrNoFiles", err)
+	}
+}
+
+// A language the repository has disabled for scanning is still code a
+// component ought to test, and the gate deliberately does not read those
+// flags. Honouring them would let a repository drop a whole language out of
+// the gate by changing what its linter runs on.
+func TestScanningOptOutsDoNotNarrowTheGate(t *testing.T) {
+	root := repo(t, map[string]string{"web/app.ts": "export const a = 1\n"})
+	res := find(t, root, component.File{})
+	if want := []string{"web/app.ts"}; !equal(res.Orphans, want) {
+		t.Errorf("orphans = %v, want %v", res.Orphans, want)
 	}
 }

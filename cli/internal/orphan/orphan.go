@@ -12,6 +12,15 @@
 // CONTEXT.md gives the word, not a referral: there is always work that
 // satisfies it. See docs/adr/0016-components-and-lydite-run-tests.md.
 //
+// It reads nothing from config.FileName, and a language disabled there is
+// still checked. "rust.enabled: false" says which checks run over a
+// repository's Rust; it does not say that no component should test it. Taking
+// it as both would let a repository drop a whole language out of this gate by
+// changing what its linter looks at — a widening of what may go untested,
+// made silently, in a file whose history is not the record of that. A
+// repository that means it writes the exclude, which is one line and says so
+// where a reviewer is already looking.
+//
 // It is a path question and nothing more. It reads no manifest, parses no
 // source and asks internal/detect nothing, which is what lets it catch a
 // whole undeclared directory that has no manifest in it yet — the case
@@ -44,6 +53,17 @@ import (
 // as untested source.
 var ErrNoRepository = errors.New("not a git repository, so the files it contains cannot be listed")
 
+// ErrNoFiles reports that git listed no source file at all under the scan
+// root.
+//
+// Distinct from finding none orphaned, and the distinction is the whole
+// point. A scan root that is itself ignored — a vendored checkout, a build
+// directory someone pointed --dir at — is inside a work tree and lists
+// nothing, exits zero, and would otherwise render as a green gate that had
+// examined the entire repository. A gate that could not run must never read
+// as one that did.
+var ErrNoFiles = errors.New("git lists no source file under the scan root, so there is nothing to check")
+
 // Result is what the gate found.
 type Result struct {
 	// Orphans are the source files under no component and no exclude, in
@@ -74,6 +94,9 @@ func Find(ctx context.Context, root string, f component.File) (Result, error) {
 	files, err := sourceFiles(ctx, root)
 	if err != nil {
 		return Result{}, err
+	}
+	if len(files) == 0 {
+		return Result{}, ErrNoFiles
 	}
 	used := make([]bool, len(f.Excludes))
 	res := Result{Scanned: len(files)}
@@ -162,10 +185,14 @@ func firstLine(s string) string {
 // -z rather than newline-separated output, so a path containing a newline or
 // a byte git would otherwise render as a quoted escape arrives intact. That
 // removes the need to pin core.quotePath the way internal/referral has to.
-// --deduplicate keeps a file that is both staged and present on disk from
-// being counted twice.
+//
+// Duplicates are dropped here rather than with git's own --deduplicate,
+// which needs git 2.31 and would turn a Debian 11 runner's whole `lydite
+// test` into a failure over a flag, for a repository whose declaration is
+// perfectly correct. An unmerged path is the only source of them, and one
+// map is a smaller thing to carry than a version floor.
 func lsFiles(ctx context.Context, root string) ([]string, error) {
-	res := executil.RunQuiet(ctx, root, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--deduplicate")
+	res := executil.RunQuiet(ctx, root, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
 	if !res.Ok() {
 		if !executil.RunQuiet(ctx, root, "git", "rev-parse", "--is-inside-work-tree").Ok() {
 			return nil, ErrNoRepository
@@ -180,8 +207,10 @@ func lsFiles(ctx context.Context, root string) ([]string, error) {
 		return nil, res.Err
 	}
 	var out []string
+	seen := map[string]bool{}
 	for _, p := range strings.Split(res.Output, "\x00") {
-		if p != "" {
+		if p != "" && !seen[p] {
+			seen[p] = true
 			out = append(out, p)
 		}
 	}
