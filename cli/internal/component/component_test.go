@@ -298,3 +298,35 @@ func TestExcludesParse(t *testing.T) {
 		t.Errorf("excludes = %v, want two", f.Excludes)
 	}
 }
+
+// TestWatchPatternsAreValidated: a watch entry is the pattern deciding whether
+// a component runs when a file outside its directory changes, so a malformed
+// one must be refused rather than folded into "matches nothing". An exclude
+// that covers nothing is fail-safe; a watch that covers nothing is a component
+// that silently stops being invalidated by its own declared input.
+func TestWatchPatternsAreValidated(t *testing.T) {
+	for _, tc := range []struct{ name, watch, want string }{
+		{"malformed", "docs/[openapi.json", "watch[0]"},
+		{"empty", "", "is empty"},
+		{"absolute", "/etc/passwd", "must be relative to the scan root"},
+		{"escaping", "../outside/thing", "escapes the scan root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := "components:\n  - name: a\n    dir: .\n    runner: go-test\n    watch: [\"" + tc.watch + "\"]\n"
+			_, err := Parse([]byte(doc), FileName)
+			if err == nil {
+				t.Fatalf("watch %q was accepted; a pattern that cannot fire is a component that never runs", tc.watch)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidWatchPatternIsAccepted(t *testing.T) {
+	doc := "components:\n  - name: a\n    dir: .\n    runner: go-test\n    watch: [\"Makefile\", \"docs/**\", \"**/VERSION\"]\n"
+	if _, err := Parse([]byte(doc), FileName); err != nil {
+		t.Errorf("valid watch patterns were rejected: %v", err)
+	}
+}

@@ -1,4 +1,5 @@
-// Package gitdiff reads which paths a change touches.
+// Package gitdiff reads paths out of git: the ones a change touches, and the
+// ones the work tree holds.
 //
 // One implementation rather than two that agree today. internal/referral asks
 // what a change touches to decide whether it may merge unread, and
@@ -15,6 +16,7 @@ package gitdiff
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -159,4 +161,58 @@ func parseNameStatus(out string) (Paths, error) {
 	sort.Strings(p.All)
 	sort.Strings(p.Deleted)
 	return p, nil
+}
+
+// ErrNoRepository reports that a directory is not inside a git repository, so
+// the files it contains cannot be listed.
+//
+// Callers report it rather than failing: a gate that could not run must be
+// visibly distinct from one that passed, never silently equal to it.
+var ErrNoRepository = errors.New("not a git repository, so the files it contains cannot be listed")
+
+// Tracked asks git for the paths it knows about, relative to root.
+//
+// -z rather than newline-separated output, so a path containing a newline or
+// a byte git would otherwise render as a quoted escape arrives intact. That
+// removes the need to pin core.quotePath the way Changed above has to.
+//
+// Duplicates are dropped here rather than with git's own --deduplicate,
+// which needs git 2.31 and would turn a Debian 11 runner's whole `lydite
+// test` into a failure over a flag, for a repository whose declaration is
+// perfectly correct. An unmerged path is the only source of them, and one
+// map is a smaller thing to carry than a version floor.
+func Tracked(ctx context.Context, root string) ([]string, error) {
+	res := executil.RunQuiet(ctx, root, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if !res.Ok() {
+		if !executil.RunQuiet(ctx, root, "git", "rev-parse", "--is-inside-work-tree").Ok() {
+			return nil, ErrNoRepository
+		}
+		// git writes its diagnostics to stderr, which RunQuiet keeps apart
+		// from stdout — reading Output here would report an empty string and
+		// leave the row saying only "exit status 129". The first line is the
+		// error; what follows it is a usage dump nobody acts on.
+		if msg := firstLine(res.Stderr); msg != "" {
+			return nil, errors.New(msg)
+		}
+		return nil, res.Err
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.Split(res.Output, "\x00") {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// firstLine is the first non-empty line of s, trimmed.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
