@@ -13,11 +13,11 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | done — #39 |
 | 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | done |
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
-| 4 | — | Scheduler: resource-constrained queue, port locks, local driver | `pr4-scheduler.md` | not started |
-| 5 | — | Affected selection; full run on the default branch | — | not started |
+| 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done |
+| 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | not started |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | — | not started |
 | 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
-| 8 | — | `lydite matrix`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
+| 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
 Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
@@ -61,7 +61,10 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   container runtime.
 - The scheduler locks on published host ports, not service names.
 - Affected selection is an optimisation; the default branch runs everything.
-- A matrix job is a component, not a check.
+- A matrix job is a **shard** — a set of components lydite runs in one process —
+  and not a check. The scheduler runs inside a shard, so a job holding several
+  components is the case that keeps the port lock exercised. See
+  [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md).
 - Mutation is built for all three languages, not delegated.
 - Configuration lives under `.lydite/`. `coverage.source` is removed, but only
   when coverage actually moves onto components at step 6.
@@ -139,10 +142,10 @@ either way.
   nothing provisions it — which is the gap that silently caches an empty
   baseline under `coverage.source: run`. It belongs with step 6, where the
   instrumented variant is first actually run.
-- **The run is sequential.** `internal/compose` reads each stack's published
-  host ports, which is what step 4's port lock needs, but nothing consumes them
-  yet — two components publishing the same port would collide today if they ran
-  at once, and nothing runs at once.
+- **The run was sequential.** Step 4 consumes the published host ports
+  `internal/compose` reads, through a `compose.LoadWith` pre-pass: a stack is
+  the only thing that knows its ports, and the scheduler needs every
+  component's before it decides what may run together.
 - **`internal/detect` is untouched.** Scan and coverage still discover their own
   units; step 7 is where they learn it from the component instead.
 
@@ -186,6 +189,56 @@ already holds, and the copy that drifts starts calling build output source.
 Both decide something consequential off a path, and two matchers agree until
 one learns about a pattern form the other has not.
 
+## What the scheduler settled
+
+Four questions ADR 0016 left open, decided in the challenge interview and
+recorded in [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md).
+
+- **A CI job holds a shard, not a component.** Under one component per job
+  nothing in CI ever contends for a port, so the lock's only exercise would be a
+  local run somebody has to remember to do. The planner (`lydite test plan`) and
+  the merge command are step 8; the in-shard scheduler is step 4.
+- **`--concurrency` defaults to 4, and is not derived from `NumCPU`.** Every
+  runner lydite drives is already internally parallel, so one component already
+  tries to use the whole machine. It is not 1 either — that leaves the port lock
+  untaken everywhere it is not asked for explicitly.
+- **`depends_on` is not a scheduling input.** lydite passes no artifact between
+  components, so ordering on an invalidation edge costs parallelism to express a
+  claim its author never made.
+- **A failure never cancels the rest, and rows stay in declaration order.**
+  GitHub Actions already has `fail-fast` at the layer that can cancel machines,
+  and completion order puts a run's timing into a document meant to be diffable.
+
+The lock covers a component's directory as well as its ports, by containment
+rather than equality: `component.validate` enforces unique names and not unique
+directories, and two components rooted at one tree install into and build in it
+at once. `--keep-services` is gone — `down --volumes` exists so a suite that
+truncates and reseeds starts from nothing, and keeping a stack alive made the
+next run inherit the last one's data.
+
+## What four review rounds kept finding
+
+Every round found the same shape the orphan gate produced, and none of it was
+caught by the build, the tests or the linter:
+
+- An interrupted run exited 0, because unstarted rows are `unmeasured` and do
+  not vote. Fixed in the exit code, and then found again in `--json`, which is
+  the surface every consumer is told to read and the one the PR comment renders.
+- The port lock read only the services named in `compose.up`, while compose
+  starts their `depends_on` closure too — so a component naming an `app` held
+  none of its database's ports.
+- Probing for a container runtime before validating the declaration made
+  `internal/compose`'s own tests pass or fail depending on whether the developer
+  had docker installed.
+- The CI assertion named the two colliding components by *directory* rather than
+  by component name, so it matched nothing — and an assertion that matches
+  nothing passes.
+
+Two of the tests written for this step were themselves vacuous when first
+checked: one passed with the port lock removed, and one prepended to `PATH`
+rather than replacing it, so the runtime it meant to hide stayed resolvable.
+**Injecting the defect is the only thing that established either.**
+
 ## Known traps
 
 - **#36 before step 6.** Adding `-coverpkg` and moving coverage onto components
@@ -198,8 +251,11 @@ one learns about a pattern form the other has not.
   directories for Rust and TypeScript.
 - **An unviable mutant is indistinguishable from a killed one by exit code.**
   Both exit 1. Build before testing, or the mutation score silently inflates.
-- **The local scheduler is the path CI never runs.** Agent skills requiring a
-  local run before opening a pull request are what exercise it.
+- **A scheduler nobody contends is a scheduler nothing has tested.** Every test
+  about port locks passes on a scheduler that never runs two components at once,
+  because the lock is never taken. The proving ground's two components on 5432
+  are the calibration, and the assertion is the observed concurrency and the
+  observed serialisation — never the exit code.
 - **The proving ground's correct verdict is not all-green.** Its
   `ci-end2end.yml` job asserts the orphan gate *fails* on `scripts/seed.ts`
   and stays silent on the excluded `generated/client.ts`. A change that makes

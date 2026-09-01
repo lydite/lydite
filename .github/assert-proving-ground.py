@@ -14,6 +14,13 @@ would then look exactly like a repository that had nothing to exclude.
 `generated/client.ts` is a real source file under no component that the
 declaration excludes, so it must never appear.
 
+The same standard applies to the scheduler. `tally` and `api` both publish host
+port 5432, under services named `postgres` and `db` — differently on purpose, so a lock keyed on service names passes this repository while being
+wrong. Asserting the exit code would prove nothing: a scheduler that ran
+everything one at a time satisfies every claim about port locks without once
+having taken one. So the observed concurrency and the serialised pair are
+asserted, not the absence of a failure.
+
 Checking only that it is absent from the report would be vacuous: a file that
 has been deleted, renamed, or moved under a component is absent too, and the
 exclude path would then go unexercised with the job still green. So its
@@ -27,12 +34,30 @@ is the coupling --json exists to remove.
 
 import json
 import os
+import re
 import sys
 
 # Under no component and not excluded: the gate must report it.
 EXPECTED_ORPHANS = ["scripts/seed.ts"]
 # Under no component and excluded: the gate must stay silent about it.
 EXPECTED_EXCLUDED = ["generated/client.ts"]
+# The components rooted at `rust/` and `go/api/` both publish this host port,
+# under services deliberately named differently (`postgres` and `db`), so a
+# lock keyed on service names would miss the collision and fail mid-run on a
+# bind error.
+CONTENDED_PORT = 5432
+EXPECTED_SERIALISED = ("tally", "api")
+
+
+def concurrency(value: str) -> int | None:
+    """Read the components-run-at-once count out of the schedule row's value.
+
+    The count is taken from the value rather than the detail because the detail
+    ends with prose, and asserting on its wording would make every improvement
+    to that sentence a CI edit.
+    """
+    match = re.search(r"max (\d+) concurrent", value)
+    return int(match.group(1)) if match else None
 
 
 def main(path: str, checkout: str) -> int:
@@ -50,6 +75,38 @@ def main(path: str, checkout: str) -> int:
             failures.append(
                 f"{excluded} is not in the checkout — it exists to prove an exclude clears an "
                 "orphan, and without it that half of the gate is untested"
+            )
+
+    # The scheduler has to be shown to have scheduled. Every assertion about
+    # port locks is satisfied by a run that never had two components going at
+    # once, because the lock is never taken — so a green job would prove
+    # nothing about a constraint that was never reached.
+    schedule = rows.get("schedule")
+    if schedule is None:
+        failures.append("no `schedule` row: the scheduler did not report what it did")
+    else:
+        concurrent = concurrency(schedule.get("value", ""))
+        if concurrent is None:
+            failures.append(f"schedule value {schedule.get('value')!r} names no observed concurrency")
+        elif concurrent < 2:
+            failures.append(
+                f"schedule reports max {concurrent} concurrent: nothing ever ran at once, so the "
+                "port lock was never contended and every assertion about it here is vacuous"
+            )
+        # One whole line has to say it, in either order. Joining the detail
+        # and testing for each name separately passes on a report whose lines
+        # are "tally and web ... 5432" and "api and db ... 6379" — neither of
+        # which is the pair this exists to observe.
+        a, b = EXPECTED_SERIALISED
+        want = re.compile(
+            rf"(?:{re.escape(a)} and {re.escape(b)}|{re.escape(b)} and {re.escape(a)})"
+            rf" serialised on port {CONTENDED_PORT}$"
+        )
+        if not any(want.match(line) for line in schedule.get("detail", [])):
+            failures.append(
+                f"schedule detail {schedule.get('detail')!r} does not record {a} and {b} being "
+                f"serialised on port {CONTENDED_PORT} — they publish it under differently named "
+                "services, so a lock keyed on names would miss them"
             )
 
     orphans = rows.get("orphans")
@@ -96,7 +153,9 @@ def main(path: str, checkout: str) -> int:
         return 1
     print(
         f"proving ground: {len(suites)} component(s) passed; "
-        f"orphan gate fired on {EXPECTED_ORPHANS} and stayed silent on {EXPECTED_EXCLUDED}"
+        f"orphan gate fired on {EXPECTED_ORPHANS} and stayed silent on {EXPECTED_EXCLUDED}; "
+        f"scheduler reached {concurrency(rows['schedule']['value'])} concurrent and serialised "
+        f"{EXPECTED_SERIALISED} on port {CONTENDED_PORT}"
     )
     return 0
 

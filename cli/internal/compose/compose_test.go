@@ -238,3 +238,104 @@ func writeFile(t *testing.T, name, body string) string {
 	}
 	return dir
 }
+
+// compose starts a named service's depends_on graph too, so a component that
+// names only an `app` still holds whatever that app's database publishes. A
+// lock computed from the named services alone leaves that port unheld, and the
+// second component to want it fails mid-run on the bind error the lock exists
+// to prevent.
+func TestHostPortsFollowsDependsOn(t *testing.T) {
+	const file = `
+services:
+  app:
+    image: app
+    depends_on: [db]
+  db:
+    image: postgres
+    ports: ["5432:5432"]
+  cache:
+    image: redis
+    depends_on:
+      queue:
+        condition: service_healthy
+    ports: ["6379:6379"]
+  queue:
+    image: rabbit
+    ports: ["5672:5672"]
+  unrelated:
+    image: x
+    ports: ["9999:9999"]
+`
+	f, err := Parse([]byte(file), "compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.HostPorts([]string{"app"})
+	if len(got) != 1 || got[0] != 5432 {
+		t.Errorf("HostPorts([app]) = %v, want the database it pulls in", got)
+	}
+	// The long syntax is a mapping of name to condition; the condition says
+	// when to start, not what to start.
+	got = f.HostPorts([]string{"cache"})
+	if len(got) != 2 || got[0] != 5672 || got[1] != 6379 {
+		t.Errorf("HostPorts([cache]) = %v, want its own port and the queue's", got)
+	}
+	if got := f.HostPorts([]string{"app"}); len(got) != 1 {
+		t.Errorf("HostPorts([app]) = %v, want nothing from an unrelated service", got)
+	}
+}
+
+// `up --wait` waits for the depends_on closure, not just the named services, so
+// a named service with a healthcheck whose database has none is treated as
+// ready the moment its container is running. The suite then races the database,
+// which is the flakiness the refusal exists to prevent — landing on the test
+// rather than on the wait.
+func TestWaitHealthyChecksTheDependsOnClosure(t *testing.T) {
+	const file = `
+services:
+  app:
+    image: app
+    depends_on: [db]
+    healthcheck:
+      test: ["CMD", "true"]
+  db:
+    image: postgres
+`
+	dir := writeFile(t, "compose.yaml", file)
+	_, err := Load(context.Background(), dir, component.Component{
+		Name: "web", Dir: ".",
+		Compose: component.Compose{Up: []string{"app"}, Wait: component.WaitHealthy},
+	}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "declares no healthcheck") {
+		t.Fatalf("want a refusal naming the dependency with no healthcheck, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"db"`) {
+		t.Errorf("error = %v, want the offending service named", err)
+	}
+	// The author wrote `up: [app]` and did not choose db, so the message says
+	// how it got here rather than reading as though they had listed it.
+	if !strings.Contains(err.Error(), "pulled in by depends_on") {
+		t.Errorf("error = %v, want it to say how the service was reached", err)
+	}
+}
+
+// A depends_on naming something the file does not declare is compose's error to
+// report. Rejecting it here would make lydite's reading of a file it does not
+// own the ceiling on what that file may say.
+func TestAnUndeclaredDependencyIsNotLyditesToReject(t *testing.T) {
+	const file = `
+services:
+  app:
+    image: app
+    depends_on: [ghost]
+    healthcheck:
+      test: ["CMD", "true"]
+`
+	dir := writeFile(t, "compose.yaml", file)
+	if _, err := Load(context.Background(), dir, component.Component{
+		Name: "web", Dir: ".",
+		Compose: component.Compose{Up: []string{"app"}, Wait: component.WaitHealthy},
+	}, io.Discard); err != nil {
+		t.Fatalf("want the file accepted, got %v", err)
+	}
+}

@@ -107,9 +107,11 @@ and the failure is attributed to the test rather than to the wait.
 
 `setup` and `teardown` commands cover what is not a container — migrations,
 fixtures, cleanup. Teardown runs even when the run fails; leaked containers
-poison the next local run. Keeping services up between runs is an invocation
-choice rather than a repository fact, so it is `--keep-services` on the command
-line and not a key in the file.
+poison the next local run. Nothing keeps a stack alive between runs:
+[ADR 0017](0017-shards-the-scheduler-and-the-planner.md) records why the
+`--keep-services` this section originally described does not survive the port
+lock, and why `down --volumes` makes it a determinism question rather than only
+a scheduling one.
 
 ## Scheduling is resource-constrained
 
@@ -130,9 +132,11 @@ non-deterministic and reads as a bad test. Making it safe means injecting a
 distinct database per component, which puts lydite back in charge of connection
 details that the compose delegation exists to keep out of it.
 
-This constraint binds locally only: in CI each component is a separate job on a
-separate machine and nothing contends. The consequence worth knowing is that the
-local scheduler is the code path CI never exercises.
+The scheduler runs inside a **shard** — see
+[ADR 0017](0017-shards-the-scheduler-and-the-planner.md). A shard holding
+several components is produced deliberately rather than merely tolerated,
+because a scheduler that never runs two components at once passes every test
+about port locks without ever having taken one.
 
 ## Affected selection, with the default branch as the backstop
 
@@ -157,9 +161,13 @@ merge instead of never, which turns affected-selection from a correctness
 mechanism into an optimisation with a bounded failure. Default-branch runs
 already have to be complete, since they record the coverage baselines.
 
-## One job per component, containing all of its checks
+## One job per shard, containing all of its checks
 
-A matrix job is a component, not a check. Scanning, testing, coverage and
+A matrix job is a set of components, not a check.
+[ADR 0017](0017-shards-the-scheduler-and-the-planner.md) names that set a
+**shard** and explains why the unit is not a single component: under one
+component per job nothing in CI ever contends for a port, and the scheduler's
+lock below is exercised nowhere automated. Scanning, testing, coverage and
 mutation for that component share a job because they share a compilation:
 `wardnet-cloud` runs `cargo fmt`, `cargo clippy` and its coverage run together
 for exactly that reason, and splitting them across jobs compiles the workspace

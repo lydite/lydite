@@ -6,15 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/ui"
 )
 
@@ -309,9 +312,9 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	// manager's behaviour — internal/nodedeps covers the detection.
 	cfg := config.Default()
 	cfg.TypeScript.Install = "exit 3"
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}, cfg, false, false)
+	}), cfg)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -339,11 +342,11 @@ func TestAGoComponentHasNoPreparationStep(t *testing.T) {
 func TestTeardownRunsWhenSetupFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -357,10 +360,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -373,10 +376,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 // so it fails a component that otherwise passed.
 func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -387,10 +390,10 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -399,13 +402,13 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 // Setup runs before the suite, not alongside it.
 func TestSetupRunsBeforeTheSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		// The suite reads what setup wrote, so it can only pass if the
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -417,11 +420,19 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 // A component declaring no services needs no runtime, so a repository without
 // one runs on a machine with no container engine at all.
 func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// PATH is replaced rather than prepended to: leaving the real one behind
+	// keeps docker and podman resolvable, so a planner that probed anyway
+	// would find one and the assertion below would hold either way.
+	t.Setenv("PATH", t.TempDir())
 	root := fixtureRepo(t, "components: []\n")
-	stop, _, ok := services(context.Background(), root, "test(fixture)", component.Component{Name: "fixture", Dir: "mod"}, false, openLog(root, "fixture", false))
+	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, false)
+	if len(plans) != 1 || !plans[0].ready {
+		t.Fatalf("a component with no compose block must not be probed for a runtime: %+v", plans)
+	}
+	defer plans[0].log.Close()
+	stop, _, ok := startServices(context.Background(), plans[0], "test(fixture)")
 	if !ok {
-		t.Fatal("a component with no compose block must not be probed for a runtime")
+		t.Fatal("a component with no services must start none")
 	}
 	stop()
 }
@@ -432,9 +443,9 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}, config.Default(), false, false)
+	}), config.Default())
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -462,9 +473,9 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 // document and nothing else, so the log is the only place the output exists.
 func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, component.Component{
+	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}, config.Default(), false, false)
+	}), config.Default())
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -504,5 +515,409 @@ func TestTailOfNothingIsNothing(t *testing.T) {
 	}
 	if got := tail("\n\n"); got != nil {
 		t.Errorf("tail of blank lines = %v, want nothing", got)
+	}
+}
+
+// planFor builds the plan runComponent takes. Every component in these tests
+// declares no services, so nothing is probed and no stack is loaded.
+func planFor(t *testing.T, root string, c component.Component) componentPlan {
+	t.Helper()
+	log := openLog(root, c.Name, false, len(c.Name))
+	t.Cleanup(log.Close)
+	return componentPlan{c: c, log: log, ready: true}
+}
+
+func TestResolveConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		flag    string
+		want    int
+		wantErr bool
+	}{
+		{flag: "4", want: 4},
+		{flag: "1", want: 1},
+		// A slot for every component: the scheduler never admits more than it
+		// was given, so this needs no count to resolve against and can be
+		// checked before any work happens.
+		{flag: "max", want: math.MaxInt},
+		{flag: "0", wantErr: true},
+		{flag: "-2", wantErr: true},
+		// Refused rather than defaulted: a typo that silently ran anyway
+		// would have lydite ignore something the caller said.
+		{flag: "all", wantErr: true},
+	} {
+		got, err := resolveConcurrency(tc.flag)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("resolveConcurrency(%q) = %d, want an error", tc.flag, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("resolveConcurrency(%q) = %d, %v; want %d", tc.flag, got, err, tc.want)
+		}
+	}
+}
+
+// Rows are in declaration order, never completion order: a reader diffing two
+// runs depends on it, and ordering by whichever finished first would put this
+// run's timing into the document.
+//
+// The names are deliberately not in alphabetical order, so a report that had
+// been sorted rather than kept in place fails this too.
+func TestRowsAreInDeclarationOrder(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	var declared []component.Component
+	for _, name := range []string{"charlie", "alpha", "bravo"} {
+		write(t, root, name+"/go.mod", "module "+name+"\n\ngo 1.26\n")
+		write(t, root, name+"/x_test.go", "package "+name+"\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n")
+		declared = append(declared, component.Component{Name: name, Dir: name, Runner: runner.GoTest})
+	}
+
+	rep := ui.NewReport("test")
+	runComponents(context.Background(), root, declared, config.Default(), 3, false, rep)
+
+	var got []string
+	for _, r := range rep.Rows() {
+		if strings.HasPrefix(r.Label, "test(") {
+			got = append(got, r.Label)
+		}
+	}
+	want := []string{"test(charlie)", "test(alpha)", "test(bravo)"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+}
+
+// depends_on is an invalidation edge and never a build-order one. The
+// scheduler must not read it: lydite passes no artifact between components, so
+// ordering them would cost parallelism to express a claim their author never
+// made.
+//
+// The assertion is that the edge contributes nothing the scheduler could
+// serialise on. That two items with no conflict then genuinely run at once is
+// internal/scheduler's own test, which forces the overlap with a barrier.
+func TestDependsOnDoesNotSerialise(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "sdk/go.mod", "module sdk\n\ngo 1.26\n")
+	write(t, root, "cli/go.mod", "module cli\n\ngo 1.26\n")
+	declared := []component.Component{
+		{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
+		{Name: "cli", Dir: "cli", Runner: runner.GoTest, DependsOn: []string{"sdk"}},
+	}
+	plans := planComponents(context.Background(), root, declared, false)
+	var items []scheduler.Item
+	for _, p := range plans {
+		defer p.log.Close()
+		items = append(items, itemFor(p))
+	}
+	if got := scheduler.Conflicts(items); len(got) != 0 {
+		t.Fatalf("Conflicts = %v, want none: a depends_on edge is not a port", got)
+	}
+}
+
+// A component the run never reached reports that it did not run, rather than
+// being dropped. A truncated run that omitted rows would read as a complete
+// run over fewer components, and a check that could not run must never read as
+// one that did.
+func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	declared := []component.Component{
+		{Name: "a", Dir: "mod", Runner: runner.GoTest},
+		{Name: "b", Dir: "mod", Runner: runner.GoTest},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rep := ui.NewReport("test")
+	runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+
+	seen := 0
+	for _, r := range rep.Rows() {
+		if !strings.HasPrefix(r.Label, "test(") {
+			continue
+		}
+		seen++
+		if r.Status != ui.StatusUnmeasured || r.Value != "not run" {
+			t.Errorf("row = %+v, want an unmeasured `not run`", r)
+		}
+	}
+	if seen != len(declared) {
+		t.Fatalf("%d component rows, want %d: a component that never ran must still be reported", seen, len(declared))
+	}
+	// The truncation has to be in the document, not only in the process exit
+	// code: anything automated reads --json and never the terminal, so a run
+	// publishing "verdict": "pass" having tested nothing is a PR comment
+	// rendering a green gate. The component rows stay unmeasured — they did
+	// not fail, they did not run — and the schedule row is what fails.
+	schedule := rowByLabel(t, rep, "schedule")
+	if schedule.Status != ui.StatusFail {
+		t.Errorf("schedule row = %+v, want a failure: the run did not start every component", schedule)
+	}
+	if !strings.Contains(schedule.Value, "0 of 2") {
+		t.Errorf("schedule value = %q, want how many of the components actually started", schedule.Value)
+	}
+	if rep.Verdict() != ui.VerdictFail || rep.ExitCode() != 1 {
+		t.Errorf("verdict = %q, exit = %d; want a truncated run to publish a failure",
+			rep.Verdict(), rep.ExitCode())
+	}
+}
+
+// The row says what the scheduler did, because the observed concurrency is
+// what separates a scheduler that ran from one that only claims to.
+func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
+	row := scheduleRow(context.Background(), scheduler.Outcome{
+		MaxConcurrent: 3,
+		Started:       4,
+		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", On: "port 5432"}},
+	}, 4, 4)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v", row)
+	}
+	if !strings.Contains(row.Value, "max 3 concurrent") {
+		t.Errorf("value = %q, want the observed concurrency", row.Value)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "go/api and rust serialised on port 5432") {
+		t.Errorf("detail = %q, want the contended pair named", detail)
+	}
+}
+
+func rowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
+	t.Helper()
+	for _, r := range rep.Rows() {
+		if r.Label == label {
+			return r
+		}
+	}
+	t.Fatalf("no %q row in %v", label, rep.Rows())
+	return ui.Row{}
+}
+
+// Watching a hang is the one thing --stream exists for, and a suite that has
+// printed no newline yet is exactly the case: holding its line until the
+// process is killed withholds the output somebody turned the flag on to see.
+func TestAnUnterminatedLineIsShownAnyway(t *testing.T) {
+	var got []byte
+	w := &prefixWriter{prefix: "web | ", delay: time.Millisecond}
+	// emit writes to stderr in production; the test reads what it formatted
+	// rather than capturing the process's stderr, which no other test could
+	// then share.
+	done := make(chan struct{})
+	w.onEmit = func(line []byte) {
+		got = append(append(got, line...), '\n')
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
+
+	if _, err := w.Write([]byte("running 412 tests...")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an unterminated line was never shown: a hanging suite prints nothing")
+	}
+	if string(got) != "running 412 tests...\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// A line that arrives in pieces is shown once, whole, rather than split at
+// whatever boundary the child happened to flush at.
+func TestACompletedLineIsNotSplit(t *testing.T) {
+	var lines []string
+	// A deadline long enough that the assertion is about the newline and not
+	// about how fast this loop ran: every other test here depends on
+	// synchronisation rather than timing, and one that did not would go flaky
+	// on a loaded runner years from now.
+	w := &prefixWriter{prefix: "web | ", delay: time.Hour}
+	w.onEmit = func(line []byte) { lines = append(lines, string(line)) }
+	for _, chunk := range []string{"ok  ", "web ", "(cached)\n"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Flush()
+	if len(lines) != 1 || lines[0] != "ok  web (cached)" {
+		t.Fatalf("lines = %q, want one whole line", lines)
+	}
+}
+
+// The deadline runs from when the pending line began, not from the last write.
+// A runner redrawing a progress display writes continuously without ever
+// emitting a newline, and a deadline restarted on each write would never
+// expire — nothing would reach the terminal, and the buffer would hold every
+// byte of it.
+func TestContinuousOutputWithNoNewlineIsStillShown(t *testing.T) {
+	emitted := make(chan []byte, 8)
+	w := &prefixWriter{prefix: "web | ", delay: 20 * time.Millisecond}
+	w.onEmit = func(line []byte) { emitted <- append([]byte(nil), line...) }
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = w.Write([]byte("\rdownloading"))
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	select {
+	case line := <-emitted:
+		if len(line) == 0 {
+			t.Fatal("emitted an empty line")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a continuously written line was never shown: the deadline is measuring silence, not the line's age")
+	}
+}
+
+// A deadline armed for a line that has since been completed does not belong to
+// the line waiting now. Keeping it fires early and splits the new line, which
+// is the mid-line split buffering exists to prevent.
+//
+// The defect shows as an emission that must not happen, observed on a channel
+// rather than by comparing two sleeps: a stale deadline fires 200ms after the
+// second line starts, and a correct one not for a further 800ms, so neither
+// bound is close to the scheduling slack of a loaded machine.
+func TestTheDeadlineFollowsThePendingLine(t *testing.T) {
+	const delay = time.Second
+	emitted := make(chan string, 4)
+	w := &prefixWriter{prefix: "web | ", delay: delay}
+	w.onEmit = func(line []byte) { emitted <- string(line) }
+
+	if _, err := w.Write([]byte("PASS")); err != nil {
+		t.Fatal(err)
+	}
+	// Well inside the first line's deadline, so it is still pending when the
+	// write below completes it.
+	time.Sleep(800 * time.Millisecond)
+	select {
+	case line := <-emitted:
+		t.Fatalf("emitted %q before its deadline", line)
+	default:
+	}
+
+	if _, err := w.Write([]byte(" ok\nrunning batch 2 of 9")); err != nil {
+		t.Fatal(err)
+	}
+	if line := <-emitted; line != "PASS ok" {
+		t.Fatalf("emitted %q, want the completed line", line)
+	}
+
+	// A deadline kept from the first line fires 200ms from here; the second
+	// line's own runs for a full second.
+	select {
+	case line := <-emitted:
+		t.Fatalf("emitted %q: the line that just started was split by the previous line's deadline", line)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared: the component never started", path)
+}
+
+// A run cancelled once every component had started kills each suite mid-flight,
+// so each exits non-zero. Reporting those as test failures blames a CI job
+// timeout on the repository's tests, in the document the PR comment reads —
+// and the schedule row would pass, because nothing was left unstarted.
+func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/slow_test.go",
+		"package fixture\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
+	// setup runs only after the scheduler has admitted the component, so the
+	// marker it writes is the signal that this run is genuinely under way —
+	// where waiting on the log would not be, since planning creates that file
+	// before the scheduler has looked at the context at all.
+	started := filepath.Join(root, "started")
+	declared := []component.Component{{
+		Name: "slow", Dir: "mod", Runner: runner.GoTest,
+		Setup: []string{"touch " + started},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rep := ui.NewReport("test")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runComponents(ctx, root, declared, config.Default(), 1, false, rep)
+	}()
+	waitForFile(t, started)
+	cancel()
+	<-done
+
+	row := rowByLabel(t, rep, "test(slow)")
+	if row.Status != ui.StatusUnmeasured || row.Value != "not completed" {
+		t.Errorf("row = %+v, want the killed suite reported as unmeasured, not as a test failure", row)
+	}
+	schedule := rowByLabel(t, rep, "schedule")
+	if schedule.Status != ui.StatusFail {
+		t.Errorf("schedule = %+v, want a failure: the run was cut short", schedule)
+	}
+	if rep.ExitCode() != 1 {
+		t.Errorf("exit = %d, want 1", rep.ExitCode())
+	}
+}
+
+// A row built during planning is final before the run begins, and is the one
+// actionable error such a run produced. An interrupt must not replace it with a
+// sentence about an interrupt that had nothing to do with it.
+//
+// The interrupt has to land while a component is genuinely running, so a second
+// component holds the run open until the broken one's row has already been
+// decided.
+func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/compose.yaml", "services:\n  db:\n    image: postgres\n")
+	write(t, root, "slow/go.mod", "module slow\n\ngo 1.26\n")
+	write(t, root, "slow/slow_test.go",
+		"package slow\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
+
+	started := filepath.Join(root, "started")
+	declared := []component.Component{
+		{
+			Name: "broken", Dir: "mod", Runner: runner.GoTest,
+			Compose: component.Compose{File: "./compose.yaml", Up: []string{"ghost"}},
+		},
+		{
+			Name: "slow", Dir: "slow", Runner: runner.GoTest,
+			Setup: []string{"touch " + started},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rep := ui.NewReport("test")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+	}()
+	waitForFile(t, started)
+	cancel()
+	<-done
+
+	row := rowByLabel(t, rep, "test(broken)")
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want the declaration error kept: the interrupt did not cause it", row)
+	}
+	if !strings.Contains(strings.Join(row.Detail, " "), "ghost") {
+		t.Errorf("detail = %v, want the undeclared service still named", row.Detail)
 	}
 }

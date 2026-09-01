@@ -1,14 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,13 +26,15 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/ui"
 )
 
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, keepServices, stream bool
+	var asJSON, noColor, stream bool
+	var concurrency string
 	cmd := &cobra.Command{
 		Use:           "test",
 		SilenceUsage:  true,
@@ -38,6 +48,38 @@ the component's to declare.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("test")
+
+			// An interrupt cancels this command's context rather than killing
+			// the process where it stands. `lydite test` starts containers and
+			// removes them in a deferred teardown, and a signal that skips
+			// those defers leaves one stack running per component that had
+			// started — holding the host ports the next run has to bind, so
+			// the leak surfaces as an unrelated failure one run later.
+			//
+			// Scoped to this command and not installed in main, because it is
+			// the only one that reports a cancelled run honestly. `scan` and
+			// `coverage` would render every killed tool as a finding, and
+			// publish a complete-looking document saying every scanner failed
+			// — a check that could not run reading as one that did, which is
+			// worse than the process dying.
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			// Unregister as soon as the first signal lands, so the second one
+			// gets the default disposition and kills the process. The handler
+			// otherwise stays installed with nothing reading its channel, and
+			// a teardown hanging on an unresponsive container daemon could not
+			// be interrupted at all.
+			go func() {
+				<-ctx.Done()
+				stop()
+			}()
+
+			// Before any work: a typo must not pay for a git walk first, and
+			// must not discard a report the run had already computed.
+			limit, err := resolveConcurrency(concurrency)
+			if err != nil {
+				return err
+			}
 
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -53,7 +95,7 @@ the component's to declare.`,
 			// or on there being any. A repository that declares none is
 			// exactly the one whose every source file is orphaned, and a
 			// gate it never saw would be the failure it exists to catch.
-			rep.Add(orphanRow(cmd.Context(), dir, file))
+			rep.Add(orphanRow(ctx, dir, file))
 
 			selected, err := file.Select(components)
 			if err != nil {
@@ -71,9 +113,7 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			for _, c := range selected {
-				rep.Add(runComponent(cmd.Context(), dir, c, cfg, keepServices, stream))
-			}
+			runComponents(ctx, dir, selected, cfg, limit, stream, rep)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -81,15 +121,304 @@ the component's to declare.`,
 	cmd.Flags().StringSliceVar(&components, "component", nil, "component to run; repeatable, and every declared component by default")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
-	// A flag and never a key in the component declaration: whether to leave
-	// services up between runs is a choice about this invocation, not a fact
-	// about the repository.
-	cmd.Flags().BoolVar(&keepServices, "keep-services", false, "leave each component's compose services running after the suite")
+	// A flag and never a key in .lydite/config.yml: how many components a
+	// machine can run at once is a fact about the machine, and a four-core
+	// runner reading a number committed from a thirty-two-core workstation is
+	// exactly the drift a flag avoids.
+	cmd.Flags().StringVar(&concurrency, "concurrency", strconv.Itoa(defaultConcurrency),
+		`how many components to run at once, or "max" for one slot per selected component`)
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	return cmd
+}
+
+// defaultConcurrency is how many components run at once when nothing says
+// otherwise.
+//
+// Deliberately a constant rather than something derived from NumCPU. Every
+// runner lydite drives is already internally parallel — go test fans out at
+// GOMAXPROCS, cargo nextest runs tests concurrently, vitest forks workers — so
+// one component already tries to use the whole machine and NumCPU of them
+// oversubscribe it quadratically. The symptom is timing-sensitive tests going
+// flaky, which reads as a bad suite rather than as a bad bound.
+//
+// It is not 1. A scheduler that never runs two components at once passes every
+// assertion about port locks without once having taken one, so a bound of 1 by
+// default would leave the constraint unexercised everywhere it is not asked
+// for explicitly.
+const defaultConcurrency = 4
+
+// resolveConcurrency turns the flag into a slot count.
+//
+// "max" is a slot for every component, which is what the planner passes when it
+// wants a shard to hold everything it was given; the scheduler never admits
+// more than it has, so the bound needs no count to be resolved against and can
+// be checked before any work happens. A number below one is refused rather than
+// clamped: it is a typo, and silently running anyway would have lydite ignore
+// something the caller said.
+func resolveConcurrency(flag string) (int, error) {
+	if flag == "max" {
+		return math.MaxInt, nil
+	}
+	n, err := strconv.Atoi(flag)
+	if err != nil {
+		return 0, fmt.Errorf("--concurrency %q is neither a number nor \"max\"", flag)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("--concurrency must be at least 1, got %d", n)
+	}
+	return n, nil
+}
+
+// componentPlan is one selected component with everything resolved that has to
+// be known before anything starts.
+//
+// The stack is loaded here rather than inside the run because a stack is the
+// only thing that knows which host ports its component publishes, and the
+// scheduler needs every component's before it can decide which of them may run
+// together. Loading up front also moves compose's own validation — a
+// compose.up naming a service the file does not declare, a wait: healthy with
+// no healthcheck — ahead of the first container, where it costs nothing.
+type componentPlan struct {
+	c     component.Component
+	log   *componentLog
+	stack *compose.Stack // nil when the component declares no services
+	ports []int
+	// row is already final when the component cannot be run at all, and the
+	// scheduler is never given it.
+	row   ui.Row
+	ready bool
+}
+
+// runComponents plans every selected component, runs them under the scheduler
+// and adds their rows in declaration order.
+//
+// Declaration order and never completion order: a reader diffing two runs
+// depends on it, and ordering by whichever finished first would put this run's
+// timing into the document, so two runs of the same declaration would produce
+// different reports.
+//
+// An interrupted run fails through the `schedule` row rather than through a
+// returned error. The unstarted rows are `unmeasured`, which does not vote, so
+// a run cut short by a CI job timeout would otherwise carry no failing row —
+// and `--json` would publish `"verdict": "pass"` for a run that tested half the
+// repository. Anything automated reads that document and never the terminal, so
+// a truncation visible only in the process exit code is a truncation the PR
+// comment renders green. `ui.Report.ExitCode` stays the single place the
+// mapping lives.
+func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+	plans := planComponents(ctx, root, selected, stream)
+	for _, p := range plans {
+		defer p.log.Close()
+	}
+
+	rows := make([]ui.Row, len(plans))
+	var items []scheduler.Item
+	var index []int
+	for i, p := range plans {
+		if !p.ready {
+			rows[i] = p.row
+			continue
+		}
+		// Pre-filled, so a component the run never reached reports that it
+		// did not run rather than being dropped. A truncated run that simply
+		// omitted rows would read as a complete run over fewer components,
+		// and a check that could not run must never read as one that did.
+		rows[i] = ui.Row{
+			Status: ui.StatusUnmeasured,
+			Label:  "test(" + p.c.Name + ")",
+			Value:  "not run",
+			Detail: []string{"the run ended before this component started"},
+		}
+		items = append(items, itemFor(p))
+		index = append(index, i)
+	}
+
+	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
+		i := index[k]
+		rows[i] = runComponent(ctx, root, plans[i], cfg)
+	})
+
+	// A cancelled run kills every suite it had started, so each one exits
+	// non-zero and would otherwise be reported as a test failure — four
+	// components' worth of red rows attributing a CI job timeout to the
+	// repository's tests, in the document the PR comment reads. Under
+	// cancellation lydite cannot tell a suite that failed from one that was
+	// killed, and saying so is the only honest answer. A component that had
+	// already passed keeps its result, because that one is not in doubt.
+	if ctx.Err() != nil {
+		// Only over what the scheduler dispatched. A row built during
+		// planning — a compose file that would not load, a compose.up naming
+		// a service the file does not declare — was final before the run
+		// began, and is the one actionable error such a run produced;
+		// rewriting it would discard the answer in favour of a sentence about
+		// an interrupt that had nothing to do with it.
+		for _, i := range index {
+			r := rows[i]
+			// Only a failing row is in doubt. A component that had already
+			// passed produced a real result, and one that never started
+			// already says so — rewriting that would tell a reader a
+			// component did not finish something it never began.
+			if r.Status != ui.StatusFail {
+				continue
+			}
+			rows[i] = ui.Row{
+				Status: ui.StatusUnmeasured,
+				Label:  r.Label,
+				Value:  "not completed",
+				Detail: []string{"the run was interrupted before this component finished"},
+				Log:    r.Log,
+			}
+		}
+	}
+
+	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
+	for _, r := range rows {
+		rep.Add(r)
+	}
+}
+
+// itemFor is what the scheduler locks on: the component's root, cleaned so
+// `./web`, `web/` and `web` are one directory, and the host ports its services
+// publish.
+//
+// One construction, because a second one that agreed today would come apart
+// the day the normalisation changed — and the test built on the copy would
+// keep passing.
+func itemFor(p componentPlan) scheduler.Item {
+	return scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Ports: p.ports}
+}
+
+// planComponents opens each component's log and loads the stack of any that
+// declares services.
+//
+// The container runtime is probed at most once for the whole run, and only
+// when something actually declares services: a component that declares none
+// needs no runtime, so a repository without services still runs on a machine
+// with no container engine at all.
+func planComponents(ctx context.Context, root string, selected []component.Component, stream bool) []componentPlan {
+	width := 0
+	for _, c := range selected {
+		if len(c.Name) > width {
+			width = len(c.Name)
+		}
+	}
+
+	// Probed at most once for the whole run, and only if a declaration gets
+	// far enough to need it: compose.LoadWith consults this after validating,
+	// so a compose.up naming a service the file does not declare is reported
+	// as that rather than as the machine having no container engine.
+	var (
+		rt       compose.Runtime
+		probeErr error
+		probed   bool
+	)
+	runtime := func() (compose.Runtime, error) {
+		if !probed {
+			probed = true
+			rt, probeErr = compose.Probe(ctx)
+			if probeErr == nil {
+				fmt.Fprintf(os.Stderr, "lydite: services via %s\n", rt)
+			}
+		}
+		return rt, probeErr
+	}
+
+	plans := make([]componentPlan, len(selected))
+	for i, c := range selected {
+		p := componentPlan{c: c, log: openLog(root, c.Name, stream, width), ready: true}
+		if !c.Compose.Declared() {
+			plans[i] = p
+			continue
+		}
+		dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+		stack, err := compose.LoadWith(runtime, dir, c, p.log.out)
+		if err != nil {
+			// A probe runs candidate `docker compose version` invocations
+			// under the run's context, so an interrupt kills every one of
+			// them and looks exactly like a machine with no container
+			// runtime. Reporting that would be a confident wrong answer
+			// about the machine, and would report an interrupted run as a
+			// component that failed — the plan stays runnable instead, and
+			// the scheduler starts nothing on a cancelled context, so it
+			// lands on the `not run` row where it belongs.
+			p.ready = false
+			if ctx.Err() != nil {
+				// Not the compose error: a probe runs candidate `docker
+				// compose version` invocations under the run's context, so an
+				// interrupt kills every one of them and looks exactly like a
+				// machine with no container runtime. Reporting that would be
+				// a confident wrong answer about the machine.
+				//
+				// Marked unrunnable rather than left runnable-with-no-stack,
+				// which is byte-for-byte the state of a component that
+				// declares no services at all — safe only for as long as the
+				// scheduler refuses to admit anything on a cancelled context,
+				// and a suite started without the database it declared is the
+				// one outcome worse than not running it.
+				p.row = ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "test(" + c.Name + ")",
+					Value:  "not run",
+					Detail: []string{"the run ended before this component started"},
+				}
+			} else {
+				p.row = failure("test("+c.Name+")", p.log, err.Error(), "services not started", "")
+			}
+			plans[i] = p
+			continue
+		}
+		p.stack, p.ports = stack, stack.HostPorts()
+		plans[i] = p
+	}
+	return plans
+}
+
+// scheduleRow says what the scheduler actually did.
+//
+// The concurrency reached is observed rather than asserted, and it is the
+// number that separates a scheduler that ran from one that only claims to:
+// every port-lock assertion is satisfied by a run that never had two
+// components going at once, because the lock is never taken. The conflicting
+// pairs are named beside it, so a reader — and the proving ground's assertion
+// — can see the constraint was reached rather than merely declared.
+//
+// A run that did not start every component it was given fails here, and this
+// is the only row that can carry that. The components that never ran are
+// `unmeasured`, which does not vote, and the ones that did run passed — so
+// without a failing row a truncated run publishes a passing verdict, and the
+// gate reads green having tested part of the repository.
+// components is every component the run was given, including any that could
+// not be planned. Both halves of the ratio come from that one set: a component
+// whose stack would not load never started either, so `Started of components`
+// describes a real pair of numbers, where mixing in the count that reached the
+// scheduler would describe no set at all.
+//
+// Cancellation and not `Started < components` is what makes this fail. A run
+// interrupted once everything had started has nothing left unstarted, and that
+// is exactly the run whose components were all killed mid-suite — the case
+// most in need of a row saying the run was cut short.
+func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, limit int) ui.Row {
+	row := ui.Row{Status: ui.StatusPass, Label: "schedule"}
+	if ctx.Err() != nil {
+		row.Status = ui.StatusFail
+		row.Value = fmt.Sprintf("interrupted after %d of %d component(s)", outcome.Started, components)
+	} else {
+		row.Value = fmt.Sprintf("%d component(s), max %d concurrent", components, outcome.MaxConcurrent)
+	}
+	if pairs := scheduler.Pairs(outcome.Conflicts); pairs > 0 {
+		row.Value += fmt.Sprintf(", %d pair(s) serialised", pairs)
+	}
+	for _, c := range outcome.Conflicts {
+		row.Detail = append(row.Detail,
+			fmt.Sprintf("%s and %s serialised on %s", c.A, c.B, c.On))
+	}
+	if limit == 1 && components > 1 {
+		row.Detail = append(row.Detail, "--concurrency 1: components ran one at a time")
+	}
+	return row
 }
 
 // runComponent runs one component's suite and returns its row.
@@ -99,7 +428,8 @@ the component's to declare.`,
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, c component.Component, cfg config.Config, keep, stream bool) (row ui.Row) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config) (row ui.Row) {
+	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
 
 	inv, err := invocation(c)
@@ -107,20 +437,15 @@ func runComponent(ctx context.Context, root string, c component.Component, cfg c
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}
 	}
 
-	log := openLog(root, c.Name, stream)
-	defer log.Close()
-
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
 	if prepared, ok := prepare(ctx, dir, label, c, cfg, log); !ok {
 		return prepared
 	}
 
-	// Both teardowns are deferred before anything starts, so every path out
-	// of here runs them — including a setup that failed halfway, which is
-	// when a half-applied migration most needs undoing. Leaked containers
-	// poison the next local run, and the port they hold is the next
-	// component's to bind.
-	stop, started, ok := services(ctx, dir, label, c, keep, log)
+	// Deferred before anything starts, so every path out of here tears the
+	// stack down — including a setup that failed halfway, which is when a
+	// half-applied migration most needs undoing.
+	stop, started, ok := startServices(ctx, p, label)
 	if !ok {
 		return started
 	}
@@ -180,15 +505,18 @@ type componentLog struct {
 	// absolute path from someone else's runner is noise in a PR comment.
 	Rel string
 
-	file *os.File
-	out  io.Writer
+	file   *os.File
+	out    io.Writer
+	name   string
+	width  int
+	mirror *prefixWriter
 }
 
 // openLog creates the component's log. A log that cannot be created is not a
 // reason to skip the component, so it degrades to capture-only: the tail under
 // a failing row still names the cause, which is most of what the file is for.
-func openLog(root, name string, stream bool) *componentLog {
-	l := &componentLog{out: io.Discard}
+func openLog(root, name string, stream bool, width int) *componentLog {
+	l := &componentLog{out: io.Discard, name: name, width: width}
 	dir := filepath.Join(root, runner.ReportDir, name)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", name, err)
@@ -215,18 +543,184 @@ func openLog(root, name string, stream bool) *componentLog {
 // streamed mirrors the log to stderr when asked. Stderr and never stdout,
 // because stdout carries the report and, under --json, a document that a
 // suite's output would make unparseable.
+//
+// The mirror is prefixed with the component's name and the file underneath is
+// not. Components run concurrently, so an unlabelled line on the terminal
+// belongs to nobody in particular; the log is already the per-component view,
+// and prefixing it would make it a lossy copy of what the suite printed rather
+// than the thing a CI job uploads and a report links.
 func (l *componentLog) streamed(stream bool) *componentLog {
-	if stream {
-		if l.file == nil {
-			l.out = os.Stderr
-		} else {
-			l.out = io.MultiWriter(os.Stderr, l.file)
-		}
+	if !stream {
+		return l
+	}
+	l.mirror = &prefixWriter{prefix: fmt.Sprintf("%-*s | ", l.width, l.name)}
+	if l.file == nil {
+		l.out = l.mirror
+	} else {
+		l.out = io.MultiWriter(l.mirror, l.file)
 	}
 	return l
 }
 
+// stderrMu serialises whole lines onto stderr.
+//
+// Without it two components writing at once interleave inside a line, and a
+// prefix naming the component that wrote half of it is worse than no prefix at
+// all.
+var stderrMu sync.Mutex
+
+// partialLineDelay is how long an unterminated line waits before it is shown
+// anyway.
+//
+// Buffering to a newline is what makes a prefix meaningful, but a suite that
+// prints `running 412 tests...` and then hangs has written no newline — and
+// watching a hang is the one thing --stream exists for, so holding that line
+// until the process is killed withholds exactly the output somebody turned the
+// flag on to see. Long enough that ordinary output is not split mid-line,
+// short enough that a person watching a stalled run does not conclude nothing
+// was printed.
+const partialLineDelay = 500 * time.Millisecond
+
+// prefixWriter labels each complete line with its component and writes it to
+// stderr under stderrMu.
+//
+// It buffers until a newline because a writer is handed whatever chunk the
+// child happened to flush, which is not a line: prefixing each chunk would
+// scatter the label through the middle of the output.
+type prefixWriter struct {
+	prefix string
+	// onEmit replaces the write to stderr. Only a test sets it: capturing the
+	// process's own stderr is not something two tests can do at once.
+	onEmit func(line []byte)
+	// delay overrides partialLineDelay. Only a test sets it: an assertion
+	// about whole lines must not depend on the machine having got round to
+	// the next write inside the production deadline.
+	delay time.Duration
+
+	mu  sync.Mutex
+	buf []byte
+	// gen invalidates a deadline that no longer belongs to what is pending.
+	// Timer.Stop reports false once the callback has fired, and that callback
+	// may be blocked on mu inside this very Write — so it cannot be cancelled,
+	// only ignored when it finally runs. Acting on it would flush a line that
+	// began after it was scheduled and drop the live timer's handle.
+	//
+	// The interleaving this guards cannot be forced from a test without a
+	// synchronisation hook in this type, so no test covers it; the deadline's
+	// ordinary behaviour is covered by TestTheDeadlineFollowsThePendingLine.
+	gen   uint64
+	timer *time.Timer
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	emitted := false
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.emit(w.buf[:i])
+		w.buf = w.buf[i+1:]
+		emitted = true
+	}
+	// A deadline armed for a line that has since been completed does not
+	// belong to what is pending now: it would fire early and split the new
+	// line, which is the thing buffering exists to prevent. The deadline
+	// belongs to the line that is waiting, so it restarts whenever a
+	// different one starts waiting.
+	if emitted {
+		w.disarm()
+	}
+	w.arm()
+	return len(p), nil
+}
+
+// arm schedules the leftover of a line to be shown if nothing completes it.
+// Called with w.mu held.
+//
+// The deadline runs from when the pending line began, not from the last write.
+// Restarting it on every write would measure silence instead, and a runner
+// redrawing a progress display with a carriage return and no newline writes
+// every few tens of milliseconds for minutes — so the deadline would never
+// expire, nothing would reach the terminal, and the buffer would hold every
+// byte of it.
+func (w *prefixWriter) arm() {
+	if len(w.buf) == 0 {
+		w.disarm()
+		return
+	}
+	if w.timer != nil {
+		return
+	}
+	gen := w.gen
+	w.timer = time.AfterFunc(w.partialLineDelay(), func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		// A deadline from before the last disarm has already fired and is
+		// only now getting the lock. Acting on it would flush a line that
+		// started after it was scheduled — the mid-line split this all
+		// exists to prevent — and would drop the live timer's handle.
+		if gen != w.gen {
+			return
+		}
+		w.timer = nil
+		w.flush()
+	})
+}
+
+// disarm invalidates the pending deadline. Called with w.mu held.
+func (w *prefixWriter) disarm() {
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.gen++
+}
+
+// partialLineDelay is how long this writer waits; a test sets its own so the
+// assertion does not depend on how fast the machine ran the loop.
+func (w *prefixWriter) partialLineDelay() time.Duration {
+	if w.delay > 0 {
+		return w.delay
+	}
+	return partialLineDelay
+}
+
+// Flush writes a trailing line that never ended in a newline, which is what a
+// suite killed part-way through printing leaves behind — and is the line most
+// worth seeing.
+func (w *prefixWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.disarm()
+	w.flush()
+}
+
+// flush is called with w.mu held.
+func (w *prefixWriter) flush() {
+	if len(w.buf) > 0 {
+		w.emit(w.buf)
+		w.buf = nil
+	}
+}
+
+func (w *prefixWriter) emit(line []byte) {
+	if w.onEmit != nil {
+		w.onEmit(line)
+		return
+	}
+	stderrMu.Lock()
+	defer stderrMu.Unlock()
+	fmt.Fprintf(os.Stderr, "%s%s\n", w.prefix, line)
+}
+
 func (l *componentLog) Close() {
+	if l.mirror != nil {
+		l.mirror.Flush()
+	}
 	if l.file != nil {
 		_ = l.file.Close()
 	}
@@ -256,41 +750,38 @@ func tail(output string) []string {
 	return lines
 }
 
-// services starts the component's compose services and returns the teardown
-// to run once the suite is done.
+// startServices brings the component's stack up and returns the teardown to
+// run once the suite is done.
 //
-// A component that declares none needs no runtime and gets no probe, so a
-// repository with no services runs on a machine with no container engine at
-// all.
+// The stack was loaded during planning, so everything that can be known
+// without starting a container — that the file parses, that compose.up names
+// services it declares, that a wait: healthy has a healthcheck to wait on —
+// has already been decided. What is left here is the part that can only fail
+// by being attempted.
 //
 // Failing to start is reported as the component failing rather than being
 // pushed into the suite: a suite run against an absent database reports errors
 // naming the tests, which is the one outcome worse than an unstarted service.
-func services(ctx context.Context, dir, label string, c component.Component, keep bool, log *componentLog) (func(), ui.Row, bool) {
-	if !c.Compose.Declared() {
+func startServices(ctx context.Context, p componentPlan, label string) (func(), ui.Row, bool) {
+	if p.stack == nil {
 		return func() {}, ui.Row{}, true
 	}
-	fail := func(err error) (func(), ui.Row, bool) {
-		return nil, failure(label, log, err.Error(), "services not started", ""), false
-	}
-	stack, err := compose.Load(ctx, dir, c, log.out)
-	if err != nil {
-		return fail(err)
-	}
-	fmt.Fprintf(os.Stderr, "lydite: %s services via %s\n", c.Name, stack.Runtime())
-	if err := stack.Up(ctx); err != nil {
-		return fail(err)
+	if err := p.stack.Up(ctx); err != nil {
+		// Down anyway: up --wait leaves the containers it did start behind
+		// when one of them never became healthy, and those hold the ports the
+		// next component is waiting for.
+		if derr := p.stack.Down(context.WithoutCancel(ctx)); derr != nil {
+			fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", p.c.Name, derr)
+		}
+		return nil, failure(label, p.log, err.Error(), "services not started", ""), false
 	}
 	return func() {
-		if keep {
-			fmt.Fprintf(os.Stderr, "lydite: %s services left running\n", c.Name)
-			return
-		}
 		// Teardown gets a context of its own: the run's may already be
 		// cancelled, and a cancelled teardown is the leak this exists to
-		// prevent.
-		if err := stack.Down(context.WithoutCancel(ctx)); err != nil {
-			fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", c.Name, err)
+		// prevent. Leaked containers poison the next local run, and the port
+		// they hold is the next component's to bind.
+		if err := p.stack.Down(context.WithoutCancel(ctx)); err != nil {
+			fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", p.c.Name, err)
 		}
 	}, ui.Row{}, true
 }

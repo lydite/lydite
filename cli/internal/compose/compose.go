@@ -98,6 +98,10 @@ type Service struct {
 	// is physical — two services called `db` on different ports do not
 	// collide, and a `db` and a `postgres` on the same port do.
 	Ports []int
+	// DependsOn names the services compose starts alongside this one. They
+	// publish their host ports too, so the lock has to see them: a component
+	// naming only an `app` still holds whatever `app`'s database publishes.
+	DependsOn []string
 }
 
 // File is a parsed compose file.
@@ -118,13 +122,35 @@ func (f File) Service(name string) (Service, bool) {
 	return Service{}, false
 }
 
+// dependsOn reads a service's dependencies in either of compose's two
+// syntaxes: a sequence of names, or a mapping of name to condition. Only the
+// names matter here — the condition says when to start, not what to start.
+func dependsOn(n yaml.Node) []string {
+	var out []string
+	switch n.Kind {
+	case yaml.SequenceNode:
+		for _, item := range n.Content {
+			out = append(out, item.Value)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			out = append(out, n.Content[i].Value)
+		}
+	}
+	return out
+}
+
 // HostPorts returns every host port the named services publish, deduped and
 // sorted.
+//
+// It follows each named service's depends_on closure, because compose does:
+// `compose up app` starts everything `app` depends on, and a `db` pulled in
+// that way publishes its host port just as surely as one named directly. A
+// lock computed from the named services alone would leave that port unheld,
+// and the second component to want it fails mid-run on a bind error — which is
+// the failure the lock exists to prevent.
 func (f File) HostPorts(names []string) []int {
-	wanted := map[string]bool{}
-	for _, n := range names {
-		wanted[n] = true
-	}
+	wanted := f.closure(names)
 	seen := map[int]bool{}
 	var out []int
 	for _, s := range f.Services {
@@ -142,6 +168,40 @@ func (f File) HostPorts(names []string) []int {
 	return out
 }
 
+// sortedNames orders a service set, so a file with two offenders names the
+// same one on every run.
+func sortedNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// closure is the named services plus everything they depend on, transitively.
+func (f File) closure(names []string) map[string]bool {
+	byName := make(map[string]Service, len(f.Services))
+	for _, s := range f.Services {
+		byName[s.Name] = s
+	}
+	out := make(map[string]bool, len(names))
+	var visit func(string)
+	visit = func(n string) {
+		if out[n] {
+			return
+		}
+		out[n] = true
+		for _, dep := range byName[n].DependsOn {
+			visit(dep)
+		}
+	}
+	for _, n := range names {
+		visit(n)
+	}
+	return out
+}
+
 // composeFile is the subset of the schema lydite reads. Everything else is
 // compose's business, and parsing more of it would be lydite growing the
 // service schema this design exists to avoid owning.
@@ -152,6 +212,7 @@ type composeFile struct {
 type composeService struct {
 	Healthcheck *yaml.Node  `yaml:"healthcheck"`
 	Ports       []yaml.Node `yaml:"ports"`
+	DependsOn   yaml.Node   `yaml:"depends_on"`
 }
 
 // Parse reads a compose file.
@@ -185,6 +246,7 @@ func Parse(data []byte, path string) (File, error) {
 			Name:        name,
 			Healthcheck: svc.Healthcheck != nil && svc.Healthcheck.Tag != "!!null",
 			Ports:       ports,
+			DependsOn:   dependsOn(svc.DependsOn),
 		})
 	}
 	return f, nil
@@ -272,6 +334,27 @@ type Stack struct {
 // lifecycle between one component's verdict and the next is what makes a CI
 // log unreadable, and none of it is worth reading unless something failed.
 func Load(ctx context.Context, dir string, c component.Component, out io.Writer) (*Stack, error) {
+	return LoadWith(func() (Runtime, error) { return Probe(ctx) }, dir, c, out)
+}
+
+// RuntimeSource yields the compose implementation to run a stack with.
+//
+// It is a function rather than a Runtime so that it is consulted only after
+// the declaration has been checked. Probing first would mask every declaration
+// error behind the state of the machine: a compose.up naming a service the
+// file does not declare would be reported as an absent container runtime, and
+// this package's own tests would pass or fail depending on whether the
+// developer running them happens to have docker installed.
+//
+// A caller loading every component's stack before any of them starts passes
+// one memoised source, so the run probes once rather than once per component:
+// which implementation is on the machine is a property of the machine, and
+// asking three candidate binaries the same question per component is work
+// whose answer cannot differ.
+type RuntimeSource func() (Runtime, error)
+
+// LoadWith is Load against a caller-supplied runtime source.
+func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.Writer) (*Stack, error) {
 	path, err := composePath(dir, c)
 	if err != nil {
 		return nil, err
@@ -299,10 +382,27 @@ func Load(ctx context.Context, dir string, c component.Component, out io.Writer)
 	if wait == "" {
 		wait = component.WaitHealthy
 	}
+	named := make(map[string]bool, len(up))
 	for _, name := range up {
+		if _, ok := file.Service(name); !ok {
+			return nil, fmt.Errorf("%s: compose.up names %q, which %s does not declare", c.Name, name, path)
+		}
+		named[name] = true
+	}
+	// Over the depends_on closure and not the named list, because that is what
+	// compose starts and what `up --wait` waits for. A named service with a
+	// healthcheck whose database has none is treated as ready the moment its
+	// container is running, so the suite races the database — the flakiness
+	// this refusal exists to prevent, landing on the test rather than on the
+	// wait.
+	for _, name := range sortedNames(file.closure(up)) {
 		svc, ok := file.Service(name)
 		if !ok {
-			return nil, fmt.Errorf("%s: compose.up names %q, which %s does not declare", c.Name, name, path)
+			// A depends_on naming a service the file does not declare is
+			// compose's error to report, not lydite's: rejecting it here would
+			// make lydite's reading of a file it does not own the ceiling on
+			// what that file may say.
+			continue
 		}
 		// Refused, not degraded to "started". A suite racing a database that
 		// is not yet listening is the flakiest thing a pipeline can contain,
@@ -310,18 +410,30 @@ func Load(ctx context.Context, dir string, c component.Component, out io.Writer)
 		// component either declares a healthcheck or says out loud that it is
 		// not waiting for one.
 		if wait == component.WaitHealthy && !svc.Healthcheck {
+			// A service reached through depends_on is named differently from
+			// one the component listed, because the remedies differ: the
+			// author who wrote `up: [app]` did not choose `db` and cannot act
+			// on advice phrased as though they had. Adding the healthcheck is
+			// named first either way — dropping to wait: started weakens the
+			// wait for every service to fix one.
+			how := "in " + path
+			if !named[name] {
+				how = "pulled in by depends_on in " + path
+			}
 			return nil, fmt.Errorf(
-				"%s: service %q in %s declares no healthcheck, so wait: healthy cannot be satisfied — add one, or set compose.wait to %q",
-				c.Name, name, path, component.WaitStarted)
+				"%s: service %q %s declares no healthcheck, so wait: healthy cannot be satisfied — give it one, or set compose.wait to %q for this component",
+				c.Name, name, how, component.WaitStarted)
 		}
 	}
 
-	runtime, err := Probe(ctx)
+	// Last, so a declaration this package can reject on its own is rejected
+	// on its own.
+	rt, err := runtime()
 	if err != nil {
 		return nil, fmt.Errorf("%s declares compose services: %w", c.Name, err)
 	}
 	return &Stack{
-		runtime: runtime,
+		runtime: rt,
 		file:    file,
 		dir:     dir,
 		// Per component, so two components' stacks cannot adopt each other's
