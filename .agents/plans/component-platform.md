@@ -13,8 +13,8 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 1 | — | `internal/component`, `internal/runner` (go/rust/ts), `lydite test`, `.lydite/` layout | `pr1-component-model.md` | done — #39 |
 | 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | done |
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
-| 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done |
-| 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done |
+| 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
+| 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | not started |
 | 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |

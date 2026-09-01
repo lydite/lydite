@@ -21,7 +21,7 @@ root; run all go and golangci-lint commands from there.
 `internal/component`, `internal/runner`, `internal/compose` and `lydite test`.
 Step 2 (#42) carries `internal/orphan`, `internal/pathmatch` and `excludes`.
 Step 4 (#44) carries `internal/scheduler`, `--concurrency` and the `schedule`
-row. Step 5 carries `internal/affected`, `internal/gitdiff`, `--affected`, the
+row. Step 5 (#46) carries `internal/affected`, `internal/gitdiff`, `--affected`, the
 `select` and `watch` rows and
 [ADR 0018](../../docs/adr/0018-selection-widens-on-ignorance.md). If any is
 missing, stop and say so.
