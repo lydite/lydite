@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"lydite/lydite/internal/download"
 	"lydite/lydite/internal/executil"
@@ -64,6 +65,20 @@ func (t Tool) Install(ctx context.Context, progress io.Writer) error {
 	if t.Installed() {
 		return nil
 	}
+	// One install of a given tool at a time. `lydite test` prepares its
+	// components concurrently, so two Rust components ask for the same pinned
+	// nextest at once — and while the prebuilt path stages into a sibling
+	// directory and renames, the source fallback runs `cargo install --root`
+	// twice against one root, where the two contend over its .crates.toml.
+	// That fallback is the path a blocked download or a mismatched checksum
+	// already selected, which is the worst place to add a second failure.
+	unlock := lockTool(t.Name + "@" + t.Version)
+	defer unlock()
+	// Re-checked under the lock: the install this one waited for is very
+	// likely the one it was about to do.
+	if t.Installed() {
+		return nil
+	}
 	root, err := t.Root()
 	if err != nil {
 		return err
@@ -88,6 +103,22 @@ func (t Tool) Install(ctx context.Context, progress io.Writer) error {
 		return fmt.Errorf("cargo install %s@%s: %w", t.Name, t.Version, res.Err)
 	}
 	return nil
+}
+
+// installLocks serialises installs of one tool version within this process.
+//
+// In-process only, and that is the whole of what it claims: two lydite
+// processes installing the same tool still race, which the staged-and-renamed
+// prebuilt path already tolerates and the source build has always been able to
+// hit. What it closes is the case this process creates for itself by preparing
+// components concurrently.
+var installLocks sync.Map
+
+func lockTool(key string) func() {
+	v, _ := installLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // errNoPrebuilt says the publisher ships nothing for this machine, which is a

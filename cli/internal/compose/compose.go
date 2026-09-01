@@ -382,10 +382,12 @@ func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.W
 	if wait == "" {
 		wait = component.WaitHealthy
 	}
+	named := make(map[string]bool, len(up))
 	for _, name := range up {
 		if _, ok := file.Service(name); !ok {
 			return nil, fmt.Errorf("%s: compose.up names %q, which %s does not declare", c.Name, name, path)
 		}
+		named[name] = true
 	}
 	// Over the depends_on closure and not the named list, because that is what
 	// compose starts and what `up --wait` waits for. A named service with a
@@ -408,9 +410,19 @@ func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.W
 		// component either declares a healthcheck or says out loud that it is
 		// not waiting for one.
 		if wait == component.WaitHealthy && !svc.Healthcheck {
+			// A service reached through depends_on is named differently from
+			// one the component listed, because the remedies differ: the
+			// author who wrote `up: [app]` did not choose `db` and cannot act
+			// on advice phrased as though they had. Adding the healthcheck is
+			// named first either way — dropping to wait: started weakens the
+			// wait for every service to fix one.
+			how := "in " + path
+			if !named[name] {
+				how = "pulled in by depends_on in " + path
+			}
 			return nil, fmt.Errorf(
-				"%s: service %q in %s declares no healthcheck, so wait: healthy cannot be satisfied — add one, or set compose.wait to %q",
-				c.Name, name, path, component.WaitStarted)
+				"%s: service %q %s declares no healthcheck, so wait: healthy cannot be satisfied — give it one, or set compose.wait to %q for this component",
+				c.Name, name, how, component.WaitStarted)
 		}
 	}
 

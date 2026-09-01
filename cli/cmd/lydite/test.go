@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path"
@@ -73,6 +74,13 @@ the component's to declare.`,
 				stop()
 			}()
 
+			// Before any work: a typo must not pay for a git walk first, and
+			// must not discard a report the run had already computed.
+			limit, err := resolveConcurrency(concurrency)
+			if err != nil {
+				return err
+			}
+
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
@@ -105,10 +113,6 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			limit, err := resolveConcurrency(concurrency, len(selected))
-			if err != nil {
-				return err
-			}
 			runComponents(ctx, dir, selected, cfg, limit, stream, rep)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
@@ -148,13 +152,15 @@ const defaultConcurrency = 4
 
 // resolveConcurrency turns the flag into a slot count.
 //
-// "max" is one slot per selected component, which is what the planner passes
-// when it wants a shard to hold everything it was given. A number below one is
-// refused rather than clamped: it is a typo, and silently running anyway would
-// have lydite ignore something the caller said.
-func resolveConcurrency(flag string, selected int) (int, error) {
+// "max" is a slot for every component, which is what the planner passes when it
+// wants a shard to hold everything it was given; the scheduler never admits
+// more than it has, so the bound needs no count to be resolved against and can
+// be checked before any work happens. A number below one is refused rather than
+// clamped: it is a typo, and silently running anyway would have lydite ignore
+// something the caller said.
+func resolveConcurrency(flag string) (int, error) {
 	if flag == "max" {
-		return max(selected, 1), nil
+		return math.MaxInt, nil
 	}
 	n, err := strconv.Atoi(flag)
 	if err != nil {
@@ -243,7 +249,14 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 	// killed, and saying so is the only honest answer. A component that had
 	// already passed keeps its result, because that one is not in doubt.
 	if ctx.Err() != nil {
-		for i, r := range rows {
+		// Only over what the scheduler dispatched. A row built during
+		// planning — a compose file that would not load, a compose.up naming
+		// a service the file does not declare — was final before the run
+		// began, and is the one actionable error such a run produced;
+		// rewriting it would discard the answer in favour of a sentence about
+		// an interrupt that had nothing to do with it.
+		for _, i := range index {
+			r := rows[i]
 			// Only a failing row is in doubt. A component that had already
 			// passed produced a real result, and one that never started
 			// already says so — rewriting that would tell a reader a

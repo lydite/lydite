@@ -312,6 +312,11 @@ services:
 	if !strings.Contains(err.Error(), `"db"`) {
 		t.Errorf("error = %v, want the offending service named", err)
 	}
+	// The author wrote `up: [app]` and did not choose db, so the message says
+	// how it got here rather than reading as though they had listed it.
+	if !strings.Contains(err.Error(), "pulled in by depends_on") {
+		t.Errorf("error = %v, want it to say how the service was reached", err)
+	}
 }
 
 // A depends_on naming something the file does not declare is compose's error to

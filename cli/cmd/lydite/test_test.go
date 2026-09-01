@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -529,23 +529,23 @@ func planFor(t *testing.T, root string, c component.Component) componentPlan {
 
 func TestResolveConcurrency(t *testing.T) {
 	for _, tc := range []struct {
-		flag     string
-		selected int
-		want     int
-		wantErr  bool
+		flag    string
+		want    int
+		wantErr bool
 	}{
-		{flag: "4", selected: 9, want: 4},
-		{flag: "1", selected: 9, want: 1},
-		{flag: "max", selected: 9, want: 9},
-		// "max" over an empty selection still has to be a usable bound.
-		{flag: "max", selected: 0, want: 1},
-		{flag: "0", selected: 9, wantErr: true},
-		{flag: "-2", selected: 9, wantErr: true},
+		{flag: "4", want: 4},
+		{flag: "1", want: 1},
+		// A slot for every component: the scheduler never admits more than it
+		// was given, so this needs no count to resolve against and can be
+		// checked before any work happens.
+		{flag: "max", want: math.MaxInt},
+		{flag: "0", wantErr: true},
+		{flag: "-2", wantErr: true},
 		// Refused rather than defaulted: a typo that silently ran anyway
 		// would have lydite ignore something the caller said.
-		{flag: "all", selected: 9, wantErr: true},
+		{flag: "all", wantErr: true},
 	} {
-		got, err := resolveConcurrency(tc.flag, tc.selected)
+		got, err := resolveConcurrency(tc.flag)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("resolveConcurrency(%q) = %d, want an error", tc.flag, got)
@@ -553,7 +553,7 @@ func TestResolveConcurrency(t *testing.T) {
 			continue
 		}
 		if err != nil || got != tc.want {
-			t.Errorf("resolveConcurrency(%q, %d) = %d, %v; want %d", tc.flag, tc.selected, got, err, tc.want)
+			t.Errorf("resolveConcurrency(%q) = %d, %v; want %d", tc.flag, got, err, tc.want)
 		}
 	}
 }
@@ -783,33 +783,55 @@ func TestContinuousOutputWithNoNewlineIsStillShown(t *testing.T) {
 // A deadline armed for a line that has since been completed does not belong to
 // the line waiting now. Keeping it fires early and splits the new line, which
 // is the mid-line split buffering exists to prevent.
+//
+// The defect shows as an emission that must not happen, observed on a channel
+// rather than by comparing two sleeps: a stale deadline fires 200ms after the
+// second line starts, and a correct one not for a further 800ms, so neither
+// bound is close to the scheduling slack of a loaded machine.
 func TestTheDeadlineFollowsThePendingLine(t *testing.T) {
-	var lines []string
-	var mu sync.Mutex
-	w := &prefixWriter{prefix: "web | ", delay: 150 * time.Millisecond}
-	w.onEmit = func(line []byte) {
-		mu.Lock()
-		defer mu.Unlock()
-		lines = append(lines, string(line))
-	}
+	const delay = time.Second
+	emitted := make(chan string, 4)
+	w := &prefixWriter{prefix: "web | ", delay: delay}
+	w.onEmit = func(line []byte) { emitted <- string(line) }
 
-	// A partial line, then — just before its deadline — a write that
-	// completes it and starts another.
 	if _, err := w.Write([]byte("PASS")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Well inside the first line's deadline, so it is still pending when the
+	// write below completes it.
+	time.Sleep(800 * time.Millisecond)
+	select {
+	case line := <-emitted:
+		t.Fatalf("emitted %q before its deadline", line)
+	default:
+	}
+
 	if _, err := w.Write([]byte(" ok\nrunning batch 2 of 9")); err != nil {
 		t.Fatal(err)
 	}
-	// Past the first line's deadline, comfortably short of the second's.
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(lines) != 1 || lines[0] != "PASS ok" {
-		t.Fatalf("lines = %q, want only the completed line: the second was split by the first line's deadline", lines)
+	if line := <-emitted; line != "PASS ok" {
+		t.Fatalf("emitted %q, want the completed line", line)
 	}
+
+	// A deadline kept from the first line fires 200ms from here; the second
+	// line's own runs for a full second.
+	select {
+	case line := <-emitted:
+		t.Fatalf("emitted %q: the line that just started was split by the previous line's deadline", line)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared: the component never started", path)
 }
 
 // A run cancelled once every component had started kills each suite mid-flight,
@@ -820,7 +842,15 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/slow_test.go",
 		"package fixture\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
-	declared := []component.Component{{Name: "slow", Dir: "mod", Runner: runner.GoTest}}
+	// setup runs only after the scheduler has admitted the component, so the
+	// marker it writes is the signal that this run is genuinely under way —
+	// where waiting on the log would not be, since planning creates that file
+	// before the scheduler has looked at the context at all.
+	started := filepath.Join(root, "started")
+	declared := []component.Component{{
+		Name: "slow", Dir: "mod", Runner: runner.GoTest,
+		Setup: []string{"touch " + started},
+	}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	rep := ui.NewReport("test")
@@ -829,9 +859,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 		defer close(done)
 		runComponents(ctx, root, declared, config.Default(), 1, false, rep)
 	}()
-	// Cancel once the suite is genuinely running, so the row under test comes
-	// from a killed suite rather than from one that never started.
-	waitForLog(t, root, "slow")
+	waitForFile(t, started)
 	cancel()
 	<-done
 
@@ -848,18 +876,48 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	}
 }
 
-// waitForLog blocks until a component's log exists and has content, which is
-// the first thing its suite produces — so the test cancels a run that is
-// genuinely under way rather than one that has not begun.
-func waitForLog(t *testing.T, root, name string) {
-	t.Helper()
-	path := filepath.Join(root, runner.ReportDir, name, "test.log")
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if fi, err := os.Stat(path); err == nil && fi.Size() >= 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+// A row built during planning is final before the run begins, and is the one
+// actionable error such a run produced. An interrupt must not replace it with a
+// sentence about an interrupt that had nothing to do with it.
+//
+// The interrupt has to land while a component is genuinely running, so a second
+// component holds the run open until the broken one's row has already been
+// decided.
+func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/compose.yaml", "services:\n  db:\n    image: postgres\n")
+	write(t, root, "slow/go.mod", "module slow\n\ngo 1.26\n")
+	write(t, root, "slow/slow_test.go",
+		"package slow\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
+
+	started := filepath.Join(root, "started")
+	declared := []component.Component{
+		{
+			Name: "broken", Dir: "mod", Runner: runner.GoTest,
+			Compose: component.Compose{File: "./compose.yaml", Up: []string{"ghost"}},
+		},
+		{
+			Name: "slow", Dir: "slow", Runner: runner.GoTest,
+			Setup: []string{"touch " + started},
+		},
 	}
-	t.Fatal("the component never started")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rep := ui.NewReport("test")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+	}()
+	waitForFile(t, started)
+	cancel()
+	<-done
+
+	row := rowByLabel(t, rep, "test(broken)")
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want the declaration error kept: the interrupt did not cause it", row)
+	}
+	if !strings.Contains(strings.Join(row.Detail, " "), "ghost") {
+		t.Errorf("detail = %v, want the undeclared service still named", row.Detail)
+	}
 }
