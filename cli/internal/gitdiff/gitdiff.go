@@ -41,10 +41,16 @@ import (
 //     either caller.
 //   - diff.mnemonicPrefix: emits "w/" instead of "b/", which referral's patch
 //     header parser would not recognise.
-var Config = []string{
-	"-c", "core.quotePath=false",
-	"-c", "diff.relative=false",
-	"-c", "diff.mnemonicPrefix=false",
+//
+// A function returning a fresh slice rather than a package-level variable:
+// every caller appends its own subcommand to these, and a shared backing array
+// lets one caller's append land in another's arguments.
+func Config() []string {
+	return []string{
+		"-c", "core.quotePath=false",
+		"-c", "diff.relative=false",
+		"-c", "diff.mnemonicPrefix=false",
+	}
 }
 
 // Rename is a path a change moves, from its old location to its new one.
@@ -75,7 +81,7 @@ type Paths struct {
 // a caller reads a diff of nothing — which for referral passes everything and
 // for selection runs nothing.
 func Changed(ctx context.Context, dir, base string) (Paths, error) {
-	args := append(append([]string{}, Config...), "diff", "--name-status", "-M", base+"..HEAD")
+	args := append(Config(), "diff", "--name-status", "-M", base+"..HEAD")
 	res := executil.RunQuiet(ctx, dir, "git", args...)
 	if !res.Ok() {
 		return Paths{}, fmt.Errorf("git diff --name-status %s..HEAD: %w", base, res.Err)

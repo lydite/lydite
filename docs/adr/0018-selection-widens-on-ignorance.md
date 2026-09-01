@@ -37,8 +37,10 @@ change that can affect all of them.
   path selects at least one component, so `0 of N affected` can only mean HEAD
   has no changes against the merge-base. The scariest case in the feature
   becomes an invariant with a test rather than a judgement call.
-- **The invalidator set is built in, matched at any depth, and cannot be removed
-  or added to.** Not removable for the reason the built-in disqualifier set is
+- **The invalidator set is built in and cannot be removed or added to.**
+  Lockfiles, manifests and toolchain files match at any depth, since one
+  matters wherever it sits; `.lydite/` stays anchored, since the scan root is
+  the only place lydite reads configuration from. Not removable for the reason the built-in disqualifier set is
   not: a repository able to drop `.lydite/**` could make a change to its own
   component declaration run nothing. Not extensible because `watch` already says
   "this outside file invalidates me" one level down.

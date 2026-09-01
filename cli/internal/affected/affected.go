@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/pathmatch"
 )
 
@@ -41,11 +42,18 @@ import (
 // invalidates me" one level down, and a second mechanism for it would be
 // surface bought with nothing.
 //
-// Every pattern is "**"-prefixed, which is the one place lydite deliberately
-// departs from pathmatch's anchoring. A lockfile matters wherever it sits, and
-// spelling the depth-independence into the pattern keeps the matcher's own
-// semantics untouched and puts the widening where a reader can see it.
-var Invalidators = []string{
+// The file patterns are "**"-prefixed, which is the one place lydite
+// deliberately departs from pathmatch's anchoring: a lockfile matters wherever
+// it sits. Spelling the depth-independence into the pattern keeps the
+// matcher's own semantics untouched and puts the widening where a reader can
+// see it. ".lydite/**" is the exception and stays anchored, because lydite
+// reads its configuration from the scan root and nowhere else — a
+// "docs/.lydite/config.yml" configures nothing.
+//
+// Unexported so the set is a floor rather than a suggestion. Exported it would
+// be a mutable package-level slice any caller could append to or replace,
+// which is a weaker guarantee than the doc above claims.
+var invalidators = []string{
 	// lydite's own configuration: what the components are, what is excluded
 	// from the orphan gate, and every gate knob.
 	".lydite/**",
@@ -126,46 +134,87 @@ type Result struct {
 	Reasons map[string]Reason
 }
 
+// Path is one changed path, already mapped onto the scan root.
+//
+// Outside says the path lies outside the scan root altogether. Such a path can
+// match no component by construction — a component directory is scan-root
+// relative — so it widens, and carrying the flag is what stops a
+// repository-root path from colliding with a same-named component directory
+// and narrowing to it instead.
+type Path struct {
+	Rel     string
+	Outside bool
+}
+
+// Paths maps repository-root-relative paths onto the scan root, which is where
+// component directories are written. prefix comes from gitdiff.Prefix.
+//
+// It lives here rather than at the call site because forgetting it is silent:
+// the paths still match something, just not the right thing.
+func Paths(prefix string, all []string) []Path {
+	out := make([]Path, 0, len(all))
+	for _, p := range all {
+		rel, inside := gitdiff.Rel(prefix, p)
+		out = append(out, Path{Rel: rel, Outside: !inside})
+	}
+	return out
+}
+
 // Select returns the components a change touching changed could have broken.
 //
-// changed is scan-root-relative, forward-slash, and carries both sides of a
-// rename: moving a file between two components must run both, since the source
-// lost a file and a rule reading only the destination runs the half of the
-// change that cannot break.
+// changed carries both sides of a rename: moving a file between two components
+// must run both, since the source lost a file and a rule reading only the
+// destination runs the half of the change that cannot break.
 //
 // An empty diff selects nothing, and is the only way to select nothing. Every
 // changed path selects at least one component — it matched something, or it
 // matched nothing and therefore matched everything — so "0 of N affected" can
 // only mean HEAD has no changes against the merge-base, never that the
 // narrowing went wrong.
-func Select(f component.File, changed []string) Result {
+func Select(f component.File, changed []Path) Result {
 	reasons := map[string]Reason{}
 
-	all := func(r Reason) Result {
-		for _, c := range f.Components {
-			reasons[c.Name] = r
+	// The first path that matches nothing, or matches an invalidator. Held
+	// rather than acted on, so that a component the change *also* touched
+	// directly keeps the reason naming the reader's own edit: a widening
+	// applied the moment it is found overwrites every reason recorded before
+	// it and suppresses every one after.
+	var widen *Reason
+	note := func(r Reason) {
+		if widen == nil {
+			widen = &r
 		}
-		return assemble(f, reasons)
 	}
 
 	for _, p := range changed {
-		p = strings.TrimPrefix(path.Clean(p), "./")
-		if matchesAny(Invalidators, p) {
-			return all(Reason{Kind: KindInvalidator, Path: p})
+		if p.Outside {
+			note(Reason{Kind: KindUnmatched, Path: p.Rel})
+			continue
+		}
+		rel := strings.TrimPrefix(path.Clean(p.Rel), "./")
+		if matchesAny(invalidators, rel) {
+			note(Reason{Kind: KindInvalidator, Path: rel})
+			continue
 		}
 		matched := false
 		for _, c := range f.Components {
 			switch {
-			case under(p, c.Dir):
+			case under(rel, c.Dir):
 				matched = true
-				keep(reasons, c.Name, Reason{Kind: KindDir, Path: p})
-			case matchesAny(c.Watch, p):
+				keep(reasons, c.Name, Reason{Kind: KindDir, Path: rel})
+			case matchesAny(c.Watch, rel):
 				matched = true
-				keep(reasons, c.Name, Reason{Kind: KindWatch, Path: p})
+				keep(reasons, c.Name, Reason{Kind: KindWatch, Path: rel})
 			}
 		}
 		if !matched {
-			return all(Reason{Kind: KindUnmatched, Path: p})
+			note(Reason{Kind: KindUnmatched, Path: rel})
+		}
+	}
+
+	if widen != nil {
+		for _, c := range f.Components {
+			keep(reasons, c.Name, *widen)
 		}
 	}
 

@@ -74,7 +74,7 @@ func Changes(ctx context.Context, dir, base string) (Change, error) {
 	//
 	// -U0 drops context lines, so every "+" line inside a hunk is one the
 	// change actually introduced.
-	patchArgs := append(append([]string{}, gitdiff.Config...),
+	patchArgs := append(gitdiff.Config(),
 		"diff", "-M", "--text", "--unified=0", base+"..HEAD")
 	patch := executil.RunQuiet(ctx, dir, "git", patchArgs...)
 	if !patch.Ok() {

@@ -74,7 +74,7 @@ _Avoid_: "impacted", "dirty", "changed components" — the change touches files,
 
 **Invalidator**:
 A path that makes every **Component** affected, whatever else the change touches. Its purpose is to override a **Component** `dir` match that is too narrow: a repository with a component rooted at `.` would otherwise have a change to `.lydite/components.yml` select that one component and not the others, when a change to the component declaration is precisely the change that can affect all of them.
-_Note_: the set is built in, matched at any depth, and cannot be removed or added to — the same floor argument as the built-in **Disqualifier** set, since a repository able to drop `.lydite/**` from its invalidators could make a change to its own component declaration run nothing. There is no declarable form because `watch` already says "this outside file invalidates me", one level down, and a second mechanism for it would be surface bought with nothing.
+_Note_: the set is built in and cannot be removed or added to. Lockfiles, manifests and toolchain files are matched at any depth, because one matters wherever it sits; `.lydite/` stays anchored to the scan root, because that is the only place lydite reads its configuration from — the same floor argument as the built-in **Disqualifier** set, since a repository able to drop `.lydite/**` from its invalidators could make a change to its own component declaration run nothing. There is no declarable form because `watch` already says "this outside file invalidates me", one level down, and a second mechanism for it would be surface bought with nothing.
 _Avoid_: "global watch" (`watch` is per component and this is not declarable), "trigger", "wildcard".
 
 **Proving ground**:

@@ -50,7 +50,7 @@ func TestSelect(t *testing.T) {
 		{"an empty diff selects nothing", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := names(Select(provingGround(), tc.changed).Selected)
+			got := names(Select(provingGround(), Paths("", tc.changed)).Selected)
 			if got != tc.want {
 				t.Errorf("Select(%v) = %q, want %q", tc.changed, got, tc.want)
 			}
@@ -68,7 +68,7 @@ func TestSelectedIsEmptyOnlyWhenTheDiffIs(t *testing.T) {
 		{".github/workflows/ci.yml"}, {"web/package.json"}, {"nothing/at/all.txt"},
 		{"VERSION", "docs/openapi.json"},
 	} {
-		if got := Select(provingGround(), changed).Selected; len(got) == 0 {
+		if got := Select(provingGround(), Paths("", changed)).Selected; len(got) == 0 {
 			t.Errorf("Select(%v) selected nothing; a non-empty diff must select at least one component", changed)
 		}
 	}
@@ -79,7 +79,7 @@ func TestSelectedIsEmptyOnlyWhenTheDiffIs(t *testing.T) {
 // dropped.
 func TestSkippedAccountsForEveryComponent(t *testing.T) {
 	f := provingGround()
-	res := Select(f, []string{"VERSION"})
+	res := Select(f, Paths("", []string{"VERSION"}))
 	if got, want := names(res.Selected), "tally"; got != want {
 		t.Fatalf("selected = %q, want %q", got, want)
 	}
@@ -96,7 +96,7 @@ func TestSkippedAccountsForEveryComponent(t *testing.T) {
 // The source lost a file and the destination gained one, and a rule reading
 // only the destination runs the half of the change that cannot break.
 func TestRenameSelectsBothSides(t *testing.T) {
-	got := names(Select(provingGround(), []string{"go/sdk/moved.go", "web/src/moved.ts"}).Selected)
+	got := names(Select(provingGround(), Paths("", []string{"go/sdk/moved.go", "web/src/moved.ts"})).Selected)
 	if want := "sdk,web"; got != want {
 		t.Errorf("selected = %q, want %q", got, want)
 	}
@@ -111,10 +111,10 @@ func TestComponentAtRootContainsEverything(t *testing.T) {
 		{Name: "root", Dir: ".", Runner: "go-test"},
 		{Name: "web", Dir: "web", Runner: "vitest"},
 	}}
-	if got, want := names(Select(f, []string{"main.go"}).Selected), "root"; got != want {
+	if got, want := names(Select(f, Paths("", []string{"main.go"})).Selected), "root"; got != want {
 		t.Errorf("a root-rooted component claims main.go: got %q, want %q", got, want)
 	}
-	if got, want := names(Select(f, []string{".lydite/components.yml"}).Selected), "root,web"; got != want {
+	if got, want := names(Select(f, Paths("", []string{".lydite/components.yml"})).Selected), "root,web"; got != want {
 		t.Errorf("the declaration must invalidate every component: got %q, want %q", got, want)
 	}
 }
@@ -122,8 +122,49 @@ func TestComponentAtRootContainsEverything(t *testing.T) {
 // TestDeclarationOrder: rows must read the same however the diff was ordered,
 // the same rule the scheduler follows for its own rows.
 func TestDeclarationOrder(t *testing.T) {
-	got := names(Select(provingGround(), []string{"web/src/app.ts", "VERSION", "go/api/main.go"}).Selected)
+	got := names(Select(provingGround(), Paths("", []string{"web/src/app.ts", "VERSION", "go/api/main.go"})).Selected)
 	if want := "tally,api,sdk,web"; got != want {
 		t.Errorf("selected = %q, want declaration order %q", got, want)
+	}
+}
+
+// TestOutsideTheScanRootWidens: a component directory is scan-root relative,
+// so a repository-root path that happens to spell one is not that component's
+// file. Selecting it would narrow a change lydite cannot see the consequences
+// of — ADR 0018 promises the opposite.
+func TestOutsideTheScanRootWidens(t *testing.T) {
+	f := component.File{Components: []component.Component{
+		{Name: "docs-site", Dir: "docs", Runner: "vitest"},
+		{Name: "api", Dir: "go/api", Runner: "go-test"},
+	}}
+	// Scanned with --dir source: "docs/README.md" at the repository root is
+	// not "source/docs/README.md", however alike the two read.
+	got := names(Select(f, Paths("source/", []string{"docs/README.md"})).Selected)
+	if want := "docs-site,api"; got != want {
+		t.Errorf("selected = %q, want %q — a path outside the scan root matches no component", got, want)
+	}
+	// Inside it, the same component is selected alone.
+	got = names(Select(f, Paths("source/", []string{"source/docs/README.md"})).Selected)
+	if want := "docs-site"; got != want {
+		t.Errorf("selected = %q, want %q", got, want)
+	}
+}
+
+// TestReasonNamesTheReadersOwnEdit: a component touched directly keeps that
+// path as its reason even when something else in the change widened to
+// everything. The audit line exists to be acted on, and one pointing at a
+// lockfile when the reader edited the component is worse than none.
+func TestReasonNamesTheReadersOwnEdit(t *testing.T) {
+	for _, changed := range [][]string{
+		{"web/src/app.ts", ".lydite/config.yml"},
+		{".lydite/config.yml", "web/src/app.ts"},
+	} {
+		res := Select(provingGround(), Paths("", changed))
+		if got, want := res.Reasons["web"].Path, "web/src/app.ts"; got != want {
+			t.Errorf("Select(%v): web's reason = %q, want %q", changed, got, want)
+		}
+		if got, want := res.Reasons["tally"].String(), ".lydite/config.yml (invalidator)"; got != want {
+			t.Errorf("Select(%v): tally's reason = %q, want %q", changed, got, want)
+		}
 	}
 }
