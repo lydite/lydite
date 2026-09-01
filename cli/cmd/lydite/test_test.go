@@ -669,7 +669,7 @@ func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
 		MaxConcurrent: 3,
 		Started:       4,
 		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", On: "port 5432"}},
-	}, 4, 4)
+	}, 4, 4, 4)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}

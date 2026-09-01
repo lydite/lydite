@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,6 +48,31 @@ the component's to declare.`,
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("test")
 
+			// An interrupt cancels this command's context rather than killing
+			// the process where it stands. `lydite test` starts containers and
+			// removes them in a deferred teardown, and a signal that skips
+			// those defers leaves one stack running per component that had
+			// started — holding the host ports the next run has to bind, so
+			// the leak surfaces as an unrelated failure one run later.
+			//
+			// Scoped to this command and not installed in main, because it is
+			// the only one that reports a cancelled run honestly. `scan` and
+			// `coverage` would render every killed tool as a finding, and
+			// publish a complete-looking document saying every scanner failed
+			// — a check that could not run reading as one that did, which is
+			// worse than the process dying.
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			// Unregister as soon as the first signal lands, so the second one
+			// gets the default disposition and kills the process. The handler
+			// otherwise stays installed with nothing reading its channel, and
+			// a teardown hanging on an unresponsive container daemon could not
+			// be interrupted at all.
+			go func() {
+				<-ctx.Done()
+				stop()
+			}()
+
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
@@ -60,7 +87,7 @@ the component's to declare.`,
 			// or on there being any. A repository that declares none is
 			// exactly the one whose every source file is orphaned, and a
 			// gate it never saw would be the failure it exists to catch.
-			rep.Add(orphanRow(cmd.Context(), dir, file))
+			rep.Add(orphanRow(ctx, dir, file))
 
 			selected, err := file.Select(components)
 			if err != nil {
@@ -82,7 +109,7 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
-			runComponents(cmd.Context(), dir, selected, cfg, limit, stream, rep)
+			runComponents(ctx, dir, selected, cfg, limit, stream, rep)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -208,7 +235,7 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 		rows[i] = runComponent(ctx, root, plans[i], cfg)
 	})
 
-	rep.Add(scheduleRow(outcome, len(items), limit))
+	rep.Add(scheduleRow(outcome, len(items), len(plans), limit))
 	for _, r := range rows {
 		rep.Add(r)
 	}
@@ -305,9 +332,15 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 // `unmeasured`, which does not vote, and the ones that did run passed — so
 // without a failing row a truncated run publishes a passing verdict, and the
 // gate reads green having tested part of the repository.
-func scheduleRow(outcome scheduler.Outcome, components, limit int) ui.Row {
+// dispatched is how many components reached the scheduler; components is every
+// one the run was given, including those that could not be planned. The row
+// counts the latter, because it is the row that says what the run did and a
+// denominator that quietly shed the components which failed to plan would
+// under-report it — while whether the run was cut short is a question about the
+// ones actually queued.
+func scheduleRow(outcome scheduler.Outcome, dispatched, components, limit int) ui.Row {
 	row := ui.Row{Status: ui.StatusPass, Label: "schedule"}
-	if outcome.Started < components {
+	if outcome.Started < dispatched {
 		row.Status = ui.StatusFail
 		row.Value = fmt.Sprintf("interrupted after %d of %d component(s)", outcome.Started, components)
 	} else {
@@ -502,8 +535,18 @@ type prefixWriter struct {
 	// the next write inside the production deadline.
 	delay time.Duration
 
-	mu    sync.Mutex
-	buf   []byte
+	mu  sync.Mutex
+	buf []byte
+	// gen invalidates a deadline that no longer belongs to what is pending.
+	// Timer.Stop reports false once the callback has fired, and that callback
+	// may be blocked on mu inside this very Write — so it cannot be cancelled,
+	// only ignored when it finally runs. Acting on it would flush a line that
+	// began after it was scheduled and drop the live timer's handle.
+	//
+	// The interleaving this guards cannot be forced from a test without a
+	// synchronisation hook in this type, so no test covers it; the deadline's
+	// ordinary behaviour is covered by TestTheDeadlineFollowsThePendingLine.
+	gen   uint64
 	timer *time.Timer
 }
 
@@ -526,9 +569,8 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 	// line, which is the thing buffering exists to prevent. The deadline
 	// belongs to the line that is waiting, so it restarts whenever a
 	// different one starts waiting.
-	if emitted && w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
+	if emitted {
+		w.disarm()
 	}
 	w.arm()
 	return len(p), nil
@@ -545,21 +587,35 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 // byte of it.
 func (w *prefixWriter) arm() {
 	if len(w.buf) == 0 {
-		if w.timer != nil {
-			w.timer.Stop()
-			w.timer = nil
-		}
+		w.disarm()
 		return
 	}
 	if w.timer != nil {
 		return
 	}
+	gen := w.gen
 	w.timer = time.AfterFunc(w.partialLineDelay(), func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
+		// A deadline from before the last disarm has already fired and is
+		// only now getting the lock. Acting on it would flush a line that
+		// started after it was scheduled — the mid-line split this all
+		// exists to prevent — and would drop the live timer's handle.
+		if gen != w.gen {
+			return
+		}
 		w.timer = nil
 		w.flush()
 	})
+}
+
+// disarm invalidates the pending deadline. Called with w.mu held.
+func (w *prefixWriter) disarm() {
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.gen++
 }
 
 // partialLineDelay is how long this writer waits; a test sets its own so the
@@ -577,10 +633,7 @@ func (w *prefixWriter) partialLineDelay() time.Duration {
 func (w *prefixWriter) Flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
+	w.disarm()
 	w.flush()
 }
 

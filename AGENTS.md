@@ -434,10 +434,14 @@ further once the context is done, and a component it never reached is reported
 would read as a complete run over fewer components.
 
 **The `schedule` row is how the run says what it actually did.** It carries the
-observed maximum concurrency and names each pair that shared a port. The observed
-number is the point — every assertion about port locks is satisfied by a run that
-never had two components going at once, so a report that cannot distinguish the
-two is a report that proves nothing. `.github/assert-proving-ground.py` holds the
+maximum concurrency the bound and the locks allowed, and names each pair that
+shared one. That number is the point — every assertion about port locks is
+satisfied by a run that never had two components going at once, so a report that
+cannot distinguish the two proves nothing. It counts admissions rather than
+goroutine entries, because counting when a goroutine actually starts would let a
+correct run report 1 and make the CI assertion below flaky; that two components
+genuinely overlap is forced in `internal/scheduler`'s own tests, by a barrier
+none of them can pass alone. `.github/assert-proving-ground.py` holds the
 proving ground to a maximum of at least 2 and to having serialised `tally` and
 `api` on 5432 — the components rooted at `rust/` and `go/api/`, which publish it
 under services deliberately named `postgres` and `db`, so a lock keyed on
