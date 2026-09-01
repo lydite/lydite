@@ -578,8 +578,15 @@ and another at `web/` would otherwise have a change to `.lydite/components.yml` 
 component alone. It is unexported and has no declarable form — `watch` already says "this
 outside file invalidates me" one level down, and a set a repository could empty is not a floor,
 the same argument the built-in disqualifiers win. Lockfiles, manifests and toolchain files match
-at any depth; `.lydite/**` stays anchored, because the scan root is the only place lydite reads
-configuration from.
+at any depth; `.lydite/**` and the workflow paths stay anchored, because the scan root is the
+only place lydite reads configuration from and the only place CI is defined.
+
+`.github/workflows/**` and `.github/actions/**` are on the set for a reason worth stating: **a
+component rooted at `.` claims every path, so in that repository nothing ever reaches the
+widening rule.** The safety net is switched off by one declaration, and only the invalidator set
+protects the other components — a workflow edit would otherwise select the root component alone
+and leave every other one unrun. That interaction is a real limit rather than a closed hole:
+anything at the root that is not on the set is still absorbed by a `.`-rooted component.
 
 **Selection is explicit, and never inferred.** `lydite test` with no flags always runs every
 component. Every signal for "is this a pull request" is unreliable where lydite runs — a
@@ -607,7 +614,11 @@ no interest in its contents. A path outside the scan root is not dropped: it mat
 component, and therefore widens.
 
 **A deselected component is reported, never dropped.** One `unmeasured` / `not affected` row
-each, in declaration order, plus a `select` row carrying `N of M affected` and the reason each
+each, labelled `test(<name>)` exactly as a suite row is — so every component produces exactly one
+such row whether it ran or not, and what separates them is the status. A bare name would share a
+namespace with the gate rows, and nothing forbids a component called `watch`, `select`,
+`orphans` or `schedule`; a consumer keying rows by label would then silently lose the gate. Rows
+are in declaration order, plus a `select` row carrying `N of M affected` and the reason each
 selected component was chosen. `0 of N` makes the `select` row `unmeasured` rather than `pass`:
 nothing was gated, and a gate that did not run must never render as one that did. The
 distinction travels as a **status**, so a consumer separates "0 of 4 affected" from "4 of 4
@@ -630,8 +641,10 @@ pattern at parse time, alongside `validateExcludes` — that gap existed for as 
 has, since only excludes were ever run through `pathmatch.ValidatePattern`. The `watch` row then
 holds every pattern against the tree, because the dangerous typo is syntactically perfect:
 `Makefil` is a valid pattern, and so is a bare `docs` written where `docs/**` was meant, since
-these patterns are anchored and do not float. Outside a git repository it reports `unmeasured`
-and passes, the shape `orphanRow` already has.
+these patterns are anchored and do not float. Outside a git repository — and equally when git
+lists no file at all, which is what a scan root that is itself ignored looks like — it reports
+`unmeasured` and passes, the shape `orphanRow` already has for both cases. A gate that saw no
+files must not fail a declaration that is correct.
 
 The file list is every path git knows about, not only source — a watch legitimately names a
 `Makefile`, a `VERSION` file or an OpenAPI document, none of which any component could claim.

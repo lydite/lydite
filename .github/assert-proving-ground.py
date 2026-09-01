@@ -109,27 +109,28 @@ def main_affected(path: str, checkout: str) -> int:
                     "having stopped working"
                 )
 
-    suites = {label for label in rows if label.startswith("test(")}
+    # Every component produces exactly one test(<name>) row whether it ran or
+    # not, so what separates them is the status: a component that ran and
+    # passed says 'pass', and one selection skipped says 'unmeasured'.
     for name in EXPECTED_AFFECTED:
-        if f"test({name})" not in suites:
-            failures.append(f"{name} did not run, but a change under go/api/ must select it")
-        elif rows[f"test({name})"]["status"] != "pass":
-            failures.append(f"test({name}) is {rows[f'test({name})']['status']!r}")
+        row = rows.get(f"test({name})")
+        if row is None:
+            failures.append(f"no test({name}) row, but a change under go/api/ must select {name}")
+        elif row["status"] != "pass":
+            failures.append(f"test({name}) is {row['status']!r}: {row.get('value', '')}")
     for name in EXPECTED_UNAFFECTED:
-        if f"test({name})" in suites:
-            failures.append(
-                f"{name} ran, but nothing in the change touches it — a selection that returns "
-                "every component satisfies every assertion about correctness and delivers none "
-                "of the value"
-            )
-        row = rows.get(name)
+        row = rows.get(f"test({name})")
         if row is None:
             failures.append(
-                f"no {name!r} row: a deselected component must be reported rather than dropped, "
-                "or a reader cannot tell 'not affected' from 'not declared'"
+                f"no test({name}) row: a deselected component must be reported rather than "
+                "dropped, or a reader cannot tell 'not affected' from 'not declared'"
             )
         elif row.get("status") != "unmeasured" or row.get("value") != "not affected":
-            failures.append(f"{name} row is {row!r}, want an unmeasured 'not affected' row")
+            failures.append(
+                f"test({name}) is {row!r}, want an unmeasured 'not affected' row — nothing in "
+                "the change touches it, and a selection that returns every component satisfies "
+                "every assertion about correctness while delivering none of the value"
+            )
 
     # Every watch pattern the declaration carries names a file that exists, so
     # this gate has to be silent. A failure here means either a watched file

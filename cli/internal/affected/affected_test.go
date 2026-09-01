@@ -168,3 +168,20 @@ func TestReasonNamesTheReadersOwnEdit(t *testing.T) {
 		}
 	}
 }
+
+// A component rooted at "." claims every path, so nothing in such a
+// repository ever reaches the widening rule — the safety net ADR 0018 relies
+// on is switched off by that one declaration, and only the invalidator set
+// protects the other components. A workflow change decides how every
+// component is built and run, so it is on that set.
+func TestARootComponentDoesNotSwallowAWorkflowChange(t *testing.T) {
+	f := component.File{Components: []component.Component{
+		{Name: "root", Dir: ".", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	for _, p := range []string{".github/workflows/ci.yml", ".github/actions/setup/action.yml"} {
+		if got, want := names(Select(f, Paths("", []string{p})).Selected), "root,web"; got != want {
+			t.Errorf("Select(%q) = %q, want %q — web must not be left unrun by a root component", p, got, want)
+		}
+	}
+}

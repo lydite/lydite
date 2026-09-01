@@ -132,7 +132,14 @@ jobs:
           git -C proving-ground switch --quiet -c selection-probe
           printf 'package api\n\n// The selection probe makes a diff under this component, so CI can\n// assert which components a change here selects.\n' \
             > proving-ground/go/api/selection_probe.go
-          git -C proving-ground add -A
+          # The probe file alone, never `add -A`. This step runs in the same
+          # checkout as the full run above, so a stray artefact swept into the
+          # commit would widen selection — .lydite-reports/** matches no
+          # component and a touched lockfile is an invalidator — and the
+          # assertion would fail on the harness rather than on lydite. The
+          # proving ground gitignores its report directory today, but that is
+          # another repository's file to change.
+          git -C proving-ground add go/api/selection_probe.go
           git -C proving-ground commit --quiet -m "selection probe"
           status=0
           /tmp/lydite test --dir proving-ground --affected --json > affected.json || status=$?

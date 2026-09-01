@@ -44,6 +44,12 @@ change that can affect all of them.
   not: a repository able to drop `.lydite/**` could make a change to its own
   component declaration run nothing. Not extensible because `watch` already says
   "this outside file invalidates me" one level down.
+- **A component rooted at `.` switches the widening rule off.** It claims every
+  path, so nothing in that repository is ever unmatched, and only the
+  invalidator set keeps a change at the root from selecting the root component
+  alone. `.github/workflows/**` and `.github/actions/**` are on the set for
+  that reason. This is a limit of the rule rather than a hole closed: anything
+  at the root not on the set is absorbed.
 - **Bluntness is accepted twice.** A `web/package-lock.json` change selects
   every component, not just `web`; and in a monorepo scanned with `--dir source`,
   any change outside that subtree selects everything. Both cost time and fail

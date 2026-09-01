@@ -2,6 +2,9 @@ package main
 
 import (
 	"os/exec"
+	"path/filepath"
+
+	"lydite/lydite/internal/component"
 	"strings"
 	"testing"
 )
@@ -47,6 +50,15 @@ func affectedRepo(t *testing.T) string {
 	run(root, "commit", "--quiet", "-m", "base")
 	run(root, "push", "--quiet", "origin", "main")
 	return root
+}
+
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 }
 
 func commitChange(t *testing.T, root, rel, body string) {
@@ -96,7 +108,7 @@ func TestAffectedSelectsAWatcherAlone(t *testing.T) {
 	}
 	// The deselected component is present and marked, which is what lets a
 	// reader tell "not affected" from "not declared".
-	skipped := jsonRowByLabel(t, out, "a")
+	skipped := jsonRowByLabel(t, out, "test(a)")
 	if skipped.Status != "unmeasured" || skipped.Value != "not affected" {
 		t.Errorf("a = %+v, want an unmeasured 'not affected' row", skipped)
 	}
@@ -136,7 +148,7 @@ func TestAffectedOnAnEmptyDiffIsUnmeasuredNotPassed(t *testing.T) {
 		t.Errorf("select = %q, want the count", got.Value)
 	}
 	for _, name := range []string{"a", "b"} {
-		if r := jsonRowByLabel(t, out, name); r.Status != "unmeasured" {
+		if r := jsonRowByLabel(t, out, "test("+name+")"); r.Status != "unmeasured" {
 			t.Errorf("%s status = %q, want unmeasured", name, r.Status)
 		}
 	}
@@ -216,5 +228,72 @@ func TestWatchGateOutsideAGitRepositoryIsUnmeasured(t *testing.T) {
 	out, _ := runTestCmd(t, root, "--json")
 	if got := jsonRowByLabel(t, out, "watch"); got.Status != "unmeasured" {
 		t.Errorf("watch = %+v, want unmeasured outside a repository", got)
+	}
+}
+
+// A gate that could not run must never blame the declaration. A scan root git
+// lists no file for — one that is itself ignored, a vendored checkout, a --dir
+// pointed at build output — exits zero with an empty listing, and every watch
+// pattern would otherwise read as covering nothing.
+func TestWatchGateOnAnIgnoredScanRootIsUnmeasured(t *testing.T) {
+	root := gitRepo(t, map[string]string{
+		".gitignore":                      "vendored/\n",
+		"vendored/.lydite/components.yml": "components:\n  - name: a\n    dir: moda\n    runner: go-test\n    watch: [\"Makefile\"]\n",
+		"vendored/Makefile":               "all:\n",
+		"vendored/moda/go.mod":            "module moda\n\ngo 1.26\n",
+		"vendored/moda/x.go":              "package moda\n",
+	})
+	out, _ := runTestCmd(t, filepath.Join(root, "vendored"), "--json")
+	got := jsonRowByLabel(t, out, "watch")
+	if got.Status != "unmeasured" {
+		t.Errorf("watch = %+v, want unmeasured — the gate saw no files and cannot have an opinion", got)
+	}
+}
+
+// A run that selected nothing has components declared. Saying otherwise makes
+// the report contradict itself about the one thing it exists to state.
+func TestAnEmptySelectionIsNotAnEmptyDeclaration(t *testing.T) {
+	root := affectedRepo(t)
+	commitChange(t, root, "", "")
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no components declared") {
+		t.Errorf("two components are declared; the report says none are:\n%s", out)
+	}
+}
+
+// Component names are unique among themselves but share the label namespace
+// with every gate row, and nothing forbids a component called "watch". A
+// consumer keying rows by label would silently lose one of the two, and the
+// gate row is the one that would go.
+func TestADeselectedComponentCannotCollideWithAGateRow(t *testing.T) {
+	root := affectedRepo(t)
+	// Rename component "b" to "watch", which is also a gate's label. The
+	// declaration change goes into the base: .lydite/** is an invalidator, so
+	// carrying it in the probe commit would widen to every component and the
+	// test would assert nothing.
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: a\n    dir: moda\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: watch\n    dir: modb\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"    watch: [\"docs/spec.json\"]\n")
+	commitChange(t, root, "", "")
+	gitIn(t, root, "push", "--quiet", "origin", "HEAD:main")
+	commitChange(t, root, "moda/x.go", "package moda\n\n// Foo is what the test exercises.\nfunc Foo() int { return 1 }\n\n// Bar is new, and keeps the suite passing.\nfunc Bar() {}\n")
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	// The gate row survives, carrying its own value rather than the
+	// component's.
+	if got := jsonRowByLabel(t, out, "watch"); got.Status != "pass" || got.Value == "not affected" {
+		t.Errorf("watch gate row = %+v, want the gate's own row, not the component's", got)
+	}
+	if got := jsonRowByLabel(t, out, "test(watch)"); got.Value != "not affected" {
+		t.Errorf("test(watch) = %+v, want the deselected component's row", got)
 	}
 }

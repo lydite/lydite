@@ -126,19 +126,32 @@ the component's to declare.`,
 				}
 				selected = res.Selected
 				rep.Add(selectRow(res, len(file.Components)))
+				// The same label shape a suite row takes, so every
+				// component produces exactly one test(<name>) row whether it
+				// ran or not. A bare name would collide with a gate row for
+				// a component called "watch", "select", "orphans" or
+				// "schedule" — nothing forbids those — and a consumer keying
+				// rows by label silently loses the gate.
 				for _, c := range res.Skipped {
-					rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: c.Name, Value: "not affected"})
+					rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"})
 				}
 			}
 			if len(selected) == 0 {
-				// Through the report rather than around it: --json promises
-				// stdout carries a document and nothing else, and a bare
-				// sentence printed here is unparseable output.
-				rep.Add(ui.Row{
-					Status: ui.StatusUnmeasured,
-					Label:  "test",
-					Value:  "no components declared in " + component.FileName,
-				})
+				// Only when the declaration is genuinely empty. A run that
+				// selected nothing has components declared and has already
+				// said so through its own select row, and repeating the
+				// sentence here would have the report contradict itself
+				// about the one thing it exists to state.
+				if len(file.Components) == 0 {
+					// Through the report rather than around it: --json
+					// promises stdout carries a document and nothing else,
+					// and a bare sentence printed here is unparseable output.
+					rep.Add(ui.Row{
+						Status: ui.StatusUnmeasured,
+						Label:  "test",
+						Value:  "no components declared in " + component.FileName,
+					})
+				}
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
@@ -156,9 +169,6 @@ the component's to declare.`,
 	// exactly the drift a flag avoids.
 	cmd.Flags().StringVar(&concurrency, "concurrency", strconv.Itoa(defaultConcurrency),
 		`how many components to run at once, or "max" for one slot per selected component`)
-	// Every run captures; this only adds the terminal. A suite that hangs
-	// prints nothing until it is killed, and its log is written but not yet
-	// interesting — watching it is the case a captured file cannot serve.
 	// Off by default, and never inferred. Every signal for "is this a pull
 	// request" is unreliable where lydite runs — a detached HEAD, a shallow
 	// clone, a fork with no upstream fetched, a default branch not called
@@ -167,6 +177,9 @@ the component's to declare.`,
 	// so; a bare `lydite test` always runs every component.
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
 		"run only the components the change against the merge-base could have broken")
+	// Every run captures; this only adds the terminal. A suite that hangs
+	// prints nothing until it is killed, and its log is written but not yet
+	// interesting — watching it is the case a captured file cannot serve.
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	return cmd
 }
@@ -1041,6 +1054,15 @@ func watchRow(ctx context.Context, dir string, file component.File) ui.Row {
 	}
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
+	}
+	// A scan root git lists nothing for — one that is itself ignored, a
+	// vendored checkout, a --dir pointed at build output — sits inside a work
+	// tree and exits zero. Every pattern would read as covering no file, and
+	// the gate would fail a declaration that is correct while claiming the
+	// author had written a typo. The same case orphanRow reports through
+	// ErrNoFiles.
+	if len(files) == 0 {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no files found"}
 	}
 	unmatched := affected.UnmatchedWatch(file, files)
 	if len(unmatched) == 0 {

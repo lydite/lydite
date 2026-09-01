@@ -58,6 +58,13 @@ var invalidators = []string{
 	// from the orphan gate, and every gate knob.
 	".lydite/**",
 
+	// What CI runs, and how. A component rooted at "." claims every path, so
+	// in such a repository nothing ever reaches the widening rule and only
+	// this set protects the other components — a workflow edit would
+	// otherwise select the root component alone and leave every other
+	// component unrun.
+	".github/workflows/**", ".github/actions/**",
+
 	// Lockfiles. What a suite resolves to is decided here, so a change is
 	// felt by every component the tree installs for, not only the one whose
 	// directory the file sits in.
