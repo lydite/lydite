@@ -362,3 +362,31 @@ func TestRowsAreInDeclarationOrderAcrossSkips(t *testing.T) {
 		t.Errorf("rows are %q, want declaration order %q", got, want)
 	}
 }
+
+// A repository that declares no components has nothing to select from, which
+// is not the same as a change that selected nothing. Running selection anyway
+// produced a select row claiming "no changes against the merge-base" beside a
+// row saying no components are declared — two rows contradicting each other
+// about the one thing the report exists to state — and paid a git fetch to do
+// it, which on a shallow or fork checkout turned a renderable report into a
+// hard error before any row was written.
+func TestAffectedWithNoComponentsDeclaredSelectsNothingAndFetchesNothing(t *testing.T) {
+	root := affectedRepo(t)
+	write(t, root, component.FileName, "components: []\n")
+	commitChange(t, root, "", "")
+	gitIn(t, root, "push", "--quiet", "origin", "HEAD:main")
+	commitChange(t, root, "README.md", "changed\n")
+	// No remote at all: selection must not reach for one.
+	gitIn(t, root, "remote", "remove", "origin")
+
+	out, _ := runTestCmd(t, root, "--affected", "--json")
+	if strings.Contains(out, "\"label\": \"select\"") {
+		t.Errorf("a declaration with no components produced a select row:\n%s", out)
+	}
+	if strings.Contains(out, "no changes against the merge-base") {
+		t.Errorf("the report claims the diff was empty; README.md changed:\n%s", out)
+	}
+	if got := jsonRowByLabel(t, out, "test"); !strings.Contains(got.Value, "no components declared") {
+		t.Errorf("test row = %+v, want it to name the empty declaration", got)
+	}
+}

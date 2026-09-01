@@ -127,7 +127,14 @@ the component's to declare.`,
 			// the whole set.
 			var skipped map[string]ui.Row
 			var ordered []component.Component
-			if onlyAffected {
+			// Nothing to select from is not the same as a change that
+			// selected nothing, and selection must not be asked which it is.
+			// Running it would render a select row claiming the diff was
+			// empty beside a row saying no components are declared — two rows
+			// contradicting each other — and would pay a git fetch to do it,
+			// which on a shallow or fork checkout turns a report that renders
+			// into a hard error before any row is written.
+			if onlyAffected && len(file.Components) > 0 {
 				var res affected.Result
 				res, err = selectAffected(ctx, dir, file)
 				if err != nil {
@@ -1027,8 +1034,13 @@ func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) 
 func selectAffected(ctx context.Context, dir string, file component.File) (affected.Result, error) {
 	base, err := gitstate.BaseSHA(ctx, dir)
 	if err != nil {
-		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the default branch, and it could not be resolved: %w"+
-			"\n       a shallow checkout is the usual cause; fetch with depth 0", err)
+		// Both causes, because the advice for one does not help the other
+		// and gitstate.BaseSHA resolves origin/main and nothing else — which
+		// is the same assumption --affected exists to avoid making about the
+		// event, made here about the branch name.
+		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with origin/main, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0 —"+
+			"\n       and a default branch not named main is the other", err)
 	}
 	// On the default branch the merge-base is HEAD itself, so there is no
 	// change to select by and a computed selection narrows to nothing. ADR

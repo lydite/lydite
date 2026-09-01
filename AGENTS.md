@@ -633,6 +633,12 @@ ADR 0016 requires the default-branch run to be complete, since a forgotten `depe
 caught at merge or never, so the rule is enforced in the command rather than left to every caller
 to remember. `0 of N` remains reachable, by a commit whose tree matches its base.
 
+Selection does not run at all for a repository that declares no components. Nothing to select
+from is not the same as a change that selected nothing, and asking selection which it is produced
+a `select` row claiming the diff was empty beside a row saying no components are declared — and
+paid a `git fetch` to do it, which on a shallow or fork checkout turned a report that renders into
+a hard error before a row was written.
+
 `0 of N` makes the `select` row `unmeasured` rather than `pass`:
 nothing was gated, and a gate that did not run must never render as one that did. The
 distinction travels as a **status**, so a consumer separates "0 of 4 affected" from "4 of 4
