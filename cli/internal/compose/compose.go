@@ -168,6 +168,17 @@ func (f File) HostPorts(names []string) []int {
 	return out
 }
 
+// sortedNames orders a service set, so a file with two offenders names the
+// same one on every run.
+func sortedNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // closure is the named services plus everything they depend on, transitively.
 func (f File) closure(names []string) map[string]bool {
 	byName := make(map[string]Service, len(f.Services))
@@ -372,9 +383,24 @@ func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.W
 		wait = component.WaitHealthy
 	}
 	for _, name := range up {
+		if _, ok := file.Service(name); !ok {
+			return nil, fmt.Errorf("%s: compose.up names %q, which %s does not declare", c.Name, name, path)
+		}
+	}
+	// Over the depends_on closure and not the named list, because that is what
+	// compose starts and what `up --wait` waits for. A named service with a
+	// healthcheck whose database has none is treated as ready the moment its
+	// container is running, so the suite races the database — the flakiness
+	// this refusal exists to prevent, landing on the test rather than on the
+	// wait.
+	for _, name := range sortedNames(file.closure(up)) {
 		svc, ok := file.Service(name)
 		if !ok {
-			return nil, fmt.Errorf("%s: compose.up names %q, which %s does not declare", c.Name, name, path)
+			// A depends_on naming a service the file does not declare is
+			// compose's error to report, not lydite's: rejecting it here would
+			// make lydite's reading of a file it does not own the ceiling on
+			// what that file may say.
+			continue
 		}
 		// Refused, not degraded to "started". A suite racing a database that
 		// is not yet listening is the flakiest thing a pipeline can contain,

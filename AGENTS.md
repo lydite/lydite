@@ -424,14 +424,27 @@ their own slot and the rows are added after the wait, so two runs of the same
 declaration produce the same document; completion order would put this run's
 timing into it.
 
-**An interrupt cancels the context rather than killing the process.** `main.go`
-uses `signal.NotifyContext`, so a component already running still reaches its
-deferred teardown — a signal that skipped those defers would leave one stack per
-started component holding the ports the next run has to bind, and the leak would
-surface as an unrelated failure one run later. The scheduler starts nothing
-further once the context is done, and a component it never reached is reported
-`unmeasured` with `not run` rather than dropped: a truncated run that omitted rows
-would read as a complete run over fewer components.
+**An interrupt cancels the context rather than killing the process.**
+`newTestCmd`'s `RunE` installs `signal.NotifyContext` — **in the command, not in
+`main.go`**, because `test` is the only command that reports a cut-short run
+honestly. `scan` and `coverage` would render every killed tool as a finding and
+publish a document saying every scanner failed, so they keep dying on the signal.
+It is scoped here so a component already running reaches its deferred teardown: a
+signal that skipped those defers leaves one stack per started component holding
+the ports the next run has to bind, and the leak surfaces as an unrelated failure
+one run later. The handler unregisters as soon as the first signal lands, so a
+second interrupt gets the default disposition and kills a teardown that has
+itself hung.
+
+**Nothing about a cancelled run is reported as a result.** The scheduler starts
+nothing further once the context is done, and a component it never reached is
+`unmeasured`/`not run` rather than dropped — a truncated run that omitted rows
+would read as a complete run over fewer components. A component that *had*
+started is killed mid-suite and exits non-zero, so it becomes
+`unmeasured`/`not completed` too: under cancellation lydite cannot tell a suite
+that failed from one that was killed, and four red rows blaming a CI job timeout
+on the repository's tests is the worst available answer. Only a component that
+had already passed keeps its result, because that one is not in doubt.
 
 **The `schedule` row is how the run says what it actually did.** It carries the
 maximum concurrency the bound and the locks allowed, and names each pair that

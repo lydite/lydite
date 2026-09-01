@@ -665,11 +665,11 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 // The row says what the scheduler did, because the observed concurrency is
 // what separates a scheduler that ran from one that only claims to.
 func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
-	row := scheduleRow(scheduler.Outcome{
+	row := scheduleRow(context.Background(), scheduler.Outcome{
 		MaxConcurrent: 3,
 		Started:       4,
 		Conflicts:     []scheduler.Conflict{{A: "go/api", B: "rust", On: "port 5432"}},
-	}, 4, 4, 4)
+	}, 4, 4)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -810,4 +810,56 @@ func TestTheDeadlineFollowsThePendingLine(t *testing.T) {
 	if len(lines) != 1 || lines[0] != "PASS ok" {
 		t.Fatalf("lines = %q, want only the completed line: the second was split by the first line's deadline", lines)
 	}
+}
+
+// A run cancelled once every component had started kills each suite mid-flight,
+// so each exits non-zero. Reporting those as test failures blames a CI job
+// timeout on the repository's tests, in the document the PR comment reads —
+// and the schedule row would pass, because nothing was left unstarted.
+func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/slow_test.go",
+		"package fixture\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
+	declared := []component.Component{{Name: "slow", Dir: "mod", Runner: runner.GoTest}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rep := ui.NewReport("test")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runComponents(ctx, root, declared, config.Default(), 1, false, rep)
+	}()
+	// Cancel once the suite is genuinely running, so the row under test comes
+	// from a killed suite rather than from one that never started.
+	waitForLog(t, root, "slow")
+	cancel()
+	<-done
+
+	row := rowByLabel(t, rep, "test(slow)")
+	if row.Status != ui.StatusUnmeasured || row.Value != "not completed" {
+		t.Errorf("row = %+v, want the killed suite reported as unmeasured, not as a test failure", row)
+	}
+	schedule := rowByLabel(t, rep, "schedule")
+	if schedule.Status != ui.StatusFail {
+		t.Errorf("schedule = %+v, want a failure: the run was cut short", schedule)
+	}
+	if rep.ExitCode() != 1 {
+		t.Errorf("exit = %d, want 1", rep.ExitCode())
+	}
+}
+
+// waitForLog blocks until a component's log exists and has content, which is
+// the first thing its suite produces — so the test cancels a run that is
+// genuinely under way rather than one that has not begun.
+func waitForLog(t *testing.T, root, name string) {
+	t.Helper()
+	path := filepath.Join(root, runner.ReportDir, name, "test.log")
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if fi, err := os.Stat(path); err == nil && fi.Size() >= 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the component never started")
 }

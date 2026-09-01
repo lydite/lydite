@@ -235,7 +235,33 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 		rows[i] = runComponent(ctx, root, plans[i], cfg)
 	})
 
-	rep.Add(scheduleRow(outcome, len(items), len(plans), limit))
+	// A cancelled run kills every suite it had started, so each one exits
+	// non-zero and would otherwise be reported as a test failure — four
+	// components' worth of red rows attributing a CI job timeout to the
+	// repository's tests, in the document the PR comment reads. Under
+	// cancellation lydite cannot tell a suite that failed from one that was
+	// killed, and saying so is the only honest answer. A component that had
+	// already passed keeps its result, because that one is not in doubt.
+	if ctx.Err() != nil {
+		for i, r := range rows {
+			// Only a failing row is in doubt. A component that had already
+			// passed produced a real result, and one that never started
+			// already says so — rewriting that would tell a reader a
+			// component did not finish something it never began.
+			if r.Status != ui.StatusFail {
+				continue
+			}
+			rows[i] = ui.Row{
+				Status: ui.StatusUnmeasured,
+				Label:  r.Label,
+				Value:  "not completed",
+				Detail: []string{"the run was interrupted before this component finished"},
+				Log:    r.Log,
+			}
+		}
+	}
+
+	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
 	for _, r := range rows {
 		rep.Add(r)
 	}
@@ -305,9 +331,28 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 			// component that failed — the plan stays runnable instead, and
 			// the scheduler starts nothing on a cancelled context, so it
 			// lands on the `not run` row where it belongs.
-			if ctx.Err() == nil {
+			p.ready = false
+			if ctx.Err() != nil {
+				// Not the compose error: a probe runs candidate `docker
+				// compose version` invocations under the run's context, so an
+				// interrupt kills every one of them and looks exactly like a
+				// machine with no container runtime. Reporting that would be
+				// a confident wrong answer about the machine.
+				//
+				// Marked unrunnable rather than left runnable-with-no-stack,
+				// which is byte-for-byte the state of a component that
+				// declares no services at all — safe only for as long as the
+				// scheduler refuses to admit anything on a cancelled context,
+				// and a suite started without the database it declared is the
+				// one outcome worse than not running it.
+				p.row = ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "test(" + c.Name + ")",
+					Value:  "not run",
+					Detail: []string{"the run ended before this component started"},
+				}
+			} else {
 				p.row = failure("test("+c.Name+")", p.log, err.Error(), "services not started", "")
-				p.ready = false
 			}
 			plans[i] = p
 			continue
@@ -332,15 +377,19 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 // `unmeasured`, which does not vote, and the ones that did run passed — so
 // without a failing row a truncated run publishes a passing verdict, and the
 // gate reads green having tested part of the repository.
-// dispatched is how many components reached the scheduler; components is every
-// one the run was given, including those that could not be planned. The row
-// counts the latter, because it is the row that says what the run did and a
-// denominator that quietly shed the components which failed to plan would
-// under-report it — while whether the run was cut short is a question about the
-// ones actually queued.
-func scheduleRow(outcome scheduler.Outcome, dispatched, components, limit int) ui.Row {
+// components is every component the run was given, including any that could
+// not be planned. Both halves of the ratio come from that one set: a component
+// whose stack would not load never started either, so `Started of components`
+// describes a real pair of numbers, where mixing in the count that reached the
+// scheduler would describe no set at all.
+//
+// Cancellation and not `Started < components` is what makes this fail. A run
+// interrupted once everything had started has nothing left unstarted, and that
+// is exactly the run whose components were all killed mid-suite — the case
+// most in need of a row saying the run was cut short.
+func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, limit int) ui.Row {
 	row := ui.Row{Status: ui.StatusPass, Label: "schedule"}
-	if outcome.Started < dispatched {
+	if ctx.Err() != nil {
 		row.Status = ui.StatusFail
 		row.Value = fmt.Sprintf("interrupted after %d of %d component(s)", outcome.Started, components)
 	} else {
