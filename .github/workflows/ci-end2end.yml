@@ -60,6 +60,11 @@ jobs:
         with:
           repository: lydite/proving-ground
           path: proving-ground
+          # --affected resolves a merge-base against origin/main, which a
+          # shallow checkout cannot reach. lydite refuses rather than quietly
+          # widening or narrowing, so without this the selection step below
+          # fails with exactly the message a consumer would get.
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -103,6 +108,37 @@ jobs:
           echo "lydite test exited $status"
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
+
+      # Selection has to be shown to have selected. A run that narrowed
+      # wrongly and a run that narrowed correctly are both green and both
+      # faster, so the assertion names the components that must NOT have run
+      # as well as the ones that must — a selection returning everything
+      # satisfies every claim about correctness and delivers none of the value.
+      #
+      # The probe touches go/api/, which reaches sdk and web only through the
+      # declared dependency edge: their clients are generated from the spec api
+      # emits, across three languages, and no build tool derives that. This is
+      # the case lydite's own unit tests cannot establish, because they supply
+      # the declaration they then assert against.
+      #
+      # It costs one extra run of three of the four components. The fourth
+      # case — a lockfile selecting everything — is deliberately not run here:
+      # it is exactly the full run the step above already performs, so paying
+      # for it twice would buy an assertion the unit tests already hold.
+      - name: lydite test --affected (proving ground)
+        run: |
+          git -C proving-ground config user.email ci@lydite.invalid
+          git -C proving-ground config user.name "lydite ci"
+          git -C proving-ground switch --quiet -c selection-probe
+          printf 'package api\n\n// The selection probe makes a diff under this component, so CI can\n// assert which components a change here selects.\n' \
+            > proving-ground/go/api/selection_probe.go
+          git -C proving-ground add -A
+          git -C proving-ground commit --quiet -m "selection probe"
+          status=0
+          /tmp/lydite test --dir proving-ground --affected --json > affected.json || status=$?
+          echo "lydite test --affected exited $status"
+          cat affected.json
+          python3 .github/assert-proving-ground.py --affected affected.json proving-ground
 
       # Each component's whole output, for when the tail under its row is not
       # enough. lydite captures rather than streams, so this is the only copy —
