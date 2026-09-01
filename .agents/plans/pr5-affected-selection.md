@@ -19,8 +19,8 @@ root; run all go and golangci-lint commands from there.
 **Verify steps 1, 2 and 4 are merged first.** Step 1 (#39) carries
 `internal/component`, `internal/runner`, `internal/compose` and `lydite test`.
 Step 2 (#42) carries `internal/orphan`, `internal/pathmatch` and the `excludes`
-key. Step 4 carries `internal/scheduler`, `--concurrency`, the `schedule` row
-and the shard model in
+key. Step 4 (#44) carries `internal/scheduler`, `--concurrency`, the `schedule`
+row and the shard model in
 [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md). If any
 is missing, stop and say so.
 
@@ -74,6 +74,12 @@ Yours to settle in the challenge interview, with a recommendation for each:
 - **How selection is triggered.** A flag, an inferred base, or the presence of a
   merge-base. `gitstate.BaseSHA` already exists; what must not happen is a
   default that silently narrows a local `lydite test` into running nothing.
+- **What selection hands the scheduler.** `runComponents` builds one
+  `scheduler.Item` per selected component through `itemFor`, and the `schedule`
+  row's denominator is every component the run was given. Decide whether a
+  deselected component is absent from the report or present and marked, and
+  note that the second is what lets a reader tell "not affected" from "not
+  declared".
 - **How a run that selected nothing reports.** This is the whole risk (see
   below) and the answer is not "exit 0 quietly".
 - **What a rename, a deletion, and a new directory do.** A component whose `dir`
@@ -105,6 +111,51 @@ both produce a green run in less time, which is what everyone wants to see.
 selection that returns everything passes every test about correctness and
 delivers none of the value; a selection that returns nothing passes every test
 about speed and none about correctness. Both need to fail a test.
+
+### What step 4 learned about it, at a cost of seven review rounds
+
+Step 4 went through seven rounds of `/code-review` and every round found
+something. None of it was caught by `go build`, `go test -race` or
+`golangci-lint`, all of which were clean the entire time. Read this before
+assuming a green gate means anything here.
+
+- **Fixing the shape in one place does not fix it.** "An interrupted run reads
+  as a pass" was found and fixed four times over: first in the process exit
+  code, then again in the `--json` verdict — which is the surface every
+  consumer is told to read — then again in `scan` and `coverage`, which a
+  signal handler installed in `main.go` had silently changed, then again for
+  suites killed mid-flight, whose non-zero exits read as test failures.
+  Each fix was correct and each covered one path. **When you fix an instance,
+  enumerate the other layers the same question is asked at.**
+- **Two of the tests written for that step were vacuous, and both looked
+  fine.** One asserted that a port-conflicting pair was serialised and passed
+  with the port lock removed entirely. One replaced `PATH` by *prepending* a
+  temp directory, so the runtime it meant to hide stayed resolvable. Neither
+  was found by reading; both were found by deleting the code under test and
+  watching the test pass anyway.
+- **So: injecting the defect is the only thing that establishes a test.** For
+  every assertion that matters, break the thing on purpose, confirm the test
+  fails, and restore. Confirm it reports a *failure* — one injection here
+  printed "no tests to run", because an earlier edit had silently deleted the
+  test it was checking.
+- **Verify a claim against the real repository, not against the prompt.** The
+  CI assertion for step 4 named the two colliding components `go/api` and
+  `rust`, which are their *directories*; the components are `api` and `tally`.
+  A constant naming something that does not exist matches nothing, and an
+  assertion that matches nothing passes. Only running it exposed that.
+- **A comment that claims a property is a claim to check.** One comment stated
+  that `signal.NotifyContext` restores the default disposition after the first
+  signal. It does not — reading `$GOROOT/src/os/signal/signal.go` showed the
+  handler stays registered — so the safety it promised did not exist.
+- **A review finding is not automatically right.** One round reported that an
+  interactive Ctrl-C still leaks containers, because the signal reaches the
+  whole process group. It does not: a group signal only reaches processes alive
+  at that instant, and the teardown child is spawned afterwards. Reproducing it
+  took ten minutes and saved a pointless fix. Check before you act.
+- **A timing-dependent test is a defect you are choosing to ship.** Two of step
+  4's tests had fifty-millisecond margins and were rewritten to be driven by
+  synchronisation instead. Where an assertion genuinely cannot avoid a clock,
+  make the *failure* the thing that times out, never the pass.
 
 ## Validate it against the proving ground
 
@@ -172,17 +223,17 @@ anything itself.
 
 ## Working mode
 
-- Verify a claim before making it. Step 4's CI assertion named the wrong two
-  components — it used the directory names from the prompt rather than the
-  component names in `components.yml` — and only running it against the real
-  repository showed that. A constant naming something that does not exist
-  matches nothing, and an assertion that matches nothing passes.
+- Verify a claim before making it, against the repository rather than against
+  this file. See the section above for how step 4 learned that.
 - Run it against a real diff, not a described one. `git diff` output over a
   branch you actually made is the input; a hand-written path list is a fixture
   that agrees with whatever the code does.
 - Run `/code-review` before proposing the PR, and again after acting on it.
-  Steps 2 and 4 both went through review rounds that found real defects in work
-  that built, tested and linted clean.
+  Keep going while rounds still return findings that change behaviour — step 4
+  needed seven, and rounds five and six each found a place the previous fix had
+  not reached. Stop when what comes back is wording and test robustness rather
+  than behaviour, and say plainly that the trend is the reason rather than
+  claiming the work is clean.
 - Prefer one shared implementation over two that agree today. `internal/pathmatch`,
   `internal/gitstate` and `internal/scheduler` all exist for that reason, and
   selection touches all three.
