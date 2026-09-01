@@ -8,10 +8,11 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 )
 
 // Rename is a path the change moves, from its old location to its new one.
-type Rename struct{ From, To string }
+type Rename = gitdiff.Rename
 
 // DiffLine is one line the change introduces or removes, with the file it
 // landed in.
@@ -47,28 +48,6 @@ type Change struct {
 	Removed []DiffLine
 }
 
-// diffConfig pins every git setting that decides what a diff says, because
-// each one is settable in a user or global gitconfig lydite does not control
-// and each one silently changes what the gate sees.
-//
-//   - core.quotePath: without it ".github/workflows/déploy.yml" arrives
-//     wrapped in quotes with escaped bytes, so a prefix test against
-//     ".github/workflows/" fails and that veto never fires — while a "**"
-//     pattern still matches the mangled string, so an exemption still covers
-//     it.
-//   - diff.relative: the commands run with cmd.Dir set to --dir, so this
-//     scopes the diff to that subtree and strips the prefix from what
-//     survives. In a monorepo scanned with --dir source it drops
-//     .github/workflows entirely, which is the one path Change's doc comment
-//     promises cannot be missed.
-//   - diff.mnemonicPrefix: emits "w/" instead of "b/", which the patch
-//     header parser would not recognise.
-var diffConfig = []string{
-	"-c", "core.quotePath=false",
-	"-c", "diff.relative=false",
-	"-c", "diff.mnemonicPrefix=false",
-}
-
 // Changes reads the diff between base and HEAD.
 //
 // Working-tree state is deliberately excluded. The verdict has to be the same
@@ -81,13 +60,7 @@ var diffConfig = []string{
 // here is how the gate reads a diff of nothing and passes everything; see
 // cmd/lydite's resolveReviewBase.
 func Changes(ctx context.Context, dir, base string) (Change, error) {
-	nameArgs := append(append([]string{}, diffConfig...),
-		"diff", "--name-status", "-M", base+"..HEAD")
-	names := executil.RunQuiet(ctx, dir, "git", nameArgs...)
-	if !names.Ok() {
-		return Change{}, fmt.Errorf("git diff --name-status %s..HEAD: %w", base, names.Err)
-	}
-	paths, deleted, renamed, err := parseNameStatus(names.Output)
+	touched, err := gitdiff.Changed(ctx, dir, base)
 	if err != nil {
 		return Change{}, err
 	}
@@ -101,7 +74,7 @@ func Changes(ctx context.Context, dir, base string) (Change, error) {
 	//
 	// -U0 drops context lines, so every "+" line inside a hunk is one the
 	// change actually introduced.
-	patchArgs := append(append([]string{}, diffConfig...),
+	patchArgs := append(append([]string{}, gitdiff.Config...),
 		"diff", "-M", "--text", "--unified=0", base+"..HEAD")
 	patch := executil.RunQuiet(ctx, dir, "git", patchArgs...)
 	if !patch.Ok() {
@@ -111,45 +84,10 @@ func Changes(ctx context.Context, dir, base string) (Change, error) {
 	if err != nil {
 		return Change{}, err
 	}
-	return Change{Paths: paths, Deleted: deleted, Renamed: renamed, Added: added, Removed: removed}, nil
-}
-
-// parseNameStatus turns `git diff --name-status -M` into the set of paths a
-// change touches, plus the subset it deletes.
-//
-// A rename contributes *both* of its paths. Counting only the destination
-// would let a file be moved out of an exempt tree — or into one — while the
-// exemption still matched, and moving a file between trees is precisely the
-// kind of change whose safety depends on where it came from.
-func parseNameStatus(out string) (paths, deleted []string, renamed []Rename, err error) {
-	seen := map[string]bool{}
-	add := func(p string) {
-		if p != "" && !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
-		}
-	}
-	scanner := bufio.NewScanner(strings.NewReader(out))
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), "\t")
-		if len(fields) < 2 || fields[0] == "" {
-			continue
-		}
-		for _, p := range fields[1:] {
-			add(p)
-		}
-		switch {
-		case fields[0] == "D":
-			deleted = append(deleted, fields[1])
-		case strings.HasPrefix(fields[0], "R") && len(fields) >= 3:
-			renamed = append(renamed, Rename{From: fields[1], To: fields[2]})
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("reading git diff --name-status: %w", err)
-	}
-	return paths, deleted, renamed, nil
+	return Change{
+		Paths: touched.All, Deleted: touched.Deleted, Renamed: touched.Renamed,
+		Added: added, Removed: removed,
+	}, nil
 }
 
 // parseDiffLines extracts the lines a patch adds and removes, and fails
