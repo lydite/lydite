@@ -185,3 +185,29 @@ func TestARootComponentDoesNotSwallowAWorkflowChange(t *testing.T) {
 		}
 	}
 }
+
+// An exclude does not narrow selection, and that is deliberate.
+//
+// It states that no component *tests* a path, which is not the same as
+// nothing depending on it: a file under no component's directory can still be
+// imported into one, and the proving ground's own excluded generated/client.ts
+// is derived from a spec and consumed by a component. Reading one declaration
+// as the answer to two questions is the mistake the orphan gate already
+// refuses to make with rust.enabled — and an exclude that narrowed would let a
+// repository make changes to a path run nothing at all, by editing the file
+// whose history is meant to record what goes untested.
+//
+// The cost is real and on the safe side: a change to an excluded path runs
+// every component.
+func TestAnExcludeDoesNotNarrowSelection(t *testing.T) {
+	f := component.File{
+		Components: []component.Component{
+			{Name: "a", Dir: "moda", Runner: "go-test"},
+			{Name: "b", Dir: "modb", Runner: "go-test"},
+		},
+		Excludes: []string{"scripts/**"},
+	}
+	if got, want := names(Select(f, Paths("", []string{"scripts/seed.ts"})).Selected), "a,b"; got != want {
+		t.Errorf("selected = %q, want %q — an exclude says nobody tests the path, not that nothing depends on it", got, want)
+	}
+}

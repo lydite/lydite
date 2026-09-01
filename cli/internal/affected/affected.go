@@ -101,6 +101,9 @@ const (
 	// watch list and matching no invalidator. It affects everything, because
 	// the alternative is a narrowing nothing would report.
 	KindUnmatched Kind = "unmatched"
+	// KindDefaultBranch: selection does not apply. The run is on the branch
+	// a change is selected *against*, so there is no change to select by.
+	KindDefaultBranch Kind = "default-branch"
 )
 
 // Reason is why one component was selected, as a line a reader can act on.
@@ -119,6 +122,8 @@ func (r Reason) String() string {
 	switch r.Kind {
 	case KindDependency:
 		return "depends on " + r.Via
+	case KindDefaultBranch:
+		return "every component runs on the default branch"
 	case KindUnmatched:
 		return r.Path + " (under no component)"
 	case KindInvalidator:
@@ -151,6 +156,22 @@ type Result struct {
 type Path struct {
 	Rel     string
 	Outside bool
+}
+
+// All selects every component, for a caller that has established that
+// selection does not apply.
+//
+// The default branch is that caller. ADR 0016 requires a run there to be
+// complete, because a forgotten depends_on edge is caught at merge or never —
+// and the merge-base of the default branch with itself is its own head, so a
+// selection computed there narrows to nothing and reports a green run that
+// executed no suite at all.
+func All(f component.File, r Reason) Result {
+	reasons := make(map[string]Reason, len(f.Components))
+	for _, c := range f.Components {
+		reasons[c.Name] = r
+	}
+	return assemble(f, reasons)
 }
 
 // Paths maps repository-root-relative paths onto the scan root, which is where

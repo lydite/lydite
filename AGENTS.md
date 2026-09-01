@@ -588,6 +588,13 @@ protects the other components — a workflow edit would otherwise select the roo
 and leave every other one unrun. That interaction is a real limit rather than a closed hole:
 anything at the root that is not on the set is still absorbed by a `.`-rooted component.
 
+**An exclude does not narrow selection.** `excludes` says no component *tests* a path, not that
+nothing depends on it — an excluded file can still be imported into a component, as the proving
+ground's own `generated/client.ts` is. Reading one declaration as the answer to two questions is
+the mistake the orphan gate refuses to make with `rust.enabled`, and an exclude that narrowed
+would let a repository make changes to a path run nothing at all. So an excluded path is
+unmatched, and therefore widens.
+
 **Selection is explicit, and never inferred.** `lydite test` with no flags always runs every
 component. Every signal for "is this a pull request" is unreliable where lydite runs — a
 detached HEAD, a shallow clone, a fork with no upstream fetched, a default branch not called
@@ -619,7 +626,14 @@ such row whether it ran or not, and what separates them is the status. A bare na
 namespace with the gate rows, and nothing forbids a component called `watch`, `select`,
 `orphans` or `schedule`; a consumer keying rows by label would then silently lose the gate. Rows
 are in declaration order, plus a `select` row carrying `N of M affected` and the reason each
-selected component was chosen. `0 of N` makes the `select` row `unmeasured` rather than `pass`:
+selected component was chosen. **On the default branch, `--affected` runs everything.** The merge-base of that branch with
+itself is its own head, so a computed selection narrows to nothing — and a consumer wiring the
+flag into one workflow would get a permanently green `lydite test` that executed no suite at all.
+ADR 0016 requires the default-branch run to be complete, since a forgotten `depends_on` edge is
+caught at merge or never, so the rule is enforced in the command rather than left to every caller
+to remember. `0 of N` remains reachable, by a commit whose tree matches its base.
+
+`0 of N` makes the `select` row `unmeasured` rather than `pass`:
 nothing was gated, and a gate that did not run must never render as one that did. The
 distinction travels as a **status**, so a consumer separates "0 of 4 affected" from "4 of 4
 passed" without parsing prose — and the reasons are what make a selection that quietly returned

@@ -83,6 +83,18 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
+			// Here rather than beside the selection below, for the reason
+			// above: the gates each walk the whole tree, and a flag conflict
+			// must not pay for that first and then discard a report the run
+			// had already computed.
+			if onlyAffected && len(components) > 0 {
+				// Two narrowing mechanisms composed. The planner emits
+				// per-shard --component lists that are already the selected
+				// set, so the combination is never needed — and an
+				// intersection nobody asked for narrows silently when it is
+				// wrong.
+				return errors.New("--affected and --component both narrow the run; pass one")
+			}
 
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -110,15 +122,12 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
+			// Empty unless selection ran: with no skipped components the
+			// declaration order of the selected set is already the order of
+			// the whole set.
+			var skipped map[string]ui.Row
+			var ordered []component.Component
 			if onlyAffected {
-				if len(components) > 0 {
-					// Two narrowing mechanisms composed. The planner emits
-					// per-shard --component lists that are already the
-					// selected set, so the combination is never needed — and
-					// an intersection nobody asked for narrows silently when
-					// it is wrong.
-					return errors.New("--affected and --component both narrow the run; pass one")
-				}
 				var res affected.Result
 				res, err = selectAffected(ctx, dir, file)
 				if err != nil {
@@ -126,17 +135,31 @@ the component's to declare.`,
 				}
 				selected = res.Selected
 				rep.Add(selectRow(res, len(file.Components)))
-				// The same label shape a suite row takes, so every
-				// component produces exactly one test(<name>) row whether it
-				// ran or not. A bare name would collide with a gate row for
-				// a component called "watch", "select", "orphans" or
+				// The same label shape a suite row takes, so every component
+				// produces exactly one test(<name>) row whether it ran or
+				// not. A bare name would collide with a gate row for a
+				// component called "watch", "select", "orphans" or
 				// "schedule" — nothing forbids those — and a consumer keying
 				// rows by label silently loses the gate.
+				//
+				// They are handed to runComponents rather than added here so
+				// the rows interleave into declaration order. Added here they
+				// would all precede the suites, and a declaration of a, b, c
+				// with only b affected would document b last.
+				skipped = make(map[string]ui.Row, len(res.Skipped))
 				for _, c := range res.Skipped {
-					rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"})
+					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"}
 				}
+				ordered = file.Components
 			}
 			if len(selected) == 0 {
+				// Nothing ran, so nothing interleaves: the skipped rows are
+				// the whole set, still in declaration order.
+				for _, c := range file.Components {
+					if r, ok := skipped[c.Name]; ok {
+						rep.Add(r)
+					}
+				}
 				// Only when the declaration is genuinely empty. A run that
 				// selected nothing has components declared and has already
 				// said so through its own select row, and repeating the
@@ -155,7 +178,7 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			runComponents(ctx, dir, selected, cfg, limit, stream, rep)
+			runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, rep)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -258,7 +281,7 @@ type componentPlan struct {
 // a truncation visible only in the process exit code is a truncation the PR
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
-func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream bool, rep *ui.Report) {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -325,8 +348,29 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 	}
 
 	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
+	if len(skipped) == 0 {
+		for _, r := range rows {
+			rep.Add(r)
+		}
+		return
+	}
+	// Interleaved by the declaration, so a component selection skipped sits
+	// where its author wrote it rather than ahead of every component that
+	// ran. Two runs over one declaration already produce the same document;
+	// this is what makes that document read in the order the file does.
+	byName := make(map[string]ui.Row, len(rows))
 	for _, r := range rows {
-		rep.Add(r)
+		byName[r.Label] = r
+	}
+	for _, c := range ordered {
+		label := "test(" + c.Name + ")"
+		if r, ok := skipped[c.Name]; ok {
+			rep.Add(r)
+			continue
+		}
+		if r, ok := byName[label]; ok {
+			rep.Add(r)
+		}
 	}
 }
 
@@ -986,6 +1030,20 @@ func selectAffected(ctx context.Context, dir string, file component.File) (affec
 		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the default branch, and it could not be resolved: %w"+
 			"\n       a shallow checkout is the usual cause; fetch with depth 0", err)
 	}
+	// On the default branch the merge-base is HEAD itself, so there is no
+	// change to select by and a computed selection narrows to nothing. ADR
+	// 0016 requires that run to be complete — a forgotten depends_on edge
+	// surfaces at merge or never — so this is where that rule is enforced
+	// rather than left to every caller to remember. Without it a consumer
+	// wiring --affected into one workflow gets a permanently green `lydite
+	// test` that executed no suite at all.
+	head, err := gitstate.HeadSHA(ctx, dir)
+	if err != nil {
+		return affected.Result{}, err
+	}
+	if head == base {
+		return affected.All(file, affected.Reason{Kind: affected.KindDefaultBranch}), nil
+	}
 	touched, err := gitdiff.Changed(ctx, dir, base)
 	if err != nil {
 		return affected.Result{}, err
@@ -1020,6 +1078,14 @@ func selectRow(res affected.Result, declared int) ui.Row {
 	if len(res.Selected) == 0 {
 		row.Status = ui.StatusUnmeasured
 		row.Detail = []string{"no changes against the merge-base, so no component could have been broken"}
+		return row
+	}
+	// A reason about the run rather than about any component is stated once.
+	// Repeating "every component runs on the default branch" per component
+	// scales with the declaration and says nothing more at the twentieth
+	// line than at the first.
+	if r := res.Reasons[res.Selected[0].Name]; r.Kind == affected.KindDefaultBranch {
+		row.Detail = []string{r.String()}
 		return row
 	}
 	for _, c := range res.Selected {

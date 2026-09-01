@@ -297,3 +297,68 @@ func TestADeselectedComponentCannotCollideWithAGateRow(t *testing.T) {
 		t.Errorf("test(watch) = %+v, want the deselected component's row", got)
 	}
 }
+
+// On the default branch the merge-base is HEAD itself, so a computed
+// selection narrows to nothing. ADR 0016 requires that run to be complete —
+// a forgotten depends_on edge is caught at merge or never — so --affected
+// there runs everything rather than reporting a green run that executed no
+// suite at all.
+func TestAffectedOnTheDefaultBranchRunsEverything(t *testing.T) {
+	root := affectedRepo(t) // leaves HEAD at origin/main
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "select")
+	if got.Value != "2 of 2 affected" {
+		t.Errorf("select = %q, want every component to run on the default branch", got.Value)
+	}
+	if got.Status != "pass" {
+		t.Errorf("select status = %q, want pass", got.Status)
+	}
+	// The reason is about the run, so it is stated once rather than once per
+	// component — which would scale with the declaration and say no more at
+	// the twentieth line than at the first.
+	if len(got.Detail) != 1 || !strings.Contains(got.Detail[0], "default branch") {
+		t.Errorf("detail = %v, want one line naming the default branch", got.Detail)
+	}
+	for _, name := range []string{"a", "b"} {
+		if r := jsonRowByLabel(t, out, "test("+name+")"); r.Status != "pass" {
+			t.Errorf("test(%s) = %+v, want it to have run", name, r)
+		}
+	}
+}
+
+// Rows read in the order the declaration is written, so a component selection
+// skipped sits where its author put it rather than ahead of everything that
+// ran. Three components with only the middle one affected is the arrangement
+// that tells the two apart.
+func TestRowsAreInDeclarationOrderAcrossSkips(t *testing.T) {
+	root := affectedRepo(t)
+	write(t, root, "modc/go.mod", "module modc\n\ngo 1.26\n")
+	write(t, root, "modc/x.go", "package modc\n\n// Foo is exercised.\nfunc Foo() int { return 1 }\n")
+	write(t, root, "modc/x_test.go", "package modc\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\tif Foo() != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: a\n    dir: moda\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: b\n    dir: modb\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: c\n    dir: modc\n    runner: go-test\n    args: [\"./...\"]\n")
+	commitChange(t, root, "", "")
+	gitIn(t, root, "push", "--quiet", "origin", "HEAD:main")
+	commitChange(t, root, "modb/x.go", "package modb\n\n// Foo is what the test exercises.\nfunc Foo() int { return 1 }\n\n// Bar is new.\nfunc Bar() {}\n")
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	var order []string
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, "\"test("); i >= 0 {
+			order = append(order, strings.Trim(line[i:], "\","))
+		}
+	}
+	if got, want := strings.Join(order, " "), "test(a) test(b) test(c)"; got != want {
+		t.Errorf("rows are %q, want declaration order %q", got, want)
+	}
+}

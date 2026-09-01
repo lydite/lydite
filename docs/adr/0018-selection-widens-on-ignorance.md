@@ -62,6 +62,24 @@ change that can affect all of them.
   a fall back to running everything: that fallback is safe but makes the
   optimisation stop happening with no symptom but a slow job.
 
+## An exclude does not narrow selection
+
+`excludes` in `.lydite/components.yml` states that no component *tests* a path.
+That is not the same as nothing depending on it: a file under no component's
+directory can still be imported into one — the proving ground's own excluded
+`generated/client.ts` is derived from a spec and consumed by a component — so
+reading the exclude as an invalidation statement would narrow on a path that
+can genuinely break a suite.
+
+It is also the mistake the orphan gate already refuses to make in the other
+direction, where a language disabled in `.lydite/config.yml` is still checked:
+one declaration answering two questions lets a repository change what goes
+untested by editing a file written for a different purpose. An exclude that
+narrowed would let a change to that path run nothing at all.
+
+The cost is accepted and on the safe side: a change to an excluded path selects
+every component.
+
 ## A `watch` pattern that matches no file fails the run
 
 Deliberately asymmetric with the orphan gate's excludes, which only warn. An

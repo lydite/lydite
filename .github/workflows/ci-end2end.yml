@@ -130,7 +130,18 @@ jobs:
           git -C proving-ground config user.email ci@lydite.invalid
           git -C proving-ground config user.name "lydite ci"
           git -C proving-ground switch --quiet -c selection-probe
-          printf 'package api\n\n// The selection probe makes a diff under this component, so CI can\n// assert which components a change here selects.\n' \
+          # The package name is read from a file already there rather than
+          # written down here. Nothing in this repository pins what
+          # lydite/proving-ground calls that package, so a hardcoded one is a
+          # cross-repo coupling that turns a rename over there into a
+          # compilation failure here — reported against lydite, in a step
+          # about selection.
+          pkg=$(awk '/^package /{print $2; exit}' proving-ground/go/api/api.go)
+          if [ -z "$pkg" ]; then
+            echo "could not read the package name from proving-ground/go/api/api.go" >&2
+            exit 1
+          fi
+          printf 'package %s\n\n// The selection probe makes a diff under this component, so CI can\n// assert which components a change here selects.\n' "$pkg" \
             > proving-ground/go/api/selection_probe.go
           # The probe file alone, never `add -A`. This step runs in the same
           # checkout as the full run above, so a stray artefact swept into the
