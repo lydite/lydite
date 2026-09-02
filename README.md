@@ -48,40 +48,33 @@ version with `LYDITE_VERSION=1.2.3 curl ... | sh`. Update in place any time with
 ```sh
 lydite scan --dir .          # run every check for every ecosystem detected under --dir (default ".")
 lydite test --dir .          # run each declared component's test suite, services and all
-lydite coverage --dir .      # diff current coverage against the cached baseline for the PR's base commit
 lydite version
 lydite update                 # self-update to the latest release
 ```
 
-`lydite scan` exits non-zero if any check fails, printing a `[PASS]`/`[FAIL]` line per check.
+`lydite scan` exits non-zero if any check fails, printing one row per check.
 
-`lydite coverage` defaults to running each ecosystem's test suite itself — the right choice for
-local dev, one command and nothing to remember. A repo whose CI already runs a test job with
-coverage instrumentation on says so once, in `.lydite/config.yml`, and lydite becomes a pure consumer of
-that job's report instead of running the whole suite again:
+`lydite test` runs each component's suite and measures its coverage from the instrumented variant
+that component's runner derives — no second test run, and no report to place beforehand.
+`--gate-coverage` adds the comparison against a baseline cached on the `lydite` branch:
 
-```yaml
-coverage:
-  source: report        # default is "run" — lydite produces coverage itself
+```sh
+lydite test --dir .                     # run the suites and report coverage
+lydite test --dir . --gate-coverage     # ...and gate it against the baseline
+lydite test --dir . --no-coverage       # the fast path: no instrumentation, no coverage rows
 ```
 
-That's usually the whole change: each language's conventional report paths are searched without
-further configuration (`coverage.out`/`cover.out`/`c.out` per Go module, `coverage/llvm-cov.json`
-and `coverage/lcov.info` per Rust crate, Istanbul's `coverage/coverage-summary.json` per TS
-package). Only a report written somewhere unconventional needs naming:
+Gating is explicit because measuring is local and gating pushes to a shared branch — a developer's
+`lydite test` must never write to it. A run that measured without gating says so: its coverage rows
+carry a status that is not a pass, so a workflow that forgot the flag reports no green it did not
+earn.
 
-```yaml
-coverage:
-  source: report
-  rust:
-    report: daemon/coverage/daemon-llvm-cov.json   # non-standard name, so point at it
-```
+Coverage is reported and gated at three altitudes — per component, per language, and for the
+repository — all summed from one measurement per component, so they cannot disagree. A JavaScript
+component needs `@vitest/coverage-v8` (or `-istanbul`) in its own dependencies; lydite will not add
+a dependency to the repository it is about to gate.
 
-`--source run|report` overrides the file for a one-off local run, as do `--go-report`,
-`--rust-report` and `--rust-lcov-report` for the paths.
-
-See [AGENTS.md](AGENTS.md#coverage) for exactly how the baseline is computed and cached, and why
-`coverage.source` exists.
+See [AGENTS.md](AGENTS.md#coverage) for how the baseline is computed, cached and carried forward.
 
 ## Components
 
@@ -130,10 +123,9 @@ statement of what gets tested and its history is the record of every change to t
 
 ## Configuration
 
-`.lydite/config.yml` at the repo root is optional — the default (no file) is to scan everything detected
-with every check enabled and to produce coverage by running the tests. Use it to disable a language
-entirely, exclude a path from detection, point Semgrep at a custom ruleset, or describe how the
-repo's coverage is produced:
+`.lydite/config.yml` at the repo root is optional — the default (no file) is to scan everything
+detected with every check enabled. Use it to disable a language entirely, exclude a path from
+detection, point Semgrep at a custom ruleset, or set the coverage gates' knobs:
 
 ```yaml
 rust:
@@ -151,15 +143,14 @@ semgrep:
 toolchain:
   enabled: true   # set false to skip toolchain provisioning (air-gapped runners)
 coverage:
-  source: run     # or "report" — a prior CI job produces coverage, lydite only parses it
   tolerance: 0.1  # pp the aggregate gate tolerates below baseline (patch gate: coverage.patch.tolerance)
-  floor: 0        # minimum coverage any single module/crate/package must reach; 0 = off
+  floor: 0        # minimum coverage any single component must reach; 0 = off
 ```
 
-A language's aggregate is its units' summed line counts (`Σ covered / Σ total`), so a big package
-and a small one contribute in proportion to their size. That is the honest headline, and it is
-deliberately blind to a small package with no tests at all — `coverage.floor` is the opt-in gate
-for that second question.
+Every coverage figure is summed line counts (`Σ covered / Σ total`) over the components it covers,
+so a big component and a small one contribute in proportion to their size. That is the honest
+headline, and it is deliberately blind to a small component with no tests at all — `coverage.floor`
+is the opt-in gate for that second question.
 
 See [AGENTS.md](AGENTS.md#configuration) for the full schema and merge semantics.
 
@@ -172,33 +163,31 @@ declared version is used as-is, so on a normal CI runner this costs nothing. See
 
 ## GitHub Actions
 
-The action installs lydite, runs `scan`/`coverage`, posts a single sticky PR comment summarizing
-both, and optionally reports to the Semgrep AppSec Platform and/or Codecov:
+The action installs lydite, runs the checks and the suites, posts a single sticky PR comment
+summarizing both, and optionally reports to the Semgrep AppSec Platform and/or Codecov:
 
 ```yaml
 permissions:
-  contents: write       # lydite coverage caches baselines on the lydite branch
+  contents: write       # lydite test --gate-coverage caches baselines on the lydite branch
   pull-requests: write  # for the PR summary comment
 steps:
   - uses: actions/checkout@v7
     with:
-      fetch-depth: 0    # lydite coverage needs full history to resolve the PR's base commit
+      fetch-depth: 0    # the coverage gate needs full history to resolve the base commit
   - uses: lydite/actions/scan@v1
     with:
       semgrep-app-token: ${{ secrets.SEMGREP_APP_TOKEN }}  # optional — omit to keep Semgrep local-only
       codecov-token: ${{ secrets.CODECOV_TOKEN }}          # optional — omit to skip the Codecov upload
 ```
 
-Both `scan` and `coverage` can be turned off independently (`run-scan: false` / `run-coverage:
-false`) if a repo only wants one of them, or isn't ready to grant `contents: write` yet. See
-`action.yml`'s own input descriptions for the full list (`dir`, `version`, `github-token`, and the
-two optional tokens).
+Each half can be turned off independently if a repo only wants one of them, or isn't ready to grant
+`contents: write` yet. See `action.yml`'s own input descriptions for the full list (`dir`,
+`version`, `github-token`, and the two optional tokens).
 
-Note there is no input for coverage production. Who produces coverage, and where its reports live,
-come from `.lydite/config.yml` at the scan root — the same answer for every workflow that calls the
-action, so it's stated once in the repo rather than restated at each call site. `dir` is the one
-thing that can't move there, since the file lives *at* the scan root and lydite has to be told the
-root before it can read its own config.
+Note there is no input for anything about how coverage is produced: lydite runs each component's
+own instrumented variant and writes the report itself. `dir` is the one thing that cannot move into
+`.lydite/config.yml`, since the file lives *at* the scan root and lydite has to be told the root
+before it can read its own config.
 
 `@v1` is a floating major alias, moved onto each new `v1.x.y` release rather than pinned — so
 consumers pick up scanner fixes without a bump PR every time. Pin an exact `@v1.x.y` instead if you
