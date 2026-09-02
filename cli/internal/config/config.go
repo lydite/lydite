@@ -279,7 +279,6 @@ func LoadHistorical(root string) (Config, error) {
 	return cfg, nil
 }
 
-// validateSource rejects
 // removedKeys names the keys lydite once read and no longer does, so a
 // repository carrying one is told rather than quietly measured differently.
 //

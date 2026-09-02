@@ -160,13 +160,42 @@ type File struct {
 	Excludes []string `yaml:"excludes,omitempty"`
 }
 
-// Load reads the component declaration from root, validating it against the
-// tree it describes.
+// LoadHistorical reads the declaration of a tree lydite is *measuring* rather
+// than one it is being configured by: the base tree a coverage baseline is
+// computed at.
 //
-// A missing file is not an error and yields no components: a repository that
-// declares none is one lydite runs no tests for, which is what it should
-// report rather than refusing to run at all.
-func Load(root string) (File, error) {
+// It differs from Load in one respect — an unknown key is ignored rather than
+// rejected — and keeps every other check, because they are what makes the
+// declaration runnable at all: unique names, a dir that exists and does not
+// escape, a runner that exists, dependencies that resolve, no cycles.
+//
+// The rejection exists to tell an author that what they wrote is not read, and
+// the author of a historical tree is not being addressed and cannot act. Worse,
+// it is guaranteed to fire on the one tree it must not: the base tree of the
+// pull request that retires a key still carries it, so validating it would fail
+// that migration and every branch cut before it landed. That is not
+// hypothetical — the configuration half of this argument is live in this
+// version, where `coverage.source` went.
+//
+// The cost is real and bounded: a component in a historical tree may run
+// without a setting expressed under a key this version stopped reading, so its
+// baseline is measured slightly differently from how that tree once ran.
+// Measuring it slightly differently is better than refusing to measure it,
+// which leaves the change gating against nothing at all. The tree being gated
+// stays strict, and that is where a stale key is the author's to fix.
+func LoadHistorical(root string) (File, error) {
+	return load(root, false)
+}
+
+// Load reads the component declaration from root, validating it against the
+// tree it describes and rejecting a key lydite does not read.
+func Load(root string) (File, error) { return load(root, true) }
+
+// load is both, and carries the one sentence they share: a missing file is not
+// an error and yields no components. A repository that declares none is one
+// lydite runs no tests for, which is what it should report rather than refusing
+// to run at all.
+func load(root string, strict bool) (File, error) {
 	p := filepath.Join(root, filepath.FromSlash(FileName))
 	data, err := os.ReadFile(p) // #nosec G304 -- root is the CLI's own --dir flag, supplied by whoever runs lydite, not untrusted remote input
 	if errors.Is(err, os.ErrNotExist) {
@@ -175,7 +204,7 @@ func Load(root string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	f, err := Parse(data, FileName)
+	f, err := parse(data, FileName, strict)
 	if err != nil {
 		return File{}, err
 	}
@@ -193,10 +222,12 @@ func Load(root string) (File, error) {
 // a component configured differently from what its author wrote — a suite
 // running without the environment it declared, or a service that was never
 // started — and every run still reports a result.
-func Parse(data []byte, source string) (File, error) {
+func Parse(data []byte, source string) (File, error) { return parse(data, source, true) }
+
+func parse(data []byte, source string, strict bool) (File, error) {
 	var f File
 	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
+	dec.KnownFields(strict)
 	// An empty file decodes to io.EOF and means no components, which is a
 	// state a repository can legitimately be in.
 	if err := dec.Decode(&f); err != nil && !errors.Is(err, io.EOF) {

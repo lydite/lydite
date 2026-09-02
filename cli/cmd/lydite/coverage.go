@@ -425,7 +425,14 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	defer func() { _ = executil.RunQuiet(ctx, dir, "git", "worktree", "remove", "--force", tmp) }()
+	// A context of its own, for the reason every compose teardown here has
+	// one: the run's may already be cancelled, and an interrupt would kill the
+	// removal and then delete the directory anyway — leaving a registered
+	// worktree pointing at nothing, which every later `git worktree add` and
+	// `git worktree list` in that repository trips over until someone prunes.
+	defer func() {
+		_ = executil.RunQuiet(context.WithoutCancel(ctx), dir, "git", "worktree", "remove", "--force", tmp)
+	}()
 
 	if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp, base); !r.Ok() {
 		return nil, fmt.Errorf("checking out %s to measure its baseline: %w", shortSHA(base), r.Err)
@@ -458,7 +465,10 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	if err != nil {
 		return nil, fmt.Errorf("reading %s at %s: %w", config.FileName, shortSHA(base), err)
 	}
-	decl, err := component.Load(root)
+	// Read leniently for the reason the configuration beside it is: a key this
+	// version stopped reading is one the base tree still carries, and refusing
+	// to measure it leaves the change gating against nothing.
+	decl, err := component.LoadHistorical(root)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s at %s: %w", component.FileName, shortSHA(base), err)
 	}

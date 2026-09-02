@@ -171,15 +171,31 @@ func TestOrphanGateOutsideAGitRepositoryIsUnmeasured(t *testing.T) {
 	}
 }
 
+// runTestCmd returns stdout alone, which is the report and — under --json —
+// the document.
+//
+// Separate buffers, and that is the point rather than tidiness. Merging them
+// made every assertion here pass on output that mixes the two, so a diagnostic
+// landing on stdout would be invisible to the tests whose whole subject is the
+// document. `lydite test` legitimately writes to stderr: toolchain
+// provisioning notes, unused-exclude warnings, and every coverage warning.
 func runTestCmd(t *testing.T, root string, extra ...string) (string, error) {
 	t.Helper()
+	out, _, err := runTestCmdStreams(t, root, extra...)
+	return out, err
+}
+
+// runTestCmdStreams is runTestCmd with stderr as well, for a test whose subject
+// is a diagnostic rather than the report.
+func runTestCmdStreams(t *testing.T, root string, extra ...string) (string, string, error) {
+	t.Helper()
 	cmd := newRootCmd()
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetErr(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetArgs(append([]string{"test", "--dir", root, "--no-color"}, extra...))
 	err := cmd.ExecuteContext(context.Background())
-	return out.String(), err
+	return out.String(), errOut.String(), err
 }
 
 // fixtureRepo is a scan root holding one buildable Go module with a passing
@@ -919,5 +935,33 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(row.Detail, " "), "ghost") {
 		t.Errorf("detail = %v, want the undeclared service still named", row.Detail)
+	}
+}
+
+// stdout carries the report and nothing else. `lydite test` provisions
+// toolchains, warns about unused excludes and warns about every coverage gap,
+// and all of it goes to stderr — under --json a single diagnostic on stdout
+// makes the document unparseable, which is what anything automated reads.
+func TestDiagnosticsStayOffStdout(t *testing.T) {
+	root := fixtureRepo(t, "components:\n  - name: mod\n    dir: mod\n    runner: go-test\n    args: [\"./...\"]\n")
+	out, errOut, err := runTestCmdStreams(t, root, "--json")
+	if err != nil {
+		t.Fatalf("run: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	var doc struct {
+		Rows []struct{ Label string } `json:"rows"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &doc); jsonErr != nil {
+		t.Fatalf("stdout is not a JSON document (%v):\n%s", jsonErr, out)
+	}
+	if len(doc.Rows) == 0 {
+		t.Error("the document carries no rows")
+	}
+	// The diagnostics this run does produce went somewhere, and it was not
+	// stdout. Toolchain provisioning always says what it resolved, so this
+	// run has one — without checking for it the test would pass on a run that
+	// printed nothing anywhere, proving nothing about where output goes.
+	if !strings.Contains(errOut, "go:") {
+		t.Errorf("stderr = %q, want the toolchain note this run produces", errOut)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
@@ -126,6 +127,20 @@ the component's to declare.`,
 
 			selected, err := file.Select(components)
 			if err != nil {
+				return err
+			}
+			// Before any suite runs. `lydite test` is the command that invokes
+			// `go test`, `cargo llvm-cov` and `npx vitest`, so it is the one
+			// that has to make their toolchains present — a runner with no
+			// Node answers `npx: not found` rather than provisioning one, and
+			// a runner whose ambient Go is fine still needs GOTOOLCHAIN
+			// pinned, which is the whole reason internal/toolchain touches Go
+			// at all.
+			//
+			// It cannot be inherited from a `lydite scan` earlier in the same
+			// job: the result is applied with process-local os.Setenv, so it
+			// leaves with that process.
+			if err := ensureToolchains(ctx, cmd, dir, cfg, componentEcosystems(file)); err != nil {
 				return err
 			}
 			// Empty unless selection ran: with no skipped components the
@@ -1091,6 +1106,38 @@ func env(c component.Component) []string {
 	// environment in the same order: a map's iteration order is not one a
 	// failure can be reproduced from.
 	sort.Strings(out)
+	return out
+}
+
+// componentEcosystems is the set of language toolchains this declaration needs,
+// read from the components rather than from a walk of the tree.
+//
+// The declaration is the better source and is the direction the rest of this
+// change goes: a repository with a vendored Cargo.toml no component builds
+// needs no Rust toolchain, and detection would provision one. It is also every
+// declared component and not only the selected ones — narrowing here would make
+// which toolchains a run provisions depend on which components it happened to
+// choose, so two runs of one repository would prepare differently.
+func componentEcosystems(file component.File) []detect.Ecosystem {
+	byLang := map[runner.Lang]detect.Ecosystem{
+		runner.Go:         detect.Go,
+		runner.Rust:       detect.Rust,
+		runner.TypeScript: detect.TypeScript,
+	}
+	seen := map[detect.Ecosystem]bool{}
+	var out []detect.Ecosystem
+	// In detect.Ecosystems' own order, so two runs of one declaration
+	// provision in the same order and say so in the same order.
+	for _, e := range []detect.Ecosystem{detect.Rust, detect.TypeScript, detect.Go} {
+		for _, c := range file.Components {
+			r, ok := runner.Lookup(c.Runner)
+			if !ok || byLang[r.Lang] != e || seen[e] {
+				continue
+			}
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
 	return out
 }
 

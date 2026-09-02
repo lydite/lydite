@@ -330,3 +330,56 @@ func TestValidWatchPatternIsAccepted(t *testing.T) {
 		t.Errorf("valid watch patterns were rejected: %v", err)
 	}
 }
+
+// A tree lydite is measuring, rather than being configured by, is read
+// leniently on exactly one axis: an unknown key is ignored.
+//
+// The rejection exists to tell an author that what they wrote is not read, and
+// the author of a historical tree is not being addressed and cannot act — while
+// it is guaranteed to fire on the one tree it must not, the base tree of the
+// pull request that retires the key. Every other check stays, because they are
+// what makes the declaration runnable at all.
+func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "svc"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, filepath.FromSlash(FileName))), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(FileName)), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+
+	retired := "components:\n  - name: svc\n    dir: svc\n    runner: go-test\n    retired_key: yes\n"
+	root := write(t, retired)
+	if _, err := Load(root); err == nil {
+		t.Error("Load accepted an unknown key — the rejection is what tells an author their declaration is stale")
+	}
+	f, err := LoadHistorical(root)
+	if err != nil {
+		t.Fatalf("LoadHistorical refused the tree it exists to read: %v", err)
+	}
+	if len(f.Components) != 1 || f.Components[0].Name != "svc" {
+		t.Fatalf("components = %+v, want the declaration read", f.Components)
+	}
+
+	// Everything that makes a declaration runnable is still checked, because
+	// a tree that cannot be run cannot be measured either.
+	for name, body := range map[string]string{
+		"an unknown runner":             "components:\n  - name: svc\n    dir: svc\n    runner: not-a-runner\n",
+		"a directory that is not there": "components:\n  - name: svc\n    dir: nope\n    runner: go-test\n",
+		"a duplicate name":              "components:\n  - name: svc\n    dir: svc\n    runner: go-test\n  - name: svc\n    dir: svc\n    runner: go-test\n",
+		"a dangling depends_on":         "components:\n  - name: svc\n    dir: svc\n    runner: go-test\n    depends_on: [ghost]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadHistorical(write(t, body)); err == nil {
+				t.Errorf("LoadHistorical accepted %s", name)
+			}
+		})
+	}
+}
