@@ -33,7 +33,8 @@ jobs:
           cache: true
 
       # Built from cli/ (the module root); the scan below deliberately runs
-      # from the repository root, which is the scan root .lydite/config.yml sits at.
+      # from the repository root, which is the scan root .lydite/ sits at — the
+      # cli component is declared at cli/, and scan reads that declaration.
       - name: build lydite
         working-directory: cli
         run: go build -o /tmp/lydite ./cmd/lydite
