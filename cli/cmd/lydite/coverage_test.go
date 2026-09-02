@@ -194,17 +194,62 @@ func TestAComponentIsGatedAgainstItsOwnBaseline(t *testing.T) {
 // above it are carrying its baseline forward. A carried number that says
 // nothing about itself is one a reader takes for a measurement.
 func TestAnUnmeasuredComponentNamesWhyAndWhatIsCarried(t *testing.T) {
-	m := unmeasuredComponent(component.Component{Name: "tally", Dir: "rust", Runner: runner.CargoNextest},
-		"the component declares a raw command, which has no instrumented variant")
-	row := componentRow(m, gitstate.Baseline{"tally": lines(60, 100)}, 0.1)
+	c := component.Component{Name: "tally", Dir: "rust", Runner: runner.CargoNextest}
+	base := gitstate.Baseline{"tally": lines(60, 100)}
+
+	skipped := unmeasuredComponent(c, "the component was not selected for this run")
+	skipped.Carryable = true
+	row := componentRow(skipped, base, 0.1)
 	if row.Status != ui.StatusUnmeasured {
 		t.Fatalf("row = %+v, want unmeasured", row)
 	}
-	if !strings.Contains(row.Value, "raw command") {
+	if !strings.Contains(row.Value, "not selected") {
 		t.Errorf("value = %q, want it to name the reason", row.Value)
 	}
 	if !strings.Contains(row.Value, "60.0%") {
 		t.Errorf("value = %q, want it to say the baseline is being carried forward", row.Value)
+	}
+
+	// A component that ran and failed carries nothing, so its row must not
+	// claim a number is standing in for it.
+	failed := unmeasuredComponent(c, "test(tally) did not pass: failed")
+	if got := componentRow(failed, base, 0.1); strings.Contains(got.Value, "60.0%") {
+		t.Errorf("value = %q — a failed component's old figure is a guess, not a stand-in", got.Value)
+	}
+}
+
+// Only a component this run did not select carries its baseline forward. One
+// that ran and failed may be exactly what changed, so its old entry is a guess
+// — and carrying it renders as a pass, so a language whose only component
+// failed to build would report that component's last good figure with a ✓
+// beside it.
+func TestOnlyAnUnselectedComponentCarriesForward(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	for _, tc := range []struct {
+		name      string
+		carryable bool
+		want      ui.Status
+	}{
+		{"a component selection skipped", true, ui.StatusPass},
+		{"a component that failed", false, ui.StatusUnmeasured},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := unmeasuredComponent(decl.Components[0], "why")
+			m.Carryable = tc.carryable
+			baseline := gitstate.Baseline{"web": lines(80, 100)}
+			current := []measurement{m}
+			carried := map[string]bool{}
+			if tc.carryable {
+				current = []measurement{{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: baseline["web"]}}
+				carried["web"] = true
+			}
+			row := composedRow("typescript coverage", current, carried, baseline, byLang(runner.TypeScript), 0.1)
+			if row.Status != tc.want {
+				t.Errorf("row = %+v, want %q", row, tc.want)
+			}
+		})
 	}
 }
 

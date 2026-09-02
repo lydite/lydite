@@ -47,6 +47,16 @@ type measurement struct {
 	// not affected" and "this component's report could not be read" are the
 	// same absence and want opposite reactions from a reader.
 	Why string
+	// Carryable marks a component whose absence says nothing about its
+	// content: this invocation did not select it, so it is unchanged from the
+	// tree the baseline was recorded for and that entry still describes it.
+	//
+	// A component that ran and failed is not carryable, however tempting the
+	// symmetry. Its content may be exactly what changed, so its old entry is a
+	// guess — and one that renders as a pass, because a language whose only
+	// component failed to build would otherwise report that component's last
+	// good figure with a ✓ beside it.
+	Carryable bool
 }
 
 // Measured reports whether this component produced a coverage measurement.
@@ -155,7 +165,11 @@ func inDeclarationOrder(decl component.File, ms []measurement) []measurement {
 			out = append(out, m)
 			continue
 		}
-		out = append(out, unmeasuredComponent(c, "the component was not selected for this run"))
+		// The only place a carryable measurement is made. Everything else in
+		// this file describes a component this run actually reached.
+		m := unmeasuredComponent(c, "the component was not selected for this run")
+		m.Carryable = true
+		out = append(out, m)
 	}
 	return out
 }
@@ -223,6 +237,9 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	for i, m := range ms {
 		current[i] = m
 		if m.Measured() {
+			continue
+		}
+		if !m.Carryable {
 			continue
 		}
 		if lines, ok := baseline[m.Name]; ok && lines.Measured() {
@@ -354,7 +371,7 @@ func componentRow(m measurement, baseline gitstate.Baseline, tolerance float64) 
 	base, hasBase := baseline[m.Name]
 	if !m.Measured() {
 		row := unmeasuredRow(label, m.Why)
-		if hasBase && base.Measured() {
+		if m.Carryable && hasBase && base.Measured() {
 			// Named, because this is the entry the composed figures below are
 			// built from. A carried number that says nothing about itself is
 			// one a reader takes for a measurement.
@@ -615,16 +632,20 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 			record[m.Name] = m.Lines
 			continue
 		}
-		// A component this run did not measure keeps the entry the base tree
+		// A component this run did not select keeps the entry the base tree
 		// had, because it is unchanged from it. Recording only what was
 		// measured would drop it, and every later change would see it as new
 		// and gate it against nothing — permanently, since each run would
 		// drop it again.
 		//
+		// Only a component this run did not select. One that ran and failed
+		// may be exactly what changed, so recording its old entry under this
+		// tree would attribute a number to content that never produced it.
+		//
 		// A component the base tree had and this tree does not declare is
 		// gone: it is not in ms at all, so its entry dies with it rather than
 		// leaving the baseline a tail of components nobody can measure.
-		if lines, ok := baseline[m.Name]; ok && lines.Measured() && declared[m.Name] {
+		if lines, ok := baseline[m.Name]; ok && m.Carryable && lines.Measured() && declared[m.Name] {
 			record[m.Name] = lines
 		}
 	}
