@@ -19,7 +19,7 @@ import (
 // Pinned so every invocation of lydite uses the exact same toolchain
 // regardless of what's already on the machine.
 const (
-	gosecVersion       = "v2.28.0"
+	gosecVersion       = "v2.29.0"
 	govulncheckVersion = "v1.7.0"
 
 	gosecPkg       = "github.com/securego/gosec/v2/cmd/gosec@" + gosecVersion
