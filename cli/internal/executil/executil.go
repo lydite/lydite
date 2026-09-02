@@ -98,7 +98,7 @@ func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
 // made, which is data nobody asked for in the middle of a report — and, under
 // --json, in the middle of the document.
 func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, resolve(name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
+	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -124,7 +124,7 @@ func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string
 // A name that is already a path is returned untouched, and so is one no PATH
 // entry holds — the second case so the failure stays os/exec's own message,
 // which names the program the caller asked for.
-func resolve(name string, extraEnv []string) string {
+func resolve(dir, name string, extraEnv []string) string {
 	if strings.ContainsRune(name, os.PathSeparator) {
 		return name
 	}
@@ -139,11 +139,20 @@ func resolve(name string, extraEnv []string) string {
 	if path == "" {
 		return name
 	}
-	for _, dir := range filepath.SplitList(path) {
-		if dir == "" {
+	for _, entry := range filepath.SplitList(path) {
+		if entry == "" {
 			continue
 		}
-		candidate := filepath.Join(dir, name)
+		// A relative PATH entry is relative to the child's working directory,
+		// not to lydite's — a JavaScript component declaring
+		// `PATH: node_modules/.bin` means its own node_modules. Stat-ing it
+		// from here would find the wrong binary in a monorepo, or none, and
+		// then hand os/exec a bare name it would look up on a PATH the entry
+		// was never part of.
+		if !filepath.IsAbs(entry) {
+			entry = filepath.Join(dir, entry)
+		}
+		candidate := filepath.Join(entry, name)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return candidate
 		}
@@ -156,7 +165,7 @@ func run(ctx context.Context, dir string, extraEnv []string, name string, args .
 }
 
 func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, resolve(name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
+	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)

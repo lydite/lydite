@@ -774,13 +774,26 @@ deliberately not the treatment a **disabled** language gets: `rust.enabled: fals
 at all, because that is an opt-out the repository stated rather than a check that could not run,
 and a row per opted-out component trains readers to ignore the tag that exists to be noticed.
 
-**A language no component declares is named on stderr.** The orphan gate is what normally makes a
-declared list safe to rely on, and it does not cover this: a component rooted at `.` covers every
-path in the repository, so a Go component at the root leaves a TypeScript directory beside it
-orphaning nothing while no TypeScript check runs — and the orphan gate belongs to `lydite test`,
-which a consumer can run scan without. It reads git's file list and file extensions and no
-manifest, which is the orphan gate's own question rather than detection under a new name: it
-decides nothing about what runs, and its answer is a sentence. A language switched off in
+**Source no component's checks reach is named on stderr**, by `internal/orphan`'s `Unscanned`.
+The orphan gate is what normally makes a declared list safe to rely on and it cannot answer this:
+it asks whether any component *contains* a file, because a component tests what is under it
+whatever it is written in, while a scanner is per language. So a component rooted at `.` covers
+every path and leaves a TypeScript directory beside it orphaning nothing while no TypeScript check
+runs — and the gate belongs to `lydite test`, which a consumer can run scan without.
+
+**For Go it asks one thing more**, and the exception is exact rather than heuristic: a nested
+`go.mod` starts a separate module the enclosing module's package graph excludes, so `./...` at an
+ancestor never compiles it and neither gosec nor govulncheck sees it. Verified against the tools —
+the same G306 in a root module and in a nested one is reported once. **Rust gets no equivalent
+rule**, because a `Cargo.toml` between the component root and a file may be a workspace member
+cargo already covers or an unrelated crate it does not, and telling those apart means reading the
+manifest; a path-shaped rule would warn about crates that are perfectly well scanned. TypeScript
+needs none, since Biome walks the tree from where it is pointed.
+
+It reads git's file list, file extensions and the presence of a `go.mod`, and opens no manifest —
+the orphan gate's own kind of question rather than detection under a new name: it decides nothing
+about what runs, and its answer is a sentence. Excludes narrow it, because an exclude is already
+the reviewable statement that a path is claimed by no component; a language switched off in
 `.lydite/config.yml` is silent, because that is an answer rather than an oversight.
 
 **Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the

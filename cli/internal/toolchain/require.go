@@ -282,33 +282,45 @@ type packageJSONEngines struct {
 	} `json:"engines"`
 }
 
-// nodeRequirement reads the Node version from the component's own
-// `engines.node`, falling back to a .nvmrc beside it and then to one at the
-// scan root.
+// nodeRequirement reads the Node version a component needs from its own
+// `engines.node` and the .nvmrc beside it, falling back to the scan root's
+// .nvmrc when the component states neither.
 //
 // engines.node is a range rather than a version, so only its lower bound is
 // meaningful here — see minimumOfRange for why a floor is all this needs. The
-// scan-root .nvmrc is the last resort because a monorepo conventionally keeps
-// one at the top; a component that states its own version is never overruled
-// by it.
+// higher of the two the component states wins, because they are different
+// statements rather than a precedence order: `">=18"` is the floor the package
+// supports and a .nvmrc of `22` is the version it is developed on, and taking
+// the first of them found would run the suite on 18 in a repository that pins
+// 22. The scan root's .nvmrc is a last resort because a monorepo
+// conventionally keeps one at the top; a component that states its own version
+// is never overruled by it.
 func nodeRequirement(root, dir string) (Requirement, error) {
 	req := Requirement{Lang: runner.TypeScript}
-	consider := func(raw, source string) bool {
+	consider := func(raw, source string) {
 		if raw == "" {
-			return false
+			return
 		}
-		req.Raw, req.Source, req.Version = raw, source, minimumOfRange(raw)
-		return true
+		v := minimumOfRange(raw)
+		// The first statement found is recorded even when it carries no
+		// comparable version, so a message can name what the component
+		// actually wrote; a later one that does compare higher replaces it.
+		if req.Raw == "" {
+			req.Raw, req.Source, req.Version = raw, source, v
+			return
+		}
+		if maxVersion(req.Version, v) != req.Version {
+			req.Raw, req.Source, req.Version = raw, source, v
+		}
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil { // #nosec G304 -- dir is a declared component directory, not user input
 		var pkg packageJSONEngines
 		if json.Unmarshal(data, &pkg) == nil {
-			if consider(pkg.Engines.Node, relSource(root, dir, "package.json")+" (engines.node)") {
-				return req, nil
-			}
+			consider(pkg.Engines.Node, relSource(root, dir, "package.json")+" (engines.node)")
 		}
 	}
-	if consider(nvmrc(dir), relSource(root, dir, ".nvmrc")) {
+	consider(nvmrc(dir), relSource(root, dir, ".nvmrc"))
+	if req.Raw != "" {
 		return req, nil
 	}
 	consider(nvmrc(root), ".nvmrc")

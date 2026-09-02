@@ -379,8 +379,8 @@ def main_scan(path: str) -> int:
         if any(label.endswith(f"({forbidden})") for label in labels):
             failures.append(f"{forbidden} was scanned as a unit; it is part of a component, not one")
 
-    for f in failures:
-        print(f"proving ground scan: {f}", file=sys.stderr)
+    for failure in failures:
+        print(f"proving ground scan: {failure}", file=sys.stderr)
     if failures:
         return 1
     print(

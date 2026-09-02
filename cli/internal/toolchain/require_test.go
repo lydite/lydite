@@ -353,3 +353,31 @@ func TestRequirementsOnlyCoversDeclaredComponents(t *testing.T) {
 		t.Fatalf("got %+v, want only the go requirement", reqs)
 	}
 }
+
+// engines.node and a .nvmrc beside it are different statements, not a
+// precedence order: ">=18" is the floor the package supports and a .nvmrc of
+// 22 is the version it is developed on. Taking the first one found would run
+// the suite on 18 in a repository that pins 22, silently.
+func TestNodeRequirementTakesTheHigherOfEnginesAndNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":">=18"}}`)
+	write(t, filepath.Join(dir, "web"), ".nvmrc", "22.11.0\n")
+
+	got := requireAt(t, dir, "web", runner.TypeScript, Overrides{})
+	if got.Version != "v22.11.0" {
+		t.Errorf("Version = %q, want v22.11.0 — the higher of the two the component states", got.Version)
+	}
+}
+
+// An engines.node that pins nothing ("*", "latest") must not swallow the
+// .nvmrc beside it: it states no floor, so it cannot be the answer when
+// something next to it does.
+func TestAnUnpinnedEnginesDoesNotHideTheNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":"*"}}`)
+	write(t, filepath.Join(dir, "web"), ".nvmrc", "22.11.0\n")
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want the .nvmrc's v22.11.0", got)
+	}
+}

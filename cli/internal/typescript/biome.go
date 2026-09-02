@@ -122,7 +122,11 @@ const biomeNestedRootConfig = "Found a nested root configuration"
 func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, configPath string) executil.Result {
 	out, err := os.CreateTemp("", "lydite-biome-*.json")
 	if err != nil {
-		return executil.Result{Name: "biome", Err: err}
+		// Detail as well as Err, for the reason the install failure carries
+		// one: report() prints Detail under a failing row and nothing else,
+		// so a bare Err renders as `✗ biome` with the cause in neither the
+		// terminal nor --json.
+		return executil.Result{Name: "biome", Err: err, Detail: err.Error()}
 	}
 	outPath := out.Name()
 	_ = out.Close()

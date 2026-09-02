@@ -411,3 +411,53 @@ func TestAnExcludeSilencesTheUnscannedWarning(t *testing.T) {
 		t.Fatalf("gaps = %+v, want none when the path is excluded", got)
 	}
 }
+
+// Containment is not enough for Go, and this is the case that proves it. A
+// nested go.mod starts a separate module that the enclosing module's package
+// graph excludes, so `./...` at the root never compiles it and neither gosec
+// nor govulncheck sees it — while a component rooted at `.` contains every
+// path in the repository. Verified against the tools before it was encoded:
+// the same G306 in both modules is reported once.
+func TestScanWarnsAboutANestedModuleUnderARootComponent(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeLydite(t, dir, "sdk/go.mod", "module sdk\n\ngo 1.26\n")
+	writeLydite(t, dir, "sdk/client.go", "package sdk\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
+
+	if len(got) != 1 || !slices.Equal(got[0].Files, []string{"sdk/client.go"}) {
+		t.Fatalf("gaps = %+v, want only the nested module's file — main.go is in the component's own module", got)
+	}
+}
+
+// The same shape with one module: everything is in the component's module, so
+// there is nothing to say. Without this the rule above could report every Go
+// file in a perfectly ordinary repository.
+func TestOneModuleUnderARootComponentIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeLydite(t, dir, "internal/svc/svc.go", "package svc\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want silence in a single-module repository", got)
+	}
+}

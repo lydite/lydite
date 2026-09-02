@@ -150,18 +150,7 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	exts := map[string]bool{}
-	for _, e := range runner.SourceExts() {
-		exts[e] = true
-	}
-	var files []string
-	for _, p := range out {
-		if exts[strings.ToLower(path.Ext(p))] {
-			files = append(files, p)
-		}
-	}
-	sort.Strings(files)
-	return files, nil
+	return sourceOf(out), nil
 }
 
 // Unscanned lists, per language, the source files no component of that
@@ -191,17 +180,19 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 // in config is an answer rather than an oversight. Passing nil reports every
 // language.
 func Unscanned(ctx context.Context, root string, f component.File, enabled func(runner.Lang) bool) ([]Gap, error) {
-	files, err := sourceFiles(ctx, root)
+	tracked, err := gitdiff.Tracked(ctx, root)
 	if err != nil {
 		return nil, err
 	}
+	files := sourceOf(tracked)
+	modules := goModuleDirs(tracked)
 	byLang := map[runner.Lang][]string{}
 	for _, p := range files {
 		lang, ok := runner.LangForExt(strings.ToLower(path.Ext(p)))
 		if !ok || (enabled != nil && !enabled(lang)) {
 			continue
 		}
-		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components) {
+		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components, modules) {
 			continue
 		}
 		byLang[lang] = append(byLang[lang], p)
@@ -221,19 +212,91 @@ type Gap struct {
 	Files []string
 }
 
-// coveredByLanguage reports whether a component contains the file *and* runs
-// checks for the language it is written in.
-func coveredByLanguage(file string, lang runner.Lang, components []component.Component) bool {
+// coveredByLanguage reports whether a component contains the file, runs checks
+// for the language it is written in, and — for Go — actually reaches it.
+//
+// Containment is not enough for Go, and the exception is exact rather than a
+// heuristic: a nested go.mod starts a separate module that the enclosing
+// module's package graph excludes, so `./...` at an ancestor never compiles it
+// and neither gosec nor govulncheck sees it. A component rooted at `.` in a
+// repository with a second module at `sdk/` therefore contains every Go file
+// in the tree and scans only its own. Reproduced by putting the same G306 in
+// both modules and watching one of the two be reported.
+//
+// Rust deliberately gets no equivalent rule. A Cargo.toml between the
+// component root and the file may be a workspace member cargo already covers
+// or an unrelated crate it does not, and telling those apart means reading the
+// manifest — so a path-shaped rule would warn about crates that are perfectly
+// well scanned, which is how a diagnostic earns being ignored. TypeScript
+// needs none: Biome walks the tree from where it is pointed.
+func coveredByLanguage(file string, lang runner.Lang, components []component.Component, modules map[string]bool) bool {
 	for _, c := range components {
 		r, ok := runner.Lookup(c.Runner)
 		if !ok || r.Lang != lang {
 			continue
 		}
-		if coveredByComponent(file, []component.Component{c}) {
-			return true
+		if !coveredByComponent(file, []component.Component{c}) {
+			continue
 		}
+		if lang == runner.Go && !sameGoModule(file, filepath(c.Dir), modules) {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+// sameGoModule reports whether the file's nearest enclosing go.mod is the
+// component's own.
+//
+// A tree with no go.mod at all above the file answers yes: the component is
+// then broken in louder ways — govulncheck exits with "no go.mod file" — and a
+// warning about it as well would be a second sentence about one fault.
+func sameGoModule(file, dir string, modules map[string]bool) bool {
+	nearest := ""
+	for d := path.Dir(file); ; d = path.Dir(d) {
+		if modules[d] {
+			nearest = d
+			break
+		}
+		if d == "." || d == "/" {
+			break
+		}
+	}
+	if nearest == "" {
+		return true
+	}
+	return nearest == path.Clean(dir)
+}
+
+// goModuleDirs is every directory holding a go.mod, read off the file list.
+//
+// A filename's presence and nothing else — no manifest is opened, which is
+// what keeps this the same kind of question the rest of the package asks.
+func goModuleDirs(tracked []string) map[string]bool {
+	dirs := map[string]bool{}
+	for _, p := range tracked {
+		if path.Base(p) == "go.mod" {
+			dirs[path.Dir(p)] = true
+		}
+	}
+	return dirs
+}
+
+// sourceOf keeps the paths written in a language lydite has a runner for.
+func sourceOf(tracked []string) []string {
+	exts := map[string]bool{}
+	for _, e := range runner.SourceExts() {
+		exts[e] = true
+	}
+	var files []string
+	for _, p := range tracked {
+		if exts[strings.ToLower(path.Ext(p))] {
+			files = append(files, p)
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 // excluded reports whether any exclude covers the file.

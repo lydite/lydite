@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -196,11 +197,18 @@ func labelled(results []executil.Result, component string) []executil.Result {
 // stdout carries the report and under --json a document a sentence would make
 // unparseable.
 //
-// Outside a git repository, and equally where git lists no source at all,
-// there is no question to answer — the shape orphanRow already has for both.
+// Outside a git repository there is no question to answer, which is the shape
+// orphanRow already has for that case; git listing no source at all yields no
+// gaps and needs no special case.
+// Any other failure is said out loud: this is the only thing standing between
+// a scan that narrowed and a scan that narrowed silently, so a git that would
+// not run must not switch it off without a word.
 func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.File, cfg config.Config) []orphan.Gap {
 	gaps, err := orphan.Unscanned(ctx, dir, file, func(l runner.Lang) bool { return langEnabled(l, cfg) })
 	if err != nil {
+		if !errors.Is(err, orphan.ErrNoRepository) {
+			_, _ = fmt.Fprintf(w, "warning: could not check what no component scans (%v)\n", err)
+		}
 		return nil
 	}
 	for _, g := range gaps {

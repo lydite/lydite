@@ -34,12 +34,31 @@ could replace a discovered one, and this decision is the second half of it.
 component rooted at `.` covers every path in the repository, so a Go component at
 the root leaves a TypeScript directory beside it orphaning nothing while no
 TypeScript check ever runs. The orphan gate also belongs to `lydite test`, and a
-consumer can run `scan` without it. So `scan` warns on stderr when source in a
-language no component declares is present in the tree — reading git's file list
-and file extensions, the same path question the orphan gate asks, deciding
-nothing and returning no unit. It is a warning and not a gate because what a
-repository should do about it is declare a component, which is `lydite test`'s
-demand to make; what must not happen is the narrowing being silent.
+consumer can run `scan` without it. So `scan` warns on stderr about source no component's checks reach, reading
+git's file list and file extensions and no manifest — the same kind of question
+the orphan gate asks, deciding nothing and returning no unit. It is a warning
+and not a gate because what a repository should do about it is declare a
+component or write the exclude, which is `lydite test`'s demand to make; what
+must not happen is the narrowing being silent.
+
+It asks a different question from the orphan gate's, and the difference is the
+language: the gate asks whether any component *contains* a file, because a
+component tests what is under it whatever it is written in, while a scanner is
+per language. **For Go it asks one thing more**, because containment is not
+enough there: a nested `go.mod` starts a separate module the enclosing module's
+package graph excludes, so `./...` at an ancestor never compiles it and neither
+gosec nor govulncheck sees it. A component rooted at `.` in a repository with a
+second module at `sdk/` contains every Go file in the tree and scans only its
+own. That was verified against the tools rather than reasoned about — the same
+G306 in both modules is reported once — and it is exact rather than heuristic,
+being a property of the go command.
+
+**Rust deliberately gets no equivalent rule.** A `Cargo.toml` between the
+component root and a file may be a workspace member cargo already covers or an
+unrelated crate it does not, and telling those apart means reading the manifest.
+A path-shaped rule would warn about crates that are perfectly well scanned,
+which is how a diagnostic earns being ignored. TypeScript needs none: Biome
+walks the tree from where it is pointed.
 
 ## A repository declaring no components is an error, not a row
 
