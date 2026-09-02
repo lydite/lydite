@@ -588,3 +588,40 @@ func TestScanComposesAComponentsDeclaredEnvironment(t *testing.T) {
 		t.Fatalf("env = %q, want the component's declared variable", got)
 	}
 }
+
+// component.validate enforces unique names and not unique directories, so two
+// components over one root are legitimate — `lydite test` runs both suites.
+// Their scanners read the identical tree, so running both spends time to
+// report every finding twice under two labels.
+func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n"+
+			"  - name: api\n    dir: .\n    runner: go-test\n"+
+			"  - name: api-integration\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	var doc struct {
+		Rows []struct{ Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	for _, r := range doc.Rows {
+		if strings.Contains(r.Label, "api-integration") {
+			t.Fatalf("rows = %+v, want one set of checks for the shared directory", doc.Rows)
+		}
+	}
+	if len(doc.Rows) != 2 {
+		t.Fatalf("rows = %+v, want gosec and govulncheck once each", doc.Rows)
+	}
+}

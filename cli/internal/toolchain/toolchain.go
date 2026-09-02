@@ -91,11 +91,12 @@ func (e *Env) Environ() []string {
 	if e == nil {
 		return nil
 	}
-	return Compose(e.PathDirs, e.Vars)
+	return Compose(e.PathDirs, nil, e.Vars)
 }
 
 // Compose builds a child process environment: the variables in order, and
-// exactly one PATH entry holding dirs ahead of the current PATH.
+// exactly one PATH entry holding leading ahead of the current PATH and
+// trailing behind it.
 //
 // One PATH entry, and therefore one place that builds it, because a child's
 // environment is a flat list where the last occurrence of a key wins. Two
@@ -104,16 +105,17 @@ func (e *Env) Environ() []string {
 // prepend it, and then execute against the ambient one because a pinned
 // tool's own entry came later. Nothing about that is visible in argv.
 //
-// Dirs are in final PATH order: the caller nearest the invocation goes first,
-// and a directory a caller could not supply is simply absent rather than
-// empty.
-func Compose(dirs []string, vars ...[]string) []string {
+// Leading dirs are in final PATH order: the caller nearest the invocation goes
+// first. Trailing is for directories that must not shadow anything already
+// present — a path a scanned repository asked for, which may add a binary and
+// may not replace one lydite resolved.
+func Compose(leading, trailing []string, vars ...[]string) []string {
 	var out []string
 	for _, v := range vars {
 		out = append(out, v...)
 	}
-	dirs = nonEmpty(dirs)
-	if len(dirs) == 0 {
+	leading, trailing = nonEmpty(leading), nonEmpty(trailing)
+	if len(leading) == 0 && len(trailing) == 0 {
 		return out
 	}
 	// Prepended, not appended: a provisioned toolchain exists precisely
@@ -126,7 +128,9 @@ func Compose(dirs []string, vars ...[]string) []string {
 	// component's commands run with their working directory set to a
 	// directory of the repository being scanned, that puts the scanned
 	// repository on the child's PATH.
-	parts := nonEmpty(append(append([]string{}, dirs...), os.Getenv("PATH")))
+	parts := append([]string{}, leading...)
+	parts = append(parts, nonEmpty([]string{os.Getenv("PATH")})...)
+	parts = append(parts, trailing...)
 	return append(out, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 }
 

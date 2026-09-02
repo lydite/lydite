@@ -185,6 +185,14 @@ func Unscanned(ctx context.Context, root string, f component.File, enabled func(
 		return nil, err
 	}
 	files := sourceOf(tracked)
+	// Symmetric with Find, and for its reason: git listing no source at all is
+	// a different answer from finding nothing unscanned. `--dir` pointed at a
+	// gitignored tree — a vendored checkout, build output — lists nothing and
+	// exits zero, and a silent no-op there reads exactly like a repository
+	// whose every file is accounted for.
+	if len(files) == 0 {
+		return nil, ErrNoFiles
+	}
 	modules := goModuleDirs(tracked)
 	byLang := map[runner.Lang][]string{}
 	for _, p := range files {

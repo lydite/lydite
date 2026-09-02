@@ -190,7 +190,7 @@ func TestComposeBuildsOnePathEntryAndKeepsVars(t *testing.T) {
 func TestComposeEmitsExactlyOnePathEntry(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 
-	got := Compose([]string{"/pinned/bin", "/opt/go/bin"}, []string{"A=1"}, []string{"B=2"})
+	got := Compose([]string{"/pinned/bin", "/opt/go/bin"}, nil, []string{"A=1"}, []string{"B=2"})
 	var paths int
 	for _, kv := range got {
 		if strings.HasPrefix(kv, "PATH=") {
@@ -211,7 +211,7 @@ func TestComposeEmitsExactlyOnePathEntry(t *testing.T) {
 // so a component with no provisioned toolchain runs with the environment it
 // would have had.
 func TestComposeWithNoDirsSetsNoPath(t *testing.T) {
-	got := Compose(nil, []string{"A=1"})
+	got := Compose(nil, nil, []string{"A=1"})
 	if !slices.Equal(got, []string{"A=1"}) {
 		t.Fatalf("Compose = %q, want just the variables", got)
 	}
@@ -318,11 +318,26 @@ func TestAnUnpinnedRequirementNamesTheComponent(t *testing.T) {
 func TestComposeDoesNotPutTheWorkingDirectoryOnPath(t *testing.T) {
 	t.Setenv("PATH", "")
 
-	got := Compose([]string{"/opt/go/bin"}, nil)
+	got := Compose([]string{"/opt/go/bin"}, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("Compose = %q, want one PATH entry", got)
 	}
 	if got[0] != "PATH=/opt/go/bin" {
 		t.Fatalf("PATH = %q, want no trailing separator", got[0])
+	}
+}
+
+// A directory the scanned repository asked for goes behind the inherited PATH,
+// so it can add a binary that exists nowhere else and cannot replace one
+// lydite resolved. Ahead of it, a repository shipping its own `go` would
+// decide which toolchain lydite runs.
+func TestComposeKeepsATrailingDirectoryBehindTheInheritedPath(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+
+	got := Compose([]string{"/resolved/bin"}, []string{"/declared/bin"}, nil)
+	sep := string(os.PathListSeparator)
+	want := "PATH=/resolved/bin" + sep + "/usr/bin" + sep + "/declared/bin"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("Compose = %q, want %q", got, want)
 	}
 }

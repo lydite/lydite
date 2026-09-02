@@ -994,14 +994,39 @@ func TestAComponentsDeclaredPathReachesTheChild(t *testing.T) {
 		t.Fatalf("env = %q, want exactly one PATH entry", got)
 	}
 	sep := string(os.PathListSeparator)
-	// The pinned runner first, then what lydite resolved, then what the
-	// component added: a component may extend the path but must not displace
-	// the build of the runner lydite installed for it.
-	want := "/pinned/bin" + sep + "/resolved/bin" + sep + "/declared/bin" + sep + "/usr/bin"
+	// The pinned runner first, then what lydite resolved, then the inherited
+	// path, and only then what the component declared. A component may extend
+	// the path its suite runs with; it may not choose which `go` or `cargo`
+	// lydite itself launches, which is what a declared directory ahead of the
+	// inherited one would do now that the program is resolved against the
+	// environment the child is given.
+	want := "/pinned/bin" + sep + "/resolved/bin" + sep + "/usr/bin" + sep + "/declared/bin"
 	if paths[0] != want {
 		t.Errorf("PATH = %q, want %q", paths[0], want)
 	}
 	if !slices.Contains(got, "FOO=bar") {
 		t.Errorf("env = %q, want the component's other variables untouched", got)
+	}
+}
+
+// The boundary the ordering exists to hold. lydite resolves a program against
+// the environment it hands the child, so a declared directory placed ahead of
+// the inherited PATH would let a scanned repository choose which `go` lydite
+// runs — it ships `ci-bin/go`, declares `env: {PATH: ci-bin}`, and lydite
+// installs gosec with it on a runner whose own toolchain was just verified.
+func TestAComponentCannotShadowTheToolchainLyditeResolved(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{"PATH": "ci-bin"}}
+
+	got := childEnv(nil, c, runner.Invocation{})
+	var path string
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	entries := filepath.SplitList(path)
+	if len(entries) != 2 || entries[0] != "/usr/bin" || entries[1] != "ci-bin" {
+		t.Fatalf("PATH = %q, want the declared directory behind the inherited one", path)
 	}
 }

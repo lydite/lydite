@@ -175,9 +175,15 @@ A third consequence is smaller and worth stating because it is surface a
 repository can see: **`PATH` is the one variable a component cannot simply
 declare.** A component's `env:` is composed into the child like any other
 variable, but the composed `PATH` would always be the later entry and would win,
-so a declared one is folded into the composition instead — after the pinned
-runner and the resolved toolchain, so a component may extend the path without
-displacing the build of the runner lydite installed for it.
+so a declared one is folded into the composition instead — and it goes **behind
+the inherited path**, which is a boundary rather than a preference. lydite now
+resolves a program against the environment it hands the child, so a declared
+directory ahead of the inherited one would let `.lydite/components.yml` choose
+which `go`, `cargo`, `npm` or `sh` lydite itself launches: a repository shipping
+`ci-bin/go` and declaring `env: {PATH: ci-bin}` would have `lydite scan` install
+gosec with that binary, on a runner whose own toolchain had just been verified.
+A component may extend the path its suite runs with; it may not choose the
+toolchain lydite runs.
 
 ## Consequences
 

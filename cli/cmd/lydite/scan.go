@@ -75,6 +75,15 @@ func newScanCmd() *cobra.Command {
 
 			warnUnscanned(ctx, cmd.ErrOrStderr(), dir, file, cfg)
 
+			// A component's checks are keyed by what they actually look at:
+			// the directory they run in and the language they run for.
+			// component.validate enforces unique names and not unique
+			// directories, so two components over one root are legitimate —
+			// `lydite test` runs both suites and its scheduler serialises
+			// them. Their scanners would read the identical tree twice and
+			// report every finding twice, under two labels, which is time
+			// spent to make a report harder to read.
+			scanned := map[string]bool{}
 			for _, c := range file.Components {
 				lang := langOf(c)
 				if lang == "" {
@@ -97,6 +106,15 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				cdir := filepath.Join(dir, filepath.FromSlash(c.Dir))
+				// The first component in declaration order carries the rows.
+				// Either name is honest — the finding is in a directory both
+				// declare — and declaration order is the one that does not
+				// vary between runs.
+				key := string(lang) + "\x00" + filepath.Clean(cdir)
+				if scanned[key] {
+					continue
+				}
+				scanned[key] = true
 				// The component's declared environment as well as its
 				// toolchain, composed exactly as `lydite test` composes it. A
 				// Rust component declaring SQLX_OFFLINE or a Go one declaring
@@ -221,8 +239,10 @@ func labelled(results []executil.Result, component string) []executil.Result {
 // unparseable.
 //
 // Outside a git repository there is no question to answer, which is the shape
-// orphanRow already has for that case; git listing no source at all yields no
-// gaps and needs no special case.
+// orphanRow already has for that case. Anything else is said out loud —
+// including git listing no source file at all, which is what `--dir` pointed
+// at a gitignored tree looks like and which must not read the same as a
+// repository whose every file is accounted for.
 // Any other failure is said out loud: this is the only thing standing between
 // a scan that narrowed and a scan that narrowed silently, so a git that would
 // not run must not switch it off without a word.

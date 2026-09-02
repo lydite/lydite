@@ -1107,22 +1107,30 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 // lydite resolves should overrule them.
 //
 // A PATH the component declares is folded into that one entry rather than set
-// as a variable of its own, and it goes after what lydite resolved: a
-// component adding a directory must not displace the pinned runner lydite
-// installed for it, and a variable that lost every time would be worse than
-// one that is refused. It is the single key a component cannot simply state,
-// because the composed entry would always be the later of the two.
+// as a variable of its own — it is the single key a component cannot simply
+// state, because the composed entry would always be the later of the two and
+// would win outright.
+//
+// It is appended **after** the inherited PATH, and that is the security
+// boundary rather than a preference. lydite resolves a program against the
+// environment it hands the child, so a declared directory placed ahead of the
+// inherited one would let `.lydite/components.yml` decide which `go`, `cargo`,
+// `npm` or `sh` lydite itself launches: a repository shipping `ci-bin/go` and
+// declaring `env: {PATH: ci-bin}` would have `lydite scan` run that binary to
+// install gosec, on a runner where the ambient toolchain was already verified.
+// A component may extend the path its suite runs with; it may not choose the
+// toolchain lydite runs. Ordering keeps the useful case — a helper that exists
+// nowhere else is still found — and removes the shadowing one.
 func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) []string {
 	dirs := append([]string{}, inv.PathDirs...)
 	if tc != nil {
 		dirs = append(dirs, tc.PathDirs...)
 	}
 	declared, vars := splitPath(env(c))
-	dirs = append(dirs, declared...)
 	if tc == nil {
-		return toolchain.Compose(dirs, vars)
+		return toolchain.Compose(dirs, declared, vars)
 	}
-	return toolchain.Compose(dirs, tc.Vars, vars)
+	return toolchain.Compose(dirs, declared, tc.Vars, vars)
 }
 
 // splitPath separates a PATH a component declared into its directories,

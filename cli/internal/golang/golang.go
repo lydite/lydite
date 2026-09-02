@@ -9,8 +9,10 @@ package golang
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"lydite/lydite/internal/executil"
 )
@@ -100,7 +102,10 @@ func ensure(ctx context.Context, env []string, toolchainKey, name, version, pkg 
 	}
 	r := executil.RunEnv(ctx, "", append(append([]string{}, env...), "GOBIN="+binDir), "go", "install", pkg)
 	if !r.Ok() {
-		return "", r.Err
+		// The command's own output, not just its exit status: `exit status 1`
+		// is what a failing row would otherwise carry into --json, which is
+		// the document the pull-request comment renders.
+		return "", fmt.Errorf("installing %s: %w\n%s", pkg, r.Err, strings.TrimSpace(r.Output))
 	}
 	return bin, nil
 }

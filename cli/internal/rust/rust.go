@@ -20,7 +20,9 @@ package rust
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
@@ -95,7 +97,10 @@ func ensure(ctx context.Context, env []string, name, version string) (string, er
 		return "", err
 	}
 	if r := executil.RunEnv(ctx, "", env, "cargo", argv...); !r.Ok() {
-		return "", r.Err
+		// The command's own output, not just its exit status: `exit status
+		// 101` is what a failing row would otherwise carry into --json, which
+		// is the document the pull-request comment renders.
+		return "", fmt.Errorf("installing cargo-%s: %w\n%s", name, r.Err, strings.TrimSpace(r.Output))
 	}
 	return bin, nil
 }

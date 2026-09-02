@@ -433,3 +433,19 @@ func TestInstrumentationIsInstalledForWhatActuallyRunsIt(t *testing.T) {
 		}
 	}
 }
+
+// No extension may belong to two languages. LangForExt returns the first
+// match from a map, so a shared extension would make the answer depend on map
+// iteration order — and orphan.Unscanned groups its warning by language, so
+// the same tree would report a different language run to run.
+func TestNoExtensionBelongsToTwoLanguages(t *testing.T) {
+	owner := map[string]Lang{}
+	for lang, exts := range sourceExts {
+		for _, e := range exts {
+			if other, seen := owner[e]; seen {
+				t.Errorf("%q belongs to both %s and %s, so LangForExt answers by map order", e, other, lang)
+			}
+			owner[e] = lang
+		}
+	}
+}
