@@ -37,7 +37,7 @@ func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
 	var asJSON, noColor, stream, onlyAffected bool
-	var concurrency string
+	var concurrency, baseBranch string
 	cmd := &cobra.Command{
 		Use:           "test",
 		SilenceUsage:  true,
@@ -136,7 +136,7 @@ the component's to declare.`,
 			// into a hard error before any row is written.
 			if onlyAffected && len(file.Components) > 0 {
 				var res affected.Result
-				res, err = selectAffected(ctx, dir, file)
+				res, err = selectAffected(ctx, dir, file, baseBranch)
 				if err != nil {
 					return err
 				}
@@ -207,6 +207,7 @@ the component's to declare.`,
 	// so; a bare `lydite test` always runs every component.
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
 		"run only the components the change against the merge-base could have broken")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
@@ -1031,16 +1032,15 @@ func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) 
 // with no symptom other than a slow job, which is how a shallow checkout goes
 // unnoticed for months. `lydite scan --diff-base auto` refuses for the same
 // reason, and a shallow checkout is a fixable misconfiguration.
-func selectAffected(ctx context.Context, dir string, file component.File) (affected.Result, error) {
-	base, err := gitstate.BaseSHA(ctx, dir)
+func selectAffected(ctx context.Context, dir string, file component.File, baseBranch string) (affected.Result, error) {
+	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
 	if err != nil {
-		// Both causes, because the advice for one does not help the other
-		// and gitstate.BaseSHA resolves origin/main and nothing else — which
-		// is the same assumption --affected exists to avoid making about the
-		// event, made here about the branch name.
-		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with origin/main, and it could not be resolved: %w"+
-			"\n       a shallow checkout is the usual cause — fetch with depth 0 —"+
-			"\n       and a default branch not named main is the other", err)
+		// The base branch is resolved inside, so an undiscoverable one
+		// already arrives here as an error naming --base-branch. What is
+		// left to say is the other cause, which produces the same
+		// merge-base failure from a branch that resolved perfectly.
+		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the base branch, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
 	}
 	// On the default branch the merge-base is HEAD itself, so there is no
 	// change to select by and a computed selection narrows to nothing. ADR

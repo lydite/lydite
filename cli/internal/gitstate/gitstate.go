@@ -89,17 +89,116 @@ func HeadSHA(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(r.Output), nil
 }
 
-// BaseSHA resolves the commit on origin/main this branch diverged from, so
-// lydite coverage knows which baseline to compare against.
-func BaseSHA(ctx context.Context, dir string) (string, error) {
-	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", "main"); !r.Ok() {
-		return "", fmt.Errorf("fetch origin main: %w", r.Err)
+// BaseBranchFlag names the flag every command that resolves a merge-base
+// offers, so an error raised here can name the fix without each caller
+// restating it.
+const BaseBranchFlag = "--base-branch"
+
+// remote is the remote every base ref is resolved against.
+//
+// Hardcoded, deliberately. A repository with two remotes is a real thing and
+// lydite cannot guess which one a pull request targets; discovering it would
+// be a second inference layered on the one below, with the same failure mode
+// and no flag to escape it. Naming the limit is better than half-solving it:
+// a repository whose upstream is not called `origin` gets an error saying so,
+// rather than a merge-base resolved against a fork.
+const remote = "origin"
+
+// BaseBranch resolves which branch on the remote a change is measured
+// against, in descending order of how explicitly it was stated:
+//
+//  1. override — what a caller passed, which is the caller's own statement
+//     and outranks anything discovered.
+//  2. refs/remotes/origin/HEAD — git's own record of the remote's default
+//     branch. Authoritative where it is set, and `actions/checkout` does not
+//     set it, so it resolves for a developer's clone and almost never in CI.
+//  3. whichever of main and master the remote actually has. Exactly one, or
+//     this is an error: a repository carrying both has not said which one is
+//     the default, and picking by a hardcoded precedence would measure a
+//     change against a branch nobody chose.
+//
+// Every failure names the flag. The alternative — falling back to `main`
+// whatever the remote holds — is how a repository whose default branch is
+// `master` came to have --affected, `scan --diff-base auto` and the coverage
+// gate all fail with a merge-base error that named neither the cause nor the
+// fix.
+func BaseBranch(ctx context.Context, dir, override string) (string, error) {
+	if override != "" {
+		return override, nil
 	}
-	r := executil.RunQuiet(ctx, dir, "git", "merge-base", "HEAD", "origin/main")
+	if r := executil.RunQuiet(ctx, dir, "git", "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD"); r.Ok() {
+		if name := strings.TrimPrefix(strings.TrimSpace(r.Output), remote+"/"); name != "" {
+			return name, nil
+		}
+	}
+	// One query for both candidates rather than one each: a second network
+	// round trip to learn the same thing is pure latency on every run that
+	// reaches here, which in CI is every run.
+	r := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--heads", remote, "main", "master")
 	if !r.Ok() {
-		return "", fmt.Errorf("git merge-base HEAD origin/main: %w", r.Err)
+		return "", fmt.Errorf("listing %s's branches to find the default: %w\n       name it with %s", remote, r.Err, BaseBranchFlag)
+	}
+	// Each line is "<sha>\trefs/heads/<name>". Compared whole rather than by
+	// substring: a branch called `not-main` contains `main`, and a listing
+	// matched loosely would report both candidates present and refuse to run
+	// on a repository that has exactly one.
+	present := map[string]bool{}
+	for _, line := range strings.Split(r.Output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		present[strings.TrimPrefix(fields[len(fields)-1], "refs/heads/")] = true
+	}
+	var found []string
+	for _, name := range []string{"main", "master"} {
+		if present[name] {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("%s has neither a main nor a master branch, so the default branch could not be discovered — name it with %s", remote, BaseBranchFlag)
+	default:
+		return "", fmt.Errorf("%s has both a main and a master branch, so which one is the default is not lydite's to guess — name it with %s", remote, BaseBranchFlag)
+	}
+}
+
+// BaseSHA resolves the commit on the base branch this branch diverged from,
+// which is what every gate comparing against "before this change" measures
+// from: the coverage baseline lookup, affected selection, Semgrep's
+// --baseline-commit and the referral diff.
+//
+// branch is what BaseBranch resolved. It is passed in rather than resolved
+// here so a command resolves it once and reports it once, and so a run that
+// cannot discover it fails with that error rather than with a merge-base one
+// that names neither the cause nor the fix.
+func BaseSHA(ctx context.Context, dir, branch string) (string, error) {
+	if branch == "" {
+		return "", fmt.Errorf("no base branch to resolve the merge-base against — name one with %s", BaseBranchFlag)
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", remote, branch); !r.Ok() {
+		return "", fmt.Errorf("fetch %s %s: %w", remote, branch, r.Err)
+	}
+	ref := remote + "/" + branch
+	r := executil.RunQuiet(ctx, dir, "git", "merge-base", "HEAD", ref)
+	if !r.Ok() {
+		return "", fmt.Errorf("git merge-base HEAD %s: %w", ref, r.Err)
 	}
 	return strings.TrimSpace(r.Output), nil
+}
+
+// ResolveBaseSHA discovers the base branch and resolves the merge-base
+// against it in one step, for a caller that has nothing to say about either
+// beyond the override it was given.
+func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
+	branch, err := BaseBranch(ctx, dir, override)
+	if err != nil {
+		return "", err
+	}
+	return BaseSHA(ctx, dir, branch)
 }
 
 // ReadBaseline returns the cached report for sha, and false if none exists

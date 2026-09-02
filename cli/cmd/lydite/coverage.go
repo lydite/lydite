@@ -116,7 +116,7 @@ func newCoverageCmd() *cobra.Command {
 			// origin/main, say) the answer below is "no coverage measured",
 			// not a merge-base error — the errors only surface once they
 			// block an actual gate.
-			sha, shaErr := gitstate.BaseSHA(ctx, dir)
+			sha, shaErr := gitstate.ResolveBaseSHA(ctx, dir, "")
 
 			// Running ON the merge-base (a push to main) rather than ahead of it
 			// (a PR): there is no baseline to gate against — the current commit

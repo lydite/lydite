@@ -33,7 +33,7 @@ func TestResolveDiffBase(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(semgrep.AppTokenEnv, tc.appToken)
-			got, err := resolveDiffBase(context.Background(), t.TempDir(), tc.diffBase)
+			got, err := resolveDiffBase(context.Background(), t.TempDir(), tc.diffBase, "")
 			if err != nil {
 				t.Fatalf("resolveDiffBase(%q) returned %v", tc.diffBase, err)
 			}

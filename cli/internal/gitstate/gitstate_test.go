@@ -430,3 +430,138 @@ func TestReadBaselineIgnoresEntriesOutsideTheStateDir(t *testing.T) {
 		t.Errorf("PriorBaselines = %v, want nothing carried from an entry outside the state dir", got)
 	}
 }
+
+// The default branch is discovered, not assumed. A repository whose default
+// branch is `master` was refused outright by every gate that resolves a
+// merge-base — the coverage baseline, affected selection, `scan --diff-base
+// auto` and the referral diff all come through here — with an error that
+// named neither the cause nor a fix.
+//
+// Discovery is deliberately not "try main, then master": a repository
+// carrying both has not said which one is the default, and picking by
+// precedence measures a change against a branch nobody chose. Every failure
+// names the flag.
+func TestBaseBranchIsDiscovered(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+
+	// origin holds the branches; clone is where discovery runs.
+	newRepo := func(branches ...string) string {
+		origin := t.TempDir()
+		run(origin, "init", "--bare", "-b", branches[0], ".")
+		seed := t.TempDir()
+		run(seed, "init", "-b", branches[0], ".")
+		run(seed, "config", "user.email", "t@t")
+		run(seed, "config", "user.name", "t")
+		if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(seed, "add", "-A")
+		run(seed, "commit", "-m", "seed")
+		run(seed, "remote", "add", "origin", origin)
+		for _, b := range branches {
+			run(seed, "push", "origin", branches[0]+":"+b)
+		}
+		clone := t.TempDir()
+		run(clone, "clone", "--no-checkout", origin, ".")
+		// actions/checkout leaves no origin/HEAD, which is what makes the
+		// listing below the path CI actually takes. Removing it here is what
+		// reproduces that.
+		_ = executil.Run(ctx, clone, "git", "remote", "set-head", "origin", "--delete")
+		return clone
+	}
+
+	t.Run("master alone is found", func(t *testing.T) {
+		got, err := BaseBranch(ctx, newRepo("master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "master" {
+			t.Errorf("BaseBranch = %q, want %q", got, "master")
+		}
+	})
+
+	t.Run("main alone is found", func(t *testing.T) {
+		got, err := BaseBranch(ctx, newRepo("main"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "main" {
+			t.Errorf("BaseBranch = %q, want %q", got, "main")
+		}
+	})
+
+	t.Run("a branch merely containing a candidate is not one", func(t *testing.T) {
+		got, err := BaseBranch(ctx, newRepo("master", "not-main"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "master" {
+			t.Errorf("BaseBranch = %q, want %q — refs are compared whole", got, "master")
+		}
+	})
+
+	t.Run("both is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, newRepo("main", "master"), "")
+		if err == nil {
+			t.Fatal("BaseBranch resolved a repository carrying both main and master")
+		}
+		if !strings.Contains(err.Error(), BaseBranchFlag) {
+			t.Errorf("error %q does not name %s", err, BaseBranchFlag)
+		}
+	})
+
+	t.Run("neither is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, newRepo("trunk"), "")
+		if err == nil {
+			t.Fatal("BaseBranch resolved a repository with neither main nor master")
+		}
+		if !strings.Contains(err.Error(), BaseBranchFlag) {
+			t.Errorf("error %q does not name %s", err, BaseBranchFlag)
+		}
+	})
+
+	t.Run("an override outranks discovery", func(t *testing.T) {
+		// A repository discovery would refuse, which is what shows the
+		// override is consulted before anything is looked up.
+		got, err := BaseBranch(ctx, newRepo("main", "master"), "trunk")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "trunk" {
+			t.Errorf("BaseBranch = %q, want %q", got, "trunk")
+		}
+	})
+}
+
+// origin/HEAD is git's own record of the remote's default branch, and it
+// outranks the listing: a repository whose default is `develop` while main
+// also exists resolves to develop, where the listing alone would answer main.
+func TestBaseBranchPrefersOriginHead(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	origin := t.TempDir()
+	run(origin, "init", "--bare", "-b", "develop", ".")
+	seed := t.TempDir()
+	run(seed, "init", "-b", "develop", ".")
+	run(seed, "config", "user.email", "t@t")
+	run(seed, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(seed, "add", "-A")
+	run(seed, "commit", "-m", "seed")
+	run(seed, "remote", "add", "origin", origin)
+	run(seed, "push", "origin", "develop")
+	run(seed, "push", "origin", "develop:main")
+	clone := t.TempDir()
+	run(clone, "clone", "--no-checkout", origin, ".")
+
+	got, err := BaseBranch(ctx, clone, "")
+	if err != nil {
+		t.Fatalf("BaseBranch: %v", err)
+	}
+	if got != "develop" {
+		t.Errorf("BaseBranch = %q, want %q — origin/HEAD is authoritative where it is set", got, "develop")
+	}
+}

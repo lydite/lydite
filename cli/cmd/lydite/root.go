@@ -20,6 +20,15 @@ func streamDiagnostics(asJSON bool) {
 	}
 }
 
+// baseBranchUsage documents --base-branch identically wherever it appears.
+//
+// Every command that measures a change against "before it" resolves the same
+// merge-base, so they must agree on which branch that is — a scan and a
+// coverage gate disagreeing about what this change contains is worse than
+// either being wrong alone. One string, so the three cannot drift.
+const baseBranchUsage = "branch on origin the change is measured against; " +
+	"discovered from origin/HEAD, else whichever of main and master origin has"
+
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "lydite",
