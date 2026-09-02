@@ -59,3 +59,29 @@ func nextestRelease(version string) (cargotool.Asset, bool) {
 		version, version, target)
 	return cargotool.Asset{URL: base + ".tar.gz", ChecksumURL: base + ".sha256"}, true
 }
+
+// cargoLLVMCovManifest is the pin Dependabot watches for the instrumentation
+// a Rust component's coverage is measured through.
+//
+//go:embed cargo-llvm-cov-pin/Cargo.toml
+var cargoLLVMCovManifest []byte
+
+// cargoLLVMCov is the pinned instrumentation lydite installs before running a
+// Rust component's instrumented variant.
+//
+// Installing it is what closes the worst failure this repository has shipped.
+// `cargo llvm-cov` was assumed on PATH and never provisioned, so a runner
+// without it measured nothing — and an empty baseline, once cached, is
+// indistinguishable from a real one: every later pull request hits it, reports
+// every component as new, and the gate enforces nothing, permanently and with
+// no way to self-heal.
+//
+// No Prebuilt, and that is a property of the release rather than a choice.
+// cargo-llvm-cov publishes archives but no checksum file beside them, and the
+// digest is read out of band or not at all — lydite is about to put this
+// binary on PATH and execute it. So this one is built from source, which is
+// slower and says so.
+var cargoLLVMCov = cargotool.Tool{
+	Name:    "cargo-llvm-cov",
+	Version: cargotool.MustPinnedVersion(cargoLLVMCovManifest, "cargo-llvm-cov"),
+}

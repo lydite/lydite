@@ -51,6 +51,13 @@ dependabot:
       the cargo-nextest runner is run with. Pinned for the reason the scanners
       are: whatever version a machine carries decides which tests run and what
       a failure looks like.
+  - ecosystem: cargo
+    directory: /cli/internal/runner/cargo-llvm-cov-pin
+    note: |
+      cargo-llvm-cov (internal/runner), the instrumentation a Rust component's
+      coverage is measured through. Installed rather than assumed on PATH: a
+      runner without it measures nothing, and an empty baseline cached as real
+      makes every later pull request a cache hit that gates on nothing.
   - ecosystem: gomod
     directory: /cli/internal/golang/go-pin
     note: |

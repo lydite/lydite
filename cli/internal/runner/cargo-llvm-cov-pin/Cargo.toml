@@ -1,0 +1,28 @@
+# Version pin for cargo-llvm-cov, the instrumentation a Rust component's
+# coverage is measured through.
+#
+# This crate is never built, published, or depended on: it exists so Dependabot's
+# `cargo` ecosystem can see the version and open bump PRs, and it is parsed at
+# runtime by internal/runner/pins.go so the version has exactly one home.
+#
+# It is installed rather than assumed on PATH, and that is the gap it closes. A
+# baseline measured on a runner without it computes to nothing, and an empty
+# baseline cached as real makes every later pull request a cache hit that gates
+# on nothing — silently, permanently, with no way to self-heal.
+#
+# Its own manifest rather than a shared one, matching internal/rust: two cargo
+# tools that cannot resolve in one graph produce a manifest cargo errors on and
+# Dependabot silently skips, which is the "pin nothing ages out" failure the
+# whole arrangement exists to prevent.
+#
+# The empty [workspace] table stops cargo absorbing this into a workspace above it.
+[workspace]
+
+[package]
+name = "lydite-cargo-llvm-cov-pin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cargo-llvm-cov = "=0.6.16"

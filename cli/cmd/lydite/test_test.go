@@ -23,7 +23,7 @@ import (
 
 // The plain variant is the fast path, and the only one `lydite test` wants.
 func TestInvocationIsThePlainVariant(t *testing.T) {
-	inv, err := invocation(component.Component{Runner: runner.GoTest, Args: []string{"-race", "./..."}})
+	inv, err := invocation(component.Component{Runner: runner.GoTest, Args: []string{"-race", "./..."}}, runner.Plain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestInvocationIsThePlainVariant(t *testing.T) {
 // A command is run as written: it opts out of the derived variants, so
 // nothing here may add to it.
 func TestInvocationRunsACommandAsWritten(t *testing.T) {
-	inv, err := invocation(component.Component{Command: []string{"make", "test"}})
+	inv, err := invocation(component.Component{Command: []string{"make", "test"}}, runner.Plain)
 	if err != nil {
 		t.Fatal(err)
 	}

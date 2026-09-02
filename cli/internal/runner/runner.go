@@ -38,7 +38,9 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/nodedeps"
 )
 
@@ -151,13 +153,21 @@ type Runner struct {
 	// Build constructs one variant's invocation, with args from the
 	// component declaration placed ahead of anything the variant adds.
 	Build func(variant Variant, args []string) (Invocation, bool)
-	// Prepare puts in place what the runner needs before any variant will
-	// work, or is nil when it needs nothing.
+	// Prepare puts in place what the runner needs before the named variant
+	// will work, or is nil when it needs nothing.
 	//
 	// It lives on the runner rather than in the command so the command layer
 	// carries no per-language branch — the thing this registry exists to
 	// remove. dir is the component's directory, override is
 	// typescript.install, and out is where a step's own output goes.
+	//
+	// It takes the invocation that is about to run, not the variant that
+	// named it, because what a runner needs is a property of the command
+	// rather than of the label: `cargo-llvm-cov-nextest`'s *plain* variant
+	// runs through cargo-llvm-cov, and a rule keyed on the variant answers
+	// "not instrumented" for the one invocation that needs the
+	// instrumentation. Reading it off the command leaves one statement of
+	// what each variant runs, in the function that builds it.
 	//
 	// Two runners need one, for unrelated reasons. A JavaScript component has
 	// no node_modules on a fresh checkout and every import fails before a test
@@ -165,14 +175,14 @@ type Runner struct {
 	// not a degradation when absent but a component that cannot run at all.
 	// `go test` needs nothing — its toolchain fetches what a build needs on
 	// the way past.
-	Prepare func(ctx context.Context, dir, override string, out io.Writer) error
+	Prepare func(ctx context.Context, inv Invocation, dir, override string, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
 var registry = map[Name]Runner{
 	GoTest:              {Name: GoTest, Lang: Go, Build: buildGoTest},
-	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest, Prepare: installCargoNextest},
-	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest, Prepare: installCargoNextest},
+	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest, Prepare: installCargoTools},
+	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest, Prepare: installCargoTools},
 	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest, Prepare: installNodeDeps},
 	Jest:                {Name: Jest, Lang: TypeScript, Build: buildJest, Prepare: installNodeDeps},
 }
@@ -253,7 +263,7 @@ func buildCargoNextest(variant Variant, args []string) (Invocation, bool) {
 			Name:        "cargo",
 			Args:        append([]string{"nextest", "run"}, args...),
 			JUnitReport: nextestJUnit,
-			Env:         nextestEnv(),
+			Env:         cargoEnv(),
 		}, true
 	case Instrumented:
 		return llvmCovNextest(args), true
@@ -282,49 +292,78 @@ func buildCargoLLVMCovNextest(variant Variant, args []string) (Invocation, bool)
 // is why instrumentation cannot be expressed as a placeholder spliced into
 // an arbitrary command.
 //
-// Both exports come from one run: --json carries the aggregate totals and no
-// per-line data at all, and --lcov carries the per-line hits the patch gate
-// reads. Asking for one and deriving the other is not possible in either
-// direction.
+// One export, and it is the lcov. An lcov's summed line records give the same
+// covered and total counts the JSON export's totals carry, so the aggregate is
+// derivable from the lcov; the per-line hits the patch gate reads are not
+// derivable from the JSON, which has no line data at all. Only one of the two
+// is load-bearing, and asking for both is what produced an invocation carrying
+// --output-path twice — which cargo-llvm-cov refuses to parse, before anything
+// executes.
 func llvmCovNextest(args []string) Invocation {
-	json := report("llvm-cov.json")
+	lcov := report("lcov.info")
 	return Invocation{
-		Name: "cargo",
-		Args: append([]string{
-			"llvm-cov", "nextest",
-			"--json", "--output-path", json,
-			"--lcov", "--output-path", report("lcov.info"),
-		}, args...),
-		CoverageReport: json,
+		Name:           "cargo",
+		Args:           append([]string{"llvm-cov", "nextest", "--lcov", "--output-path", lcov}, args...),
+		CoverageReport: lcov,
 		JUnitReport:    nextestJUnit,
-		Env:            nextestEnv(),
+		Env:            cargoEnv(),
 	}
 }
 
-// installCargoNextest installs the pinned runner unless the cache already has
-// that exact version.
+// installCargoTools installs the pinned cargo subcommands this invocation
+// runs through, unless the cache already has those exact versions.
+//
+// cargo-llvm-cov is installed only for an invocation that actually runs it,
+// because it is a multi-minute source build and a run that asked not to be
+// instrumented must not pay for it. The question is asked of the command
+// rather than of the variant that named it: `cargo-llvm-cov-nextest`'s plain
+// variant runs through cargo-llvm-cov, so a rule keyed on the variant would
+// leave that component failing with `no such command: llvm-cov`.
 //
 // The override is ignored: typescript.install describes a JavaScript
 // workspace's own install flow, and there is no equivalent for a tool lydite
 // pins — a repository able to substitute its own cargo-nextest would be back
 // to a runner whose version varies by machine.
-func installCargoNextest(ctx context.Context, _, _ string, out io.Writer) error {
-	return cargoNextest.Install(ctx, out)
+func installCargoTools(ctx context.Context, inv Invocation, _, _ string, out io.Writer) error {
+	if err := cargoNextest.Install(ctx, out); err != nil {
+		return err
+	}
+	if !runsLLVMCov(inv) {
+		return nil
+	}
+	return cargoLLVMCov.Install(ctx, out)
 }
 
-// nextestEnv puts the pinned binary first on PATH.
+// runsLLVMCov reports whether an invocation drives cargo-llvm-cov. It reads
+// the built command, so what gets installed and what gets run cannot come
+// apart — the alternative is a second list of which variants are instrumented,
+// which is right until a runner changes and only one of the two is updated.
+func runsLLVMCov(inv Invocation) bool {
+	return inv.Name == "cargo" && len(inv.Args) > 0 && inv.Args[0] == "llvm-cov"
+}
+
+// cargoEnv puts the pinned binaries first on PATH.
 //
 // PATH rather than invoking the binary directly, because `cargo nextest` is
 // how cargo finds a subcommand, and it is the invocation a reader can re-run
 // from the failure detail — an absolute path into a version-keyed cache is
-// neither. Prepended, so an older cargo-nextest already on the machine cannot
-// win.
-func nextestEnv() []string {
-	dir, err := cargoNextest.BinDir()
-	if err != nil {
+// neither. Prepended, so an older copy already on the machine cannot win.
+//
+// Both tools' directories are on it whichever variant runs. The entry for a
+// tool this variant does not invoke costs a directory nothing looks in, and
+// splitting the list per variant would put the same PATH construction in two
+// places for that.
+func cargoEnv() []string {
+	var dirs []string
+	for _, t := range []cargotool.Tool{cargoNextest, cargoLLVMCov} {
+		if dir, err := t.BinDir(); err == nil {
+			dirs = append(dirs, dir)
+		}
+	}
+	if len(dirs) == 0 {
 		return nil
 	}
-	return []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	return []string{"PATH=" + strings.Join(dirs, string(os.PathListSeparator)) + string(os.PathListSeparator) + os.Getenv("PATH")}
 }
 
 // installNodeDeps runs the install internal/nodedeps resolves from the
@@ -333,7 +372,7 @@ func nextestEnv() []string {
 // Doing nothing is not a failure: a root no single lockfile identifies has
 // nothing lydite can install without guessing, and guessing writes a lockfile
 // the repository does not use.
-func installNodeDeps(ctx context.Context, dir, override string, out io.Writer) error {
+func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, out io.Writer) error {
 	return nodedeps.Install(ctx, dir, override, out)
 }
 
@@ -345,10 +384,20 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 	case Plain:
 		return Invocation{Name: "npx", Args: append([]string{"vitest", "run"}, args...), JUnitReport: report("junit.xml")}, true
 	case Instrumented:
+		// The reporter and the directory are named rather than left to the
+		// repository's own vitest config. lcov is the one format both gates
+		// read, and vitest's default reporter set is text and html — a
+		// component whose config says nothing would produce a coverage run
+		// with no report lydite can parse, and report as unmeasured having
+		// paid for the instrumentation.
 		return Invocation{
-			Name:           "npx",
-			Args:           append([]string{"vitest", "run", "--coverage"}, args...),
-			CoverageReport: "coverage/lcov.info",
+			Name: "npx",
+			Args: append([]string{
+				"vitest", "run", "--coverage",
+				"--coverage.reporter=lcovonly",
+				"--coverage.reportsDirectory=" + ReportDir,
+			}, args...),
+			CoverageReport: report("lcov.info"),
 			JUnitReport:    report("junit.xml"),
 		}, true
 	case BuildOnly:
@@ -367,10 +416,17 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 	case Plain:
 		return Invocation{Name: "npx", Args: append([]string{"jest"}, args...)}, true
 	case Instrumented:
+		// Named for the reason vitest's are: jest's default reporters do not
+		// include lcov, and a coverage run whose report lydite cannot parse
+		// costs the instrumentation and measures nothing.
 		return Invocation{
-			Name:           "npx",
-			Args:           append([]string{"jest", "--coverage"}, args...),
-			CoverageReport: "coverage/lcov.info",
+			Name: "npx",
+			Args: append([]string{
+				"jest", "--coverage",
+				"--coverageReporters=lcovonly",
+				"--coverageDirectory=" + ReportDir,
+			}, args...),
+			CoverageReport: report("lcov.info"),
 		}, true
 	case BuildOnly:
 		return Invocation{Name: "npx", Args: []string{"tsc", "--noEmit"}}, true

@@ -534,13 +534,14 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
 
-	inv, err := invocation(c)
+	variant := runner.Plain
+	inv, err := invocation(c, variant)
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-	if prepared, ok := prepare(ctx, dir, label, c, cfg, log); !ok {
+	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, log); !ok {
 		return prepared
 	}
 
@@ -910,12 +911,12 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 // tests rather than the absent dependencies, and a Rust one without its pinned
 // runner fails with `no such command` — the same misattribution a suite run
 // without its database produces, and the same reason to stop first.
-func prepare(ctx context.Context, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
+func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
 	}
-	if err := r.Prepare(ctx, dir, cfg.TypeScript.Install, log.out); err != nil {
+	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
 			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
@@ -928,7 +929,7 @@ func prepare(ctx context.Context, dir, label string, c component.Component, cfg 
 // invocation is the plain variant of a component's suite: the fast path, and
 // the only one this command wants. The coverage gate reads the instrumented
 // variant, and mutation needs all three.
-func invocation(c component.Component) (runner.Invocation, error) {
+func invocation(c component.Component, variant runner.Variant) (runner.Invocation, error) {
 	if len(c.Command) > 0 {
 		return runner.Invocation{Name: c.Command[0], Args: c.Command[1:]}, nil
 	}
@@ -936,9 +937,9 @@ func invocation(c component.Component) (runner.Invocation, error) {
 	if !ok {
 		return runner.Invocation{}, fmt.Errorf("unknown runner %q", c.Runner)
 	}
-	inv, ok := r.Build(runner.Plain, c.Args)
+	inv, ok := r.Build(variant, c.Args)
 	if !ok {
-		return runner.Invocation{}, fmt.Errorf("runner %q supplies no plain variant", c.Runner)
+		return runner.Invocation{}, fmt.Errorf("runner %q supplies no %s variant", c.Runner, variant)
 	}
 	return inv, nil
 }
