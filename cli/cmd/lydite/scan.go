@@ -64,6 +64,19 @@ func newScanCmd() *cobra.Command {
 					filepath.Join(dir, filepath.FromSlash(component.FileName)))
 			}
 
+			// Before anything runs, not after every check has. Its failure is
+			// an error rather than a row, so resolving it late would discard
+			// every finding already collected — minutes of clippy and gosec
+			// traded for one sentence about a shallow checkout, which is the
+			// reason typescript.Check stopped returning an error too.
+			baseSHA := ""
+			if cfg.Semgrep.Enabled {
+				baseSHA, err = resolveDiffBase(ctx, dir, diffBase, baseBranch)
+				if err != nil {
+					return err
+				}
+			}
+
 			// Before anything shells out to cargo/go/biome: make sure each
 			// component's language toolchain is present at the version its
 			// own directory declares. lydite pins every tool it runs, and
@@ -123,7 +136,11 @@ func newScanCmd() *cobra.Command {
 				// exists to make work. No invocation directories: scan runs
 				// lydite's own pinned tools, which it invokes by absolute
 				// path.
-				env := childEnv(envs.For(c.Name), c, runner.Invocation{})
+				tc := envs.For(c.Name)
+				env := executil.Env{
+					Check:   childEnv(tc, c, runner.Invocation{}),
+					Install: tc.Environ(),
+				}
 				var results []executil.Result
 				switch lang {
 				case runner.Rust:
@@ -131,7 +148,7 @@ func newScanCmd() *cobra.Command {
 				case runner.TypeScript:
 					results = typescript.Check(ctx, cdir, env)
 				case runner.Go:
-					results = golang.Check(ctx, cdir, env, envs.For(c.Name).Key())
+					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
 				for _, row := range resultRows(labelled(results, c.Name)) {
 					rep.Add(row)
@@ -140,10 +157,6 @@ func newScanCmd() *cobra.Command {
 
 			var results []executil.Result
 			if cfg.Semgrep.Enabled {
-				baseSHA, err := resolveDiffBase(ctx, dir, diffBase, baseBranch)
-				if err != nil {
-					return err
-				}
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
 			}
 

@@ -806,6 +806,16 @@ about what runs, and its answer is a sentence. Excludes narrow it, because an ex
 the reviewable statement that a path is claimed by no component; a language switched off in
 `.lydite/config.yml` is silent, because that is an answer rather than an oversight.
 
+**A check and an install do not share an environment.** `executil.Env` carries both: `Check` is the
+component's resolved toolchain plus the environment its declaration asks for, because a
+repository's own build needs `SQLX_OFFLINE` or `CGO_ENABLED` to compile at all; `Install` is the
+toolchain alone. `go install`, `cargo install` and `npm ci` read `GOPROXY`, `GOSUMDB`,
+`CARGO_REGISTRIES_*` and `npm_config_registry`, so a declaration reaching them would choose where
+lydite fetches the scanner it is about to run — without touching `PATH` — and the cache key names
+the tool's version, not where it came from, so one poisoned build would outlive the run and cross
+repositories on a shared `~/.cache/lydite`. A repository may say how its own code builds; it may
+not say where lydite's scanners come from.
+
 **Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the
 scan root whatever the declaration says.
 

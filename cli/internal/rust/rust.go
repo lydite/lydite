@@ -35,27 +35,27 @@ import (
 // Results are named for the tool alone. Which component they belong to is the
 // caller's to say, so one labelling rule covers all three languages instead of
 // three that agree until one is changed.
-func Check(ctx context.Context, dir string, env []string) []executil.Result {
+func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
 	results := []executil.Result{
-		named("cargo fmt", executil.RunEnv(ctx, dir, env, "cargo", "fmt", "--check")),
-		named("cargo clippy", executil.RunEnv(ctx, dir, env, "cargo", "clippy", "--all-targets", "--", "-D", "warnings")),
+		named("cargo fmt", executil.RunEnv(ctx, dir, env.Check, "cargo", "fmt", "--check")),
+		named("cargo clippy", executil.RunEnv(ctx, dir, env.Check, "cargo", "clippy", "--all-targets", "--", "-D", "warnings")),
 	}
 
-	if bin, err := ensure(ctx, env, "cargo-audit", cargoAuditVersion); err != nil {
+	if bin, err := ensure(ctx, env.Install, "cargo-audit", cargoAuditVersion); err != nil {
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ cargo-audit` with the cause nowhere in the report.
 		results = append(results, executil.Result{Name: "cargo-audit", Err: err, Detail: err.Error()})
 	} else {
-		results = append(results, named("cargo-audit", executil.RunEnv(ctx, dir, env, bin, "audit")))
+		results = append(results, named("cargo-audit", executil.RunEnv(ctx, dir, env.Check, bin, "audit")))
 	}
 
-	if bin, err := ensure(ctx, env, "cargo-deny", cargoDenyVersion); err != nil {
+	if bin, err := ensure(ctx, env.Install, "cargo-deny", cargoDenyVersion); err != nil {
 		results = append(results, executil.Result{Name: "cargo-deny", Err: err, Detail: err.Error()})
 	} else {
 		// advisories is intentionally excluded here: cargo-audit already
 		// covers RustSec CVEs, and running both would double-report them.
-		results = append(results, named("cargo-deny", executil.RunEnv(ctx, dir, env, bin, "deny", "check", "licenses", "bans")))
+		results = append(results, named("cargo-deny", executil.RunEnv(ctx, dir, env.Check, bin, "deny", "check", "licenses", "bans")))
 	}
 
 	return results

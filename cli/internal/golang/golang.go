@@ -38,10 +38,10 @@ const (
 //
 // Results are named for the tool alone. Which component they belong to is the
 // caller's to say.
-func Check(ctx context.Context, dir string, env []string, toolchainKey string) []executil.Result {
+func Check(ctx context.Context, dir string, env executil.Env, toolchainKey string) []executil.Result {
 	var results []executil.Result
 
-	if bin, err := ensure(ctx, env, toolchainKey, "gosec", gosecVersion, gosecPkg); err != nil {
+	if bin, err := ensure(ctx, env.Install, toolchainKey, "gosec", gosecVersion, gosecPkg); err != nil {
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ gosec` with the cause in neither the terminal nor --json.
@@ -54,15 +54,15 @@ func Check(ctx context.Context, dir string, env []string, toolchainKey string) [
 		// This matches how generated code is already treated elsewhere in the
 		// pipeline — golangci-lint's `exclusions: generated` and semgrep's own
 		// generated-file skip.
-		r := executil.RunEnv(ctx, dir, env, bin, "-exclude-generated", "./...")
+		r := executil.RunEnv(ctx, dir, env.Check, bin, "-exclude-generated", "./...")
 		r.Name = "gosec"
 		results = append(results, r)
 	}
 
-	if bin, err := ensure(ctx, env, toolchainKey, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
+	if bin, err := ensure(ctx, env.Install, toolchainKey, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
 		results = append(results, executil.Result{Name: "govulncheck", Err: err, Detail: err.Error()})
 	} else {
-		r := executil.RunEnv(ctx, dir, env, bin, "./...")
+		r := executil.RunEnv(ctx, dir, env.Check, bin, "./...")
 		r.Name = "govulncheck"
 		results = append(results, r)
 	}

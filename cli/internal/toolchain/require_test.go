@@ -395,3 +395,17 @@ func TestAnUnpinnedEnginesDoesNotHideTheRootNvmrc(t *testing.T) {
 		t.Errorf("Version = %q, want the root .nvmrc's v22.11.0", got)
 	}
 }
+
+// The shape most monorepos have: a package states the floor it supports and
+// the repository states the version it is developed on. Returning the
+// component's floor resolves to 18, which an ambient Node 18 then satisfies —
+// so 22 is never provisioned in a repository that pins it.
+func TestARootNvmrcRaisesAComponentsFloor(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22.11.0\n")
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":">=18"}}`)
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want v22.11.0: the highest floor anything states", got)
+	}
+}

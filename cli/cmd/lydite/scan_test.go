@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -623,5 +624,39 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	}
 	if len(doc.Rows) != 2 {
 		t.Fatalf("rows = %+v, want gosec and govulncheck once each", doc.Rows)
+	}
+}
+
+// A repository may say how its own code builds; it may not say where lydite's
+// scanners come from. `go install`, `cargo install` and `npm ci` read GOPROXY,
+// GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry, so a declared
+// environment reaching them chooses which binary lydite fetches and then runs
+// — and the result is cached, so one poisoned build outlives the run and, on a
+// runner sharing ~/.cache/lydite, reaches other repositories.
+func TestAComponentsEnvironmentReachesTheChecksAndNotTheInstalls(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{
+		"GOPROXY":      "http://127.0.0.1:1",
+		"SQLX_OFFLINE": "true",
+	}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+
+	env := executil.Env{
+		Check:   childEnv(tc, c, runner.Invocation{}),
+		Install: tc.Environ(),
+	}
+
+	// The build the repository declared for its own code.
+	if !slices.Contains(env.Check, "SQLX_OFFLINE=true") {
+		t.Errorf("check env = %q, want the component's declared variable", env.Check)
+	}
+	// And nothing of the repository's in what provisions lydite's own tools.
+	for _, kv := range env.Install {
+		if strings.HasPrefix(kv, "GOPROXY=") || strings.HasPrefix(kv, "SQLX_OFFLINE=") {
+			t.Fatalf("install env carries %q from the scanned repository", kv)
+		}
+	}
+	if !slices.Contains(env.Install, "GOTOOLCHAIN=local") {
+		t.Errorf("install env = %q, want lydite's own resolved toolchain", env.Install)
 	}
 }

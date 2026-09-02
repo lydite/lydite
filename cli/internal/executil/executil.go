@@ -13,6 +13,27 @@ import (
 	"sync"
 )
 
+// Env is the two environments a language check runs with, which are
+// deliberately not the same one.
+//
+// Check is what the tool is invoked with: the component's resolved toolchain
+// and the environment its declaration asks for, because a repository's own
+// build needs what its declaration says — SQLX_OFFLINE, CGO_ENABLED, PROTOC.
+//
+// Install is what lydite provisions its *own* pinned tools with, and carries
+// nothing the scanned repository supplied. `go install`, `cargo install` and
+// `npm ci` read GOPROXY, GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry,
+// so a declaration that reached them would choose where lydite fetches the
+// security scanner it is about to run — and the result is cached under a key
+// naming the tool's version, so one poisoned build would be reused by every
+// later run and, on a runner sharing ~/.cache/lydite, by other repositories.
+// A repository may say how its own code builds; it may not say where lydite's
+// scanners come from.
+type Env struct {
+	Check   []string
+	Install []string
+}
+
 // Result is the outcome of running one external command.
 type Result struct {
 	Name string

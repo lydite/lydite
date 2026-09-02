@@ -83,6 +83,13 @@ func (o Overrides) For(e runner.Lang) string {
 type Env struct {
 	PathDirs []string
 	Vars     []string
+	// Resolved names the toolchain this environment selects, for Key alone —
+	// it changes nothing in the child. An ambient toolchain that already
+	// satisfies the declaration contributes no directory and only
+	// GOTOOLCHAIN=local, so without it every such component on every machine
+	// hashes to one value: a CI image whose Go is bumped 1.25 to 1.26 keeps
+	// reusing a tool built by 1.25, which rejects 1.26 source outright.
+	Resolved string
 }
 
 // Environ is the environment a child process running under this toolchain
@@ -155,10 +162,11 @@ func nonEmpty(in []string) []string {
 // would be reused by the second, which is the failure the pin exists to
 // prevent wearing a cache key.
 func (e *Env) Key() string {
-	if e == nil || (len(e.PathDirs) == 0 && len(e.Vars) == 0) {
+	if e == nil || (len(e.PathDirs) == 0 && len(e.Vars) == 0 && e.Resolved == "") {
 		return "ambient"
 	}
 	h := sha256.New()
+	_, _ = io.WriteString(h, e.Resolved+"\x00")
 	for _, d := range e.PathDirs {
 		_, _ = io.WriteString(h, d+"\x00")
 	}
@@ -294,7 +302,7 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides, w io.Writer)
 			return nil, err
 		}
 	}
-	return &Env{PathDirs: st.pathDirs, Vars: st.vars}, nil
+	return &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}, nil
 }
 
 // provision dispatches to the per-language provisioner. Each one differs in

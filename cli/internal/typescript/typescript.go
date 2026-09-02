@@ -42,8 +42,8 @@ import (
 // difference is what the reader gets: an error aborts the run and discards
 // every row already collected, so one component's broken install would take
 // the other components' findings and Semgrep's with it.
-func Check(ctx context.Context, dir string, env []string) []executil.Result {
-	toolchainDir, err := ensureBiome(ctx, env)
+func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
+	toolchainDir, err := ensureBiome(ctx, env.Install)
 	if err != nil {
 		// Detail and not the error alone: report() prints Detail under a
 		// failing row and nothing else, so a bare Err renders as `✗ biome`
@@ -54,5 +54,5 @@ func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")
 
-	return []executil.Result{lintDirBiome(ctx, dir, env, biomeBin, configPath)}
+	return []executil.Result{lintDirBiome(ctx, dir, env.Check, biomeBin, configPath)}
 }

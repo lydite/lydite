@@ -341,3 +341,16 @@ func TestComposeKeepsATrailingDirectoryBehindTheInheritedPath(t *testing.T) {
 		t.Fatalf("Compose = %q, want %q", got, want)
 	}
 }
+
+// A tool cache keyed on this must survive a toolchain upgrade. An ambient Go
+// that already satisfies the declaration contributes no directory and only
+// GOTOOLCHAIN=local, so without the resolved version every such component on
+// every machine hashes alike — and a CI image bumped 1.25 to 1.26 keeps
+// reusing a tool built by 1.25, which rejects 1.26 source outright.
+func TestKeyDistinguishesAmbientToolchainVersions(t *testing.T) {
+	older := (&Env{Vars: []string{"GOTOOLCHAIN=local"}, Resolved: "1.25.4"}).Key()
+	newer := (&Env{Vars: []string{"GOTOOLCHAIN=local"}, Resolved: "1.26.6"}).Key()
+	if older == newer {
+		t.Fatalf("two ambient toolchains share the key %q, so a tool built by the older one is reused", older)
+	}
+}

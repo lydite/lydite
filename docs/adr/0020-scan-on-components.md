@@ -185,6 +185,27 @@ gosec with that binary, on a runner whose own toolchain had just been verified.
 A component may extend the path its suite runs with; it may not choose the
 toolchain lydite runs.
 
+**The same boundary is why a check and an install do not share an
+environment.** `go install`, `cargo install` and `npm ci` read `GOPROXY`,
+`GOSUMDB`, `CARGO_REGISTRIES_*` and `npm_config_registry`, so a declared
+environment reaching them chooses where lydite fetches the scanner it is about
+to run — without touching `PATH` at all. Reproduced: a component declaring
+`GOPROXY: http://127.0.0.1:1` made `lydite scan` try to fetch gosec from it.
+Caching makes it worse rather than better, since the key names the tool's
+version and not where it came from, so one poisoned build outlives the run and,
+on a runner sharing `~/.cache/lydite`, reaches other repositories. So
+`executil.Env` carries the two separately: the checks get the component's
+declared environment, and lydite's own provisioning gets only the toolchain
+lydite resolved.
+
+This does not make a scan immune to the repository it scans, and it is not
+meant to. A repository already influences its own scan through its own
+manifests and tool configuration — a nested `biome.json`, a `.semgrepignore`
+([#28](https://github.com/lydite/lydite/issues/28)) — and that is a known,
+tracked property of scanning a repository at all. What is closed here is
+narrower and worse: influence over lydite's *own* binaries, which persists in a
+cache and crosses repositories.
+
 ## Consequences
 
 - A consumer upgrading must declare its components before `lydite scan` will run,

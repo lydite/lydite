@@ -320,12 +320,13 @@ func nodeRequirement(root, dir string) (Requirement, error) {
 		}
 	}
 	consider(nvmrc(dir), relSource(root, dir, ".nvmrc"))
-	// On a comparable version, not merely on having said something: an
-	// `engines.node` of "*" states no floor, so it cannot be the answer when
-	// the scan root's .nvmrc names one.
-	if req.Version != "" {
-		return req, nil
-	}
+	// The scan root's .nvmrc is a candidate like the others, not a fallback
+	// for a component that said nothing. `engines.node: ">=18"` is the floor a
+	// package supports and a root .nvmrc of 22 is the version the repository
+	// is developed on — the shape most monorepos actually have — and returning
+	// the component's floor there resolves to 18, which an ambient Node 18
+	// then satisfies. The highest floor anything states is the one runtime
+	// that satisfies them all.
 	consider(nvmrc(root), ".nvmrc")
 	return req, nil
 }
