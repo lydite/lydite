@@ -5,10 +5,10 @@
 # package.json, a Cargo.toml — and are deliberately not components: they exist
 # so Dependabot can see the tool versions lydite pins, and nothing in them is
 # ever built or tested. Being undeclared is the whole of what keeps them out of
-# scope: lydite reads this file rather than walking for manifests, so a pin
-# directory needs no exclude anywhere. Adding one still means adding a matching
-# entry to .github/dependabot.yml, which nothing enforces — a pin no bot bumps
-# is a scanner that quietly goes stale.
+# scope: lydite reads this file rather than walking for manifests. A cargo pin
+# is the exception — see the exclude below. Adding one still means adding a
+# matching entry to .github/dependabot.yml, which nothing enforces — a pin no
+# bot bumps is a scanner that quietly goes stale.
 components:
   - name: cli
     dir: cli

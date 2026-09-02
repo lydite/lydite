@@ -16,6 +16,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
@@ -717,5 +718,36 @@ func TestAComponentInsideASingleModuleRepositoryIsNotAGap(t *testing.T) {
 	}
 	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
 		t.Fatalf("gaps = %+v, want none: the component's files are in the module gosec runs over", got)
+	}
+}
+
+// lydite's own declaration must leave nothing scanned by nobody.
+//
+// This replaces internal/config's TestPinDirectoriesAreExcluded, which failed
+// when a *-pin directory was not excluded from detection. Detection is gone,
+// but the obligation moved rather than vanished: every cargo pin must carry a
+// src/lib.rs — cargo refuses a [package] manifest without one — which is real
+// Rust under the `cli` component that nothing builds. The declaration excludes
+// them by glob, and a pin added outside that glob would go unmentioned with
+// nothing failing.
+//
+// It asserts the whole property rather than the pin case, so a future
+// directory of any language nothing claims fails here too.
+func TestLyditesOwnDeclarationLeavesNothingUnscanned(t *testing.T) {
+	// Three levels up: the module is at cli/, and the scan root is the
+	// repository root where .lydite/ lives.
+	const repoRoot = "../../.."
+
+	file, err := component.Load(repoRoot)
+	if err != nil {
+		t.Fatalf("loading this repository's own declaration: %v", err)
+	}
+	gaps, err := orphan.Unscanned(context.Background(), repoRoot, file, nil)
+	if err != nil {
+		t.Fatalf("checking this repository: %v", err)
+	}
+	for _, g := range gaps {
+		t.Errorf("%d %s file(s) are scanned by no component, e.g. %s — declare one, or exclude them in %s",
+			len(g.Files), g.Lang, g.Files[0], component.FileName)
 	}
 }

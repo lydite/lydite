@@ -409,3 +409,36 @@ func TestARootNvmrcRaisesAComponentsFloor(t *testing.T) {
 		t.Errorf("Version = %q, want v22.11.0: the highest floor anything states", got)
 	}
 }
+
+// A Go component declared below its module root is an ordinary shape for
+// scanning: gosec and govulncheck run there perfectly well, being inside that
+// module. Reading only the component's own directory left it unpinned, so
+// GOTOOLCHAIN stayed at `auto` and `go install` could switch to an older
+// toolchain — under a scan that reported a pass.
+func TestGoRequirementReadsTheNearestEnclosingModule(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
+	write(t, filepath.Join(dir, "services", "api"), "main.go", "package main\n")
+
+	got := requireAt(t, dir, "services/api", runner.Go, Overrides{})
+	if got.Version != "v1.26.4" {
+		t.Errorf("Version = %q, want the enclosing module's v1.26.4", got.Version)
+	}
+	if got.Source != "go.mod" {
+		t.Errorf("Source = %q, want the module the version came from", got.Source)
+	}
+}
+
+// The search stops at the scan root. A go.mod above the tree lydite was
+// pointed at belongs to something else, and reading it would pin a run by a
+// declaration outside its own repository.
+func TestGoRequirementDoesNotClimbAboveTheScanRoot(t *testing.T) {
+	outer := t.TempDir()
+	write(t, outer, "go.mod", "module outer\n\ngo 1.28.0\n")
+	root := filepath.Join(outer, "inner")
+	write(t, filepath.Join(root, "svc"), "main.go", "package main\n")
+
+	if got := requireAt(t, root, "svc", runner.Go, Overrides{}); !got.Unpinned() {
+		t.Errorf("requirement = %+v, want unpinned: the only go.mod is outside the scan root", got)
+	}
+}

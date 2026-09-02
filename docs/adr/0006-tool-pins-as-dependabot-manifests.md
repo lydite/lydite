@@ -50,6 +50,11 @@ it is out of scope because nothing claims it. **Adding a pin is two edits — th
 `.github/dependabot.yml` entry** — and nothing enforces the second, so a pin can still be added
 that no bot ever bumps.
 
+A cargo pin costs a third, for a reason particular to cargo: it refuses a `[package]` manifest
+with no `src/lib.rs`, so every cargo pin carries real Rust that no component builds and that
+`lydite scan` reports as scanned by nobody until `.lydite/components.yml` excludes it.
+`TestLyditesOwnDeclarationLeavesNothingUnscanned` fails when one falls outside that exclude.
+
 The npm cache directory is now keyed by a hash of the lockfile rather than a hand-maintained
 string of concatenated versions. That key could previously be forgotten when a dependency was
 added — the exact mechanism by which "every `.ts` file is silently skipped" would have returned

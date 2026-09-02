@@ -233,12 +233,16 @@ unattended.
 - A component declaring a raw `command:` implies no language, so nothing scans
   it. It gets an `unmeasured` row saying so rather than being skipped in silence,
   which would read as a component that was scanned and found clean.
-- A Go component whose `dir` is not its module root resolves an unpinned
-  requirement, so `GOTOOLCHAIN` is not pinned for it. Such a component is broken
-  in louder ways first — `govulncheck` exits with `no go.mod file` and
-  `internal/coverage` reports it unmeasurable — and the diagnostic names the
-  component that declared no version, so the quiet half is at least said out
-  loud.
+- A Go component declared below its module root is an ordinary shape for
+  scanning, and is treated as one: gosec and govulncheck run there perfectly
+  well, being inside that module, so the toolchain requirement is read from the
+  nearest enclosing `go.mod` rather than from the component's own directory.
+  Reading only its own directory left such a component unpinned, and
+  `GOTOOLCHAIN` then stayed at `auto` — the `go install` downgrade this
+  provisioning exists to prevent, under a scan reporting a pass.
+  `internal/coverage` is stricter and separately so: `go list -m` answers with
+  the enclosing module, so it reports such a component unmeasurable. That is a
+  coverage constraint, not a reason to leave the toolchain unpinned.
 - A language disabled in `.lydite/config.yml` produces no rows at all. That is an
   opt-out the repository stated, not a check that failed to run, and a row per
   opted-out component trains readers to skip the tag that exists to be noticed.

@@ -96,7 +96,7 @@ func newScanCmd() *cobra.Command {
 			// them. Their scanners would read the identical tree twice and
 			// report every finding twice, under two labels, which is time
 			// spent to make a report harder to read.
-			scanned := map[string]bool{}
+			scanned := map[string]string{}
 			for _, c := range file.Components {
 				lang := langOf(c)
 				if lang == "" {
@@ -142,10 +142,19 @@ func newScanCmd() *cobra.Command {
 				// language needs would fail on a build its declaration exists
 				// to make work — under the other component's name.
 				key := string(lang) + "\x00" + filepath.Clean(cdir) + "\x00" + strings.Join(env.Check, "\x00")
-				if scanned[key] {
+				if by, done := scanned[key]; done {
+					// Said, not dropped. A consumer keying rows by component
+					// name would otherwise lose this one with nothing to
+					// separate "already covered" from "never declared" — the
+					// same reason a raw-command component gets a row.
+					rep.Add(ui.Row{
+						Status: ui.StatusUnmeasured,
+						Label:  "scan(" + c.Name + ")",
+						Value:  "not scanned separately — same directory and environment as " + by,
+					})
 					continue
 				}
-				scanned[key] = true
+				scanned[key] = c.Name
 
 				var results []executil.Result
 				switch lang {
@@ -211,6 +220,17 @@ func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
 	return out
 }
 
+// anyLanguageDeclared reports whether some component names a runner, and so
+// implies source in a language lydite knows.
+func anyLanguageDeclared(file component.File) bool {
+	for _, c := range file.Components {
+		if langOf(c) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // langEnabled reports whether .lydite/config.yml leaves one language's checks
 // switched on.
 func langEnabled(l runner.Lang, cfg config.Config) bool {
@@ -268,9 +288,16 @@ func labelled(results []executil.Result, component string) []executil.Result {
 func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.File, cfg config.Config) []orphan.Gap {
 	gaps, err := orphan.Unscanned(ctx, dir, file, func(l runner.Lang) bool { return langEnabled(l, cfg) })
 	if err != nil {
-		if !errors.Is(err, orphan.ErrNoRepository) {
-			_, _ = fmt.Fprintf(w, "warning: could not check what no component scans (%v)\n", err)
+		// git listing no source at all is worth saying only where some
+		// component implies a language — `--dir` pointed at a gitignored tree
+		// looks exactly like that. A repository whose every component declares
+		// a raw command has no source in a language lydite knows by
+		// construction, and telling it so on every run is a warning about its
+		// ordinary state.
+		if errors.Is(err, orphan.ErrNoRepository) || (errors.Is(err, orphan.ErrNoFiles) && !anyLanguageDeclared(file)) {
+			return nil
 		}
+		_, _ = fmt.Fprintf(w, "warning: could not check what no component scans (%v)\n", err)
 		return nil
 	}
 	for _, g := range gaps {

@@ -155,15 +155,31 @@ func overrideKey(e runner.Lang) string {
 // toolchain to run. Taking the max of the two gives the one toolchain that can
 // build the module.
 //
-// The directory is the component's, which for a `go-test` component is its
-// module root — `go list -m` answers with the enclosing module, so a component
-// declared anywhere else is already reported as unmeasurable by
-// internal/coverage. A directory with no go.mod yields an unpinned
-// requirement: the repository named no floor, so anything present will do.
+// The go.mod read is the nearest one at or above the component's directory,
+// bounded by the scan root, because that is the module the go command uses
+// when it runs there. A component declared at `services/api` in a repository
+// with one root go.mod is an ordinary shape: gosec and govulncheck run there
+// perfectly well, being inside that module, and internal/orphan answers the
+// same question the same way. Reading only the component's own directory left
+// such a component with no version, so GOTOOLCHAIN went unpinned and
+// `go install` could switch to an older toolchain — the failure this package
+// exists to prevent, in a scan that reported a pass.
+//
+// (internal/coverage is stricter, and separately: `go list -m` answers with
+// the enclosing module, so a component declared below its module root is
+// reported unmeasurable there. That is a coverage constraint, not a reason to
+// leave this one unpinned.)
+//
+// No go.mod at or above the directory yields an unpinned requirement: the
+// repository named no floor, so anything present will do.
 func goRequirement(root, dir string) (Requirement, error) {
 	req := Requirement{Lang: runner.Go}
-	path := filepath.Join(dir, "go.mod")
-	data, err := os.ReadFile(path) // #nosec G304 -- path is a declared component directory, not user input
+	moduleDir, ok := nearestGoModule(root, dir)
+	if !ok {
+		return req, nil
+	}
+	path := filepath.Join(moduleDir, "go.mod")
+	data, err := os.ReadFile(path) // #nosec G304 -- path is at or above a declared component directory, not user input
 	if err != nil {
 		return req, nil
 	}
@@ -178,10 +194,26 @@ func goRequirement(root, dir string) (Requirement, error) {
 	for _, raw := range []string{goDirective(f), toolchainDirective(f)} {
 		if v := canonical(raw); maxVersion(req.Version, v) != req.Version {
 			req.Version, req.Raw = v, strings.TrimPrefix(raw, "go")
-			req.Source = relSource(root, dir, "go.mod")
+			req.Source = relSource(root, moduleDir, "go.mod")
 		}
 	}
 	return req, nil
+}
+
+// nearestGoModule is the closest directory at or above dir holding a go.mod,
+// searched no further up than the scan root. Beyond it is not this
+// repository's, and a go.mod outside the tree lydite was pointed at is not one
+// this run has any business reading.
+func nearestGoModule(root, dir string) (string, bool) {
+	cleanRoot := filepath.Clean(root)
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d, true
+		}
+		if d == cleanRoot || d == filepath.Dir(d) {
+			return "", false
+		}
+	}
 }
 
 // relSource names a manifest the way a reader will go looking for it: its

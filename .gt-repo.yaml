@@ -32,10 +32,11 @@ dependabot:
       years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
       pins".
 
-      A pin directory needs no exclude anywhere: lydite scans and tests what
-      .lydite/components.yml declares, and a pin directory is deliberately not a
-      component. Nothing enforces this entry, though, so a pin added without one
-      is a pin no bot ever bumps.
+      A pin directory is deliberately not a component, so nothing scans or tests
+      it. A cargo pin is the exception: cargo refuses a [package] manifest with
+      no src/lib.rs, so it carries real Rust that .lydite/components.yml has to
+      exclude. Nothing enforces this entry, though, so a pin added without one is
+      a pin no bot ever bumps.
   - ecosystem: cargo
     directory: /cli/internal/rust/cargo-audit-pin
     note: |

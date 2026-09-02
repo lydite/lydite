@@ -1020,11 +1020,16 @@ pin silently stops being bumped: the exact failure this whole arrangement exists
 install` never shares a graph between two tools, so the conflict is invisible in normal use.
 `internal/rust`'s `TestPinManifestsAreSeparate` guards against a well-meaning consolidation.
 
-**Adding a new pin means two edits, not one:** the manifest, and a
-`.github/dependabot.yml` entry. The pin directories need no exclude anywhere — lydite scans
-what `.lydite/components.yml` declares, and a pin directory is deliberately not a component, so
-CI's self-scan never reaches it. Nothing enforces the Dependabot entry, and a pin no bot bumps is
-a scanner that quietly goes stale. See
+**Adding a new pin means two edits, and a cargo pin three:** the manifest, a
+`.github/dependabot.yml` entry, and — for cargo only — an exclude in `.lydite/components.yml`.
+A pin directory is deliberately not a component, so nothing scans or tests it; but cargo refuses
+a `[package]` manifest without a `src/lib.rs`, so every cargo pin carries real Rust under the
+`cli` component that no component builds, and `lydite scan` says so unless the declaration
+excludes it. The current glob is `cli/internal/**/*-pin/**`.
+`cmd/lydite`'s `TestLyditesOwnDeclarationLeavesNothingUnscanned` fails when a pin falls outside
+it — the replacement for `internal/config`'s deleted `TestPinDirectoriesAreExcluded`, asserting
+the property rather than the pin case. Nothing enforces the Dependabot entry, and a pin no bot
+bumps is a scanner that quietly goes stale. See
 [ADR 0006](docs/adr/0006-tool-pins-as-dependabot-manifests.md).
 
 ## Toolchains
