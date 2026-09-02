@@ -1061,3 +1061,27 @@ func TestPrepareInstallsLyditesRunnersWithoutTheRepositorysEnvironment(t *testin
 		t.Errorf("install env = %q, want lydite's own resolved toolchain", env.Install)
 	}
 }
+
+// lydite states which toolchain builds a component's code; the repository
+// states how its own code builds. A component declaring GOTOOLCHAIN: auto
+// would otherwise cancel the GOTOOLCHAIN=local pinAmbientGo exists to set,
+// reinstating the `go install` downgrade that made govulncheck reject the
+// source it was pointed at.
+func TestAComponentCannotCancelTheResolvedToolchain(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{"GOTOOLCHAIN": "auto"}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+
+	got := childEnv(tc, c, runner.Invocation{})
+
+	// Last wins, so lydite's has to be the last one present.
+	last := ""
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "GOTOOLCHAIN="); ok {
+			last = v
+		}
+	}
+	if last != "local" {
+		t.Fatalf("GOTOOLCHAIN = %q, want lydite's resolved value to win", last)
+	}
+}

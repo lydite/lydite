@@ -119,28 +119,34 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				cdir := filepath.Join(dir, filepath.FromSlash(c.Dir))
-				// The first component in declaration order carries the rows.
-				// Either name is honest — the finding is in a directory both
-				// declare — and declaration order is the one that does not
-				// vary between runs.
-				key := string(lang) + "\x00" + filepath.Clean(cdir)
-				if scanned[key] {
-					continue
-				}
-				scanned[key] = true
 				// The component's declared environment as well as its
-				// toolchain, composed exactly as `lydite test` composes it. A
+				// toolchain, composed exactly as `lydite test` composes it: a
 				// Rust component declaring SQLX_OFFLINE or a Go one declaring
-				// CGO_ENABLED needs it to build at all, so without it the
-				// suite passes and clippy fails on the build the declaration
-				// exists to make work. No invocation directories: scan runs
-				// lydite's own pinned tools, which it invokes by absolute
-				// path.
+				// CGO_ENABLED needs it to build at all. Install carries none
+				// of it — see executil.Env. No invocation directories, since
+				// scan runs lydite's own pinned tools by absolute path.
 				tc := envs.For(c.Name)
 				env := executil.Env{
 					Check:   childEnv(tc, c, runner.Invocation{}),
 					Install: tc.Environ(),
 				}
+				// Keyed on the environment as well as the directory and the
+				// language, because that is the rest of what decides what a
+				// check sees. Two components over one root declaring the same
+				// environment are one scan, and the first in declaration order
+				// carries the rows — either name is honest, and declaration
+				// order does not vary between runs. Two declaring *different*
+				// environments are two builds: dropping one would scan the
+				// other's tree with an environment it never asked for, and a
+				// component declaring the CGO_ENABLED or SQLX_OFFLINE its
+				// language needs would fail on a build its declaration exists
+				// to make work — under the other component's name.
+				key := string(lang) + "\x00" + filepath.Clean(cdir) + "\x00" + strings.Join(env.Check, "\x00")
+				if scanned[key] {
+					continue
+				}
+				scanned[key] = true
+
 				var results []executil.Result
 				switch lang {
 				case runner.Rust:

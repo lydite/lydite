@@ -1134,7 +1134,15 @@ func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) [
 	if tc == nil {
 		return toolchain.Compose(dirs, declared, vars)
 	}
-	return toolchain.Compose(dirs, declared, tc.Vars, vars)
+	// The resolved toolchain's variables go last, so they win. A child's
+	// environment is a flat list where the last occurrence of a key decides,
+	// and a component declaring `GOTOOLCHAIN: auto` would otherwise cancel the
+	// `GOTOOLCHAIN=local` pinAmbientGo exists to set — reinstating the
+	// `go install` downgrade that made govulncheck reject the source it was
+	// pointed at. It is the same boundary the PATH ordering holds, for the
+	// same reason: a repository states how its own code builds, and lydite
+	// states which toolchain builds it.
+	return toolchain.Compose(dirs, declared, vars, tc.Vars)
 }
 
 // splitPath separates a PATH a component declared into its directories,

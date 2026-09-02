@@ -289,27 +289,39 @@ func coveredByLanguage(file string, lang runner.Lang, components []component.Com
 	return false
 }
 
-// sameGoModule reports whether the file's nearest enclosing go.mod is the
-// component's own.
+// sameGoModule reports whether the file and the component's directory sit in
+// the same Go module.
 //
-// A tree with no go.mod at all above the file answers yes: the component is
-// then broken in louder ways — govulncheck exits with "no go.mod file" — and a
-// warning about it as well would be a second sentence about one fault.
+// Both sides are resolved the same way, and that is the point: the question is
+// not whether the component's directory *is* a module root but whether the
+// module it belongs to is the one the file belongs to. A component declared at
+// `services/api` in a repository with a single root go.mod is scanned exactly
+// as it should be — `gosec ./...` run there is inside that module — and asking
+// whether `services/api` held a go.mod would report its own files as scanned
+// by nobody, naming a component the repository has already declared.
+//
+// A file with no enclosing module at all answers yes, so a component that is
+// broken in louder ways — govulncheck exits with "no go.mod file" — does not
+// also collect a warning about it.
 func sameGoModule(file, dir string, modules map[string]bool) bool {
-	nearest := ""
-	for d := path.Dir(file); ; d = path.Dir(d) {
-		if modules[d] {
-			nearest = d
-			break
-		}
-		if d == "." || d == "/" {
-			break
-		}
-	}
-	if nearest == "" {
+	fileModule := nearestModule(path.Dir(file), modules)
+	if fileModule == "" {
 		return true
 	}
-	return nearest == path.Clean(dir)
+	return fileModule == nearestModule(path.Clean(dir), modules)
+}
+
+// nearestModule is the closest enclosing directory holding a go.mod, or "" if
+// none does.
+func nearestModule(dir string, modules map[string]bool) string {
+	for d := dir; ; d = path.Dir(d) {
+		if modules[d] {
+			return d
+		}
+		if d == "." || d == "/" {
+			return ""
+		}
+	}
 }
 
 // goModuleDirs is every directory holding a go.mod, read off the file list.

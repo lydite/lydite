@@ -200,13 +200,27 @@ lydite resolved. The same split runs through `lydite test`'s `Prepare`, where
 the question is whose software is being fetched — the repository's dependencies
 with the repository's environment, lydite's pinned runners without it.
 
+**What lydite resolves cannot be cancelled either.** The resolved toolchain's
+variables are composed last, so a component declaring `GOTOOLCHAIN: auto` does
+not undo the `GOTOOLCHAIN=local` that exists to stop `go install` switching to
+an older toolchain. Same boundary as the path ordering, same sentence: a
+repository states how its own code builds, lydite states which toolchain builds
+it.
+
 This does not make a scan immune to the repository it scans, and it is not
-meant to. A repository already influences its own scan through its own
-manifests and tool configuration — a nested `biome.json`, a `.semgrepignore`
-([#28](https://github.com/lydite/lydite/issues/28)) — and that is a known,
-tracked property of scanning a repository at all. What is closed here is
-narrower and worse: influence over lydite's *own* binaries, which persists in a
-cache and crosses repositories.
+meant to. A declared `GOFLAGS` still changes which files gosec compiles, and a
+declared `GOVULNDB` still points govulncheck at another database — as a nested
+`biome.json` narrows Biome and a `.semgrepignore` narrows Semgrep
+([#28](https://github.com/lydite/lydite/issues/28),
+[#56](https://github.com/lydite/lydite/issues/56)). A repository has real
+influence over its own scan through its own configuration, and lydite has never
+claimed otherwise; closing that means an allowlist of what a declaration may
+say, which is a list that must be complete to be safe — the property ADR 0018
+refuses for the invalidator set. What is closed here is narrower and worse:
+influence over lydite's *own* binaries, which persists in a cache and crosses
+repositories. Editing `.lydite/components.yml` is already a built-in
+disqualifier, so adding such a variable is a change that cannot merge
+unattended.
 
 ## Consequences
 

@@ -660,3 +660,62 @@ func TestAComponentsEnvironmentReachesTheChecksAndNotTheInstalls(t *testing.T) {
 		t.Errorf("install env = %q, want lydite's own resolved toolchain", env.Install)
 	}
 }
+
+// Two components over one directory declaring different environments are two
+// builds, not one. Dropping either scans that tree with an environment it
+// never asked for, and the row would carry the other component's name.
+func TestTwoComponentsOverOneDirectoryWithDifferentEnvironmentsBothRun(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n"+
+			"  - name: api\n    dir: .\n    runner: go-test\n"+
+			"  - name: api-cgo\n    dir: .\n    runner: go-test\n    env:\n      CGO_ENABLED: \"1\"\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	var doc struct {
+		Rows []struct{ Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	var sawCGO bool
+	for _, r := range doc.Rows {
+		if strings.Contains(r.Label, "api-cgo") {
+			sawCGO = true
+		}
+	}
+	if !sawCGO {
+		t.Fatalf("rows = %+v, want the component declaring its own environment scanned under its own name", doc.Rows)
+	}
+}
+
+// A Go component declared at a subdirectory of a single-module repository is
+// scanned exactly as it should be — `gosec ./...` run there is inside that
+// module — so asking whether its directory *held* a go.mod would report its
+// own files as scanned by nobody, naming a component already declared.
+func TestAComponentInsideASingleModuleRepositoryIsNotAGap(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: api\n    dir: services/api\n    runner: go-test\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, "services/api/main.go", "package main\n\nfunc main() {}\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want none: the component's files are in the module gosec runs over", got)
+	}
+}
