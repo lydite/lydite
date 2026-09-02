@@ -71,8 +71,9 @@ type Unit struct {
 }
 
 // Requirements resolves what each unit needs, one Requirement per unit in the
-// same order. A unit whose language has no toolchain lydite provisions yields
-// a zero Requirement, which is unpinned and therefore satisfied by anything.
+// same order. A unit naming a language lydite provisions no toolchain for is
+// skipped rather than given an unpinned requirement, so nothing probes the
+// machine on its behalf.
 //
 // Resolution is per unit and not per repository, which is what makes a
 // monorepo answerable: a workspace declaring `engines.node: >=22` and a tools
