@@ -295,11 +295,19 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	baseTree, baseErr := gitstate.TreeSHA(ctx, dir, base)
 	if headErr == nil && baseErr == nil && headTree == baseTree {
 		ungatedRows(rep, ms)
-		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
-			Value:  fmt.Sprintf("recording %s — this tree is its own base", shortSHA(headTree)),
-			Detail: []string{"nothing was compared: HEAD is the merge-base, so there is no earlier measurement to gate against"}})
 		floorRows(rep, ms, cfg.Coverage.Floor)
-		recordThisTree(ctx, cmd, dir, decl, ms, nil, cfg.Coverage.Tolerance)
+		// The row is written from what recording actually did, not from what
+		// it was about to attempt. Recording declines for three reasons — a
+		// run that measured nothing, a component with no entry to record, a
+		// push that never landed — and all three report to stderr, which the
+		// pull-request comment does not render. A row claiming a recording
+		// that did not happen is the same untruth as a gate that did not run
+		// reading as one that passed.
+		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
+			Value:  "not read — HEAD is its own merge-base, so there is no earlier measurement to compare against",
+			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
+		rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
+			Value: recordThisTree(ctx, cmd, dir, decl, ms, nil, cfg.Coverage.Tolerance)})
 		return nil
 	}
 
@@ -340,7 +348,12 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 		return err
 	}
 	floorRows(rep, ms, cfg.Coverage.Floor)
-	recordThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)
+	// `record` and not `baseline`: the two are different events in one run —
+	// the baseline read this change is gated against, and the entry this
+	// change leaves for the next one. Sharing a label would put two rows under
+	// it, which is what a consumer keying rows by label cannot survive.
+	rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
+		Value: recordThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)})
 	return nil
 }
 
@@ -437,7 +450,11 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// A component this change adds did not exist there, and one it renames is
 	// a different component; measuring the base tree through the branch's
 	// declaration would attribute one component's coverage to another.
-	baseCfg, err := config.Load(root)
+	// Read leniently, because this tree is being measured rather than
+	// configuring lydite: it is guaranteed to be the tree written for the
+	// version before whatever this one rejects, and the first pull request
+	// that removes a retired key has exactly that tree as its base.
+	baseCfg, err := config.LoadHistorical(root)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s at %s: %w", config.FileName, shortSHA(base), err)
 	}
@@ -724,13 +741,23 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "floor(" + m.Name + ")",
 			Value: fmt.Sprintf("%s, floor %.1f%%", lineValue(m.Lines), floor)})
 	}
-	if below == 0 {
-		// "N of M" rather than a bare count: the two differ exactly when some
-		// component went ungated, so a partial run cannot read as a
-		// repository-wide pass.
-		rep.Add(ui.Row{Status: ui.StatusPass, Label: "floor",
-			Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, len(ms), floor)})
+	if below > 0 {
+		return
 	}
+	// A floor that cleared nothing examined nothing, whatever the count reads
+	// like. Without this a run where every component's report was unreadable
+	// renders `✓ floor … 0 of 4 component(s) at or above 80.0%` — a tick on a
+	// gate that looked at no component at all, which is the rule this file is
+	// arranged around, inverted.
+	if cleared == 0 {
+		rep.Add(unmeasuredRow("floor", fmt.Sprintf("no component was measured, so the %.1f%% floor was applied to none of them", floor)))
+		return
+	}
+	// "N of M" rather than a bare count: the two differ exactly when some
+	// component went ungated, so a partial run cannot read as a
+	// repository-wide pass.
+	rep.Add(ui.Row{Status: ui.StatusPass, Label: "floor",
+		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, len(ms), floor)})
 }
 
 // recordThisTree writes what this run measured as the baseline for the tree it
@@ -746,7 +773,9 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 // Best-effort throughout: the gate has already reached its verdict, and a
 // write that never lands costs the next run a measurement rather than a wrong
 // answer.
-func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, tolerance float64) {
+// It returns what it did, in the words a row shows, so no caller can announce
+// a recording that did not happen.
+func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, tolerance float64) string {
 	declared := make(map[string]bool, len(decl.Components))
 	for _, c := range decl.Components {
 		declared[c.Name] = true
@@ -775,7 +804,7 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		}
 	}
 	if len(record) == 0 {
-		return
+		return "nothing to record — no component produced a measurement"
 	}
 	// A run that could not measure a component it was supposed to has not
 	// established this tree's baseline, and recording a partial one is worse
@@ -796,13 +825,13 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
 			gap.Name, gap.Why)
-		return
+		return fmt.Sprintf("not recorded — %s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name)
 	}
 	record = withToleratedDipsRestored(record, baseline, tolerance)
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
-		return
+		return "not recorded — this tree could not be resolved"
 	}
 	// Merged onto whatever this tree already holds, never skipped because it
 	// holds something. A shard runs `--component` over part of the
@@ -835,13 +864,15 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 			merged[name] = lines
 		}
 		if len(merged) == len(existing) && sameCounts(merged, existing) {
-			return
+			return fmt.Sprintf("%s already holds this measurement", shortSHA(tree))
 		}
 		record = merged
 	}
 	if err := gitstate.WriteBaseline(ctx, dir, tree, record); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to record this tree's coverage for %s: %v\n", tree, err)
+		return "not recorded — the write to the " + gitstate.BranchName + " branch did not land"
 	}
+	return "recorded for " + shortSHA(tree)
 }
 
 // sameCounts reports whether two baselines hold the same entries, so a run

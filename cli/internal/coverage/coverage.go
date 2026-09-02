@@ -118,7 +118,7 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang) (R
 func measureGo(ctx context.Context, root, unitDir, dir, reportPath string) (Report, error) {
 	name := moduleName(ctx, unitDir)
 	if name == "" {
-		return Report{}, fmt.Errorf("`go list -m` named no module in %s, so the coverage profile's package-qualified paths cannot be resolved", dir)
+		return Report{}, fmt.Errorf("%s is not a Go module root, so the coverage profile's package-qualified paths cannot be resolved — a go-test component's dir is the directory holding its go.mod", dir)
 	}
 	src := GoModuleProfile{Profile: reportPath, ModuleName: name, RelDir: relDir(dir)}
 	hits, err := ParseGoProfile(src, root)
@@ -183,15 +183,50 @@ func relDir(dir string) string {
 // that passed the wrong directory would get silent nonsense instead of a
 // failure.
 func moduleName(ctx context.Context, moduleDir string) string {
-	r := executil.RunQuiet(ctx, moduleDir, "go", "list", "-m")
+	// The module's own directory is asked for alongside its path, because the
+	// path alone cannot say whether this directory is the module root. `go
+	// list -m` run *inside* a module answers with the enclosing module — a
+	// component declared at `services/api` in a repository with one go.mod at
+	// its root gets the root module's path, and goRelPath then strips that
+	// path and puts `services/api` back on, so every profile entry is keyed
+	// `services/api/services/api/x.go`. Nothing downstream notices: the patch
+	// gate finds no overlap and reports no row at all, and the generated-file
+	// check stats a path that does not exist, so generated code re-enters the
+	// denominator.
+	r := executil.RunQuiet(ctx, moduleDir, "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
 	if !r.Ok() {
 		return ""
 	}
-	name := strings.TrimSpace(r.Output)
+	out := strings.TrimSpace(r.Output)
 	// A workspace prints one module per line; a non-module root prints the
 	// placeholder. Neither identifies a single module to strip.
-	if name == "" || name == "command-line-arguments" || strings.Contains(name, "\n") {
+	if out == "" || strings.Contains(out, "\n") {
+		return ""
+	}
+	name, root, ok := strings.Cut(out, "\t")
+	if !ok || name == "" || name == "command-line-arguments" {
+		return ""
+	}
+	if !sameDir(root, moduleDir) {
 		return ""
 	}
 	return name
+}
+
+// sameDir reports whether two paths name the same directory, resolving symlinks
+// so a temporary directory reached through one is not mistaken for a different
+// place. A path that cannot be resolved is compared as given, which is the
+// stricter answer.
+func sameDir(a, b string) bool {
+	resolve := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return p
+		}
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			return real
+		}
+		return abs
+	}
+	return resolve(a) == resolve(b)
 }

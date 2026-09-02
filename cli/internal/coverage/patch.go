@@ -56,7 +56,17 @@ func ChangedLines(ctx context.Context, dir, mergeBase string, exts ...string) (m
 	// vanished from the patch gate's denominator. It also scopes the diff to
 	// dir, which is exactly the gate's remit — changes outside --dir aren't
 	// measured, so they can't be gated.
-	args := []string{"-c", "diff.mnemonicPrefix=false", "diff", "--relative", "--unified=0", mergeBase + "..HEAD"}
+	// core.quotePath=false as well as the prefix pin, and for the same class
+	// of reason internal/gitdiff pins it: with git's default a changed file
+	// whose name is not ASCII is emitted quoted and octal-escaped
+	// (`+++ "b/caf\303\251.go"`), the `b/` strip does not match the leading
+	// quote, and the key matches nothing in the report — so those changed
+	// lines drop silently out of the patch denominator.
+	args := []string{
+		"-c", "core.quotePath=false",
+		"-c", "diff.mnemonicPrefix=false",
+		"diff", "--relative", "--unified=0", mergeBase + "..HEAD",
+	}
 	if len(exts) > 0 {
 		args = append(args, "--")
 		for _, ext := range exts {

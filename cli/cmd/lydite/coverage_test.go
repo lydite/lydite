@@ -1085,3 +1085,138 @@ func TestARerunOfOneTreeDoesNotLowerItsAnchoredEntry(t *testing.T) {
 		t.Errorf("api = %v, want the measured drop recorded", dropped["api"])
 	}
 }
+
+// The base tree is read leniently, because it is being measured rather than
+// configuring lydite. The base tree of the pull request that removes a retired
+// key is by construction the tree that still carries it, and the metric version
+// bump makes that run a cache miss — so validating it would fail every
+// migration, and keep failing every branch cut before the removal landed.
+func TestAHistoricalConfigIsReadLenientlyAndACurrentOneIsNot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".lydite"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what a pre-upgrade tree carries.
+	stale := "coverage:\n  source: report\n  go:\n    report: coverage.out\ntypescript:\n  install: \"yarn install\"\n"
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(dir); err == nil {
+		t.Error("Load accepted a retired key — the rejection is what tells an author their config is stale")
+	}
+	got, err := config.LoadHistorical(dir)
+	if err != nil {
+		t.Fatalf("LoadHistorical refused the tree it exists to read: %v", err)
+	}
+	// What it is read for still arrives.
+	if got.TypeScript.Install != "yarn install" {
+		t.Errorf("TypeScript.Install = %q, want the historical tree's own value", got.TypeScript.Install)
+	}
+	// A file that is not YAML at all is still an error: there is nothing to
+	// read there.
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte("coverage:\n\tsource: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.LoadHistorical(dir); err == nil {
+		t.Error("LoadHistorical accepted a file that is not YAML")
+	}
+}
+
+// A floor that cleared nothing examined nothing, whatever the count reads like.
+// Without this a run where every component's report was unreadable renders
+// `✓ floor … 0 of 4 component(s) at or above 80.0%` — a tick on a gate that
+// looked at no component at all.
+func TestAFloorThatClearedNothingIsNotAPass(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		unmeasuredComponent(component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}, "no report"),
+		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "no report"),
+	}, 80)
+	got := rowsOf(rep)["floor"]
+	if got.Status == ui.StatusPass {
+		t.Errorf("floor = %+v, want no pass — it was applied to nothing", got)
+	}
+	if got.Status != ui.StatusUnmeasured {
+		t.Errorf("floor = %+v, want unmeasured", got)
+	}
+}
+
+// `go list -m` run inside a module answers with the enclosing module, so a
+// component whose dir is not a module root would take the root module's path —
+// and goRelPath then strips that path and puts the component's dir back on,
+// keying every profile entry `services/api/services/api/x.go`. Nothing
+// downstream notices: the patch gate finds no overlap and emits no row, and the
+// generated-file check stats a path that does not exist.
+func TestAGoComponentBelowItsModuleRootIsRefused(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One module at the repository root; the component points below it.
+	write("go.mod", "module example.com/m\n\ngo 1.26\n")
+	write("services/api/api.go", "package api\n\nfunc F() int { return 1 }\n")
+	write("services/api/.lydite-reports/coverage/coverage.out",
+		"mode: set\nexample.com/m/services/api/api.go:3.20,3.32 1 1\n")
+
+	c := component.Component{Name: "api", Dir: "services/api", Runner: runner.GoTest}
+	m := measure(context.Background(), root, c, runner.Invocation{CoverageReport: ".lydite-reports/coverage/coverage.out"}, true)
+	if m.Measured() {
+		t.Fatalf("measured %+v from a directory that is not a module root", m.Lines)
+	}
+	if !strings.Contains(m.Why, "module root") {
+		t.Errorf("why = %q, want it to name what is wrong with the declaration", m.Why)
+	}
+}
+
+// The two are different events in one run — the baseline read this change is
+// gated against, and the entry it leaves for the next one — so they carry
+// different labels. Sharing one puts two rows under it, which is what a
+// consumer keying rows by label cannot survive.
+func TestTheBaselineReadAndTheRecordAreDifferentRows(t *testing.T) {
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: ".", Runner: runner.GoTest}}}
+	addCoverageRows(context.Background(), cmd, rep, root, decl,
+		[]measurement{measured("api", runner.Go, 9, 10)}, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	seen := map[string]int{}
+	for _, r := range rep.Rows() {
+		seen[r.Label]++
+	}
+	for label, n := range seen {
+		if n > 1 {
+			t.Errorf("label %q appears %d times", label, n)
+		}
+	}
+	if seen["record"] == 0 {
+		t.Errorf("no record row: a run that writes a baseline must say what it wrote; rows were %v", rep.Rows())
+	}
+}

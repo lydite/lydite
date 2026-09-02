@@ -244,6 +244,42 @@ func Load(root string) (Config, error) {
 	return cfg, nil
 }
 
+// LoadHistorical reads the configuration of a tree lydite is *measuring*,
+// rather than one it is being configured by: the base tree a coverage baseline
+// is computed at.
+//
+// It parses and merges exactly as Load does and then validates nothing, which
+// is the whole difference. Every validation here exists to tell an author that
+// what they wrote is stale or wrong — `coverage.source` is no longer read,
+// `linter: eslint` gates on a rule set that is gone — and the author of a
+// historical tree is not being addressed and cannot act. Worse, the rejection
+// is guaranteed to fire on the one tree it must not: the base tree of the pull
+// request that removes those keys still carries them, and the metric version
+// bump makes that run a cache miss, so it always measures that tree. Validating
+// it would fail every such migration, and keep failing every branch cut before
+// the removal landed.
+//
+// Nothing read from a historical tree reaches a verdict. It supplies what the
+// suites need in order to run there; the gate's own knobs come from the tree
+// being gated. A file that is not YAML at all is still an error, because then
+// there is nothing to read.
+func LoadHistorical(root string) (Config, error) {
+	cfg := Default()
+	path := filepath.Join(root, FileName)
+	data, err := os.ReadFile(path) // #nosec G304 -- root is a worktree lydite created from a commit in the repository it was pointed at
+	if errors.Is(err, os.ErrNotExist) {
+		return cfg, nil
+	}
+	if err != nil {
+		return Config{}, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// validateSource rejects
 // removedKeys names the keys lydite once read and no longer does, so a
 // repository carrying one is told rather than quietly measured differently.
 //

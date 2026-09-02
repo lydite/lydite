@@ -201,6 +201,15 @@ lives — including the logs of components running concurrently beside it, whose
 name a file that no longer exists. Reproduced against vitest 3.2.7. The subdirectory alone fixes it
 for every component name but `coverage`; the flag fixes it for all of them.
 
+**A `go-test` component's `dir` must be its module root.** `go list -m` run inside a module answers
+with the *enclosing* module, so a component declared at `services/api` in a repository with one
+`go.mod` at its root would take the root module's path — and the profile's package-qualified names
+would then be stripped of it and re-prefixed with `services/api`, keying every entry
+`services/api/services/api/x.go`. Nothing downstream notices: the patch gate finds no overlap and
+emits no row at all, indistinguishable from a comments-only diff, and the generated-file check stats
+a path that does not exist. `internal/coverage` compares the module's own directory against the
+component's and reports the component unmeasured with what is wrong, rather than measuring nonsense.
+
 **A component's report path is cleared before its suite starts** — the directory created, anything
 already at the path removed. A suite that passes without writing a report would otherwise be
 measured from the previous run's file, which is a coverage number describing code that is no longer
@@ -1117,6 +1126,15 @@ root may sit below it, which is the shape `ChangedLines` and `selectAffected` al
 measuring at the worktree root instead finds no component declaration, hands back an empty
 baseline, and the gate passes having compared nothing. Verified by injecting it: a change that
 regresses coverage 16.7% and adds an untested line reports `test passed` with every row `new`.
+
+**A base tree's configuration is read leniently**, through `config.LoadHistorical`, which parses and
+merges exactly as `Load` does and validates nothing. Every validation exists to tell an author what
+they wrote is stale, and the author of a historical tree is not being addressed and cannot act —
+while the rejection is guaranteed to fire on the one tree it must not: the base tree of the pull
+request that removes a retired key still carries it, and the metric version bump makes that run a
+cache miss. Validating it would fail every migration and keep failing every branch cut before the
+removal landed. Nothing read from a historical tree reaches a verdict; it supplies what the suites
+need in order to run there, and the gate's own knobs come from the tree being gated.
 
 A base tree lydite could not measure **completely** is not a baseline either, and is refused the
 same way an empty one is. A bare worktree is where a measurement most often fails — no container
