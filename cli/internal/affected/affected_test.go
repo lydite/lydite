@@ -102,20 +102,52 @@ func TestRenameSelectsBothSides(t *testing.T) {
 	}
 }
 
-// TestComponentAtRootContainsEverything: a component rooted at "." claims the
-// whole tree, so every path is under its directory. The invalidator set exists
-// for exactly this declaration — without it a change to .lydite/components.yml
-// would select the root component alone and leave web unrun.
-func TestComponentAtRootContainsEverything(t *testing.T) {
+// TestARootComponentDoesNotSuppressWidening: a component rooted at "."
+// contains every path, and that containment is not evidence the path was
+// understood. It is still selected — a Go module at the repository root has no
+// other way to spell where it lives — but the path counts as unmatched, so
+// every other component is selected too.
+//
+// Reading the containment as a match switches the widening rule off for the
+// whole repository: nothing is ever unmatched, and a root-level Makefile
+// selects the root component alone while web silently does not run.
+func TestARootComponentDoesNotSuppressWidening(t *testing.T) {
 	f := component.File{Components: []component.Component{
 		{Name: "root", Dir: ".", Runner: "go-test"},
 		{Name: "web", Dir: "web", Runner: "vitest"},
 	}}
-	if got, want := names(Select(f, Paths("", []string{"main.go"})).Selected), "root"; got != want {
-		t.Errorf("a root-rooted component claims main.go: got %q, want %q", got, want)
+	for _, p := range []string{"main.go", "Makefile", "tsconfig.base.json"} {
+		res := Select(f, Paths("", []string{p}))
+		if got, want := names(res.Selected), "root,web"; got != want {
+			t.Errorf("Select(%q) = %q, want %q — containment by a root component is not a match", p, got, want)
+		}
+		// The reason the reader sees for the component they actually edited
+		// is still their own path, not the widening.
+		if got, want := res.Reasons["root"].Path, p; got != want {
+			t.Errorf("Select(%q): root's reason path = %q, want %q", p, got, want)
+		}
 	}
-	if got, want := names(Select(f, Paths("", []string{".lydite/components.yml"})).Selected), "root,web"; got != want {
-		t.Errorf("the declaration must invalidate every component: got %q, want %q", got, want)
+	// A path web contains is matched, so nothing widens. The root component
+	// is still selected, because it contains that path too — containment is
+	// what selects, and only what counts as a match has changed.
+	res := Select(f, Paths("", []string{"web/src/app.ts"}))
+	if got, want := names(res.Selected), "root,web"; got != want {
+		t.Errorf("selected = %q, want %q", got, want)
+	}
+	if got, want := res.Reasons["root"].Kind, KindDir; got != want {
+		t.Errorf("root was selected by %q, want %q — not by the widening", got, want)
+	}
+}
+
+// A matched path does not widen, and with no `.`-rooted component in the
+// declaration that is visible as a narrower selection.
+func TestAMatchedPathDoesNotWiden(t *testing.T) {
+	f := component.File{Components: []component.Component{
+		{Name: "api", Dir: "go/api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	if got, want := names(Select(f, Paths("", []string{"web/src/app.ts"})).Selected), "web"; got != want {
+		t.Errorf("selected = %q, want %q — a real directory match narrows", got, want)
 	}
 }
 
@@ -169,19 +201,21 @@ func TestReasonNamesTheReadersOwnEdit(t *testing.T) {
 	}
 }
 
-// A component rooted at "." claims every path, so nothing in such a
-// repository ever reaches the widening rule — the safety net ADR 0018 relies
-// on is switched off by that one declaration, and only the invalidator set
-// protects the other components. A workflow change decides how every
-// component is built and run, so it is on that set.
-func TestARootComponentDoesNotSwallowAWorkflowChange(t *testing.T) {
+// The invalidator set earns its place where a path IS claimed by a component
+// and still affects every other one. A lockfile inside web/ is matched by web
+// and by nothing else, so without the set it would select web alone — when
+// what a lockfile changes is what every component in the tree resolves to.
+//
+// A path no component claims already widens, so nothing on the set has to
+// carry that case.
+func TestAnInvalidatorOverridesAMatchThatIsTooNarrow(t *testing.T) {
 	f := component.File{Components: []component.Component{
-		{Name: "root", Dir: ".", Runner: "go-test"},
+		{Name: "api", Dir: "go/api", Runner: "go-test"},
 		{Name: "web", Dir: "web", Runner: "vitest"},
 	}}
-	for _, p := range []string{".github/workflows/ci.yml", ".github/actions/setup/action.yml"} {
-		if got, want := names(Select(f, Paths("", []string{p})).Selected), "root,web"; got != want {
-			t.Errorf("Select(%q) = %q, want %q — web must not be left unrun by a root component", p, got, want)
+	for _, p := range []string{"web/package-lock.json", "go/api/go.mod", ".lydite/components.yml"} {
+		if got, want := names(Select(f, Paths("", []string{p})).Selected), "api,web"; got != want {
+			t.Errorf("Select(%q) = %q, want %q — an invalidator selects every component", p, got, want)
 		}
 	}
 }
