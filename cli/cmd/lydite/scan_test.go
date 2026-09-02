@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/ui"
 )
@@ -144,5 +149,129 @@ func TestReportPrintsNoDetailForPassingOrStreamingChecks(t *testing.T) {
 		if strings.Contains(out.String(), unwanted) {
 			t.Errorf("report printed %q:\n%s", unwanted, out.String())
 		}
+	}
+}
+
+// A repository that declares nothing is scanned by nothing, and an amber row
+// would leave the job green over an unscanned tree — a security scan that
+// silently stopped. The error names the file the author has to write.
+func TestScanRefusesARepositoryThatDeclaresNoComponents(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := newScanCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("a repository declaring no components was scanned anyway")
+	}
+	var exitErr ui.ExitError
+	if errors.As(err, &exitErr) {
+		t.Fatalf("want an error, not a verdict: %v", err)
+	}
+	if !strings.Contains(err.Error(), component.FileName) {
+		t.Errorf("error should name the file to write, got: %v", err)
+	}
+}
+
+// Each of the three keys narrowed a walk for manifests, and the walk is gone.
+// Ignoring one would leave a repository scanning something other than what its
+// author wrote while every run still reported a pass.
+func TestScanRejectsARetiredExcludeKey(t *testing.T) {
+	for _, key := range []string{"rust", "typescript", "go"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			writeLydite(t, dir, config.FileName, key+":\n  exclude: [\"legacy\"]\n")
+			writeLydite(t, dir, component.FileName, "components:\n  - name: c\n    dir: .\n    runner: go-test\n")
+
+			cmd := newScanCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"--dir", dir})
+
+			err := cmd.ExecuteContext(context.Background())
+			if err == nil {
+				t.Fatal("a retired exclude key was accepted")
+			}
+			if !strings.Contains(err.Error(), key+".exclude") {
+				t.Errorf("error should name the key, got: %v", err)
+			}
+		})
+	}
+}
+
+// A component lydite cannot derive a language for is one nothing scans.
+// Dropping it in silence reads exactly like a component that was scanned and
+// found clean, so it gets a row of its own — unlike a language the repository
+// switched off, which is a decision rather than an incapacity.
+func TestScanReportsAComponentWithNoDerivableLanguage(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: legacy\n    dir: .\n    command: [\"make\", \"check\"]\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	var doc struct {
+		Rows []struct{ Status, Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	if len(doc.Rows) != 1 {
+		t.Fatalf("rows = %+v, want one row for the one component", doc.Rows)
+	}
+	if doc.Rows[0].Status != string(ui.StatusUnmeasured) || doc.Rows[0].Label != "scan(legacy)" {
+		t.Fatalf("row = %+v, want an unmeasured scan(legacy)", doc.Rows[0])
+	}
+}
+
+// A language switched off in .lydite/config.yml produces no rows and no
+// toolchain: provisioning one would download a compiler nothing invokes.
+func TestDisabledLanguageProducesNoUnitsAndNoRows(t *testing.T) {
+	file := component.File{Components: []component.Component{
+		{Name: "cli", Dir: "cli", Runner: runner.GoTest},
+		{Name: "legacy", Dir: "."},
+	}}
+	cfg := config.Default()
+	cfg.Go.Enabled = false
+
+	if units := scanUnits(file, cfg); len(units) != 0 {
+		t.Fatalf("units = %+v, want none when the only language is disabled", units)
+	}
+	cfg.Go.Enabled = true
+	units := scanUnits(file, cfg)
+	if len(units) != 1 || units[0].Name != "cli" || units[0].Lang != runner.Go {
+		t.Fatalf("units = %+v, want just the Go component", units)
+	}
+}
+
+// The name and never the directory: unique names are enforced and unique
+// directories are not, and a scan row and a test row about one component have
+// to carry the same token.
+func TestLabelledNamesTheComponent(t *testing.T) {
+	got := labelled([]executil.Result{{Name: "gosec"}, {Name: "govulncheck"}}, "api")
+	if len(got) != 2 || got[0].Name != "gosec(api)" || got[1].Name != "govulncheck(api)" {
+		t.Fatalf("labelled = %+v, want each result named for the component", got)
+	}
+}
+
+func writeLydite(t *testing.T, root, name, contents string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

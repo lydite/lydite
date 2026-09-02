@@ -109,6 +109,27 @@ jobs:
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
 
+      # The only place component-driven scanning of Rust and TypeScript
+      # executes at all. lydite's own repository has neither — web/ is empty
+      # and its only Cargo.toml files are pin manifests — so `lydite scan
+      # (self)` above exercises the Go path and nothing else.
+      #
+      # The verdict is deliberately not asserted, unlike the test step. The
+      # proving ground carries real findings on purpose (unlicensed crates, a
+      # WriteFile at 0644), so demanding green would have somebody tidy away
+      # the evidence that a scanner works. What is asserted is that every
+      # declared component was scanned by the checks its language implies — a
+      # run that scanned nothing exits 0 too — and that no member crate or
+      # workspace package appears as a unit of its own, which is what a
+      # regression back to walking for manifests would look like.
+      - name: lydite scan (proving ground)
+        run: |
+          status=0
+          /tmp/lydite scan --dir proving-ground --json > scan.json || status=$?
+          echo "lydite scan exited $status"
+          cat scan.json
+          python3 .github/assert-proving-ground.py --scan scan.json
+
       # Selection has to be shown to have selected. A run that narrowed
       # wrongly and a run that narrowed correctly are both green and both
       # faster, so the assertion names the components that must NOT have run

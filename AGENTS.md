@@ -43,9 +43,8 @@ internal/compose/               # the services a component's suite needs (see Se
 internal/scheduler/             # port locks and the concurrency bound (see The scheduler below)
 internal/affected/              # which components a change could have broken (see Affected selection)
 internal/gitdiff/               # the changed paths, and the tracked-file listing both gates read
-internal/detect/                # ecosystem + TS-package detection (walks for Cargo.toml/package.json/go.mod)
 internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
-internal/toolchain/             # ensures the Go/Rust/Node runtime each detected ecosystem needs (see Toolchains below)
+internal/toolchain/             # ensures the Go/Rust/Node runtime each component needs (see Toolchains below)
 internal/rust/                  # clippy, cargo-audit, cargo-deny
 internal/typescript/            # pinned Biome, the only TS linter (see Linters)
 internal/golang/                # gosec, govulncheck (installed into a version-keyed GOBIN dir)
@@ -554,8 +553,8 @@ excludes: ["scripts/**", "tools/gen.go"]
 ```
 
 **It is a path question and nothing else.** It reads no manifest, parses no source and
-asks `internal/detect` nothing, which is what lets it catch a whole undeclared
-directory holding no manifest yet — the case detection cannot see at all. A generated
+reads no manifest at all, which is what lets it catch a whole undeclared
+directory holding none yet — a case nothing that reads manifests can see. A generated
 file is not special-cased for the same reason: recognising one means reading it, and a
 gate that starts reading files has to be right about every language it meets. The
 exclude is where a repository says so.
@@ -576,7 +575,7 @@ test it. Reading it as both would let a repository drop a whole language out of 
 by changing what its linter looks at — a silent widening of what may go untested, in a
 file whose history is not the record of that. The exclude is how a repository says it, in
 one line, where a reviewer is already looking. (`floorReport` filters to enabled
-ecosystems and is the only gate that does; the reasons differ, and neither generalises to
+languages and is the only gate that does; the reasons differ, and neither generalises to
 the other.)
 
 **The file list comes from git** — tracked, plus untracked ones git is not ignoring.
@@ -743,6 +742,45 @@ The file list is every path git knows about, not only source — a watch legitim
 `Makefile`, a `VERSION` file or an OpenAPI document, none of which any component could claim.
 `gitdiff.Tracked` is that listing, shared with the orphan gate.
 
+## Scanning: the declaration names the units too
+
+`lydite scan` runs each language's checks over each declared component, and nothing walks the tree
+for manifests. A component names a runner, the runner implies a language, and its `dir` is where
+that language's checks run. See [ADR 0020](docs/adr/0020-scan-on-components.md).
+
+**A repository that declares no components is an error, not a row.** `lydite: no components
+declared in .lydite/components.yml`, exit 1. An `unmeasured` row would leave the job green over an
+entirely unscanned repository — a security scan that silently stopped, which is the wardnet#957
+failure applied to the scanner. `lydite test` is already loud in the same situation, because every
+source file in such a repository is an orphan. The cost is accepted and real: Semgrep is
+root-scoped and would have run.
+
+**A Cargo workspace is scanned once, at the component root**, and a JavaScript workspace is linted
+once rather than once per nested `package.json`. That is what the build tool treats as a whole,
+which is what a component is. The workspace-member resolution detection needed — a nested
+`Cargo.toml` whose ancestor declares `[workspace]` is not a second unit — has no equivalent here,
+because the declaration already states which directories are units.
+
+**Rows are labelled by component name**, unconditionally: `gosec(cli)`, `cargo clippy(api)`,
+`biome(web)`. `component.validate` enforces unique names and not unique directories, so the name is
+the only one of the two unique by construction — and it is the token `lydite test`'s rows already
+carry, so a scan row and a test row about one component are greppable together. The labelling lives
+at the command and not in each language package, so one rule covers all three rather than three
+that agree until one is changed.
+
+**A component declaring a raw `command:` gets an `unmeasured` row** saying its language cannot be
+derived. Skipping it silently would read as a component that was scanned and found clean. This is
+deliberately not the treatment a **disabled** language gets: `rust.enabled: false` produces no rows
+at all, because that is an opt-out the repository stated rather than a check that could not run,
+and a row per opted-out component trains readers to ignore the tag that exists to be noticed.
+
+**Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the
+scan root whatever the declaration says.
+
+**`scan` has no `--component` or `--affected`.** Selection is `lydite test`'s surface today; a scan
+that narrowed itself would need the same widening-on-ignorance argument made again, and nothing
+asks for it yet.
+
 ## Configuration
 
 Every file that configures lydite lives in `.lydite/` at the scan root: `config.yml` here,
@@ -752,24 +790,24 @@ same tool is an arrangement nobody can predict the shape of from either half.
 
 `.lydite/config.yml` is optional and does one thing, and tuning severity or suppressing individual
 findings is not it (that's what a fix-up pass + inline `#nosec`/`nosemgrep` annotations in the
-scanned repo are for): it **opts out** of what lydite's zero-config default already does (scan
-everything detected, every check enabled), and carries the numeric gate knobs
+scanned repo are for): it **opts out** of what lydite's default already does (run every check over
+every declared component), and carries the numeric gate knobs
 (`coverage.tolerance`, `coverage.patch.tolerance`, `coverage.floor`).
 
-It used to describe the repository's pipeline as well — `coverage.source` and the
-`coverage.{go,rust}` report paths, which located a report some other job produced. lydite now
-writes every coverage report itself, at a path derived from the component's runner, so those keys
+Keys that described a pipeline lydite no longer has are **rejected by name** rather than ignored:
+`coverage.source` and the `coverage.{go,rust}` report paths, which located a report some other job
+produced, and `rust.exclude` / `typescript.exclude` / `go.exclude`, which narrowed a walk for
+manifests. lydite writes every coverage report itself and reads its units from
+`.lydite/components.yml`, so those keys
 have nothing left to say and are **rejected by name** rather than ignored (see Coverage above).
 
 See `internal/config/config.go` for the full schema; shape:
 
 ```yaml
 rust:
-  enabled: true          # set false to skip Rust entirely even if a Cargo.toml is detected
-  exclude: []            # extra directory names to skip during ecosystem/package detection
+  enabled: true          # set false to run no Rust check over any Rust component
 typescript:
   enabled: true
-  exclude: ["legacy-app"]
   linter: biome          # the only accepted value. The retired "eslint" is rejected with an
                           # error rather than silently run under Biome (see Linters below).
   install: ""            # override the install-command auto-detection a JavaScript component's
@@ -777,7 +815,6 @@ typescript:
                           # "corepack enable && yarn install --immutable"
 go:
   enabled: true
-  exclude: []
 semgrep:
   enabled: true
   config: auto           # override to a custom registry ref/path if needed
@@ -839,7 +876,7 @@ bumped `typescript` across the ceiling anyway and merged, after which `npm ci` o
 committed lockfile failed with `ERESOLVE` and every consumer with TypeScript got an install
 error instead of a lint result. CI stayed green throughout, because lydite's own repo has no
 TypeScript to scan: its only `package.json` files are the pin manifests, which `.lydite/config.yml`
-excludes by name, so `self-scan` cannot reach that code path. Biome parses TypeScript with its
+are not components, so `self-scan` cannot reach that code path. Biome parses TypeScript with its
 own Rust parser and depends on no compiler package, so `biome-pin` has no peer range to cross
 and the failure class does not exist for it.
 
@@ -934,13 +971,12 @@ pin silently stops being bumped: the exact failure this whole arrangement exists
 install` never shares a graph between two tools, so the conflict is invisible in normal use.
 `internal/rust`'s `TestPinManifestsAreSeparate` guards against a well-meaning consolidation.
 
-**Adding a new pin means three edits, not one:** the manifest, a `.github/dependabot.yml` entry,
-and an exclude in lydite's own `.lydite/config.yml`. The manifests are real `package.json`/`Cargo.toml`/
-`go.mod` files, so CI's self-scan would otherwise treat each as a package to lint, a crate to audit
-or a module to scan. `internal/config`'s `TestPinDirectoriesAreExcluded` covers only the exclude
-half — it never reads `dependabot.yml`, and it discovers pins by a `*-pin` directory-name suffix, so
-`internal/semgrep/requirements.txt` falls outside it entirely. Nothing enforces the Dependabot
-entry. See [ADR 0006](docs/adr/0006-tool-pins-as-dependabot-manifests.md).
+**Adding a new pin means two edits, not one:** the manifest, and a
+`.github/dependabot.yml` entry. The pin directories need no exclude anywhere — lydite scans
+what `.lydite/components.yml` declares, and a pin directory is deliberately not a component, so
+CI's self-scan never reaches it. Nothing enforces the Dependabot entry, and a pin no bot bumps is
+a scanner that quietly goes stale. See
+[ADR 0006](docs/adr/0006-tool-pins-as-dependabot-manifests.md).
 
 ## Toolchains
 
@@ -956,13 +992,40 @@ It was a robustness and determinism gap, not an outage — a self-hosted or cont
 Go fails at `go install`, the version used is whatever the image ships rather than what the repo
 declares, and with no shared module cache every run re-downloads.
 
+**A toolchain is resolved per component, not per repository.** A component's `dir` is where its
+manifest is read, so a workspace declaring `engines.node: >=22` and a tools package pinning 18 keep
+their own runtimes — read across every `package.json` with the highest floor winning, they collapse
+to one runtime chosen by a rule neither of them stated. Components resolving to the same
+requirement are probed and provisioned once and share the result, so the common case costs one
+diagnostic line rather than one per component.
+
+It also makes lydite's answer and rustup's the same answer by construction: rustup selects a
+toolchain from the directory cargo runs in, and that is now the same directory lydite read the
+`rust-toolchain.toml` from.
+
+**The environment is a value handed to each child, never a change to lydite's own process.**
+Components run concurrently in one process, so a `PATH` written into that process can hold one Node
+version — which is the whole of what "one runtime per repository" was. Two things about that are
+easy to get wrong and invisible in argv:
+
+- **A child's environment is a flat list where the last occurrence of a key wins.** Two callers
+  each prepending their own directories produce two `PATH` entries and one is silently discarded.
+  So `runner.Invocation` carries directories rather than a finished `PATH=` string, and
+  `toolchain.Compose` is the one function that turns every caller's directories into the one entry.
+- **`os/exec` resolves a bare program name against *this* process's `PATH`**, when the command is
+  constructed; `cmd.Env` is applied afterwards and has no bearing on it. `executil` therefore
+  resolves the program against the environment being handed to the child. Without it a toolchain
+  lydite had just provisioned is one the child can use and the lookup cannot find — reproduced as
+  `npm ci: executable file not found in $PATH`, printed immediately after lydite reported
+  installing the Node that held it.
+
 **Versions come from the repo's own manifests, never from `.lydite/config.yml`.**
 
-| Ecosystem | Version source |
+| Language | Version source |
 |---|---|
-| Go | the `go` and `toolchain` directives in **every** discovered `go.mod`, highest wins |
-| Rust | `channel` in `rust-toolchain.toml`, else the legacy bare `rust-toolchain`, per discovered crate |
-| TypeScript | `engines.node` in each detected package's `package.json`, else `.nvmrc` (package, then scan root) |
+| Go | the `go` and `toolchain` directives in the component's own `go.mod`, higher of the two |
+| Rust | `channel` in the component's `rust-toolchain.toml`, else the legacy bare `rust-toolchain` |
+| TypeScript | `engines.node` in the component's `package.json`, else `.nvmrc` (component, then scan root) |
 
 Those files are already authoritative and already enforced by the language's own tooling, so a
 second copy in lydite's config could only agree redundantly or drift silently — and a stale
@@ -979,7 +1042,7 @@ channel, an `lts/*` .nvmrc, no declaration at all) is satisfied by anything pres
 named no floor to be below. A toolchain that won't identify itself is treated as too old, because
 it cannot be *shown* to satisfy a pin.
 
-Each ecosystem provisions differently, and only one of the three downloads anything:
+Each language provisions differently, and only one of the three downloads anything:
 
 - **Go** delegates to `GOTOOLCHAIN`. Any Go 1.21+ can fetch another toolchain itself, through the
   module proxy and verified against Go's checksum database — better provenance than lydite could
@@ -1038,8 +1101,8 @@ the grammar and, under `--json`, the document.
 over: it looked for `go.mod` at exactly one path, so wardnet — whose modules live under `wctl/` and
 `sdk/wardnet-go/`, not the scan root — would silently have got nothing, and it put knowledge of Go
 toolchains into gt, which would then have needed the same for Rust and TypeScript forever. lydite
-already knows which ecosystems it detected and where, so it reads every manifest under the scan
-root; and it is the only place that helps wardnet at all, since wardnet calls `wardnet/bulwark@v1`
+already knows which languages a repository declares and where, so it reads each component's own
+manifest; and it is the only place that helps wardnet at all, since wardnet calls `wardnet/bulwark@v1`
 directly rather than through gt. See [ADR 0004](docs/adr/0004-ensure-language-toolchains.md).
 
 Downloads land in the same version-keyed `~/.cache/lydite` layout every other lydite-managed
@@ -1056,8 +1119,8 @@ already derives, and `--gate-coverage` compares it against a baseline cached on 
 never pollutes main's history). See
 [ADR 0019](docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
 
-**The component is the unit.** `internal/detect` no longer decides what a coverage unit is — the
-declaration does. Three altitudes are reported and all three are gated: per component, per
+**The component is the unit.** Nothing decides what a coverage unit is except the
+declaration. Three altitudes are reported and all three are gated: per component, per
 language, and globally. All three are `Σ covered / Σ total` over subsets of the same stored
 per-component entries, so they cannot disagree or drift apart.
 

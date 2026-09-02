@@ -1,10 +1,14 @@
-# What lydite builds, tests and gates in its own repository.
+# What lydite builds, tests, scans and gates in its own repository.
 #
 # One component, because the Go module at cli/ is what `go test` treats as a
 # whole. The *-pin directories under it hold real manifests — a go.mod, a
 # package.json, a Cargo.toml — and are deliberately not components: they exist
 # so Dependabot can see the tool versions lydite pins, and nothing in them is
-# ever built or tested.
+# ever built or tested. Being undeclared is the whole of what keeps them out of
+# scope: lydite reads this file rather than walking for manifests, so a pin
+# directory needs no exclude anywhere. Adding one still means adding a matching
+# entry to .github/dependabot.yml, which nothing enforces — a pin no bot bumps
+# is a scanner that quietly goes stale.
 components:
   - name: cli
     dir: cli
