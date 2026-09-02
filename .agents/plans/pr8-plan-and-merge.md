@@ -117,10 +117,12 @@ What transfers:
   rather than the verdict, because the proving ground carries real findings on
   purpose. Step 8's assertions should follow that shape: assert what ran, not
   that everything was green.
-- Three issues are still open and touch this work: **#47** (`lydite/actions`
+- Four issues are still open and touch this work: **#47** (`lydite/actions`
   still invokes the removed `lydite coverage`, and should pass
   `GITHUB_BASE_REF`), **#48** (assert the coverage gate end to end against the
-  proving ground) and **#49** (the write-token question below).
+  proving ground), **#49** (the write-token question below) and **#55** (the
+  Rust toolchain probe asks cargo its version rather than rustup what is
+  installed).
 
 ### The security question, still open
 

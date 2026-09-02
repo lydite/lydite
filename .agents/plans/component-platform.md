@@ -102,6 +102,11 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   command that has no baseline for one. The orphan gate cannot cover it because
   a component rooted at `.` covers every path, which is the same property
   affected selection already had to special-case.
+- **The Rust toolchain probe asks cargo its version, not rustup what is
+  installed**, so a component pinning a channel older than the machine's
+  default is never materialised with its components. Pre-existing rather than
+  introduced — taking the highest channel across crates left the same hole —
+  and narrowed by this step. [#55](https://github.com/lydite/lydite/issues/55).
 - **`typescript.install` is still repository-wide.** See below; the half that
   could produce a wrong answer — which Node runs the install — is per component
   now.

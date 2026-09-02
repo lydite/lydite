@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,9 +13,9 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
-	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/golang"
+	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/semgrep"
@@ -74,7 +72,7 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 
-			warnUndeclaredLanguages(ctx, cmd.ErrOrStderr(), dir, file, cfg)
+			warnUnscanned(ctx, cmd.ErrOrStderr(), dir, file, cfg)
 
 			for _, c := range file.Components {
 				lang := langOf(c)
@@ -182,55 +180,37 @@ func labelled(results []executil.Result, component string) []executil.Result {
 	return out
 }
 
-// warnUndeclaredLanguages names a language whose source is in the tree and
-// which no component declares, so nothing scans it.
+// warnUnscanned names the source no component's checks reach, so a narrowing
+// scan is not a silent one.
 //
-// The orphan gate is what normally makes a declared list safe to rely on: a
-// source file under no component is reported and the author has to declare it
-// or exclude it. It does not cover this case. A component rooted at `.` covers
-// every path in the repository, so a Go component at the root leaves a
-// TypeScript directory beside it orphaning nothing while no TypeScript check
-// ever runs — and the orphan gate belongs to `lydite test`, which a consumer
-// can run scan without.
+// The orphan gate is what normally makes a declared list safe to rely on, and
+// it cannot answer this: it asks whether any component *contains* a file, and
+// a scanner is per language — a component rooted at `.` contains every path in
+// the repository, so a Go component at the root leaves TypeScript beside it
+// orphaning nothing while gosec never looks at it. The gate also belongs to
+// `lydite test`, which a consumer can run scan without.
 //
-// A warning and not a row. What a repository ought to do about it is declare a
-// component, which is `lydite test`'s gate to demand; scan's job here is to
-// stop the narrowing being silent. Stderr, because stdout carries the report
-// and under --json a document a sentence would make unparseable.
+// A warning and not a row. What a repository should do about it is declare a
+// component or write the exclude, which is `lydite test`'s gate to demand;
+// scan's job is only to stop the narrowing being invisible. Stderr, because
+// stdout carries the report and under --json a document a sentence would make
+// unparseable.
 //
-// It reads git's file list and file extensions, and no manifest — the same
-// question the orphan gate asks, and deliberately not detection returning
-// under another name: it decides nothing about what runs, and its answer is a
-// sentence rather than a unit.
-func warnUndeclaredLanguages(ctx context.Context, w io.Writer, dir string, file component.File, cfg config.Config) []runner.Lang {
-	declared := map[runner.Lang]bool{}
-	for _, c := range file.Components {
-		if lang := langOf(c); lang != "" {
-			declared[lang] = true
-		}
-	}
-	// Outside a git repository, and equally where git lists nothing, there is
-	// no question to answer — the shape orphanRow already has for both cases.
-	files, err := gitdiff.Tracked(ctx, dir)
+// Outside a git repository, and equally where git lists no source at all,
+// there is no question to answer — the shape orphanRow already has for both.
+func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.File, cfg config.Config) []orphan.Gap {
+	gaps, err := orphan.Unscanned(ctx, dir, file, func(l runner.Lang) bool { return langEnabled(l, cfg) })
 	if err != nil {
 		return nil
 	}
-	var found []runner.Lang
-	for _, f := range files {
-		lang, ok := runner.LangForExt(strings.ToLower(path.Ext(f)))
-		// A language switched off is one the repository said it wants no check
-		// over, which is an answer rather than an oversight.
-		if !ok || declared[lang] || !langEnabled(lang, cfg) || slices.Contains(found, lang) {
-			continue
-		}
-		found = append(found, lang)
+	for _, g := range gaps {
+		// One example and a count, not the list: the reader needs to know
+		// which declaration is missing, and a repository mid-migration would
+		// otherwise print hundreds of paths ahead of its own report.
+		_, _ = fmt.Fprintf(w, "warning: %d %s file(s) are under no component that checks them, so nothing scans them (e.g. %s) — declare a component for them, or exclude them in %s\n",
+			len(g.Files), g.Lang, g.Files[0], component.FileName)
 	}
-	slices.Sort(found)
-	for _, lang := range found {
-		_, _ = fmt.Fprintf(w, "warning: %s source is present but no component declares it, so nothing scans it — declare a component for it in %s\n",
-			lang, component.FileName)
-	}
-	return found
+	return gaps
 }
 
 // resolveDiffBase turns the --diff-base flag into a commit SHA for Semgrep's

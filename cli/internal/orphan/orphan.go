@@ -163,3 +163,85 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 	sort.Strings(files)
 	return files, nil
 }
+
+// Unscanned lists, per language, the source files no component of that
+// language covers — the files `lydite scan` runs no check over.
+//
+// It is a different question from Find's, and the difference is the language.
+// Find asks whether any component's directory contains the file, because a
+// component tests what is under it whatever the file is written in. A scanner
+// is per language: a Go component covering `web/app.ts` by containment runs
+// gosec, which will never look at it. So a file is unscanned when no component
+// both contains it *and* implies its language.
+//
+// This is the half of the guard `Find` cannot give `lydite scan`. A component
+// rooted at `.` contains every path in the repository, so a Go component at
+// the root leaves TypeScript beside it orphaning nothing — and a repository
+// declaring one of its two Go modules leaves the other one contained by
+// nothing while Find is the only thing that would have said so, in a command
+// the consumer may not run.
+//
+// Excludes narrow it, exactly as they narrow Find. An exclude is the
+// repository's reviewable statement that a path is claimed by no component,
+// which is the same statement this would otherwise ask for. It does not narrow
+// what gets *scanned* — nothing scans these files either way — so it is not
+// the declaration answering two questions.
+//
+// enabled decides which languages are worth reporting; a language switched off
+// in config is an answer rather than an oversight. Passing nil reports every
+// language.
+func Unscanned(ctx context.Context, root string, f component.File, enabled func(runner.Lang) bool) ([]Gap, error) {
+	files, err := sourceFiles(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	byLang := map[runner.Lang][]string{}
+	for _, p := range files {
+		lang, ok := runner.LangForExt(strings.ToLower(path.Ext(p)))
+		if !ok || (enabled != nil && !enabled(lang)) {
+			continue
+		}
+		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components) {
+			continue
+		}
+		byLang[lang] = append(byLang[lang], p)
+	}
+	var out []Gap
+	for lang, paths := range byLang {
+		out = append(out, Gap{Lang: lang, Files: paths})
+	}
+	// By language, so two runs of one repository report in one order.
+	sort.Slice(out, func(i, j int) bool { return out[i].Lang < out[j].Lang })
+	return out, nil
+}
+
+// Gap is one language's unscanned source.
+type Gap struct {
+	Lang  runner.Lang
+	Files []string
+}
+
+// coveredByLanguage reports whether a component contains the file *and* runs
+// checks for the language it is written in.
+func coveredByLanguage(file string, lang runner.Lang, components []component.Component) bool {
+	for _, c := range components {
+		r, ok := runner.Lookup(c.Runner)
+		if !ok || r.Lang != lang {
+			continue
+		}
+		if coveredByComponent(file, []component.Component{c}) {
+			return true
+		}
+	}
+	return false
+}
+
+// excluded reports whether any exclude covers the file.
+func excluded(file string, excludes []string) bool {
+	for _, e := range excludes {
+		if pathmatch.Match(e, file) {
+			return true
+		}
+	}
+	return false
+}

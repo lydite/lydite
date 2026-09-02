@@ -309,3 +309,20 @@ func TestAnUnpinnedRequirementNamesTheComponent(t *testing.T) {
 		t.Errorf("log = %q, want it to name the component that declared nothing", log.String())
 	}
 }
+
+// An empty inherited PATH must not leave a trailing separator. An empty PATH
+// element means the current directory to a shell and to an exec lookup, and a
+// component's commands run with their working directory set inside the
+// repository being scanned — so the trailing separator would put that
+// repository on the child's PATH.
+func TestComposeDoesNotPutTheWorkingDirectoryOnPath(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	got := Compose([]string{"/opt/go/bin"}, nil)
+	if len(got) != 1 {
+		t.Fatalf("Compose = %q, want one PATH entry", got)
+	}
+	if got[0] != "PATH=/opt/go/bin" {
+		t.Fatalf("PATH = %q, want no trailing separator", got[0])
+	}
+}

@@ -14,3 +14,10 @@ components:
     dir: cli
     runner: go-test
     args: ["-race", "./..."]
+
+# The pin manifests' own source. cargo refuses a [package] manifest with no
+# src/lib.rs, so cargo-audit-pin and cargo-deny-pin each carry an empty one —
+# real Rust that no component builds, tests or scans, and this is where a
+# repository says that out loud. Without it `lydite scan` reports Rust source
+# that nothing checks, which is true and is not something anyone should fix.
+excludes: ["cli/internal/**/*-pin/**"]

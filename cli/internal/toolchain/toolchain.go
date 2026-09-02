@@ -116,7 +116,15 @@ func Compose(dirs []string, vars ...[]string) []string {
 	}
 	// Prepended, not appended: a provisioned toolchain exists precisely
 	// because the ambient one was missing or too old, so it has to win.
-	parts := append(append([]string{}, dirs...), os.Getenv("PATH"))
+	//
+	// The inherited PATH is filtered the same way the supplied directories
+	// are. An empty one — a minimal container, an `env -i` invocation — would
+	// otherwise leave a trailing separator, and an empty PATH element means
+	// the current directory to a shell and to an exec lookup. Since a
+	// component's commands run with their working directory set to a
+	// directory of the repository being scanned, that puts the scanned
+	// repository on the child's PATH.
+	parts := nonEmpty(append(append([]string{}, dirs...), os.Getenv("PATH")))
 	return append(out, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 }
 

@@ -96,10 +96,23 @@ monorepo whose `web/` needs Node 22 and whose `tools/` pins Node 18 therefore go
 one runtime, chosen by a rule neither package stated. The component is the unit
 that makes the question answerable, and all three languages resolve the same way:
 Go reads the component directory's `go.mod`, Rust reads the `rust-toolchain.toml`
-beside it — which is also the directory cargo runs in, so lydite's answer and
-rustup's are now the same answer by construction rather than by luck — and Node
-reads that component's `engines.node`, then a `.nvmrc` beside it, then the scan
-root's.
+beside it — which is also the directory cargo runs in, so lydite and rustup now
+read the same file rather than agreeing by luck — and Node reads that
+component's `engines.node`, then a `.nvmrc` beside it, then the scan root's.
+
+**Reading the same file is not the same as reaching the same answer**, and for
+Rust it does not. The probe asks the ambient `cargo` its version from lydite's
+own working directory, so a component pinning a channel *older* than the
+default reads as satisfied and is never provisioned — rustup then fetches that
+channel lazily in the middle of `cargo clippy`, without the `clippy` and
+`rustfmt` components, where a missing component reads as a check failure rather
+than a setup step. Resolving per component does not introduce this (taking the
+highest channel across every crate left the same hole, for the same reason) and
+narrows it, since a component pinning a channel *newer* than the default is now
+provisioned where before only the maximum was. Closing it means asking rustup
+which toolchains and components are installed rather than asking cargo its
+version, which is a different question from the one this decision is about. Tracked as
+[#55](https://github.com/lydite/lydite/issues/55).
 
 Components resolving to the same requirement are probed and provisioned once and
 share the result, so the common case costs one diagnostic line rather than one

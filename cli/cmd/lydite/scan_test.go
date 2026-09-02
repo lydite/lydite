@@ -295,10 +295,10 @@ func TestScanWarnsAboutALanguageNoComponentDeclares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := warnUndeclaredLanguages(context.Background(), &w, dir, file, config.Default())
+	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
 
-	if !slices.Equal(got, []runner.Lang{runner.TypeScript}) {
-		t.Fatalf("found = %v, want TypeScript alone — Go is declared", got)
+	if len(got) != 1 || got[0].Lang != runner.TypeScript {
+		t.Fatalf("gaps = %+v, want TypeScript alone — Go is declared and covers main.go", got)
 	}
 	if !strings.Contains(w.String(), component.FileName) {
 		t.Errorf("warning = %q, want it to name the file that fixes it", w.String())
@@ -323,7 +323,7 @@ func TestScanIsSilentAboutADisabledLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := warnUndeclaredLanguages(context.Background(), &w, dir, file, cfg); len(got) != 0 {
+	if got := warnUnscanned(context.Background(), &w, dir, file, cfg); len(got) != 0 {
 		t.Fatalf("found = %v, want nothing when the language is switched off", got)
 	}
 }
@@ -341,7 +341,7 @@ func TestScanSaysNothingOutsideAGitRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := warnUndeclaredLanguages(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
 		t.Fatalf("found = %v, want nothing outside a repository", got)
 	}
 	if w.Len() != 0 {
@@ -355,5 +355,59 @@ func gitInit(t *testing.T, dir string) {
 		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
 			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
 		}
+	}
+}
+
+// The wardnet shape. Two Go modules, one declared: the language is covered, so
+// a check keyed on languages alone says nothing while the second module is
+// scanned by no one. Detection used to find both, so this is exactly the
+// silent narrowing the declaration must not introduce.
+func TestScanWarnsAboutAModuleNoComponentCovers(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: wctl\n    dir: wctl\n    runner: go-test\n")
+	writeLydite(t, dir, "wctl/go.mod", "module wctl\n\ngo 1.26\n")
+	writeLydite(t, dir, "wctl/main.go", "package main\n")
+	writeLydite(t, dir, "sdk/wardnet-go/go.mod", "module sdk\n\ngo 1.26\n")
+	writeLydite(t, dir, "sdk/wardnet-go/client.go", "package sdk\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
+
+	if len(got) != 1 || got[0].Lang != runner.Go {
+		t.Fatalf("gaps = %+v, want the undeclared Go module reported", got)
+	}
+	if !slices.Equal(got[0].Files, []string{"sdk/wardnet-go/client.go"}) {
+		t.Fatalf("files = %v, want only the module no component covers", got[0].Files)
+	}
+	if !strings.Contains(w.String(), "sdk/wardnet-go/client.go") {
+		t.Errorf("warning = %q, want it to name an example file", w.String())
+	}
+}
+
+// An exclude is the repository's reviewable statement that a path is claimed
+// by no component, which is the same statement this warning asks for. It does
+// not narrow what gets scanned — nothing scans these files either way.
+func TestAnExcludeSilencesTheUnscannedWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n"+
+			"excludes: [\"vendor-fixtures/**\"]\n")
+	writeLydite(t, dir, "main.go", "package main\n")
+	writeLydite(t, dir, "vendor-fixtures/src/lib.rs", "pub fn x() {}\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want none when the path is excluded", got)
 	}
 }

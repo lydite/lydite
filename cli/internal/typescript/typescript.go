@@ -45,7 +45,11 @@ import (
 func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	toolchainDir, err := ensureBiome(ctx, env)
 	if err != nil {
-		return []executil.Result{{Name: "biome", Err: err}}
+		// Detail and not the error alone: report() prints Detail under a
+		// failing row and nothing else, so a bare Err renders as `✗ biome`
+		// with the cause in neither the terminal nor --json — a toolchain
+		// that would not install, indistinguishable from lint findings.
+		return []executil.Result{{Name: "biome", Err: err, Detail: err.Error()}}
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")

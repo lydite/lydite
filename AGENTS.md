@@ -1082,6 +1082,15 @@ Each language provisions differently, and only one of the three downloads anythi
   rustup would otherwise install it lazily in the middle of `cargo clippy`, where a missing
   component reads as a check failure rather than a setup step. With no rustup at all, lydite says
   so and continues rather than installing rustup behind the user's back.
+  **The probe does not ask rustup what is installed**, and that is a real limit
+  rather than an oversight: it asks the ambient `cargo` its version, from lydite's own
+  working directory. A component pinning a channel older than the machine's default
+  therefore reads as satisfied and is never materialised, and rustup fetches it lazily
+  during `cargo clippy` — without the components, which is the failure this provisioning
+  exists to prevent. Per-component resolution narrows it rather than causing it: taking
+  the highest channel across every crate left the same hole. Closing it means asking
+  `rustup` which toolchains and components are present ([#55](https://github.com/lydite/lydite/issues/55)).
+
   Installing is not selecting, and the two come apart in exactly one case. rustup picks a toolchain
   by reading `rust-toolchain.toml` from the directory cargo runs in, which covers the normal case
   for free — `internal/rust` runs cargo inside the crate directory and a Rust component's
