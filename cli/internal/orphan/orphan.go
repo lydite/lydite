@@ -188,8 +188,9 @@ func Unscanned(ctx context.Context, root string, f component.File, enabled func(
 	modules := goModuleDirs(tracked)
 	byLang := map[runner.Lang][]string{}
 	for _, p := range files {
-		lang, ok := runner.LangForExt(strings.ToLower(path.Ext(p)))
-		if !ok || (enabled != nil && !enabled(lang)) {
+		ext := strings.ToLower(path.Ext(p))
+		lang, ok := runner.LangForExt(ext)
+		if !ok || ambiguousExt[ext] || (enabled != nil && !enabled(lang)) {
 			continue
 		}
 		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components, modules) {
@@ -204,6 +205,26 @@ func Unscanned(ctx context.Context, root string, f component.File, enabled func(
 	// By language, so two runs of one repository report in one order.
 	sort.Slice(out, func(i, j int) bool { return out[i].Lang < out[j].Lang })
 	return out, nil
+}
+
+// ambiguousExt is the extensions whose presence is not evidence of a codebase
+// nothing scans.
+//
+// The .js family is the extension of build output, configuration and tooling
+// glue in every ecosystem, lydite's languages included: a Go repository with a
+// docs/theme.js or a root *.config.js is an ordinary Go repository, not one
+// with unscanned TypeScript in it. Warning about those would fire on ordinary
+// work, on every run, with an exclude as the only way to silence it — and that
+// exclude would change what the orphan gate reads too.
+//
+// The orphan gate deliberately keeps the full set, because it asks a different
+// question: whether a component claims the file, which a component rooted at
+// `.` does. This asks whether a body of source is checked by nothing, and a
+// single .js cannot answer it either way. The cost is a genuinely unscanned
+// JavaScript-only package going unmentioned, which is narrow and is the
+// direction that keeps the diagnostic worth reading.
+var ambiguousExt = map[string]bool{
+	".js": true, ".jsx": true, ".mjs": true, ".cjs": true,
 }
 
 // Gap is one language's unscanned source.
@@ -310,6 +331,16 @@ func goModuleDirs(tracked []string) map[string]bool {
 // not scanned by the enclosing module either; nothing is being claimed as
 // covered that is not.
 func goIgnored(dir string) bool {
+	// The scan root itself. path.Dir("go.mod") is ".", whose one segment
+	// begins with a dot, so the loop below would read a repository's own root
+	// module as an ignored directory and never record it as a boundary.
+	// Nothing answers differently today, because a file with no enclosing
+	// module is treated as being in its component's — but the two are only
+	// accidentally compensating, and the next reader of either has no reason
+	// to expect it.
+	if dir == "." {
+		return false
+	}
 	for _, seg := range strings.Split(dir, "/") {
 		if seg == "testdata" || strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "_") {
 			return true

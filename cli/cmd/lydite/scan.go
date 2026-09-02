@@ -97,7 +97,15 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				cdir := filepath.Join(dir, filepath.FromSlash(c.Dir))
-				env := envs.For(c.Name).Environ()
+				// The component's declared environment as well as its
+				// toolchain, composed exactly as `lydite test` composes it. A
+				// Rust component declaring SQLX_OFFLINE or a Go one declaring
+				// CGO_ENABLED needs it to build at all, so without it the
+				// suite passes and clippy fails on the build the declaration
+				// exists to make work. No invocation directories: scan runs
+				// lydite's own pinned tools, which it invokes by absolute
+				// path.
+				env := childEnv(envs.For(c.Name), c, runner.Invocation{})
 				var results []executil.Result
 				switch lang {
 				case runner.Rust:
@@ -105,7 +113,7 @@ func newScanCmd() *cobra.Command {
 				case runner.TypeScript:
 					results = typescript.Check(ctx, cdir, env)
 				case runner.Go:
-					results = golang.Check(ctx, cdir, env)
+					results = golang.Check(ctx, cdir, env, envs.For(c.Name).Key())
 				}
 				for _, row := range resultRows(labelled(results, c.Name)) {
 					rep.Add(row)

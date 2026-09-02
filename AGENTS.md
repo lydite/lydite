@@ -792,6 +792,14 @@ cargo already covers or an unrelated crate it does not, and telling those apart 
 manifest; a path-shaped rule would warn about crates that are perfectly well scanned. TypeScript
 needs none, since Biome walks the tree from where it is pointed.
 
+**A `.js`, `.jsx`, `.mjs` or `.cjs` file is never a gap on its own.** That family is the extension
+of build output, configuration and tooling glue in every ecosystem, so a Go repository with a
+`docs/theme.js` is an ordinary Go repository rather than one carrying unscanned TypeScript. The
+orphan gate keeps the full extension set because it asks whether a component *claims* a file,
+which a component rooted at `.` does; this asks whether a body of source is checked by nothing,
+and one `.js` cannot answer it. The cost is a JavaScript-only package going unmentioned, which is
+the direction that keeps the diagnostic worth reading.
+
 It reads git's file list, file extensions and the presence of a `go.mod`, and opens no manifest —
 the orphan gate's own kind of question rather than detection under a new name: it decides nothing
 about what runs, and its answer is a sentence. Excludes narrow it, because an exclude is already

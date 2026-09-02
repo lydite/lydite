@@ -41,6 +41,8 @@ package toolchain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -136,6 +138,31 @@ func nonEmpty(in []string) []string {
 		}
 	}
 	return out
+}
+
+// Key identifies what this environment changes, for a caller that caches
+// something built under it.
+//
+// Both halves matter, and the variables alone are not enough: a downloaded Go
+// toolchain sets GOTOOLCHAIN=local — the same value an ambient one that
+// already satisfies the declaration gets — and says which toolchain by putting
+// a version-keyed directory on PATH. Two components that each downloaded a
+// different Go would otherwise share a key, and a tool built under the first
+// would be reused by the second, which is the failure the pin exists to
+// prevent wearing a cache key.
+func (e *Env) Key() string {
+	if e == nil || (len(e.PathDirs) == 0 && len(e.Vars) == 0) {
+		return "ambient"
+	}
+	h := sha256.New()
+	for _, d := range e.PathDirs {
+		_, _ = io.WriteString(h, d+"\x00")
+	}
+	_, _ = io.WriteString(h, "\x00")
+	for _, v := range e.Vars {
+		_, _ = io.WriteString(h, v+"\x00")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // Envs is one Env per component, keyed by component name. A component with

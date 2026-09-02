@@ -539,3 +539,52 @@ func TestARawCommandComponentsSourceIsNotWarnedAbout(t *testing.T) {
 		t.Fatalf("gaps = %+v, want none: scan already reports scan(legacy) unmeasured", got)
 	}
 }
+
+// The .js family is the extension of build output, configuration and tooling
+// glue in every ecosystem: a Go repository with a docs/theme.js is an ordinary
+// Go repository, not one with unscanned TypeScript in it. The orphan gate is
+// silent about that file — a component rooted at `.` claims it — so warning
+// would fire on ordinary work with an exclude as the only way to stop it.
+func TestAStrayJavaScriptFileIsNotAnUnscannedCodebase(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeLydite(t, dir, "docs/theme.js", "module.exports = {};\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want silence for a stray .js", got)
+	}
+
+	// A .ts beside it is a different claim, and still reported.
+	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
+	gitInit(t, dir)
+	file, err = component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
+	if len(got) != 1 || !slices.Equal(got[0].Files, []string{"web/app.ts"}) {
+		t.Fatalf("gaps = %+v, want the .ts alone", got)
+	}
+}
+
+// A component's declared environment reaches the checks, as it reaches its
+// suite: a Rust component declaring SQLX_OFFLINE or a Go one declaring
+// CGO_ENABLED needs it to build at all, so without it the suite passes under
+// `lydite test` and the build fails under `lydite scan`.
+func TestScanComposesAComponentsDeclaredEnvironment(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{"SQLX_OFFLINE": "true"}}
+
+	if got := childEnv(nil, c, runner.Invocation{}); !slices.Contains(got, "SQLX_OFFLINE=true") {
+		t.Fatalf("env = %q, want the component's declared variable", got)
+	}
+}
