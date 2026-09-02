@@ -178,15 +178,19 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	shared := map[string]*Env{}
 	for _, req := range reqs {
 		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
-		if env, ok := shared[key]; ok {
-			envs[req.Unit.Name] = env
-			continue
+		env, seen := shared[key]
+		if !seen {
+			resolved, err := resolveOne(ctx, req, ov, w)
+			if err != nil {
+				return nil, err
+			}
+			env = resolved
+			shared[key] = env
 		}
-		env, err := resolveOne(ctx, req, ov, w)
-		if err != nil {
-			return nil, err
-		}
-		shared[key] = env
+		// Only when there is something to apply, so a component with nothing
+		// to add has no entry rather than a nil one — For answers the same
+		// either way, and two shapes for one state is one more than the map
+		// needs.
 		if env != nil {
 			envs[req.Unit.Name] = env
 		}
