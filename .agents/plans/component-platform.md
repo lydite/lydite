@@ -16,7 +16,7 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
-| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | not started |
+| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | next |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
@@ -77,6 +77,20 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
 - A component rooted at `.` no longer suppresses affected selection's widening.
   `dir: .` says where a component is rooted, not that it tests every file.
+
+## Left open by step 6
+
+- **#47** — `lydite/actions` still invokes `lydite coverage`, which no longer
+  exists, and should pass `GITHUB_BASE_REF` on pull requests, which is what
+  actually fixes a stacked pull request. This must land before v0.2.0 reaches a
+  consumer.
+- **#48** — the coverage gate has no end-to-end assertion. `ci-end2end.yml`
+  asserts coverage is *measured* per component; nothing asserts it *gates*,
+  because that needs a state branch on the proving ground and a token with push
+  rights to it.
+- **#49** — gating puts a writable token in a job that runs the repository's own
+  code. Recording moved to a post-merge workflow, which is the answer for a
+  repository; the documentation debt for consumers is what remains.
 
 ## Still open
 

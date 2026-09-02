@@ -74,30 +74,92 @@ component is the unit that finally makes the question answerable.
 
 ## What step 6 learned, and what it cost
 
-Step 6 took **N review rounds and produced N findings** — fill this in from the
-actual run before starting, and read the trend rather than the total.
+Step 6 took **seven review rounds and produced 35 findings**, none of them a
+false positive. The counts by round were 6, 6, 4, 5, 5, 3, 6 — the rate never
+converged, and the two most dangerous defects arrived in rounds 3 and 4, after
+the point where a quiet round might have looked like a finish. Budget for six
+rounds and read the *class* of finding rather than the count: the honest stopping
+signal was the last round returning "this diagnostic is wrong" and "this
+denominator counts the wrong thing" rather than "this gate reports green having
+measured nothing".
+
+Three of the findings were defects the reviewer found in code written to fix an
+earlier finding. One was written an hour before it was found.
 
 What bit, and will bite again:
 
-- **A rejection that silently stops rejecting.** The first attempt at refusing a
-  removed config key decoded the file into a shadow struct with `*yaml.Node`
-  fields. yaml.v3 cannot unmarshal into that type, so every check errored — and
-  the error was swallowed on the grounds that the caller reports parse failures.
-  Result: the rejection accepted everything, and its own test was what caught it.
-  A guard whose failure path is "return nil" needs a test that fires it.
-- **Verify a format claim against the tool, not against its documentation.** An
-  lcov's `LF`/`LH` records match cargo-llvm-cov's JSON totals exactly; a tally of
-  its `DA` lines does not — 57 against 55 on the proving ground's three-crate
-  workspace, because a line carrying two records is one line to `LF` and two to a
-  tally. Both readings look correct from the format description.
-- **Wire it to a caller and run it against a real repository.** Every defect that
-  mattered in step 6 surfaced that way rather than from a test: a diff streaming
-  into the middle of the report, git's commit line landing in the same place, and
-  the fact that the proving ground's `web` workspace declares no coverage
-  provider at all.
+- **Almost every defect that mattered came from running it, not from a test.**
+  A vitest run deleting every component's log; `0/0` rendering as `0.0%`; a
+  failed component carrying a stale baseline into a green row; lydite's own
+  output widening its own affected selection; the default branch measuring
+  everything twice. Tests confirmed each one *afterwards*. Build real
+  repositories — a git fixture with an origin, a `--dir source` monorepo, an
+  unwritable remote — and run the thing.
+- **The two worst defects were both in code at 0% coverage, and neither was
+  reachable from a unit test.** A base tree measured at the worktree root
+  instead of the scan root, and a base tree's config validated with rules it
+  predates. Each produced a gate that passed having compared nothing. If a
+  package has a network or worktree path, drive it end to end through the
+  command or accept that reviews are the only thing testing it.
+- **A guard whose failure path is `return nil` needs a test that fires it.** The
+  first attempt at rejecting a removed config key decoded into a shadow struct
+  with `*yaml.Node` fields, which yaml.v3 cannot unmarshal into. Every check
+  errored, the error was swallowed as "the caller reports parse failures", and
+  the rejection accepted everything. Its own test caught it.
+- **Injecting the defect is what establishes a test, and the injection has to
+  compile.** One injection left an unused import; nothing built, no test ran,
+  and the filtered output looked exactly like a passing injection. Read the
+  build output.
+- **Verify a format claim against the tool.** An lcov's `LF`/`LH` records match
+  cargo-llvm-cov's JSON totals exactly; a tally of its `DA` lines does not — 57
+  against 55 on the proving ground — because a line carrying two records is one
+  line to `LF`. Both readings look right from the format description.
 - **`cd ..` from `cli/` is the worktree; `cd ..` from the worktree is the bare
-  repo.** A `git add -A && git commit` in the second one commits into `.bare` and
-  moves its HEAD. Use absolute paths.
+  repo.** A `git add -A && git commit` in the second one commits into `.bare`
+  and moves its HEAD. Use absolute paths. Also: `cd x && cmd` silently skips
+  `cmd` when the `cd` fails, which cost an edit that appeared to apply and had
+  not.
+- **A CI edit is code.** `working-directory: ..` in a workflow step resolves
+  against the workspace, not the job's default — so it named the parent of the
+  checkout, where `lydite test` reports "no components declared" and exits 0.
+  The suite and the gate would both have stopped running while the job stayed
+  green. Written while fixing a different finding, found by the next round.
+
+### A security question this step opened, and did not close
+
+Gating coverage means running the repository's tests *and* writing to a branch.
+Put both in one job and a pull request's own code runs beside a token that can
+push anywhere. Splitting them does not help: the measuring job runs the branch's
+code whatever token it holds, so a branch can fabricate the measurement a
+recording job would then commit — trading trust in the branch's token for trust
+in its data, where a poisoned baseline persists and every later change gates
+against it.
+
+The answer taken was to record **after merge**, on the default branch, measuring
+the tree itself. Pull requests gate read-only. See
+[#49](https://github.com/lydite/lydite/issues/49), and expect the same question
+wherever step 7 or 8 adds a job that writes.
+
+## What step 6 left in place, that you will meet
+
+- **This repository gates itself.** `.github/workflows/ci-test.yml` runs
+  `lydite test --dir .. --gate-coverage` **read-only**, and
+  `.github/workflows/lydite-baseline.yml` records on pushes to the default
+  branch. If step 7 changes what scan measures, that gate is now the thing that
+  notices — including on step 7's own pull request.
+- **`enabledEcosystems` moved to `cmd/lydite/scan.go`** and has one caller. It
+  is the obvious casualty of deleting `internal/detect`, and where
+  `rust/typescript/go.enabled` is answered today.
+- **`ensureToolchains` is called by both `scan` and `test`**, and `test` derives
+  its ecosystems from the component declaration (`componentEcosystems`) rather
+  than from a walk. That is the shape step 7 extends: scan should do the same,
+  and then nothing reads `detect.Ecosystems` at all.
+- **`internal/runner.SourceExtsFor`** already maps a language to its extensions,
+  which is what `detect.Extensions` was for.
+- Three issues are open and touch this work: **#47** (`lydite/actions` still
+  invokes the removed `lydite coverage`, and should pass `GITHUB_BASE_REF`),
+  **#48** (assert the coverage gate end to end against the proving ground) and
+  **#49** (the write-token question above).
 
 ## Out of scope
 
