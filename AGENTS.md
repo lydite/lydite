@@ -1111,7 +1111,17 @@ running CI only on pull requests satisfies never, and it is strictly more expens
 instrumented run per change rather than one on the branch and another on main.
 
 **A cache miss measures, and never substitutes.** `measureBaseTree` checks the base commit out into
-a throwaway worktree and runs it through the same path `lydite test` just took — so the compose
+a throwaway worktree — **at the scan root inside it, not at the worktree root** — and runs it
+through the same path `lydite test` just took. A worktree holds the whole repository and the scan
+root may sit below it, which is the shape `ChangedLines` and `selectAffected` already account for;
+measuring at the worktree root instead finds no component declaration, hands back an empty
+baseline, and the gate passes having compared nothing. Verified by injecting it: a change that
+regresses coverage 16.7% and adds an untested line reports `test passed` with every row `new`.
+
+A base tree lydite could not measure **completely** is not a baseline either, and is refused the
+same way an empty one is. A bare worktree is where a measurement most often fails — no container
+runtime for a component's services, an install that fails there — and a partial entry, once cached,
+reads as a hit for every later change — so the compose
 services each component declares actually start, each runner's `Prepare` runs, and the report read
 back is the one the instrumented variant wrote. Invoking coverage tooling directly instead is what
 produced a failed measurement for any suite needing a database, one of the roads to an empty

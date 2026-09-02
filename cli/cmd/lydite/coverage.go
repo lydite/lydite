@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
@@ -397,6 +399,14 @@ func baselineFor(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, b
 // what produced a failed measurement for every suite that needs a database,
 // which is one of the roads to an empty baseline cached as real.
 func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, opts coverageOptions) (gitstate.Baseline, error) {
+	// Nothing here may return a baseline missing a component it was supposed
+	// to measure. A bare worktree is where a measurement most often fails —
+	// no container runtime for a component's services, an install that fails
+	// there, a cold instrumentation build that times out — and a partial
+	// entry, once cached, reads as a hit for every later change: the missing
+	// component is new forever, and its language's row and the global row
+	// refuse to compare and stop gating, silently and with a green verdict.
+	// The same rule recordThisTree applies to what a run records.
 	tmp, err := os.MkdirTemp("", "lydite-baseline-*")
 	if err != nil {
 		return nil, err
@@ -407,15 +417,31 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp, base); !r.Ok() {
 		return nil, fmt.Errorf("checking out %s to measure its baseline: %w", shortSHA(base), r.Err)
 	}
+	// A worktree holds the whole repository, and the scan root may sit below
+	// it. Measuring at the worktree root instead would look for
+	// `.lydite/components.yml` where there is none, find no components, and
+	// hand back an empty baseline — so every component reads as new, every
+	// composed row refuses to compare, and the gate passes having compared
+	// nothing. A monorepo run as `--dir source` is the shape, and it is the
+	// shape `ChangedLines` and `selectAffected` already account for.
+	//
+	// Worse where the repository also has a declaration at its own root: the
+	// base tree would then be measured through a different repository's
+	// components.
+	prefix, err := gitdiff.Prefix(ctx, dir)
+	if err != nil {
+		return nil, fmt.Errorf("locating the scan root inside the repository: %w", err)
+	}
+	root := filepath.Join(tmp, filepath.FromSlash(prefix))
 	// The base tree's own declaration and configuration, never this branch's.
 	// A component this change adds did not exist there, and one it renames is
 	// a different component; measuring the base tree through the branch's
 	// declaration would attribute one component's coverage to another.
-	baseCfg, err := config.Load(tmp)
+	baseCfg, err := config.Load(root)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s at %s: %w", config.FileName, shortSHA(base), err)
 	}
-	decl, err := component.Load(tmp)
+	decl, err := component.Load(root)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s at %s: %w", component.FileName, shortSHA(base), err)
 	}
@@ -426,7 +452,7 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// asked for, and adding them to this run's report would put a second set
 	// of component rows beside the ones the reader is looking at.
 	scratch := ui.NewReport("baseline")
-	ms := runComponents(ctx, tmp, decl.Components, nil, nil, baseCfg, opts.Concurrency, false, true, scratch)
+	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, opts.Concurrency, false, true, scratch)
 
 	// The worktree — and every log written into it — is removed on the way
 	// out, so the tail under a failing row is the only account of what went
@@ -445,14 +471,21 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 			out[m.Name] = m.Lines
 			continue
 		}
-		// Named on stderr rather than dropped in silence. A baseline missing
-		// a component is what makes every later change report that component
-		// as new and gate it against nothing, and the cause is here rather
-		// than in the run that later notices.
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: the baseline at %s has no entry for component %q: %s\n", shortSHA(base), m.Name, m.Why)
+		// Named on stderr rather than dropped in silence, and the tail with
+		// it: the worktree holding the log is removed on the way out, so this
+		// is the only account of the failure that outlives this function.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: the base tree at %s could not be measured for component %q: %s\n", shortSHA(base), m.Name, m.Why)
 		for _, line := range tails[m.Name] {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", line)
 		}
+	}
+	// The same predicate a run applies to what it records, over the same two
+	// things: the measurements, and what came of them. Returned empty rather
+	// than partial, so the caller's existing refusal to cache an empty
+	// baseline covers this too — the next change measures the tree again,
+	// which is slower and correct.
+	if _, blocked := recordingBlockedBy(ms, out); blocked {
+		return nil, nil
 	}
 	return out, nil
 }
@@ -759,9 +792,9 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 	// naming no report — does not block it. It contributes to neither side of
 	// any comparison, so its absence from the baseline is permanent and
 	// expected rather than a gap this run created.
-	if gap, blocked := recordingBlockedBy(ms); blocked {
+	if gap, blocked := recordingBlockedBy(ms, record); blocked {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"warning: component %q was not measured (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
+			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
 			gap.Name, gap.Why)
 		return
 	}
@@ -782,6 +815,16 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 	// document; until it exists, a sharded *gated* run is not a supported
 	// shape and this only narrows the window rather than closing it.
 	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, tree); hit {
+		// Anchored against what this tree already holds as well as against the
+		// base baseline. The same tree is the same content, so a difference
+		// between two measurements of it is the measurement noise the
+		// tolerance exists for — and without this a run on the default branch
+		// re-measures a tree a pull request already recorded and replaces the
+		// anchored high-water entry with a raw dipped one, handing the next
+		// change a lowered number to gate against. That is the per-merge
+		// ratchet withToleratedDipsRestored exists to prevent, reintroduced
+		// one path over.
+		record = withToleratedDipsRestored(record, existing, tolerance)
 		merged := gitstate.Baseline{}
 		for name, lines := range existing {
 			if declared[name] {
@@ -816,17 +859,26 @@ func sameCounts(a, b gitstate.Baseline) bool {
 }
 
 // recordingBlockedBy names the component that stops this run establishing the
-// tree's baseline, if any: one it was supposed to measure and did not.
+// tree's baseline, if any: one with no entry in what is about to be recorded.
 //
-// A component this run did not select is unchanged from the tree the baseline
-// describes and carries forward; one nothing could ever measure contributes to
-// neither side of any comparison. Neither is a gap this run created.
-func recordingBlockedBy(ms []measurement) (measurement, bool) {
+// The question is asked of the record and not of the flags, which is the
+// difference between a component that carried forward and one that was merely
+// entitled to. A deselected component whose baseline entry does not exist
+// carries nothing, so recording anyway would write the same gap forward on
+// every merge — and it can then never heal, because each run reproduces it
+// from the last.
+//
+// A component nothing could ever measure is the one exemption: it contributes
+// to neither side of any comparison, so its absence is permanent and expected
+// rather than a gap a run created.
+func recordingBlockedBy(ms []measurement, record gitstate.Baseline) (measurement, bool) {
 	for _, m := range ms {
-		if m.Measured() || m.Carryable || m.Unmeasurable {
+		if m.Unmeasurable {
 			continue
 		}
-		return m, true
+		if _, ok := record[m.Name]; !ok {
+			return m, true
+		}
 	}
 	return measurement{}, false
 }

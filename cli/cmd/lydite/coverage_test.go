@@ -12,6 +12,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
@@ -438,8 +439,8 @@ func TestAMissingReportIsUnmeasuredNotZero(t *testing.T) {
 func TestMeasureReadsTheReportTheInvocationNamed(t *testing.T) {
 	root := t.TempDir()
 	for rel, content := range map[string]string{
-		"api/go.mod":                       "module example.com/api\n\ngo 1.26\n",
-		"api/main.go":                      "package api\n\nfunc F() int {\n\treturn 1\n}\n",
+		"api/go.mod":  "module example.com/api\n\ngo 1.26\n",
+		"api/main.go": "package api\n\nfunc F() int {\n\treturn 1\n}\n",
 		"api/.lydite-reports/coverage/coverage.out": "mode: set\nexample.com/api/main.go:3.16,5.2 1 1\n",
 	} {
 		p := filepath.Join(root, filepath.FromSlash(rel))
@@ -902,7 +903,10 @@ func TestAPartialRunDoesNotRecordAPartialBaseline(t *testing.T) {
 			"the component declares a raw command, which has no instrumented variant"), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), tc.gap})
+			// The record holds only what was measured, which is what the
+			// predicate reads.
+			record := gitstate.Baseline{"api": lines(9, 10)}
+			gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), tc.gap}, record)
 			if blocked == tc.wantRecord {
 				t.Errorf("recordingBlockedBy = (%v, %v), want blocked = %v", gap.Name, blocked, !tc.wantRecord)
 			}
@@ -916,8 +920,19 @@ func TestAPartialRunDoesNotRecordAPartialBaseline(t *testing.T) {
 func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
 	skipped := unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not selected")
 	skipped.Carryable = true
-	if gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), skipped}); blocked {
+	ms := []measurement{measured("api", runner.Go, 9, 10), skipped}
+
+	// It carried, so the record holds an entry for it.
+	carried := gitstate.Baseline{"api": lines(9, 10), "web": lines(5, 10)}
+	if gap, blocked := recordingBlockedBy(ms, carried); blocked {
 		t.Errorf("recording blocked by %q, but selection determined it could not have been broken", gap.Name)
+	}
+
+	// It was entitled to carry and had nothing to carry, which is a different
+	// thing. Recording anyway writes the same gap forward on every merge, and
+	// it can then never heal: each run reproduces it from the last.
+	if _, blocked := recordingBlockedBy(ms, gitstate.Baseline{"api": lines(9, 10)}); !blocked {
+		t.Error("a deselected component with no baseline entry did not block recording")
 	}
 }
 
@@ -953,5 +968,120 @@ func TestTheReportDirectoryDisownsItself(t *testing.T) {
 	data, _ = os.ReadFile(own)
 	if strings.TrimSpace(string(data)) != "!keep" {
 		t.Errorf("ignore file = %q, want the existing one untouched", data)
+	}
+}
+
+// A worktree holds the whole repository, and the scan root may sit below it. A
+// base-tree measurement rooted at the worktree instead looks for the component
+// declaration where there is none, finds no components, and hands back an
+// empty baseline — so every component reads as new, every composed row refuses
+// to compare, and the gate passes having compared nothing.
+//
+// A monorepo run as `--dir source` is the shape, and it is the one
+// `ChangedLines` and `selectAffected` already account for. Asserted through
+// `gitdiff.Prefix`, which is the mapping, rather than by measuring a base tree:
+// what can be wrong here is which directory is treated as the scan root.
+func TestTheBaseTreeIsMeasuredAtTheScanRootNotTheWorktreeRoot(t *testing.T) {
+	repo := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(repo, "init", "-b", "main", ".")
+	scanRoot := filepath.Join(repo, "source")
+	if err := os.MkdirAll(filepath.Join(scanRoot, ".lydite"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	prefix, err := gitdiff.Prefix(context.Background(), scanRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix != "source/" {
+		t.Fatalf("prefix = %q, want %q", prefix, "source/")
+	}
+	// The join is what measureBaseTree does with a worktree path, and it has
+	// to land on the scan root's copy rather than on the repository root.
+	worktree := t.TempDir()
+	if got, want := filepath.Join(worktree, filepath.FromSlash(prefix)), filepath.Join(worktree, "source"); got != want {
+		t.Errorf("base scan root = %q, want %q", got, want)
+	}
+	// At the repository root the mapping is the identity, so the common case
+	// is unchanged.
+	rootPrefix, err := gitdiff.Prefix(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootPrefix != "" {
+		t.Errorf("prefix at the repository root = %q, want empty", rootPrefix)
+	}
+}
+
+// A base tree lydite could not measure completely is not a baseline. A bare
+// worktree is where a measurement most often fails — no container runtime for
+// a component's services, an install that fails there — and a partial entry,
+// once cached, reads as a hit for every later change: the missing component is
+// new forever, and its language's row and the global row refuse to compare and
+// stop gating, with a green verdict.
+func TestAPartiallyMeasuredBaseTreeIsNotCached(t *testing.T) {
+	// The predicate the base-tree path applies, over the measurements it
+	// collected. A component nothing could ever measure is the one exemption.
+	for _, tc := range []struct {
+		name string
+		ms   []measurement
+		want bool
+	}{
+		{"every component measured", []measurement{
+			measured("api", runner.Go, 9, 10),
+		}, false},
+		{"one component failed there", []measurement{
+			measured("api", runner.Go, 9, 10),
+			unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "no container runtime"),
+		}, true},
+		{"a component nothing could measure", []measurement{
+			measured("api", runner.Go, 9, 10),
+			unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}}, "raw command"),
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// What measureBaseTree collected, and what came of it — the same
+			// two things a run hands the predicate when it records.
+			out := gitstate.Baseline{}
+			for _, m := range tc.ms {
+				if m.Measured() {
+					out[m.Name] = m.Lines
+				}
+			}
+			gap, blocked := recordingBlockedBy(tc.ms, out)
+			if blocked != tc.want {
+				t.Errorf("recordingBlockedBy = (%q, %v), want blocked = %v", gap.Name, blocked, tc.want)
+			}
+		})
+	}
+}
+
+// A tolerated dip is anchored against what this tree already holds, not only
+// against the base baseline. A pull request records the anchored high-water
+// entry for its tree; a squash merge lands a commit carrying that same tree; a
+// run on the default branch measures it again and would otherwise replace the
+// anchor with a raw dipped number, handing the next change a lowered figure to
+// gate against — the per-merge ratchet the anchoring exists to prevent,
+// reintroduced one path over.
+func TestARerunOfOneTreeDoesNotLowerItsAnchoredEntry(t *testing.T) {
+	anchored := gitstate.Baseline{"api": lines(800, 1000)}
+	// The same tree measured again, 0.05pp lower: noise, which is what the
+	// tolerance is for.
+	remeasured := gitstate.Baseline{"api": lines(799, 1000)}
+	got := withToleratedDipsRestored(remeasured, anchored, 0.1)
+	if pct := got["api"].Percent(); pct < 79.95 || pct > 80.05 {
+		t.Errorf("api = %v%%, want the anchored 80%% kept", pct)
+	}
+	// A drop beyond the tolerance is recorded: it failed visibly on the change
+	// that introduced it, so accepting it is deliberate.
+	dropped := withToleratedDipsRestored(gitstate.Baseline{"api": lines(700, 1000)}, anchored, 0.1)
+	if dropped["api"] != lines(700, 1000) {
+		t.Errorf("api = %v, want the measured drop recorded", dropped["api"])
 	}
 }
