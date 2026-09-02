@@ -1091,10 +1091,19 @@ component. Gating against the nearest ancestor that happens to have an entry was
 rejected — which number a change is judged against would depend on how far back history had one,
 which is not reproducible from the change itself.
 
-**A component the run did not measure carries its baseline entry forward.** Under `--affected` most
+**A component the run did not *select* carries its baseline entry forward.** Under `--affected` most
 components do not run, and recording only what was measured would drop them — every later change
 would see them as `new` and gate them against nothing, permanently, since each run would drop them
-again. A component the declaration no longer holds is not carried: its entry dies with it rather
+again.
+
+**Only that one, and the distinction is load-bearing.** A component that ran and failed produced the
+same absence and means the opposite thing: its content may be exactly what changed, so its old entry
+is a guess — and carrying it renders as a pass, so a language whose only component failed to build
+would report that component's last good figure with a `✓` beside it. `measurement.Carryable` is set
+in the one place that builds a measurement for a component this invocation never reached, so no path
+through a run that did reach one can produce it.
+
+A component the declaration no longer holds is not carried either: its entry dies with it rather
 than leaving the baseline a tail of components nobody can measure.
 
 **A composed figure names what it measured.** `72.5% (145/200 lines), 3 of 4 component(s), 1
