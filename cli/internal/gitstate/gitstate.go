@@ -355,7 +355,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	if executil.RunQuiet(ctx, tmp, "git", "diff", "--cached", "--quiet").Ok() {
 		return nil
 	}
-	commitR := executil.RunEnv(ctx, tmp, []string{
+	commitR := executil.RunQuietEnv(ctx, tmp, []string{
 		"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@users.noreply.github.com",
 		"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@users.noreply.github.com",
 	}, "git", "commit", "-m", "coverage baseline for "+sha)

@@ -63,7 +63,10 @@ func ChangedLines(ctx context.Context, dir, mergeBase string, exts ...string) (m
 			args = append(args, "*"+ext)
 		}
 	}
-	r := executil.Run(ctx, dir, "git", args...)
+	// Quiet, because a diff is data this parses and not output anyone
+	// watches: streamed, the whole patch lands in the middle of the report,
+	// and under --json in the middle of the document.
+	r := executil.RunQuiet(ctx, dir, "git", args...)
 	if !r.Ok() {
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), r.Err)
 	}

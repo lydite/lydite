@@ -85,8 +85,22 @@ func RunOutput(ctx context.Context, dir string, extraEnv []string, out io.Writer
 // shell, so there is no command injection here; argument injection is the
 // caller's to prevent.
 func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
+	return RunQuietEnv(ctx, dir, nil, name, args...)
+}
+
+// RunQuietEnv is RunQuiet with extra "KEY=value" entries appended to the
+// child's environment.
+//
+// It exists because a git commit needs an author it must not read from the
+// machine, and its own output is chatter: `git commit` prints the commit it
+// made, which is data nobody asked for in the middle of a report — and, under
+// --json, in the middle of the document.
+func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
 	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
