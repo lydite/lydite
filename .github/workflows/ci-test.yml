@@ -2,14 +2,24 @@
 #
 # gt created it once and will never modify or delete it again.
 #
-# The Go suite, moved from ci.yml, now also producing a coverage profile.
+# The Go suite, run through lydite itself.
+#
+# Dogfooding, and the only place the coverage gate runs against a repository
+# whose history it did not create: `lydite test --gate-coverage` measures every
+# declared component, compares it against the baseline for the merge-base, and
+# records this tree's. A gate lydite asks consumers to adopt and does not run
+# on itself is one nobody has checked end to end.
 name: ci-test
 
 on:
   workflow_call:
 
 permissions:
-  contents: read
+  # write, because --gate-coverage records this tree's per-component coverage
+  # on the `lydite` branch. Granted by the orchestrator through
+  # pipeline.ci.stage_permissions in .gt-repo.yaml: a called workflow can only
+  # narrow what its caller gave it.
+  contents: write
 
 jobs:
   build-test:
@@ -20,6 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The gate resolves the merge-base with the base branch, and a
+          # shallow checkout cannot reach it. lydite refuses rather than
+          # quietly widening or narrowing, so without this the run fails with
+          # exactly the message a consumer would get.
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -31,21 +47,22 @@ jobs:
       - name: go build
         run: go build ./...
 
-      # -coverprofile so the lydite stage reads a report instead of running
-      # the suite again. .lydite/config.yml here declares `report`, and lydite exits
-      # rather than shrugging when told to read one nothing produced.
-      - name: go test
-        run: go test -race -coverprofile=coverage.out ./...
+      - name: build lydite
+        run: go build -o /tmp/lydite ./cmd/lydite
 
-  # Dogfooding: lydite scans itself. This is the only thing that would have
-  # caught a regression in the scanner logic itself (a broken auto-install, a
-  # findings-suppression that stops working, a version pin that drifts) —
-  # go test alone doesn't exercise the actual scan/report path end-to-end
-  # against a real repo the way this does.
-
-      - name: Upload coverage for the lydite stage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gt-coverage
-          path: cli/coverage.out
-          if-no-files-found: error
+      # The suite runs through lydite rather than beside it. The instrumented
+      # variant of the `cli` component's runner IS `go test -race`, with
+      # -coverprofile and -coverpkg added, so nothing is run twice and nothing
+      # is measured that the suite did not produce.
+      #
+      # --gate-coverage compares each component against the baseline for the
+      # merge-base and records this tree's. On a cache miss it measures the
+      # base tree once, in a throwaway worktree — the cost a consumer pays on
+      # the first change against a new base, paid here too rather than
+      # described.
+      - name: lydite test
+        # `..` rather than an expression: the job's default is `cli`, the scan
+        # root is the repository root, and a literal beats interpolating
+        # something into a field that does not need it.
+        working-directory: ..
+        run: /tmp/lydite test --dir . --gate-coverage
