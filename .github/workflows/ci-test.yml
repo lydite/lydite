@@ -15,11 +15,24 @@ on:
   workflow_call:
 
 permissions:
-  # write, because --gate-coverage records this tree's per-component coverage
-  # on the `lydite` branch. Granted by the orchestrator through
-  # pipeline.ci.stage_permissions in .gt-repo.yaml: a called workflow can only
-  # narrow what its caller gave it.
-  contents: write
+  # read, and the gate still gates. This job executes the repository's own test
+  # suite — `go test` from the component declaration, plus any `setup` and
+  # `teardown` shell that declaration carries — so on a pull request it runs
+  # code the pull request wrote. A token that can push to any branch, handed to
+  # a job that runs a branch's own code, is arbitrary write access to the
+  # repository for anyone who can open a pull request from a branch.
+  #
+  # Recording the baseline is the only thing that wants write, and it is
+  # best-effort by design: the write fails, a warning says so, and the verdict
+  # is unaffected. What lydite loses is the cache, so every run measures the
+  # base tree instead of reading a recorded one — one extra instrumented run,
+  # which is the right price.
+  #
+  # Recording on a push to the default branch instead would not help here: gt's
+  # orchestrator skips every stage for a tree already validated on the pull
+  # request, which is exactly what a squash merge produces. Tree-keying is what
+  # makes that survivable — ADR 0019 requires no default-branch run at all.
+  contents: read
 
 jobs:
   build-test:
@@ -56,10 +69,11 @@ jobs:
       # is measured that the suite did not produce.
       #
       # --gate-coverage compares each component against the baseline for the
-      # merge-base and records this tree's. On a cache miss it measures the
-      # base tree once, in a throwaway worktree — the cost a consumer pays on
-      # the first change against a new base, paid here too rather than
-      # described.
+      # merge-base. With a read-only token nothing is cached, so it measures
+      # the base tree in a throwaway worktree every run rather than once — the
+      # cost a consumer pays on the first change against a new base, paid here
+      # on every one. That is the trade for not handing a writable token to a
+      # job that runs a pull request's own code.
       # No working-directory override, and that is deliberate. A step-level
       # relative working-directory is resolved against the workspace rather
       # than against the job's default, so `..` names the parent of the

@@ -86,9 +86,5 @@ dependabot:
 bulwark:
   enabled: false
 pipeline:
-  ci:
-    stage_permissions:
-      test:
-        contents: write
   cd:
     enabled: false
