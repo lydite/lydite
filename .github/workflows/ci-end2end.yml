@@ -129,6 +129,13 @@ jobs:
           /tmp/lydite scan --dir proving-ground --json > scan.json || status=$?
           echo "lydite scan exited $status"
           cat scan.json
+          # An error rather than a verdict writes no document at all, and the
+          # assertion would then die parsing an empty file instead of showing
+          # what lydite said. The message is on stderr, already in this log.
+          if [ ! -s scan.json ]; then
+            echo "lydite scan produced no report; see its error above" >&2
+            exit 1
+          fi
           python3 .github/assert-proving-ground.py --scan scan.json
 
       # Selection has to be shown to have selected. A run that narrowed

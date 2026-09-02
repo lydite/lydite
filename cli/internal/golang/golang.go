@@ -11,6 +11,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"lydite/lydite/internal/executil"
 )
@@ -71,12 +72,20 @@ func Check(ctx context.Context, dir string, env []string) []executil.Result {
 // ensure installs pkg via `go install` into a version-keyed lydite cache
 // directory (GOBIN), so a version bump gets a fresh install instead of
 // silently reusing a stale one, and returns the path to the installed binary.
+//
+// The key carries the Go toolchain as well as the tool's version, because the
+// toolchain is per component: a repository declaring `go 1.24` in one module
+// and `go 1.28` in another builds this tool twice, and a single key would let
+// whichever component ran first decide which build every other one gets. A
+// tool built by an older Go rejects newer source outright — the failure
+// GOTOOLCHAIN is pinned to prevent — and keyed on the tool alone the verdict
+// would depend on declaration order.
 func ensure(ctx context.Context, env []string, name, version, pkg string) (string, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	binDir := filepath.Join(cacheDir, "lydite", "gobin-"+name+"-"+version)
+	binDir := filepath.Join(cacheDir, "lydite", "gobin-"+name+"-"+version+"-"+toolchainKey(env))
 	bin := filepath.Join(binDir, name)
 
 	if _, err := os.Stat(bin); err == nil {
@@ -90,4 +99,29 @@ func ensure(ctx context.Context, env []string, name, version, pkg string) (strin
 		return "", r.Err
 	}
 	return bin, nil
+}
+
+// toolchainKey names the Go toolchain a build will use, for the cache
+// directory. It reads GOTOOLCHAIN out of the environment the install is about
+// to run with, since that is what decides the answer; a component with none
+// resolved shares the "ambient" key, which is the one toolchain such
+// components all get.
+func toolchainKey(env []string) string {
+	value := "ambient"
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "GOTOOLCHAIN="); ok && v != "" {
+			value = v
+		}
+	}
+	// A directory name, so anything that is not plainly a name becomes a
+	// dash: GOTOOLCHAIN accepts forms like "go1.26.0+auto", and a path
+	// separator in a cache key would silently nest the install somewhere else.
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, value)
 }

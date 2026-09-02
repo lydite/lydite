@@ -59,3 +59,28 @@ func moduleVersion(gomod, module string) (string, bool) {
 	}
 	return "", false
 }
+
+// The toolchain is per component, so the cache key has to carry it. A
+// repository declaring `go 1.24` in one module and `go 1.28` in another builds
+// this tool under two toolchains, and a key naming only the tool would let
+// whichever component ran first decide which binary every other one gets — a
+// tool built by an older Go rejects newer source outright.
+func TestToolCacheKeyDistinguishesToolchains(t *testing.T) {
+	local := toolchainKey([]string{"GOTOOLCHAIN=local"})
+	pinned := toolchainKey([]string{"GOTOOLCHAIN=go1.28.0"})
+	if local == pinned {
+		t.Fatalf("two toolchains share the key %q, so one component's build would serve the other", local)
+	}
+	if got := toolchainKey(nil); got != "ambient" {
+		t.Errorf("toolchainKey(nil) = %q, want the shared ambient key", got)
+	}
+	// Last wins, matching how a process reads duplicate keys out of its own
+	// environment.
+	if got := toolchainKey([]string{"GOTOOLCHAIN=local", "GOTOOLCHAIN=go1.28.0"}); got != "go1.28.0" {
+		t.Errorf("toolchainKey = %q, want the last GOTOOLCHAIN", got)
+	}
+	// Nothing that could nest the install somewhere else.
+	if got := toolchainKey([]string{"GOTOOLCHAIN=go1.26.0+auto"}); strings.ContainsAny(got, `/\+`) {
+		t.Errorf("toolchainKey = %q, want a plain directory name", got)
+	}
+}

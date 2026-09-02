@@ -1042,6 +1042,11 @@ func startServices(ctx context.Context, p componentPlan, label string) (func(), 
 func runCommands(ctx context.Context, dir, label string, c component.Component, tc *toolchain.Env, kind string, cmds []string, log *componentLog) (ui.Row, bool) {
 	for _, cmd := range cmds {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- the command comes from the scanned repository's own component declaration, authored by whoever configured lydite for that repo, not from remote input
+		// An empty invocation: a setup command gets the component's toolchain
+		// and its declared environment, and not the pinned runner's directory.
+		// It is the repository's own shell, not lydite's runner — a migration
+		// or a seed script has no business finding `cargo nextest` on PATH
+		// because lydite is about to run one.
 		if res := executil.RunOutput(ctx, dir, childEnv(tc, c, runner.Invocation{}), log.out, "sh", "-c", cmd); !res.Ok() {
 			return failure(label, log, cmd+" failed in "+c.Dir, kind+" failed", res.Output), false
 		}
