@@ -1061,6 +1061,19 @@ declaration does. Three altitudes are reported and all three are gated: per comp
 language, and globally. All three are `Σ covered / Σ total` over subsets of the same stored
 per-component entries, so they cannot disagree or drift apart.
 
+**A gating job holds a writable token and runs the repository's own code, and that is a real
+tension** ([#49](https://github.com/lydite/lydite/issues/49)). Recording the baseline is a push to
+the `lydite` branch; measuring runs each component's suite and any `setup`/`teardown` shell the
+declaration carries. On a pull request that is the pull request's own code, in a job with a token
+that can push anywhere.
+
+Running the gate **read-only** is a supported configuration and is what this repository does: the
+write fails, the `record` row says `not recorded`, the verdict is unaffected, and every run measures
+the base tree rather than reading a recorded one. The cost is one extra instrumented run per change;
+the cache exists to avoid exactly that, so this is a trade rather than a free choice. Separating
+measuring from recording — a second command that writes what the first produced, executing nothing
+from the repository — is the fix, and belongs with `lydite test plan`/`merge` and the ledger.
+
 **Measuring is local; gating touches the network.** `lydite test` always measures. `--no-coverage`
 opts out of instrumentation entirely and emits no coverage row at all. `--gate-coverage` turns on
 the baseline read, the comparison and the record. The flag is explicit, exactly as `--affected` is:
