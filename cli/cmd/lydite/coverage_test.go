@@ -920,3 +920,38 @@ func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
 		t.Errorf("recording blocked by %q, but selection determined it could not have been broken", gap.Name)
 	}
 }
+
+// lydite writes into the repository it is measuring, and what it writes must
+// never become part of what it measures. A committed `.lydite-reports/` lands
+// in the diff, where it matches no component and therefore widens affected
+// selection to everything on every change — observed on a fixture whose select
+// row named a coverage profile and a test log as the reason a second component
+// ran.
+func TestTheReportDirectoryDisownsItself(t *testing.T) {
+	root := t.TempDir()
+	reports := filepath.Join(root, runner.ReportDir)
+	if err := os.MkdirAll(reports, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ignoreReports(reports)
+
+	data, err := os.ReadFile(filepath.Join(reports, ".gitignore"))
+	if err != nil {
+		t.Fatalf("no .gitignore in the report directory: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "*" {
+		t.Errorf("ignore file = %q, want everything ignored", data)
+	}
+
+	// A repository that already wrote its own rules there keeps them: this
+	// directory is lydite's, but the file is whoever wrote it first's.
+	own := filepath.Join(reports, ".gitignore")
+	if err := os.WriteFile(own, []byte("!keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ignoreReports(reports)
+	data, _ = os.ReadFile(own)
+	if strings.TrimSpace(string(data)) != "!keep" {
+		t.Errorf("ignore file = %q, want the existing one untouched", data)
+	}
+}

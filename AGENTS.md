@@ -310,6 +310,17 @@ carries.
 
 ### Output: captured, not streamed
 
+**`.lydite-reports/` disowns itself**, by holding a `.gitignore` that ignores
+everything under it — written when the directory is created, and never
+overwriting one already there. lydite writes into the repository it is
+measuring, and what it writes must never become part of what it measures: a
+committed report directory lands in the diff, where it matches no component and
+therefore widens affected selection to everything on every change. Observed on
+a fixture whose `select` row named a coverage profile and a test log as the
+reason a second component ran. Inside the directory rather than in the
+repository's own `.gitignore`, because that file is the repository's to write
+and lydite's output is lydite's to disown.
+
 Every component's output goes to `.lydite-reports/<name>/test.log` under the scan
 root — the suite, the install, the setup and teardown commands, and the container
 lifecycle. A failing row carries the last 40 lines under it and names the log; a

@@ -648,6 +648,36 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
 }
 
+// ignoreReports keeps lydite's own output out of git, by writing a `.gitignore`
+// ignoring everything into the report directory itself.
+//
+// lydite writes into the repository it is measuring, and what it writes must
+// never become part of what it measures. A committed `.lydite-reports/` lands
+// in the diff, where it matches no component and therefore widens affected
+// selection to everything on every change — observed on a fixture whose select
+// row named a coverage profile and a test log as the reason two components
+// ran. An uncommitted one is offered to the author by every `git status` and
+// `git add -A` until someone commits it.
+//
+// Inside the directory rather than in the repository's own `.gitignore`,
+// because that file is the repository's to write and lydite's output is
+// lydite's to disown. A repository that has already ignored the directory
+// loses nothing: this file is inside what it ignored.
+//
+// Best-effort. A report directory that cannot hold a `.gitignore` is not a
+// reason to fail a run, and the failure it prevents is a slow run rather than
+// a wrong answer.
+func ignoreReports(dir string) {
+	path := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	// "*" and not "**": a .gitignore ignores paths relative to itself, and a
+	// single star at the top of a directory covers everything under it,
+	// including this file.
+	_ = os.WriteFile(path, []byte("*\n"), 0o600)
+}
+
 // clearReport makes the component's report path ready to be written to: its
 // directory exists, and nothing is at the path itself.
 //
@@ -667,6 +697,7 @@ func clearReport(dir, report string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
+	ignoreReports(filepath.Join(dir, runner.ReportDir))
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -722,6 +753,7 @@ func openLog(root, name string, stream bool, width int) *componentLog {
 		fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", name, err)
 		return l.streamed(stream)
 	}
+	ignoreReports(filepath.Join(root, runner.ReportDir))
 	path := filepath.Join(dir, "test.log")
 	f, err := os.Create(path) // #nosec G304 -- the path is lydite's own report directory under the scan root, built from a validated component name
 	if err != nil {
