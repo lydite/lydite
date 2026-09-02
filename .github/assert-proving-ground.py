@@ -48,6 +48,24 @@ EXPECTED_EXCLUDED = ["generated/client.ts"]
 CONTENDED_PORT = 5432
 EXPECTED_SERIALISED = ("tally", "api")
 
+# The selection probe commits a change under go/api/ and asserts what runs.
+# api is selected by its own directory; sdk and web hold a client generated
+# from the spec api emits, an edge across three languages that no build tool
+# can derive and that only `depends_on` states. tally shares nothing with any
+# of them and must not run.
+#
+# Asserting the run was green would prove nothing here: a selection that
+# returned every component passes that, and delivers none of what selecting is
+# for. So the components that must NOT have run are named too, and their
+# absence from the suites is what is checked.
+SELECTION_PROBE = "go/api/selection_probe.go"
+EXPECTED_AFFECTED = ["api", "sdk", "web"]
+EXPECTED_UNAFFECTED = ["tally"]
+# sdk and web are reachable only through the edge, so the reason each carries
+# is the one thing distinguishing a working transitive closure from a
+# selection that happened to return three components.
+EXPECTED_VIA = {"sdk": "depends on api", "web": "depends on api"}
+
 
 def concurrency(value: str) -> int | None:
     """Read the components-run-at-once count out of the schedule row's value.
@@ -58,6 +76,82 @@ def concurrency(value: str) -> int | None:
     """
     match = re.search(r"max (\d+) concurrent", value)
     return int(match.group(1)) if match else None
+
+
+def main_affected(path: str, checkout: str) -> int:
+    """Assert which components a change under go/api/ selected."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    rows = {r["label"]: r for r in doc["rows"]}
+    failures = []
+
+    if not os.path.isfile(os.path.join(checkout, SELECTION_PROBE)):
+        failures.append(
+            f"{SELECTION_PROBE} is not in the checkout — the probe never made a diff, so every "
+            "assertion below is about a run with nothing to select"
+        )
+
+    select = rows.get("select")
+    if select is None:
+        failures.append("no `select` row: the run did not narrow, or did not say that it had")
+    else:
+        want = f"{len(EXPECTED_AFFECTED)} of {len(EXPECTED_AFFECTED) + len(EXPECTED_UNAFFECTED)} affected"
+        if select.get("value") != want:
+            failures.append(f"select value is {select.get('value')!r}, want {want!r}")
+        if select.get("status") != "pass":
+            failures.append(f"select status is {select.get('status')!r}, want 'pass'")
+        detail = select.get("detail", [])
+        for name, reason in sorted(EXPECTED_VIA.items()):
+            if f"{name}: {reason}" not in detail:
+                failures.append(
+                    f"select detail {detail!r} does not record {name!r} as {reason!r} — that edge is "
+                    "declared because no tool can derive it, and nothing else here would notice it "
+                    "having stopped working"
+                )
+
+    # Every component produces exactly one test(<name>) row whether it ran or
+    # not, so what separates them is the status: a component that ran and
+    # passed says 'pass', and one selection skipped says 'unmeasured'.
+    for name in EXPECTED_AFFECTED:
+        row = rows.get(f"test({name})")
+        if row is None:
+            failures.append(f"no test({name}) row, but a change under go/api/ must select {name}")
+        elif row["status"] != "pass":
+            failures.append(f"test({name}) is {row['status']!r}: {row.get('value', '')}")
+    for name in EXPECTED_UNAFFECTED:
+        row = rows.get(f"test({name})")
+        if row is None:
+            failures.append(
+                f"no test({name}) row: a deselected component must be reported rather than "
+                "dropped, or a reader cannot tell 'not affected' from 'not declared'"
+            )
+        elif row.get("status") != "unmeasured" or row.get("value") != "not affected":
+            failures.append(
+                f"test({name}) is {row!r}, want an unmeasured 'not affected' row — nothing in "
+                "the change touches it, and a selection that returns every component satisfies "
+                "every assertion about correctness while delivering none of the value"
+            )
+
+    # Every watch pattern the declaration carries names a file that exists, so
+    # this gate has to be silent. A failure here means either a watched file
+    # was deleted without the declaration being updated, or the gate itself
+    # started firing on correct declarations.
+    watch = rows.get("watch")
+    if watch is None:
+        failures.append("no `watch` row: the gate did not run")
+    elif watch.get("status") != "pass":
+        failures.append(f"watch row is {watch!r}, want a pass — every watched file exists here")
+
+    for f in failures:
+        print(f"proving ground (affected): {f}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        f"proving ground (affected): a change under go/api/ selected {EXPECTED_AFFECTED} "
+        f"and skipped {EXPECTED_UNAFFECTED}; {sorted(EXPECTED_VIA)} came through the "
+        "declared dependency edge"
+    )
+    return 0
 
 
 def main(path: str, checkout: str) -> int:
@@ -161,4 +255,6 @@ def main(path: str, checkout: str) -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "--affected":
+        sys.exit(main_affected(sys.argv[2], sys.argv[3]))
     sys.exit(main(sys.argv[1], sys.argv[2]))

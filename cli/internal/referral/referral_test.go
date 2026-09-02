@@ -226,25 +226,6 @@ func TestEmptyDocumentParsesToTheDayOneState(t *testing.T) {
 	}
 }
 
-// A rename contributes both of its paths. Counting only the destination
-// would let a file be moved out of an exempt tree — or into one — while the
-// exemption still matched.
-func TestRenameContributesBothPaths(t *testing.T) {
-	got, _, _, err := parseNameStatus("R100\tdocs/old.md\tsrc/new.go\nM\tREADME.md\n")
-	if err != nil {
-		t.Fatalf("parseNameStatus: %v", err)
-	}
-	want := map[string]bool{"docs/old.md": true, "src/new.go": true, "README.md": true}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want the three paths in %v", got, want)
-	}
-	for _, p := range got {
-		if !want[p] {
-			t.Errorf("unexpected path %q", p)
-		}
-	}
-}
-
 func TestParseDiffLinesSeparatesAdditionsFromRemovals(t *testing.T) {
 	patch := strings.Join([]string{
 		"diff --git a/src/a.go b/src/a.go",
@@ -541,21 +522,6 @@ func TestSelectorCallsAreNotTestDeclarations(t *testing.T) {
 	}, Disqualifiers{})
 	if len(real) != 1 || real[0].Kind != "tests removed" {
 		t.Errorf("a removed test declaration must veto, got %+v", real)
-	}
-}
-
-// Renames come off --name-status, whose rename records carry both paths and
-// a similarity-suffixed status letter.
-func TestParseNameStatusCollectsRenamesAndDeletions(t *testing.T) {
-	_, deleted, renamed, err := parseNameStatus("R100\tsrc/a_test.go\tsrc/a.go\nD\tsrc/b_test.go\nM\tREADME.md\n")
-	if err != nil {
-		t.Fatalf("parseNameStatus: %v", err)
-	}
-	if len(deleted) != 1 || deleted[0] != "src/b_test.go" {
-		t.Errorf("deleted = %v, want [src/b_test.go]", deleted)
-	}
-	if len(renamed) != 1 || renamed[0] != (Rename{From: "src/a_test.go", To: "src/a.go"}) {
-		t.Errorf("renamed = %+v, want one src/a_test.go → src/a.go", renamed)
 	}
 }
 

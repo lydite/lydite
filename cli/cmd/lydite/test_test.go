@@ -574,7 +574,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, config.Default(), 3, false, rep)
+	runComponents(context.Background(), root, declared, nil, nil, config.Default(), 3, false, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -629,7 +629,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+	runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -857,7 +857,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, config.Default(), 1, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), 1, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -907,7 +907,7 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, config.Default(), 2, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()

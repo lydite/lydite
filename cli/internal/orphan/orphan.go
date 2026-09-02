@@ -38,20 +38,14 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/component"
-	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/runner"
 )
 
 // ErrNoRepository reports that root is not inside a git repository, so the
-// set of files the repository contains cannot be established.
-//
-// Returned rather than fallen back to a filesystem walk. A walk would need
-// its own list of directories to skip — node_modules, target, dist, coverage
-// — which is a second copy of a judgement git already holds in .gitignore,
-// and the copy that drifts is the one that starts reporting a build artefact
-// as untested source.
-var ErrNoRepository = errors.New("not a git repository, so the files it contains cannot be listed")
+// files it contains cannot be listed.
+var ErrNoRepository = gitdiff.ErrNoRepository
 
 // ErrNoFiles reports that git listed no source file at all under the scan
 // root.
@@ -152,7 +146,7 @@ func filepath(dir string) string { return strings.ReplaceAll(dir, "\\", "/") }
 
 // sourceFiles lists the repository's source files under root, sorted.
 func sourceFiles(ctx context.Context, root string) ([]string, error) {
-	out, err := lsFiles(ctx, root)
+	out, err := gitdiff.Tracked(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -168,51 +162,4 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
-}
-
-// firstLine is the first non-empty line of s, trimmed.
-func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
-// lsFiles asks git for the paths it knows about, relative to root.
-//
-// -z rather than newline-separated output, so a path containing a newline or
-// a byte git would otherwise render as a quoted escape arrives intact. That
-// removes the need to pin core.quotePath the way internal/referral has to.
-//
-// Duplicates are dropped here rather than with git's own --deduplicate,
-// which needs git 2.31 and would turn a Debian 11 runner's whole `lydite
-// test` into a failure over a flag, for a repository whose declaration is
-// perfectly correct. An unmerged path is the only source of them, and one
-// map is a smaller thing to carry than a version floor.
-func lsFiles(ctx context.Context, root string) ([]string, error) {
-	res := executil.RunQuiet(ctx, root, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-	if !res.Ok() {
-		if !executil.RunQuiet(ctx, root, "git", "rev-parse", "--is-inside-work-tree").Ok() {
-			return nil, ErrNoRepository
-		}
-		// git writes its diagnostics to stderr, which RunQuiet keeps apart
-		// from stdout — reading Output here would report an empty string and
-		// leave the row saying only "exit status 129". The first line is the
-		// error; what follows it is a usage dump nobody acts on.
-		if msg := firstLine(res.Stderr); msg != "" {
-			return nil, errors.New(msg)
-		}
-		return nil, res.Err
-	}
-	var out []string
-	seen := map[string]bool{}
-	for _, p := range strings.Split(res.Output, "\x00") {
-		if p != "" && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
-	}
-	return out, nil
 }

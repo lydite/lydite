@@ -14,8 +14,8 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 2 | — | Orphan-file gate | `pr2-orphan-gate.md` | done |
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
-| 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | next |
-| 6 | #36 | Coverage onto components; `coverage.source` removed | — | not started |
+| 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
+| 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | not started |
 | 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
@@ -61,6 +61,9 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   container runtime.
 - The scheduler locks on published host ports, not service names.
 - Affected selection is an optimisation; the default branch runs everything.
+- Selection widens on ignorance: a changed path matching nothing selects every
+  component, which makes the invalidator set a performance concern rather than a
+  safety one. See [ADR 0018](../../docs/adr/0018-selection-widens-on-ignorance.md).
 - A matrix job is a **shard** — a set of components lydite runs in one process —
   and not a check. The scheduler runs inside a shard, so a job holding several
   components is the case that keeps the port lock exercised. See

@@ -20,10 +20,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/affected"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
+	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
@@ -33,7 +36,7 @@ import (
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream bool
+	var asJSON, noColor, stream, onlyAffected bool
 	var concurrency string
 	cmd := &cobra.Command{
 		Use:           "test",
@@ -80,6 +83,18 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
+			// Here rather than beside the selection below, for the reason
+			// above: the gates each walk the whole tree, and a flag conflict
+			// must not pay for that first and then discard a report the run
+			// had already computed.
+			if onlyAffected && len(components) > 0 {
+				// Two narrowing mechanisms composed. The planner emits
+				// per-shard --component lists that are already the selected
+				// set, so the combination is never needed — and an
+				// intersection nobody asked for narrows silently when it is
+				// wrong.
+				return errors.New("--affected and --component both narrow the run; pass one")
+			}
 
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -97,23 +112,80 @@ the component's to declare.`,
 			// gate it never saw would be the failure it exists to catch.
 			rep.Add(orphanRow(ctx, dir, file))
 
+			// Before selection: a watch pattern that fires for nothing is a
+			// component that stops running when its input changes, and the
+			// question is about the declaration rather than about what this
+			// invocation chose.
+			rep.Add(watchRow(ctx, dir, file))
+
 			selected, err := file.Select(components)
 			if err != nil {
 				return err
 			}
+			// Empty unless selection ran: with no skipped components the
+			// declaration order of the selected set is already the order of
+			// the whole set.
+			var skipped map[string]ui.Row
+			var ordered []component.Component
+			// Nothing to select from is not the same as a change that
+			// selected nothing, and selection must not be asked which it is.
+			// Running it would render a select row claiming the diff was
+			// empty beside a row saying no components are declared — two rows
+			// contradicting each other — and would pay a git fetch to do it,
+			// which on a shallow or fork checkout turns a report that renders
+			// into a hard error before any row is written.
+			if onlyAffected && len(file.Components) > 0 {
+				var res affected.Result
+				res, err = selectAffected(ctx, dir, file)
+				if err != nil {
+					return err
+				}
+				selected = res.Selected
+				rep.Add(selectRow(res, len(file.Components)))
+				// The same label shape a suite row takes, so every component
+				// produces exactly one test(<name>) row whether it ran or
+				// not. A bare name would collide with a gate row for a
+				// component called "watch", "select", "orphans" or
+				// "schedule" — nothing forbids those — and a consumer keying
+				// rows by label silently loses the gate.
+				//
+				// They are handed to runComponents rather than added here so
+				// the rows interleave into declaration order. Added here they
+				// would all precede the suites, and a declaration of a, b, c
+				// with only b affected would document b last.
+				skipped = make(map[string]ui.Row, len(res.Skipped))
+				for _, c := range res.Skipped {
+					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"}
+				}
+				ordered = file.Components
+			}
 			if len(selected) == 0 {
-				// Through the report rather than around it: --json promises
-				// stdout carries a document and nothing else, and a bare
-				// sentence printed here is unparseable output.
-				rep.Add(ui.Row{
-					Status: ui.StatusUnmeasured,
-					Label:  "test",
-					Value:  "no components declared in " + component.FileName,
-				})
+				// Nothing ran, so nothing interleaves: the skipped rows are
+				// the whole set, still in declaration order.
+				for _, c := range file.Components {
+					if r, ok := skipped[c.Name]; ok {
+						rep.Add(r)
+					}
+				}
+				// Only when the declaration is genuinely empty. A run that
+				// selected nothing has components declared and has already
+				// said so through its own select row, and repeating the
+				// sentence here would have the report contradict itself
+				// about the one thing it exists to state.
+				if len(file.Components) == 0 {
+					// Through the report rather than around it: --json
+					// promises stdout carries a document and nothing else,
+					// and a bare sentence printed here is unparseable output.
+					rep.Add(ui.Row{
+						Status: ui.StatusUnmeasured,
+						Label:  "test",
+						Value:  "no components declared in " + component.FileName,
+					})
+				}
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			runComponents(ctx, dir, selected, cfg, limit, stream, rep)
+			runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, rep)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -127,6 +199,14 @@ the component's to declare.`,
 	// exactly the drift a flag avoids.
 	cmd.Flags().StringVar(&concurrency, "concurrency", strconv.Itoa(defaultConcurrency),
 		`how many components to run at once, or "max" for one slot per selected component`)
+	// Off by default, and never inferred. Every signal for "is this a pull
+	// request" is unreliable where lydite runs — a detached HEAD, a shallow
+	// clone, a fork with no upstream fetched, a default branch not called
+	// main — and guessing wrong in the narrowing direction is the one failure
+	// selection cannot report. The caller already knows the event, so it says
+	// so; a bare `lydite test` always runs every component.
+	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
+		"run only the components the change against the merge-base could have broken")
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
@@ -208,7 +288,7 @@ type componentPlan struct {
 // a truncation visible only in the process exit code is a truncation the PR
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
-func runComponents(ctx context.Context, root string, selected []component.Component, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream bool, rep *ui.Report) {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -275,8 +355,29 @@ func runComponents(ctx context.Context, root string, selected []component.Compon
 	}
 
 	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
+	if len(skipped) == 0 {
+		for _, r := range rows {
+			rep.Add(r)
+		}
+		return
+	}
+	// Interleaved by the declaration, so a component selection skipped sits
+	// where its author wrote it rather than ahead of every component that
+	// ran. Two runs over one declaration already produce the same document;
+	// this is what makes that document read in the order the file does.
+	byName := make(map[string]ui.Row, len(rows))
 	for _, r := range rows {
-		rep.Add(r)
+		byName[r.Label] = r
+	}
+	for _, c := range ordered {
+		label := "test(" + c.Name + ")"
+		if r, ok := skipped[c.Name]; ok {
+			rep.Add(r)
+			continue
+		}
+		if r, ok := byName[label]; ok {
+			rep.Add(r)
+		}
 	}
 }
 
@@ -919,4 +1020,144 @@ func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) 
 		return err
 	}
 	return rep.Err()
+}
+
+// selectAffected narrows the run to the components the change against the
+// merge-base could have broken.
+//
+// An unresolvable merge-base is an error rather than a fallback, in either
+// direction. Falling back to nothing is the failure selection exists to avoid;
+// falling back to everything is safe but makes the optimisation stop happening
+// with no symptom other than a slow job, which is how a shallow checkout goes
+// unnoticed for months. `lydite scan --diff-base auto` refuses for the same
+// reason, and a shallow checkout is a fixable misconfiguration.
+func selectAffected(ctx context.Context, dir string, file component.File) (affected.Result, error) {
+	base, err := gitstate.BaseSHA(ctx, dir)
+	if err != nil {
+		// Both causes, because the advice for one does not help the other
+		// and gitstate.BaseSHA resolves origin/main and nothing else — which
+		// is the same assumption --affected exists to avoid making about the
+		// event, made here about the branch name.
+		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with origin/main, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0 —"+
+			"\n       and a default branch not named main is the other", err)
+	}
+	// On the default branch the merge-base is HEAD itself, so there is no
+	// change to select by and a computed selection narrows to nothing. ADR
+	// 0016 requires that run to be complete — a forgotten depends_on edge
+	// surfaces at merge or never — so this is where that rule is enforced
+	// rather than left to every caller to remember. Without it a consumer
+	// wiring --affected into one workflow gets a permanently green `lydite
+	// test` that executed no suite at all.
+	head, err := gitstate.HeadSHA(ctx, dir)
+	if err != nil {
+		return affected.Result{}, err
+	}
+	if head == base {
+		return affected.All(file, affected.Reason{Kind: affected.KindDefaultBranch}), nil
+	}
+	touched, err := gitdiff.Changed(ctx, dir, base)
+	if err != nil {
+		return affected.Result{}, err
+	}
+	// Component directories are scan-root relative and the diff is
+	// repository-root relative, so the two are mapped before anything is
+	// matched. A path outside the scan root matches no component and
+	// therefore widens.
+	prefix, err := gitdiff.Prefix(ctx, dir)
+	if err != nil {
+		return affected.Result{}, err
+	}
+	return affected.Select(file, affected.Paths(prefix, touched.All)), nil
+}
+
+// selectRow says what selection actually did.
+//
+// It carries the count because "0 of 4 affected" and "4 of 4 passed" must not
+// read alike, and the reason each selected component was chosen because a
+// selection that quietly returned everything is otherwise indistinguishable
+// from one that narrowed correctly.
+//
+// Zero selected is unmeasured rather than a pass. It can only mean the diff
+// was empty — every changed path selects at least one component — so nothing
+// was gated, and a gate that did not run must never render as one that did.
+func selectRow(res affected.Result, declared int) ui.Row {
+	row := ui.Row{
+		Status: ui.StatusPass,
+		Label:  "select",
+		Value:  fmt.Sprintf("%d of %d affected", len(res.Selected), declared),
+	}
+	if len(res.Selected) == 0 {
+		row.Status = ui.StatusUnmeasured
+		row.Detail = []string{"no changes against the merge-base, so no component could have been broken"}
+		return row
+	}
+	// A reason about the run rather than about any component is stated once.
+	// Repeating "every component runs on the default branch" per component
+	// scales with the declaration and says nothing more at the twentieth
+	// line than at the first.
+	if r := res.Reasons[res.Selected[0].Name]; r.Kind == affected.KindDefaultBranch {
+		row.Detail = []string{r.String()}
+		return row
+	}
+	for _, c := range res.Selected {
+		row.Detail = append(row.Detail, c.Name+": "+res.Reasons[c.Name].String())
+	}
+	return row
+}
+
+// watchRow gates every declared watch pattern against the tree.
+//
+// A pattern covering no file is a component that will not run when its input
+// changes — silently, permanently, and green every time. It fails where an
+// unused exclude only warns, because an exclude covering nothing leaves the
+// orphan gate stricter than declared while this leaves a suite unrun.
+//
+// Outside a git repository it reports unmeasured and passes, the same shape
+// orphanRow takes: a gate that could not run must be visibly distinct from one
+// that passed, and turning `lydite test` in an exported tarball into a hard
+// failure would be the gate firing on ordinary work.
+func watchRow(ctx context.Context, dir string, file component.File) ui.Row {
+	const label = "watch"
+	declared := 0
+	for _, c := range file.Components {
+		declared += len(c.Watch)
+	}
+	if declared == 0 {
+		return ui.Row{Status: ui.StatusPass, Label: label, Value: "none declared"}
+	}
+	files, err := gitdiff.Tracked(ctx, dir)
+	if errors.Is(err, gitdiff.ErrNoRepository) {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no git repository"}
+	}
+	if err != nil {
+		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
+	}
+	// A scan root git lists nothing for — one that is itself ignored, a
+	// vendored checkout, a --dir pointed at build output — sits inside a work
+	// tree and exits zero. Every pattern would read as covering no file, and
+	// the gate would fail a declaration that is correct while claiming the
+	// author had written a typo. The same case orphanRow reports through
+	// ErrNoFiles.
+	if len(files) == 0 {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no files found"}
+	}
+	unmatched := affected.UnmatchedWatch(file, files)
+	if len(unmatched) == 0 {
+		return ui.Row{Status: ui.StatusPass, Label: label, Value: fmt.Sprintf("%d pattern(s) match", declared)}
+	}
+	detail := make([]string, 0, len(unmatched)+1)
+	for _, u := range unmatched {
+		detail = append(detail, fmt.Sprintf("%s: %q covers no file", u.Component, u.Pattern))
+	}
+	// The rule rather than a guess at what was meant, the same stance the
+	// unused-exclude warning takes: a pattern whose file was deleted has no
+	// better spelling at all.
+	detail = append(detail, "patterns are anchored, so a subtree is spelled \"dir/**\"; correct or remove each pattern in "+component.FileName)
+	return ui.Row{
+		Status: ui.StatusFail,
+		Label:  label,
+		Value:  fmt.Sprintf("%d of %d pattern(s) cover no file", len(unmatched), declared),
+		Detail: detail,
+	}
 }

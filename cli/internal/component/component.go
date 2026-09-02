@@ -232,6 +232,9 @@ func (f File) validate(source string) error {
 		if err := validateCompose(where, c.Compose); err != nil {
 			return err
 		}
+		if err := validateWatch(where, c.Watch); err != nil {
+			return err
+		}
 	}
 	if err := f.validateExcludes(source); err != nil {
 		return err
@@ -260,6 +263,34 @@ func (f File) validateExcludes(source string) error {
 		}
 		if err := pathmatch.ValidatePattern(e); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
+		}
+	}
+	return nil
+}
+
+// validateWatch rejects a watch pattern that cannot fire.
+//
+// A watch entry is what makes a component run when a file outside its
+// directory changes, so a malformed one folded into "matches nothing" is a
+// component that silently stops being invalidated by its own declared input,
+// while every run still reports a pass. That is the opposite of an exclude
+// covering nothing, which is fail-safe — the orphan gate merely stays stricter
+// — and the asymmetry is why both are checked here but only one of them is
+// also held against the tree.
+func validateWatch(where string, watch []string) error {
+	for i, w := range watch {
+		at := fmt.Sprintf("%s: watch[%d]", where, i)
+		if w == "" {
+			return fmt.Errorf("%s: is empty", at)
+		}
+		if path.IsAbs(w) || filepath.IsAbs(w) || strings.HasPrefix(w, "~") {
+			return fmt.Errorf("%s: %q must be relative to the scan root", at, w)
+		}
+		if w == ".." || strings.HasPrefix(w, "../") {
+			return fmt.Errorf("%s: %q escapes the scan root", at, w)
+		}
+		if err := pathmatch.ValidatePattern(w); err != nil {
+			return fmt.Errorf("%s: %w", at, err)
 		}
 	}
 	return nil
