@@ -307,7 +307,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 			Value:  "not read — HEAD is its own merge-base, so there is no earlier measurement to compare against",
 			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
-			Value: recordThisTree(ctx, cmd, dir, decl, ms, nil, cfg.Coverage.Tolerance)})
+			Value: recordThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), cfg.Coverage.Tolerance)})
 		return nil
 	}
 
@@ -355,6 +355,35 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
 		Value: recordThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)})
 	return nil
+}
+
+// previousTreeBaseline is the entry recorded for the commit immediately before
+// this one, used only to anchor a tolerated dip when recording on a branch that
+// is its own base.
+//
+// That path reads no baseline — there is nothing to gate against — so without
+// this the anchoring is a no-op and a raw within-tolerance dip is recorded
+// against nothing. Each merge then dips up to one tolerance from the last
+// recorded value and passes, which is the per-merge downward ratchet the
+// anchoring exists to prevent, on the one path with no prior number in hand.
+// A squash merge hides it, because the tree the pull request already anchored
+// is the tree that lands; a rebase merge or a direct push does not.
+//
+// The commit immediately before, and never the nearest ancestor that happens
+// to have an entry. A fixed one step back is reproducible from the change
+// itself; a walk makes the number depend on how far back history had one,
+// which is what ADR 0019 rejected for gating. This anchors a recording and
+// gates nothing — a miss simply means no anchor, exactly as before.
+func previousTreeBaseline(ctx context.Context, dir string) gitstate.Baseline {
+	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD~1")
+	if err != nil {
+		return nil
+	}
+	baseline, hit, err := gitstate.ReadBaseline(ctx, dir, tree)
+	if err != nil || !hit {
+		return nil
+	}
+	return baseline
 }
 
 // baselineFor reads the base tree's baseline, and measures it when there is

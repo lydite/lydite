@@ -193,7 +193,19 @@ func moduleName(ctx context.Context, moduleDir string) string {
 	// gate finds no overlap and reports no row at all, and the generated-file
 	// check stats a path that does not exist, so generated code re-enters the
 	// denominator.
-	r := executil.RunQuiet(ctx, moduleDir, "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
+	// GOWORK=off, because in workspace mode `go list -m` with no argument
+	// lists every module in the workspace — two lines for a two-member
+	// go.work, which this reads as "not a single module" and reports as a
+	// component whose dir is not a module root. That is both false and
+	// blocking: the component is unmeasured rather than unmeasurable, so
+	// nothing records a baseline and the gate never gates, run after run.
+	// lydite already expects these repositories — a root go.work is a
+	// built-in invalidator for affected selection.
+	//
+	// Off rather than honoured, because the question here is which module
+	// this component's own profile is qualified by, and that is the module
+	// rooted at this directory whatever else the workspace joins to it.
+	r := executil.RunQuietEnv(ctx, moduleDir, []string{"GOWORK=off"}, "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
 	if !r.Ok() {
 		return ""
 	}

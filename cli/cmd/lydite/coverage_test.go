@@ -1382,3 +1382,59 @@ func jsonRows(t *testing.T, out string) map[string]struct {
 	}
 	return byLabel
 }
+
+// The branch that is its own base reads no baseline — there is nothing to gate
+// against — so a tolerated dip recorded there has nothing to anchor to, and
+// each merge dips up to one tolerance from the last recorded value and passes.
+// That is the per-merge downward ratchet the anchoring exists to prevent, on
+// the one path with no prior number in hand.
+//
+// The anchor is the commit immediately before, never the nearest ancestor that
+// happens to have an entry: a fixed step is reproducible from the change, and a
+// walk makes the number depend on how far back history went. It anchors a
+// recording and gates nothing, so a miss simply means no anchor.
+func TestTheSelfBasePathAnchorsAgainstThePreviousCommit(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	// The first run on the default branch records this tree.
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("first run: %v\n%s", err, errOut)
+	}
+	first := previousOrCurrentBaseline(t, root, "HEAD")
+	if len(first) == 0 {
+		t.Fatal("the first run recorded nothing to anchor against")
+	}
+
+	// A second commit on the same branch: no gating, and previousTreeBaseline
+	// is the only thing standing between a dip and the recorded number.
+	write(t, root, "svc/notes.md", "not code\n")
+	run("add", "-A")
+	run("commit", "-m", "second")
+
+	got := previousTreeBaseline(context.Background(), root)
+	if len(got) == 0 {
+		t.Fatal("no anchor found for the commit immediately before")
+	}
+	if got["svc"] != first["svc"] {
+		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got["svc"], first["svc"])
+	}
+}
+
+// previousOrCurrentBaseline reads whatever is recorded for a revision's tree.
+func previousOrCurrentBaseline(t *testing.T, dir, rev string) gitstate.Baseline {
+	t.Helper()
+	tree, err := gitstate.TreeSHA(context.Background(), dir, rev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := gitstate.ReadBaseline(context.Background(), dir, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

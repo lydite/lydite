@@ -60,9 +60,17 @@ jobs:
       # base tree once, in a throwaway worktree — the cost a consumer pays on
       # the first change against a new base, paid here too rather than
       # described.
+      # No working-directory override, and that is deliberate. A step-level
+      # relative working-directory is resolved against the workspace rather
+      # than against the job's default, so `..` names the parent of the
+      # checkout — a directory with no declaration and no work tree, where
+      # `lydite test` reports "no components declared" and exits 0. The suite
+      # and the gate would both stop running while this job stayed green,
+      # which is the failure the whole gate exists to prevent, in the workflow
+      # that runs it.
+      #
+      # So the step keeps the job's `cli` default and the scan root is named
+      # by the flag, which is resolved by lydite relative to the process's own
+      # directory and needs no runner semantics to be right.
       - name: lydite test
-        # `..` rather than an expression: the job's default is `cli`, the scan
-        # root is the repository root, and a literal beats interpolating
-        # something into a field that does not need it.
-        working-directory: ..
-        run: /tmp/lydite test --dir . --gate-coverage
+        run: /tmp/lydite test --dir .. --gate-coverage

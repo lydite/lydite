@@ -211,3 +211,30 @@ func keys(h LineHits) []string {
 	}
 	return out
 }
+
+// In workspace mode `go list -m` with no argument lists every module in the
+// workspace, which reads as "not a single module" and reports a component whose
+// dir is a perfectly good module root as though it were not. That answer is
+// both false and blocking: the component comes back unmeasured rather than
+// unmeasurable, so nothing records a baseline and the gate never gates.
+//
+// lydite already expects these repositories — a root `go.work` is a built-in
+// invalidator for affected selection.
+func TestAModuleInsideAGoWorkspaceIsStillItsOwnModule(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "go.work", "go 1.24\n\nuse (\n\t./a\n\t./b\n)\n")
+	write(t, root, "a/go.mod", "module example.com/a\n\ngo 1.24\n")
+	write(t, root, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
+
+	if got := moduleName(context.Background(), filepath.Join(root, "a")); got != "example.com/a" {
+		t.Errorf("moduleName = %q, want example.com/a — the workspace lists both members", got)
+	}
+	if got := moduleName(context.Background(), filepath.Join(root, "b")); got != "example.com/b" {
+		t.Errorf("moduleName = %q, want example.com/b", got)
+	}
+	// A directory that is genuinely not a module root is still refused, so
+	// this did not buy the workspace case by loosening the check.
+	if got := moduleName(context.Background(), root); got != "" {
+		t.Errorf("moduleName at the workspace root = %q, want none", got)
+	}
+}
