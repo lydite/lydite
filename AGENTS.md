@@ -1140,6 +1140,15 @@ dips are restored to the baseline's own counts, capping total drift at one toler
 the tolerance is recorded as measured: it failed visibly on the change that introduced it, so
 accepting it is a deliberate reset rather than leakage.
 
+**A run that could not measure a component it was supposed to records nothing.** Recording a
+partial baseline is worse than recording none: any non-empty entry reads as a cache hit, so the
+missing component is `new` on every later change — and because a composed figure refuses to compare
+unless the baseline covers every component in it, that language's row and the global row stop
+gating too, silently. Recording nothing leaves the next change a clean cache miss, which measures
+the base tree; that is slower and correct. A component nothing could ever measure — a raw
+`command:`, a runner naming no report — does not block it: it contributes to neither side of any
+comparison, so its absence is permanent and expected rather than a gap one run created.
+
 **Only a passing component contributes a measurement.** A report written by a suite that failed,
 was killed, or never started describes an unfinished run, and recording it would put a number in
 the baseline nothing can be compared against honestly. The rule is enforced over the final rows, so
@@ -1276,17 +1285,22 @@ the usage string and the resolution live in one place.
 Resolution is explicit before discovered:
 
 1. `--base-branch`, which is the caller's own statement.
-2. `git symbolic-ref refs/remotes/origin/HEAD` — git's own record. Authoritative where it is set,
-   and `actions/checkout` does not set it, so it resolves for a developer's clone and almost never
-   in CI.
-3. Whichever of `main` and `master` the remote actually has. Exactly one, or it is an error: a
-   repository carrying both has not said which is the default, and picking by a hardcoded
-   precedence would measure a change against a branch nobody chose.
+2. `git symbolic-ref refs/remotes/origin/HEAD` — git's local record. Free and offline where a clone
+   has it, and `actions/checkout` does not create it.
+3. `git ls-remote --symref origin HEAD` — the remote's own answer. Authoritative, needs nothing set
+   up locally, and is the step that actually resolves in CI.
+4. Whichever of `main` and `master` the remote has, for a remote reporting no HEAD at all. Exactly
+   one, or it is an error: a repository carrying both has not said which is the default.
 
 Every failure names the flag. Falling back to `main` whatever the remote holds is what left a
 repository whose default branch is `master` unable to run any of the four, each failing with a
-merge-base error naming neither the cause nor the fix. Refs are compared whole rather than by
-substring, so a branch called `not-main` is not one of the candidates.
+merge-base error naming neither the cause nor the fix.
+
+**Step 3 is what keeps step 4 from being that same guess wearing a different hat.** A repository
+whose default is `develop` and which still carries a stale `master` has exactly one candidate, so
+step 4 alone answers `master` with no diagnostic — silently measuring every change against a branch
+nobody chose, which is worse than the hardcoded `main` it replaced. Refs are compared whole rather
+than by substring, so a branch called `not-main` is not a candidate either.
 
 **The remote stays `origin`, deliberately.** A repository with two remotes is real and lydite cannot
 guess which one a pull request targets; discovering it would be a second inference with the same
