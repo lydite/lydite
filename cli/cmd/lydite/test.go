@@ -1066,7 +1066,11 @@ func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c co
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
 	}
-	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, childEnv(tc, c, inv), log.out); err != nil {
+	// Two environments, because two different people's software gets
+	// installed here: the repository's dependencies with what the repository
+	// declared, and lydite's pinned runners with lydite's toolchain alone.
+	env := executil.Env{Check: childEnv(tc, c, inv), Install: tc.Environ()}
+	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, env, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
 			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")

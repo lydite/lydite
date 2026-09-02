@@ -40,6 +40,7 @@ import (
 	"sort"
 
 	"lydite/lydite/internal/cargotool"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/nodedeps"
 )
 
@@ -202,7 +203,7 @@ type Runner struct {
 	// not a degradation when absent but a component that cannot run at all.
 	// `go test` needs nothing — its toolchain fetches what a build needs on
 	// the way past.
-	Prepare func(ctx context.Context, inv Invocation, dir, override string, env []string, out io.Writer) error
+	Prepare func(ctx context.Context, inv Invocation, dir, override string, env executil.Env, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
@@ -360,14 +361,23 @@ func llvmCovNextest(args []string) Invocation {
 // workspace's own install flow, and there is no equivalent for a tool lydite
 // pins — a repository able to substitute its own cargo-nextest would be back
 // to a runner whose version varies by machine.
-func installCargoTools(ctx context.Context, inv Invocation, _, _ string, env []string, out io.Writer) error {
-	if err := cargoNextest.Install(ctx, env, out); err != nil {
+// installCargoTools installs *lydite's* pinned runners, so it gets the
+// toolchain environment alone and nothing the scanned repository supplied.
+// `cargo install` reads CARGO_HOME, CARGO_REGISTRIES_*, CARGO_NET_* and
+// RUSTC_WRAPPER, so a declared environment reaching it would choose where
+// lydite's own cargo-nextest and cargo-llvm-cov come from — and they are
+// cached under a key naming the tool and its version, so one poisoned build
+// outlives the run and, on a runner sharing ~/.cache/lydite, reaches other
+// repositories. A repository may say how its own code builds; it may not say
+// where lydite's tools come from.
+func installCargoTools(ctx context.Context, inv Invocation, _, _ string, env executil.Env, out io.Writer) error {
+	if err := cargoNextest.Install(ctx, env.Install, out); err != nil {
 		return err
 	}
 	if !runsLLVMCov(inv) {
 		return nil
 	}
-	return cargoLLVMCov.Install(ctx, env, out)
+	return cargoLLVMCov.Install(ctx, env.Install, out)
 }
 
 // runsLLVMCov reports whether an invocation drives cargo-llvm-cov. It reads
@@ -406,8 +416,15 @@ func cargoBinDirs() []string {
 // Doing nothing is not a failure: a root no single lockfile identifies has
 // nothing lydite can install without guessing, and guessing writes a lockfile
 // the repository does not use.
-func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, env []string, out io.Writer) error {
-	return nodedeps.Install(ctx, dir, override, env, out)
+// installNodeDeps installs the *repository's* dependencies, so it gets the
+// environment the repository declared: a workspace whose install needs a
+// registry or a token said so in its own declaration, and lydite is running
+// that repository's package manager over that repository's lockfile.
+//
+// This is the opposite of installCargoTools below, and the difference is whose
+// software is being fetched.
+func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, env executil.Env, out io.Writer) error {
+	return nodedeps.Install(ctx, dir, override, env.Check, out)
 }
 
 // buildVitest runs through the package manager's own binary directory rather

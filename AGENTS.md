@@ -816,6 +816,13 @@ the tool's version, not where it came from, so one poisoned build would outlive 
 repositories on a shared `~/.cache/lydite`. A repository may say how its own code builds; it may
 not say where lydite's scanners come from.
 
+**The same split runs through `lydite test`'s `Prepare`,** where the distinction is whose software
+is being fetched. `installNodeDeps` installs the *repository's* dependencies and gets the declared
+environment — a workspace whose install needs a registry or a token said so in its own
+declaration. `installCargoTools` installs *lydite's* pinned runners and gets the toolchain alone,
+because `cargo install` reads `CARGO_HOME`, `CARGO_REGISTRIES_*`, `CARGO_NET_*` and
+`RUSTC_WRAPPER`.
+
 **Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the
 scan root whatever the declaration says.
 

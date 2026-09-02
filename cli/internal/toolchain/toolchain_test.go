@@ -347,10 +347,26 @@ func TestComposeKeepsATrailingDirectoryBehindTheInheritedPath(t *testing.T) {
 // GOTOOLCHAIN=local, so without the resolved version every such component on
 // every machine hashes alike — and a CI image bumped 1.25 to 1.26 keeps
 // reusing a tool built by 1.25, which rejects 1.26 source outright.
+//
+// Driven through Ensure rather than a hand-built Env: the branch this exists
+// for is the ambient one, and a test that constructs the value itself passes
+// whether or not production ever sets it. It did not, and this is what caught
+// it the second time.
 func TestKeyDistinguishesAmbientToolchainVersions(t *testing.T) {
-	older := (&Env{Vars: []string{"GOTOOLCHAIN=local"}, Resolved: "1.25.4"}).Key()
-	newer := (&Env{Vars: []string{"GOTOOLCHAIN=local"}, Resolved: "1.26.6"}).Key()
-	if older == newer {
-		t.Fatalf("two ambient toolchains share the key %q, so a tool built by the older one is reused", older)
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.16\n")
+
+	env := ensureOne(t, dir, runner.Go, Overrides{}, &bytes.Buffer{})
+	if env == nil {
+		t.Fatal("an ambient Go that satisfies the declaration still has GOTOOLCHAIN to pin")
+	}
+	if env.Resolved == "" {
+		t.Fatal("the resolved toolchain is unrecorded, so every ambient Go hashes to one key")
+	}
+	// The same environment with a different toolchain under it must key
+	// differently, which is the whole point of recording it.
+	other := &Env{PathDirs: env.PathDirs, Vars: env.Vars, Resolved: env.Resolved + ".1"}
+	if env.Key() == other.Key() {
+		t.Fatalf("two ambient toolchains share the key %q, so a tool built by the older one is reused", env.Key())
 	}
 }

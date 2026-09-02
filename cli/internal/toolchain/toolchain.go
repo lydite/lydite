@@ -270,7 +270,12 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides, w io.Writer)
 				if err := logf(w, "%s\n", st.note); err != nil {
 					return nil, err
 				}
-				return &Env{Vars: st.vars}, nil
+				// The ambient version is recorded, not applied. It is the only
+				// thing telling two ambient toolchains apart — this branch
+				// contributes no directory and only GOTOOLCHAIN=local, which
+				// names every ambient Go there has ever been — so a caller
+				// caching a tool built under it has nothing else to key on.
+				return &Env{Vars: st.vars, Resolved: display(ambient)}, nil
 			}
 		}
 		return nil, nil

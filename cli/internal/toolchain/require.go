@@ -283,18 +283,18 @@ type packageJSONEngines struct {
 }
 
 // nodeRequirement reads the Node version a component needs from its own
-// `engines.node` and the .nvmrc beside it, falling back to the scan root's
-// .nvmrc when the component states neither.
+// `engines.node`, the .nvmrc beside it, and the scan root's .nvmrc, and
+// returns the highest floor any of them states.
 //
 // engines.node is a range rather than a version, so only its lower bound is
-// meaningful here — see minimumOfRange for why a floor is all this needs. The
-// higher of the two the component states wins, because they are different
-// statements rather than a precedence order: `">=18"` is the floor the package
-// supports and a .nvmrc of `22` is the version it is developed on, and taking
-// the first of them found would run the suite on 18 in a repository that pins
-// 22. The scan root's .nvmrc is a last resort because a monorepo
-// conventionally keeps one at the top; a component that states its own version
-// is never overruled by it.
+// meaningful here — see minimumOfRange for why a floor is all this needs.
+//
+// All three are candidates rather than a precedence order, because they are
+// different statements: `">=18"` is the floor a package supports, and a .nvmrc
+// of `22` — beside it or at the scan root, where a monorepo conventionally
+// keeps one — is the version it is developed on. Taking the first found would
+// resolve to 18 in a repository that pins 22, and an ambient Node 18 would
+// then read as satisfying it.
 func nodeRequirement(root, dir string) (Requirement, error) {
 	req := Requirement{Lang: runner.TypeScript}
 	consider := func(raw, source string) {

@@ -196,7 +196,9 @@ version and not where it came from, so one poisoned build outlives the run and,
 on a runner sharing `~/.cache/lydite`, reaches other repositories. So
 `executil.Env` carries the two separately: the checks get the component's
 declared environment, and lydite's own provisioning gets only the toolchain
-lydite resolved.
+lydite resolved. The same split runs through `lydite test`'s `Prepare`, where
+the question is whose software is being fetched — the repository's dependencies
+with the repository's environment, lydite's pinned runners without it.
 
 This does not make a scan immune to the repository it scans, and it is not
 meant to. A repository already influences its own scan through its own

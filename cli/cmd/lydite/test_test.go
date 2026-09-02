@@ -17,6 +17,7 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/toolchain"
@@ -1028,5 +1029,35 @@ func TestAComponentCannotShadowTheToolchainLyditeResolved(t *testing.T) {
 	entries := filepath.SplitList(path)
 	if len(entries) != 2 || entries[0] != "/usr/bin" || entries[1] != "ci-bin" {
 		t.Fatalf("PATH = %q, want the declared directory behind the inherited one", path)
+	}
+}
+
+// Two different people's software is installed in prepare, and each gets its
+// own environment. The repository's dependencies are installed with what the
+// repository declared — its registry, its token. lydite's pinned runners are
+// not: `cargo install` reads CARGO_HOME, CARGO_REGISTRIES_*, CARGO_NET_* and
+// RUSTC_WRAPPER, so a declared environment reaching it would choose where
+// lydite's own cargo-nextest comes from, and the result is cached beyond the
+// run.
+func TestPrepareInstallsLyditesRunnersWithoutTheRepositorysEnvironment(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{
+		"CARGO_REGISTRIES_CRATES_IO_INDEX": "http://127.0.0.1:1",
+		"SQLX_OFFLINE":                     "true",
+	}}
+	tc := &toolchain.Env{Vars: []string{"RUSTUP_TOOLCHAIN=1.96"}}
+
+	env := executil.Env{Check: childEnv(tc, c, runner.Invocation{}), Install: tc.Environ()}
+
+	if !slices.Contains(env.Check, "SQLX_OFFLINE=true") {
+		t.Errorf("check env = %q, want what the repository declared", env.Check)
+	}
+	for _, kv := range env.Install {
+		if strings.HasPrefix(kv, "CARGO_REGISTRIES_") || strings.HasPrefix(kv, "SQLX_OFFLINE=") {
+			t.Fatalf("install env carries %q from the scanned repository", kv)
+		}
+	}
+	if !slices.Contains(env.Install, "RUSTUP_TOOLCHAIN=1.96") {
+		t.Errorf("install env = %q, want lydite's own resolved toolchain", env.Install)
 	}
 }
