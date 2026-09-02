@@ -530,3 +530,61 @@ func TestALanguageFigureCoversOnlyItsOwnComponents(t *testing.T) {
 		t.Errorf("languages = %s, want a stable sorted order", got)
 	}
 }
+
+// A figure no component contributed to is unmeasured, never a 0.0% row. 0/0
+// renders as 0.0%, which reads as a real measurement of no coverage at all: a
+// language whose only component failed would report the worst possible number
+// as though it had been measured, and a reader acting on it would go looking
+// for missing tests rather than for the failing suite.
+//
+// Found on the proving ground, where the `web` component fails for want of a
+// coverage provider and its language reported `0.0% (0/0 lines)`.
+func TestALanguageThatMeasuredNothingIsUnmeasured(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasuredComponent(decl.Components[1], "test(web) did not pass: failed"),
+	}
+	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true}); err != nil {
+		t.Fatal(err)
+	}
+	rows := rowsOf(rep)
+	ts, ok := rows["typescript coverage"]
+	if !ok {
+		t.Fatalf("no typescript row; got %v", rep.Rows())
+	}
+	if ts.Status != ui.StatusUnmeasured {
+		t.Errorf("typescript coverage = %+v, want unmeasured rather than a figure", ts)
+	}
+	if strings.Contains(ts.Value, "0.0%") {
+		t.Errorf("typescript coverage value = %q, want no percentage at all", ts.Value)
+	}
+	// The language that did measure is unaffected, and so is the global
+	// figure — which still has something in it.
+	if rows["go coverage"].Status != ui.StatusContext {
+		t.Errorf("go coverage = %+v, want a measured-but-ungated row", rows["go coverage"])
+	}
+	if rows["coverage"].Status != ui.StatusContext {
+		t.Errorf("global coverage = %+v, want a measured-but-ungated row", rows["coverage"])
+	}
+}
+
+// With nothing measured at all, the global figure says so too — a repository
+// whose every component failed must not report 0.0% coverage.
+func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	ms := []measurement{unmeasuredComponent(decl.Components[0], "test(api) did not pass: failed")}
+	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rowsOf(rep)["coverage"]; got.Status != ui.StatusUnmeasured {
+		t.Errorf("coverage = %+v, want unmeasured", got)
+	}
+}

@@ -175,14 +175,30 @@ func ungatedRows(rep *ui.Report, ms []measurement) {
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "coverage(" + m.Name + ")", Value: lineValue(m.Lines)})
 	}
 	for _, l := range languages(ms) {
-		lines, measured, _ := composed(ms, nil, byLang(l))
-		rep.Add(ui.Row{Status: ui.StatusContext, Label: string(l) + " coverage",
-			Value: composedValue(lines, measured, 0, count(ms, byLang(l)))})
+		rep.Add(ungatedComposedRow(string(l)+" coverage", ms, byLang(l)))
 	}
-	lines, measured, _ := composed(ms, nil, everything)
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: "coverage",
-		Value:  composedValue(lines, measured, 0, len(ms)),
-		Detail: []string{"nothing was compared: pass --gate-coverage to gate against the baseline"}})
+	global := ungatedComposedRow("coverage", ms, everything)
+	if global.Status == ui.StatusContext {
+		global.Detail = []string{"nothing was compared: pass --gate-coverage to gate against the baseline"}
+	}
+	rep.Add(global)
+}
+
+// ungatedComposedRow renders one language's or the repository's figure for a
+// run that measured without gating.
+//
+// A figure no component contributed to is `unmeasured`, never a 0.0% context
+// row. 0/0 renders as 0.0%, which reads as a real measurement of no coverage
+// at all — the language whose only component failed would report the worst
+// possible number as though it had been measured, and a reader acting on it
+// would go looking for missing tests rather than for the failing suite.
+func ungatedComposedRow(label string, ms []measurement, in func(measurement) bool) ui.Row {
+	lines, measured, _ := composed(ms, nil, in)
+	total := count(ms, in)
+	if !lines.Measured() {
+		return unmeasuredRow(label, fmt.Sprintf("none of its %d component(s) produced a measurement", total))
+	}
+	return ui.Row{Status: ui.StatusContext, Label: label, Value: composedValue(lines, measured, 0, total)}
 }
 
 // gatedRows reads the baseline, compares every altitude against it, gates the

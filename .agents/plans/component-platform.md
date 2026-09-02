@@ -15,8 +15,8 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
-| 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | in progress — challenged, see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
-| 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
+| 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
+| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | not started |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
@@ -69,8 +69,8 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   components is the case that keeps the port lock exercised. See
   [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md).
 - Mutation is built for all three languages, not delegated.
-- Configuration lives under `.lydite/`. `coverage.source` is removed, but only
-  when coverage actually moves onto components at step 6.
+- Configuration lives under `.lydite/`. `coverage.source` is removed, along with
+  the report-path keys that existed to locate a report some other job produced.
 - Coverage is measured per component, from the runner's instrumented variant.
   `lydite test` measures and gates it and `lydite coverage` is removed; a
   baseline is per-component line counts keyed by tree. See
@@ -132,14 +132,18 @@ the coverage gate and the test run cannot disagree about it.
 
 Open: `typescript.install` is a repository-wide key while a component's
 `setup` is per component, and a JavaScript component can express its install
-either way.
+either way. Step 6 left it as it was: there is now one install path rather than
+two, so the key no longer means different things in different places, and
+deciding whether it should be per component belongs with step 7's per-component
+toolchain resolution.
 
 ## What step 1 left for later
 
 - **`coverage.source` survives.** ADR 0016 removes it, and step 6 is where that
   happens: lydite's own CI depends on `source: report` today, and removing the
   key before coverage moves onto components would leave the repository unable
-  to gate itself.
+  to gate itself. *Closed at step 6: the key, its three report-path siblings and
+  their five flags are all rejected by name.*
 - **Prebuilt first, source as the fallback.** cargo-nextest from source is seven
   minutes and the published archive is three, so `internal/cargotool` downloads
   the release and verifies its digest, falling back to `cargo install` for a
@@ -149,14 +153,17 @@ either way.
 - **`cargo-llvm-cov` is still not installed.** `cargo-nextest` now is, pinned via
   `internal/cargotool`, but the instrumented Rust variant needs llvm-cov and
   nothing provisions it — which is the gap that silently caches an empty
-  baseline under `coverage.source: run`. It belongs with step 6, where the
-  instrumented variant is first actually run.
+  baseline. *Closed at step 6: it is a third `internal/cargotool` caller, with no
+  prebuilt path, because the release publishes archives and no checksum beside
+  them.*
 - **The run was sequential.** Step 4 consumes the published host ports
   `internal/compose` reads, through a `compose.LoadWith` pre-pass: a stack is
   the only thing that knows its ports, and the scheduler needs every
   component's before it decides what may run together.
 - **`internal/detect` is untouched.** Scan and coverage still discover their own
-  units; step 7 is where they learn it from the component instead.
+  units; step 7 is where they learn it from the component instead. *Coverage
+  stopped using it at step 6; scan and `internal/toolchain` still do, which is
+  what step 7 closes.*
 
 ## A component's output is captured, not streamed
 
@@ -252,9 +259,9 @@ rather than replacing it, so the runtime it meant to hide stayed resolvable.
 
 - **#36 before step 6.** Adding `-coverpkg` and moving coverage onto components
   both change the reported number. Done separately they cost two baseline resets
-  and two confusing releases. `internal/runner`'s instrumented Go variant
-  already carries `-coverpkg=./...`, and no reported number moves until step 6
-  puts `internal/coverage` behind it — so the two land together, in one reset.
+  and two confusing releases. Both landed in step 6, in one reset: the baseline
+  moved to `v3/` because the quantity changed, and Go's figure moved upwards
+  because `-coverpkg=./...` is what the instrumented variant now actually runs.
 - **`go test -overlay` is Go-only.** `cargo` has no equivalent, so mutation
   isolation is a strategy behind one interface: overlay for Go, worker
   directories for Rust and TypeScript.
@@ -270,3 +277,9 @@ rather than replacing it, so the runtime it meant to hide stayed resolvable.
   and stays silent on the excluded `generated/client.ts`. A change that makes
   that job green by removing either file has removed a branch of the gate from
   observation, not fixed anything.
+- **A JavaScript component must declare its own coverage provider.** `vitest
+  --coverage` needs `@vitest/coverage-v8` in the workspace's own dependencies,
+  and lydite will not add it: installing into the repository it is about to
+  gate would have lydite change what that repository resolves to. The proving
+  ground's `web` workspace does not declare one, so its `web` component fails
+  under instrumentation until it does.

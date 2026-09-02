@@ -66,6 +66,27 @@ EXPECTED_UNAFFECTED = ["tally"]
 # selection that happened to return three components.
 EXPECTED_VIA = {"sdk": "depends on api", "web": "depends on api"}
 
+# The component is the coverage unit, and the proving ground is where that
+# claim is falsifiable: `rust/` is one Cargo workspace of three crates and
+# `web/` one npm workspace of two packages, so a run that still discovered its
+# units by walking for manifests would report three Rust rows and two
+# TypeScript ones. Only `go/api` and `go/sdk` are genuinely two.
+#
+# The assertion is the negative. "Every declared component has a coverage row"
+# is satisfied by a run reporting five extra rows beside them, which is exactly
+# the failure this exists to catch — so the count is pinned and any row naming
+# a crate or package is a failure.
+EXPECTED_COVERAGE_UNITS = ["tally", "api", "sdk", "web"]
+# Names that appear in the tree as crates or packages and must never appear as
+# coverage units: they are parts of a component, not components.
+FORBIDDEN_COVERAGE_UNITS = [
+    "tally-core",
+    "tally-db",
+    "tally-cli",
+    "app",
+    "shared",
+]
+
 
 def concurrency(value: str) -> int | None:
     """Read the components-run-at-once count out of the schedule row's value.
@@ -131,6 +152,28 @@ def main_affected(path: str, checkout: str) -> int:
                 "the change touches it, and a selection that returns every component satisfies "
                 "every assertion about correctness while delivering none of the value"
             )
+
+    # A component selection skipped is not measured, and its coverage row has
+    # to say so rather than reporting a number. Naming the component that must
+    # NOT have been measured is the coverage equivalent of naming the ones that
+    # must not have run: a run that measured everything satisfies every
+    # assertion about correctness and delivers none of what selecting is for.
+    for name in EXPECTED_UNAFFECTED:
+        row = rows.get(f"coverage({name})")
+        if row is None:
+            failures.append(
+                f"no coverage({name}) row: a component that did not run must still be accounted "
+                "for, or a narrowed run reads as a complete one"
+            )
+        elif row.get("status") != "unmeasured":
+            failures.append(
+                f"coverage({name}) is {row!r}, want unmeasured — nothing in the change touches "
+                f"{name}, so there is no measurement it could honestly report"
+            )
+    for name in EXPECTED_AFFECTED:
+        row = rows.get(f"coverage({name})")
+        if row is None:
+            failures.append(f"no coverage({name}) row, but {name} ran")
 
     # Every watch pattern the declaration carries names a file that exists, so
     # this gate has to be silent. A failure here means either a watched file
@@ -231,6 +274,43 @@ def main(path: str, checkout: str) -> int:
                     "the exclude is not clearing anything"
                 )
 
+    # The component is the coverage unit. A run that still discovered units by
+    # walking for manifests reports one row per crate and per package, so the
+    # count is pinned and the crate and package names are forbidden outright —
+    # asserting only that each component has a row would pass on a report
+    # carrying five more beside them.
+    units = sorted(
+        label[len("coverage(") : -1]
+        for label in rows
+        if label.startswith("coverage(") and label.endswith(")")
+    )
+    if units != sorted(EXPECTED_COVERAGE_UNITS):
+        failures.append(
+            f"coverage units are {units}, want {sorted(EXPECTED_COVERAGE_UNITS)} — rust/ is one "
+            "workspace of three crates and web/ one workspace of two packages, so each must be a "
+            "single unit"
+        )
+    for forbidden in FORBIDDEN_COVERAGE_UNITS:
+        if forbidden in units:
+            failures.append(
+                f"{forbidden} is reported as a coverage unit, but it is a crate or package inside "
+                "a component rather than a component"
+            )
+
+    # A run that measured without gating must not render as one that gated.
+    # This job passes no --gate-coverage, so every coverage row here has to
+    # carry the status that says nothing was compared — a workflow that forgot
+    # the flag otherwise reports exactly the green a gated run reports.
+    for label in ("coverage",) + tuple(f"coverage({n})" for n in EXPECTED_COVERAGE_UNITS):
+        row = rows.get(label)
+        if row is None:
+            failures.append(f"no {label} row")
+        elif row.get("status") == "pass":
+            failures.append(
+                f"{label} is a pass, but this run gated nothing — a measured-but-ungated figure "
+                "must be visibly distinct from one held to a baseline"
+            )
+
     # Every component still has to pass. The orphan gate failing must not be
     # able to mask a runner that stopped working, which is what this job was
     # built to catch in the first place.
@@ -249,7 +329,8 @@ def main(path: str, checkout: str) -> int:
         f"proving ground: {len(suites)} component(s) passed; "
         f"orphan gate fired on {EXPECTED_ORPHANS} and stayed silent on {EXPECTED_EXCLUDED}; "
         f"scheduler reached {concurrency(rows['schedule']['value'])} concurrent and serialised "
-        f"{EXPECTED_SERIALISED} on port {CONTENDED_PORT}"
+        f"{EXPECTED_SERIALISED} on port {CONTENDED_PORT}; coverage measured {units} and gated none "
+        "of them"
     )
     return 0
 

@@ -396,7 +396,9 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 	// final rows, so no path out of runComponent can forget it.
 	for i := range plans {
 		if rows[i].Status != ui.StatusPass {
-			measured[i] = unmeasuredComponent(plans[i].c, rows[i].Value)
+			// The row's own words, so the coverage row and the suite row give
+			// a reader the same account of one event rather than two.
+			measured[i] = unmeasuredComponent(plans[i].c, rows[i].Label+" did not pass: "+rows[i].Value)
 		}
 	}
 
