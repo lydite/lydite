@@ -116,7 +116,16 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang) (R
 // It is asked of the component's own directory, which is where a module-scoped
 // go command is the only place it works.
 func measureGo(ctx context.Context, root, unitDir, dir, reportPath string) (Report, error) {
-	name := moduleName(ctx, unitDir)
+	name, err := moduleName(ctx, unitDir)
+	if err != nil {
+		// A probe that could not run says nothing about the declaration. An
+		// interrupted run kills it, and a machine without go on PATH never
+		// starts it — reporting either as "this dir is not a module root"
+		// is a confident wrong answer about the repository, which is the
+		// mistake planComponents already refuses to make about the container
+		// runtime.
+		return Report{}, fmt.Errorf("could not ask which Go module is rooted at %s: %w", dir, err)
+	}
 	if name == "" {
 		return Report{}, fmt.Errorf("%s is not a Go module root, so the coverage profile's package-qualified paths cannot be resolved — a go-test component's dir is the directory holding its go.mod", dir)
 	}
@@ -153,11 +162,20 @@ func measureLCOV(data []byte, unitDir, dir string) (Report, error) {
 // and one silently overwrites the other, which is a merge that reads as a
 // measurement.
 func prefixHits(hits LineHits, relDir string) LineHits {
-	if relDir == "" {
-		return hits
-	}
 	out := make(LineHits, len(hits))
 	for file, lines := range hits {
+		// An absolute path that does not resolve under the component is not
+		// this component's file — a dependency compiled from a registry
+		// checkout is the usual one. Joining the component's directory onto it
+		// produces a key like `rust/Users/me/.cargo/registry/...`, which
+		// matches no changed path ever, so those lines are silently absent
+		// from the patch gate's denominator while their line counts are still
+		// in the component's aggregate: two numbers over two different sets of
+		// files. Dropped instead, so the patch gate covers exactly the files
+		// it can name.
+		if path.IsAbs(file) || strings.HasPrefix(file, "../") {
+			continue
+		}
 		out[path.Join(relDir, file)] = lines
 	}
 	return out
@@ -182,7 +200,11 @@ func relDir(dir string) string {
 // is not an error and is not a prefix any profile entry carries, so a caller
 // that passed the wrong directory would get silent nonsense instead of a
 // failure.
-func moduleName(ctx context.Context, moduleDir string) string {
+// It returns an error only when the probe could not run at all, which is a
+// different thing from an answer lydite cannot use: an interrupted run and a
+// machine with no go on PATH both land here, and neither says anything about
+// the directory.
+func moduleName(ctx context.Context, moduleDir string) (string, error) {
 	// The module's own directory is asked for alongside its path, because the
 	// path alone cannot say whether this directory is the module root. `go
 	// list -m` run *inside* a module answers with the enclosing module — a
@@ -207,22 +229,29 @@ func moduleName(ctx context.Context, moduleDir string) string {
 	// rooted at this directory whatever else the workspace joins to it.
 	r := executil.RunQuietEnv(ctx, moduleDir, []string{"GOWORK=off"}, "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
 	if !r.Ok() {
-		return ""
+		// `go list -m` outside a module exits non-zero with a message saying
+		// so, which is an answer about the directory rather than a failure to
+		// ask. Anything else — a cancelled context, no go on PATH — is the
+		// probe not running.
+		if strings.Contains(r.Stderr, "go.mod file not found") {
+			return "", nil
+		}
+		return "", fmt.Errorf("go list -m in %s: %w: %s", moduleDir, r.Err, strings.TrimSpace(r.Stderr))
 	}
 	out := strings.TrimSpace(r.Output)
 	// A workspace prints one module per line; a non-module root prints the
 	// placeholder. Neither identifies a single module to strip.
 	if out == "" || strings.Contains(out, "\n") {
-		return ""
+		return "", nil
 	}
 	name, root, ok := strings.Cut(out, "\t")
 	if !ok || name == "" || name == "command-line-arguments" {
-		return ""
+		return "", nil
 	}
 	if !sameDir(root, moduleDir) {
-		return ""
+		return "", nil
 	}
-	return name
+	return name, nil
 }
 
 // sameDir reports whether two paths name the same directory, resolving symlinks

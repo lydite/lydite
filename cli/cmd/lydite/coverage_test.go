@@ -1438,3 +1438,26 @@ func previousOrCurrentBaseline(t *testing.T, dir, rev string) gitstate.Baseline 
 	}
 	return b
 }
+
+// The floor's denominator counts only components a run could ever measure. A
+// raw `command:` is not a gap in this run's coverage, and counting it renders a
+// complete run as `1 of 2 component(s)` — the "N of M" shape that exists so a
+// partial run cannot read as a repository-wide pass, saying the opposite of
+// what happened.
+func TestTheFloorDenominatorExcludesWhatItCanNeverApplyTo(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		measured("api", runner.Go, 90, 100),
+		unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
+			"the component declares a raw command, which has no instrumented variant"),
+	}, 50)
+	rows := rowsOf(rep)
+	if got := rows["floor"].Value; !strings.Contains(got, "1 of 1 component(s)") {
+		t.Errorf("floor summary = %q, want 1 of 1 — the raw-command component is not a gap", got)
+	}
+	// It is still named, because a component the floor can never apply to is
+	// worth knowing about.
+	if got := rows["floor(docs)"].Status; got != ui.StatusUnmeasured {
+		t.Errorf("floor(docs) = %q, want it named as unmeasured", got)
+	}
+}

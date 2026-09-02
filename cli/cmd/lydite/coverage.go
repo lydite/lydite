@@ -760,8 +760,26 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 	if floor <= 0 || len(ms) == 0 {
 		return
 	}
+	// Only components a run could ever measure are in the denominator. A raw
+	// `command:` is not a gap in this run's coverage, and counting it renders
+	// a complete run as `1 of 2 component(s)` — the "N of M" shape that exists
+	// so a partial run cannot read as a repository-wide pass, saying the
+	// opposite of what happened. recordingBlockedBy already excludes them from
+	// the same question.
+	gateable := 0
+	for _, m := range ms {
+		if !m.Unmeasurable {
+			gateable++
+		}
+	}
 	below, cleared := 0, 0
 	for _, m := range ms {
+		if m.Unmeasurable {
+			// Named, because a component the floor can never apply to is worth
+			// knowing about — but never as a gap this run left.
+			rep.Add(unmeasuredRow("floor("+m.Name+")", fmt.Sprintf("the %.1f%% floor cannot apply: %s", floor, m.Why)))
+			continue
+		}
 		if !m.Measured() {
 			// Never folded into the passing count, and never a failure: a
 			// gate that did not run must be visibly distinct from one that
@@ -796,7 +814,7 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 	// component went ungated, so a partial run cannot read as a
 	// repository-wide pass.
 	rep.Add(ui.Row{Status: ui.StatusPass, Label: "floor",
-		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, len(ms), floor)})
+		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, gateable, floor)})
 }
 
 // recordThisTree writes what this run measured as the baseline for the tree it
@@ -873,15 +891,16 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		return "not recorded — this tree could not be resolved"
 	}
 	// Merged onto whatever this tree already holds, never skipped because it
-	// holds something. A shard runs `--component` over part of the
-	// declaration, so the first one to finish would otherwise be the only one
-	// that ever records and every later shard's freshly measured components
-	// would be silently discarded.
+	// holds something: a re-run that measures more than the last one must not
+	// be refused for finding an entry there.
 	//
-	// It is a read-then-write, so two shards finishing together can still lose
-	// one side. `lydite test merge` is what makes a sharded run's report one
-	// document; until it exists, a sharded *gated* run is not a supported
-	// shape and this only narrows the window rather than closing it.
+	// It does not make a sharded run record. A shard narrows with
+	// `--component`, which leaves every other component with no entry and no
+	// licence to carry one, so recordingBlockedBy above returns first and the
+	// shard records nothing at all. That is deliberate for now — a shard has
+	// measured part of a tree and cannot honestly claim the tree — and
+	// `lydite test merge` is what will fold a sharded run into one document
+	// and one recording.
 	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, tree); hit {
 		// Anchored against what this tree already holds as well as against the
 		// base baseline. The same tree is the same content, so a difference

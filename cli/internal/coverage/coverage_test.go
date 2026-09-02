@@ -90,7 +90,11 @@ func TestGoProfileLinesExcludeGeneratedFiles(t *testing.T) {
 // path strips nothing and every file silently fails to match the diff, which
 // is how Go patch coverage came to be reported as unmeasured in wardnet.
 func TestModuleNameRejectsNonModuleDir(t *testing.T) {
-	if got := moduleName(context.Background(), t.TempDir()); got != "" {
+	got, err := moduleName(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("moduleName returned an error for a directory it could ask about: %v", err)
+	}
+	if got != "" {
 		t.Fatalf("moduleName(non-module dir) = %q, want \"\"", got)
 	}
 }
@@ -226,15 +230,41 @@ func TestAModuleInsideAGoWorkspaceIsStillItsOwnModule(t *testing.T) {
 	write(t, root, "a/go.mod", "module example.com/a\n\ngo 1.24\n")
 	write(t, root, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
 
-	if got := moduleName(context.Background(), filepath.Join(root, "a")); got != "example.com/a" {
+	if got, _ := moduleName(context.Background(), filepath.Join(root, "a")); got != "example.com/a" {
 		t.Errorf("moduleName = %q, want example.com/a — the workspace lists both members", got)
 	}
-	if got := moduleName(context.Background(), filepath.Join(root, "b")); got != "example.com/b" {
+	if got, _ := moduleName(context.Background(), filepath.Join(root, "b")); got != "example.com/b" {
 		t.Errorf("moduleName = %q, want example.com/b", got)
 	}
 	// A directory that is genuinely not a module root is still refused, so
 	// this did not buy the workspace case by loosening the check.
-	if got := moduleName(context.Background(), root); got != "" {
+	if got, _ := moduleName(context.Background(), root); got != "" {
 		t.Errorf("moduleName at the workspace root = %q, want none", got)
+	}
+}
+
+// An absolute lcov path that does not resolve under the component is not that
+// component's file — a dependency compiled from a registry checkout is the
+// usual one. Joining the component's directory onto it produces a key that
+// matches no changed path ever, so those lines vanish from the patch gate's
+// denominator while their counts stay in the component's aggregate: two
+// numbers over two different sets of files.
+func TestAnOutOfTreeLCOVPathIsDroppedRatherThanPrefixed(t *testing.T) {
+	root := t.TempDir()
+	lcov := "SF:src/lib.rs\nDA:1,1\nLF:1\nLH:1\nend_of_record\n" +
+		"SF:/somewhere/else/.cargo/registry/src/dep.rs\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+	write(t, root, "rust/.lydite-reports/coverage/lcov.info", lcov)
+
+	got, err := Measure(context.Background(), root, "rust", ".lydite-reports/coverage/lcov.info", runner.Rust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Hits["rust/src/lib.rs"]; !ok {
+		t.Errorf("Hits keys = %v, want the component's own file", keys(got.Hits))
+	}
+	for k := range got.Hits {
+		if strings.Contains(k, "registry") {
+			t.Errorf("Hits carries %q — an out-of-tree path prefixed with the component directory", k)
+		}
 	}
 }

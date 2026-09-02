@@ -288,7 +288,15 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 	}
 	var report Baseline
 	if err := json.Unmarshal([]byte(r.Output), &report); err != nil {
-		return nil, false, fmt.Errorf("parsing cached baseline for %s: %w", found, err)
+		// A miss, and never an error. Nothing rewrites the base tree's entry —
+		// a run records the tree it measured — so returning an error here
+		// red-lines the gate for every change whose merge-base is that tree,
+		// permanently and with no way back. A hand-edit, a truncated object or
+		// an entry from a format this version does not know would all do it.
+		// A miss recomputes and overwrites, which is the same self-healing the
+		// empty-entry rule below exists for.
+		fmt.Fprintf(os.Stderr, "lydite: the cached baseline for %s is not readable (%v) — measuring it again\n", found, err)
+		return nil, false, nil
 	}
 	// An empty baseline ("{}") is a cache miss, not a baseline of nothing. A
 	// run whose measurement failed for every component records nothing worth

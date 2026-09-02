@@ -534,3 +534,34 @@ func TestReadBaselineWithNoUsableKeyIsAMiss(t *testing.T) {
 		}
 	}
 }
+
+// An unreadable cached entry is a miss, and never an error. Nothing rewrites
+// the base tree's entry — a run records the tree it measured — so returning an
+// error red-lines the gate for every change whose merge-base is that tree,
+// permanently and with no way back. A hand-edit, a truncated object or an entry
+// from a format this version does not know would all do it. A miss recomputes
+// and overwrites, which is the self-healing the empty-entry rule already has.
+func TestAnUnreadableBaselineIsAMissRatherThanAnError(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{
+		"broken": `{"api":{"covered":`,
+		"good":   `{"api":{"covered":10,"total":100}}`,
+	})
+	run := gitRunner(t, ctx)
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+
+	report, hit, err := ReadBaseline(ctx, clone, "broken")
+	if err != nil {
+		t.Errorf("ReadBaseline on a truncated entry returned %v, want a miss", err)
+	}
+	if hit || report != nil {
+		t.Errorf("ReadBaseline = (%v, hit=%v), want a miss", report, hit)
+	}
+	// A readable entry beside it is unaffected, so this did not buy the
+	// healing by treating everything as absent.
+	if _, hit, err := ReadBaseline(ctx, clone, "good"); err != nil || !hit {
+		t.Errorf("ReadBaseline on a good entry = (hit=%v, %v), want a hit", hit, err)
+	}
+}
