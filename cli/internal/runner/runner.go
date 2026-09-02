@@ -35,10 +35,8 @@ package runner
 import (
 	"context"
 	"io"
-	"os"
 	"path"
 	"sort"
-	"strings"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/nodedeps"
@@ -146,11 +144,17 @@ type Invocation struct {
 	// Optional marks a preparation step whose failure is not the run
 	// failing. A suite invocation is never optional.
 	Optional bool
-	// Env is "KEY=value" entries the command needs on top of the caller's
-	// own. It carries the cache directory of a pinned tool onto PATH, so the
-	// invocation stays the one a reader could type — `cargo nextest run`,
-	// not an absolute path into a version-keyed cache.
-	Env []string
+	// PathDirs is directories this command needs at the front of PATH: the
+	// cache directory of a pinned tool, so the invocation stays the one a
+	// reader could type — `cargo nextest run`, not an absolute path into a
+	// version-keyed cache.
+	//
+	// Directories rather than a finished "PATH=..." entry, because a child's
+	// environment is a flat list where the last occurrence of a key wins:
+	// two callers each building their own PATH produce two entries and one
+	// of them is discarded without a trace. toolchain.Compose is the single
+	// place that turns every caller's directories into the one entry.
+	PathDirs []string
 }
 
 // Runner is what lydite knows about one test command.
@@ -184,7 +188,7 @@ type Runner struct {
 	// not a degradation when absent but a component that cannot run at all.
 	// `go test` needs nothing — its toolchain fetches what a build needs on
 	// the way past.
-	Prepare func(ctx context.Context, inv Invocation, dir, override string, out io.Writer) error
+	Prepare func(ctx context.Context, inv Invocation, dir, override string, env []string, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
@@ -281,7 +285,7 @@ func buildCargoNextest(variant Variant, args []string) (Invocation, bool) {
 			Name:        "cargo",
 			Args:        append([]string{"nextest", "run"}, args...),
 			JUnitReport: nextestJUnit,
-			Env:         cargoEnv(),
+			PathDirs:    cargoBinDirs(),
 		}, true
 	case Instrumented:
 		return llvmCovNextest(args), true
@@ -324,7 +328,7 @@ func llvmCovNextest(args []string) Invocation {
 		Args:           append([]string{"llvm-cov", "nextest", "--lcov", "--output-path", lcov}, args...),
 		CoverageReport: lcov,
 		JUnitReport:    nextestJUnit,
-		Env:            cargoEnv(),
+		PathDirs:       cargoBinDirs(),
 	}
 }
 
@@ -342,14 +346,14 @@ func llvmCovNextest(args []string) Invocation {
 // workspace's own install flow, and there is no equivalent for a tool lydite
 // pins — a repository able to substitute its own cargo-nextest would be back
 // to a runner whose version varies by machine.
-func installCargoTools(ctx context.Context, inv Invocation, _, _ string, out io.Writer) error {
-	if err := cargoNextest.Install(ctx, out); err != nil {
+func installCargoTools(ctx context.Context, inv Invocation, _, _ string, env []string, out io.Writer) error {
+	if err := cargoNextest.Install(ctx, env, out); err != nil {
 		return err
 	}
 	if !runsLLVMCov(inv) {
 		return nil
 	}
-	return cargoLLVMCov.Install(ctx, out)
+	return cargoLLVMCov.Install(ctx, env, out)
 }
 
 // runsLLVMCov reports whether an invocation drives cargo-llvm-cov. It reads
@@ -360,28 +364,26 @@ func runsLLVMCov(inv Invocation) bool {
 	return inv.Name == "cargo" && len(inv.Args) > 0 && inv.Args[0] == "llvm-cov"
 }
 
-// cargoEnv puts the pinned binaries first on PATH.
+// cargoBinDirs is where the pinned cargo tools live.
 //
-// PATH rather than invoking the binary directly, because `cargo nextest` is
-// how cargo finds a subcommand, and it is the invocation a reader can re-run
-// from the failure detail — an absolute path into a version-keyed cache is
-// neither. Prepended, so an older copy already on the machine cannot win.
+// They go on PATH rather than being invoked by absolute path, because `cargo
+// nextest` is how cargo finds a subcommand, and it is the invocation a reader
+// can re-run from the failure detail — an absolute path into a version-keyed
+// cache is neither. The caller prepends them, so an older copy already on the
+// machine cannot win.
 //
-// Both tools' directories are on it whichever variant runs. The entry for a
-// tool this variant does not invoke costs a directory nothing looks in, and
-// splitting the list per variant would put the same PATH construction in two
+// Both tools' directories are returned whichever variant runs. The entry for
+// a tool this variant does not invoke costs a directory nothing looks in, and
+// splitting the list per variant would put the same construction in two
 // places for that.
-func cargoEnv() []string {
+func cargoBinDirs() []string {
 	var dirs []string
 	for _, t := range []cargotool.Tool{cargoNextest, cargoLLVMCov} {
 		if dir, err := t.BinDir(); err == nil {
 			dirs = append(dirs, dir)
 		}
 	}
-	if len(dirs) == 0 {
-		return nil
-	}
-	return []string{"PATH=" + strings.Join(dirs, string(os.PathListSeparator)) + string(os.PathListSeparator) + os.Getenv("PATH")}
+	return dirs
 }
 
 // installNodeDeps runs the install internal/nodedeps resolves from the
@@ -390,8 +392,8 @@ func cargoEnv() []string {
 // Doing nothing is not a failure: a root no single lockfile identifies has
 // nothing lydite can install without guessing, and guessing writes a lockfile
 // the repository does not use.
-func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, out io.Writer) error {
-	return nodedeps.Install(ctx, dir, override, out)
+func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, env []string, out io.Writer) error {
+	return nodedeps.Install(ctx, dir, override, env, out)
 }
 
 // buildVitest runs through the package manager's own binary directory rather

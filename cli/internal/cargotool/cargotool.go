@@ -61,7 +61,7 @@ type Tool struct {
 // that does not match all still end up with the pinned version — slowly, and
 // having said so, rather than not at all. progress is where the source build's
 // output goes; the download is quiet because there is nothing to watch.
-func (t Tool) Install(ctx context.Context, progress io.Writer) error {
+func (t Tool) Install(ctx context.Context, env []string, progress io.Writer) error {
 	if t.Installed() {
 		return nil
 	}
@@ -99,7 +99,7 @@ func (t Tool) Install(ctx context.Context, progress io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if res := executil.RunOutput(ctx, "", nil, progress, "cargo", argv...); !res.Ok() {
+	if res := executil.RunOutput(ctx, "", env, progress, "cargo", argv...); !res.Ok() {
 		return fmt.Errorf("cargo install %s@%s: %w", t.Name, t.Version, res.Err)
 	}
 	return nil

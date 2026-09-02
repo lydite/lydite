@@ -133,10 +133,10 @@ func Commands(root, override string) []Command {
 // answer differently: the coverage gate omits a package it cannot measure,
 // while a test run that proceeds after a failed install reports import errors
 // naming the tests rather than the missing dependencies.
-func Install(ctx context.Context, root, override string, out io.Writer) error {
+func Install(ctx context.Context, root, override string, env []string, out io.Writer) error {
 	for _, cmd := range Commands(root, override) {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
-		res := executil.RunOutput(ctx, root, nil, out, cmd.Argv[0], cmd.Argv[1:]...)
+		res := executil.RunOutput(ctx, root, env, out, cmd.Argv[0], cmd.Argv[1:]...)
 		if !res.Ok() && !cmd.Optional {
 			return fmt.Errorf("%s: %w", strings.Join(cmd.Argv, " "), res.Err)
 		}

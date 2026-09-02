@@ -3,20 +3,22 @@ package toolchain
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
-	"lydite/lydite/internal/detect"
+	"lydite/lydite/internal/runner"
 )
 
 // The whole point of the "prefer ambient" rule: a runner that already has a
 // good-enough toolchain must produce no download and no install. This pins
 // the decision itself, independent of any provisioner.
 func TestSatisfied(t *testing.T) {
-	pinned := Requirement{Ecosystem: detect.Go, Version: "v1.26.4", Raw: "1.26.4"}
-	unpinned := Requirement{Ecosystem: detect.Rust, Raw: "stable"}
+	pinned := Requirement{Lang: runner.Go, Version: "v1.26.4", Raw: "1.26.4"}
+	unpinned := Requirement{Lang: runner.Rust, Raw: "stable"}
 
 	for _, tc := range []struct {
 		name    string
@@ -45,6 +47,17 @@ func TestSatisfied(t *testing.T) {
 	}
 }
 
+// ensureOne resolves one component rooted at the scan root and returns its
+// environment, which is nil when there is nothing to apply.
+func ensureOne(t *testing.T, dir string, l runner.Lang, ov Overrides, log io.Writer) *Env {
+	t.Helper()
+	envs, err := Ensure(context.Background(), dir, []Unit{{Name: "c", Lang: l, Dir: "."}}, ov, log)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	return envs.For("c")
+}
+
 // With the ambient toolchain already good enough, Ensure must install
 // nothing: no PATH entry, and — critically — no network access, which is what
 // makes this test safe to run offline at all.
@@ -55,12 +68,11 @@ func TestEnsureInstallsNothingWhenAmbientSatisfies(t *testing.T) {
 	write(t, dir, "go.mod", "module x\n\ngo 1.16\n")
 
 	var log bytes.Buffer
-	env, err := Ensure(context.Background(), dir, []detect.Ecosystem{detect.Go}, Overrides{}, &log)
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if len(env.PathDirs) != 0 {
-		t.Fatalf("a satisfied toolchain must add nothing to PATH, got %+v", env.PathDirs)
+	env := ensureOne(t, dir, runner.Go, Overrides{}, &log)
+	for _, kv := range env.Environ() {
+		if strings.HasPrefix(kv, "PATH=") {
+			t.Fatalf("a satisfied toolchain must add nothing to PATH, got %q", kv)
+		}
 	}
 	if !strings.Contains(log.String(), "using ambient go") {
 		t.Errorf("Ensure should say it reused the ambient toolchain; log was %q", log.String())
@@ -80,16 +92,13 @@ func TestEnsurePinsGoToolchainEvenWhenAmbientSatisfies(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.16\n")
 
-	env, err := Ensure(context.Background(), dir, []detect.Ecosystem{detect.Go}, Overrides{}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
+	env := ensureOne(t, dir, runner.Go, Overrides{}, &bytes.Buffer{})
 	// "local", not the declared version: the declaration is a minimum, so
 	// pinning it would downgrade a newer ambient toolchain — precisely
 	// backwards when the newer patch is the one carrying a security fix.
 	want := "GOTOOLCHAIN=local"
-	if len(env.Vars) != 1 || env.Vars[0] != want {
-		t.Fatalf("Vars = %+v, want exactly [%s]", env.Vars, want)
+	if got := env.Environ(); len(got) != 1 || got[0] != want {
+		t.Fatalf("Environ = %+v, want exactly [%s]", got, want)
 	}
 }
 
@@ -99,12 +108,9 @@ func TestEnsureDoesNotPinGoWhenNothingIsDeclared(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n")
 
-	env, err := Ensure(context.Background(), dir, []detect.Ecosystem{detect.Go}, Overrides{}, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if len(env.Vars) != 0 {
-		t.Fatalf("Vars = %+v, want none when the repo declares no Go version", env.Vars)
+	env := ensureOne(t, dir, runner.Go, Overrides{}, &bytes.Buffer{})
+	if got := env.Environ(); len(got) != 0 {
+		t.Fatalf("Environ = %+v, want none when the repo declares no Go version", got)
 	}
 }
 
@@ -117,12 +123,9 @@ func TestEnsureDisabledStillReportsShortfall(t *testing.T) {
 	write(t, dir, "go.mod", "module x\n\ngo 99.0.0\n")
 
 	var log bytes.Buffer
-	env, err := Ensure(context.Background(), dir, []detect.Ecosystem{detect.Go}, Overrides{Disabled: true}, &log)
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if len(env.PathDirs) != 0 || len(env.Vars) != 0 {
-		t.Fatalf("provisioning was disabled but the env changed: %+v", env)
+	env := ensureOne(t, dir, runner.Go, Overrides{Disabled: true}, &log)
+	if got := env.Environ(); len(got) != 0 {
+		t.Fatalf("provisioning was disabled but the env changed: %+v", got)
 	}
 	out := log.String()
 	if !strings.Contains(out, "toolchain.enabled is false") {
@@ -150,11 +153,10 @@ func TestEnsureProvisioningFailureWarnsAndContinues(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	var log bytes.Buffer
-	env, err := Ensure(context.Background(), dir, []detect.Ecosystem{detect.Rust}, Overrides{}, &log)
-	if err != nil {
-		t.Fatalf("Ensure returned an error; a provisioning failure must be a warning: %v", err)
-	}
-	if len(env.PathDirs) != 0 {
+	// ensureOne fails the test if Ensure returns an error at all: a
+	// provisioning failure must be a warning, never a verdict.
+	env := ensureOne(t, dir, runner.Rust, Overrides{}, &log)
+	if len(env.Environ()) != 0 {
 		t.Fatalf("a failed provision must contribute nothing to the env, got %+v", env)
 	}
 	if !strings.Contains(log.String(), "warning:") {
@@ -162,45 +164,90 @@ func TestEnsureProvisioningFailureWarnsAndContinues(t *testing.T) {
 	}
 }
 
-func TestEnvActivatePrependsPathAndSetsVars(t *testing.T) {
+func TestComposeBuildsOnePathEntryAndKeepsVars(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
-	t.Setenv("GOTOOLCHAIN", "auto")
 
 	env := &Env{
 		PathDirs: []string{"/opt/go/bin", "/opt/node/bin"},
 		Vars:     []string{"GOTOOLCHAIN=go1.26.5"},
 	}
-	if err := env.Activate(); err != nil {
-		t.Fatalf("Activate: %v", err)
+	got := env.Environ()
+	sep := string(os.PathListSeparator)
+	want := []string{
+		"GOTOOLCHAIN=go1.26.5",
+		"PATH=/opt/go/bin" + sep + "/opt/node/bin" + sep + "/usr/bin",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Environ() = %q, want %q", got, want)
+	}
+}
+
+// The defect deleting the process-wide activation would otherwise create: a
+// child's environment is a flat list where the last occurrence of a key wins,
+// so two callers each prepending their own directories produce two PATH
+// entries and one is discarded with nothing to show for it. Compose takes
+// every caller's directories and emits one.
+func TestComposeEmitsExactlyOnePathEntry(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+
+	got := Compose([]string{"/pinned/bin", "/opt/go/bin"}, []string{"A=1"}, []string{"B=2"})
+	var paths int
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "PATH=") {
+			paths++
+		}
+	}
+	if paths != 1 {
+		t.Fatalf("Environ = %q, want exactly one PATH entry", got)
 	}
 	sep := string(os.PathListSeparator)
-	want := "/opt/go/bin" + sep + "/opt/node/bin" + sep + "/usr/bin"
-	if got := os.Getenv("PATH"); got != want {
-		t.Errorf("PATH = %q, want %q", got, want)
-	}
-	if got := os.Getenv("GOTOOLCHAIN"); got != "go1.26.5" {
-		t.Errorf("GOTOOLCHAIN = %q, want go1.26.5", got)
+	want := "PATH=/pinned/bin" + sep + "/opt/go/bin" + sep + "/usr/bin"
+	if got[len(got)-1] != want {
+		t.Fatalf("PATH = %q, want %q — the nearest caller's directory first", got[len(got)-1], want)
 	}
 }
 
-// A provisioned toolchain exists precisely because the ambient one was
-// missing or too old, so it has to come first on PATH — appending would
-// install it and then never use it.
-func TestEnvActivatePrependsRatherThanAppends(t *testing.T) {
-	t.Setenv("PATH", "/usr/bin")
-	env := &Env{PathDirs: []string{"/opt/go/bin"}}
-	if err := env.Activate(); err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
-	if !strings.HasPrefix(os.Getenv("PATH"), "/opt/go/bin") {
-		t.Fatalf("PATH = %q, want the provisioned dir first", os.Getenv("PATH"))
+// Nothing to prepend must leave PATH alone entirely rather than restating it,
+// so a component with no provisioned toolchain runs with the environment it
+// would have had.
+func TestComposeWithNoDirsSetsNoPath(t *testing.T) {
+	got := Compose(nil, []string{"A=1"})
+	if !slices.Equal(got, []string{"A=1"}) {
+		t.Fatalf("Compose = %q, want just the variables", got)
 	}
 }
 
-func TestEnvActivateNilIsSafe(t *testing.T) {
+func TestNilEnvComposesNothing(t *testing.T) {
 	var env *Env
-	if err := env.Activate(); err != nil {
-		t.Fatalf("Activate on a nil Env: %v", err)
+	if got := env.Environ(); got != nil {
+		t.Fatalf("Environ on a nil Env = %q, want nil", got)
+	}
+	if got := Envs(nil).For("c"); got != nil {
+		t.Fatalf("For on a nil Envs = %+v, want nil", got)
+	}
+}
+
+// Two components asking for the same toolchain are probed and reported once:
+// the second one reuses the first's answer rather than repeating both the
+// work and the diagnostic.
+func TestEnsureSharesOneResultAcrossComponentsWantingTheSameThing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a"), "go.mod", "module a\n\ngo 1.16\n")
+	write(t, filepath.Join(dir, "b"), "go.mod", "module b\n\ngo 1.16\n")
+
+	var log bytes.Buffer
+	envs, err := Ensure(context.Background(), dir, []Unit{
+		{Name: "a", Lang: runner.Go, Dir: "a"},
+		{Name: "b", Lang: runner.Go, Dir: "b"},
+	}, Overrides{}, &log)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if envs.For("a") != envs.For("b") {
+		t.Errorf("two components wanting one toolchain got two results")
+	}
+	if n := strings.Count(log.String(), "using ambient go"); n != 1 {
+		t.Errorf("the ambient toolchain was reported %d times, want once", n)
 	}
 }
 

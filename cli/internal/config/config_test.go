@@ -20,14 +20,14 @@ func TestLoadMissingFileReturnsDefault(t *testing.T) {
 
 func TestLoadPartialOverrideKeepsOtherDefaults(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "go:\n  exclude: [\"legacy\"]\n")
+	write(t, dir, "go:\n  enabled: false\n")
 
 	got, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	want := Default()
-	want.Go.Exclude = []string{"legacy"}
+	want.Go.Enabled = false
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Load = %+v, want %+v", got, want)
 	}

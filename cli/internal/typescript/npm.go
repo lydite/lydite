@@ -27,7 +27,7 @@ import (
 // fails loudly if the lockfile and package.json disagree (which is how a
 // half-applied Dependabot bump surfaces), and never silently re-resolves
 // transitive dependencies to something newer than what was reviewed.
-func ensureNPMToolchain(ctx context.Context, name, binName string, packageJSON, packageLock []byte) (string, error) {
+func ensureNPMToolchain(ctx context.Context, env []string, name, binName string, packageJSON, packageLock []byte) (string, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
@@ -59,7 +59,7 @@ func ensureNPMToolchain(ctx context.Context, name, binName string, packageJSON, 
 	if err := os.WriteFile(filepath.Join(staging, "package-lock.json"), packageLock, 0o600); err != nil {
 		return "", err
 	}
-	if r := executil.Run(ctx, staging, "npm", "ci", "--no-audit", "--no-fund", "--silent"); !r.Ok() {
+	if r := executil.RunEnv(ctx, staging, env, "npm", "ci", "--no-audit", "--no-fund", "--silent"); !r.Ok() {
 		return "", fmt.Errorf("installing pinned %s toolchain: %w\n%s", name, r.Err, r.Output)
 	}
 

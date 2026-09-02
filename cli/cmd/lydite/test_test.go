@@ -330,7 +330,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg, false)
+	}), cfg, nil, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -362,7 +362,7 @@ func TestTeardownRunsWhenSetupFails(t *testing.T) {
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -379,7 +379,7 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -395,7 +395,7 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -409,7 +409,7 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -424,7 +424,7 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -461,7 +461,7 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -491,7 +491,7 @@ func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -590,7 +590,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, nil, nil, config.Default(), 3, false, false, rep)
+	runComponents(context.Background(), root, declared, nil, nil, config.Default(), nil, 3, false, false, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -645,7 +645,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
+	runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -873,7 +873,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 1, false, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 1, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -923,7 +923,7 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()

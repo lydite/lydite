@@ -1,5 +1,5 @@
-// Package typescript runs Biome against every detected TypeScript package
-// using a toolchain lydite bundles and pins itself, independent of the target
+// Package typescript runs Biome against one component's directory using a
+// toolchain lydite bundles and pins itself, independent of the target
 // package's own devDependencies. This avoids the failure mode where a
 // package's lint script references a linter it never declares as a dependency.
 //
@@ -22,37 +22,30 @@ import (
 	"context"
 	"path/filepath"
 
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 )
 
-// Check lints every package directory under root, skipping any directory
-// named in exclude.
-func Check(ctx context.Context, root string, exclude []string) ([]executil.Result, error) {
-	pkgDirs, err := detect.TSPackageDirs(root, exclude)
-	if err != nil {
-		return nil, err
-	}
-	// Nothing to lint: don't pay for a toolchain install to discover that.
-	if len(pkgDirs) == 0 {
-		return nil, nil
-	}
-
-	// One toolchain install for the whole run, then one lint per package.
-	toolchainDir, err := ensureBiome(ctx)
+// Check lints dir, with env on top of the caller's own environment — the
+// component's resolved Node toolchain.
+//
+// One invocation for the component and not one per package.json inside it:
+// Biome walks the tree from where it is pointed, so a workspace's own
+// packages are covered by the run at its root, and a second run inside one of
+// them would report the same findings twice.
+//
+// The result is named for the tool alone. Which component it belongs to is
+// the caller's to say.
+func Check(ctx context.Context, dir string, env []string) ([]executil.Result, error) {
+	toolchainDir, err := ensureBiome(ctx, env)
 	if err != nil {
 		return nil, err
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")
 
-	var results []executil.Result
-	for _, dir := range pkgDirs {
-		res, err := lintDirBiome(ctx, dir, biomeBin, configPath)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, res)
+	res, err := lintDirBiome(ctx, dir, env, biomeBin, configPath)
+	if err != nil {
+		return nil, err
 	}
-	return results, nil
+	return []executil.Result{res}, nil
 }

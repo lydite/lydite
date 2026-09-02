@@ -508,7 +508,16 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// asked for, and adding them to this run's report would put a second set
 	// of component rows beside the ones the reader is looking at.
 	scratch := ui.NewReport("baseline")
-	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, opts.Concurrency, false, true, scratch)
+	// The base tree's own toolchains, from its own declaration and its own
+	// config. A component this change adds did not exist there, and one whose
+	// engines.node this change raises needs the version the base tree asked
+	// for — measuring it under the branch's would be measuring a tree that
+	// never existed.
+	envs, err := ensureToolchains(ctx, cmd, root, baseCfg, componentUnits(decl))
+	if err != nil {
+		return nil, err
+	}
+	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, envs, opts.Concurrency, false, true, scratch)
 
 	// The worktree — and every log written into it — is removed on the way
 	// out, so the tail under a failing row is the only account of what went

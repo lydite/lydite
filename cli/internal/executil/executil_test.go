@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,46 @@ func TestRunQuietKeepsStderrOutOfOutput(t *testing.T) {
 	}
 	if strings.TrimSpace(r.Stderr) != "noise" {
 		t.Errorf("Stderr = %q, want the stderr text kept separately", r.Stderr)
+	}
+}
+
+// os/exec resolves a bare program name against *this* process's PATH when the
+// command is constructed; cmd.Env is applied afterwards and has no say in it.
+// Without resolving here, a toolchain lydite provisioned and put on the
+// child's PATH is one the child could use and the lookup cannot find — `npm
+// ci: executable file not found in $PATH`, moments after lydite reported
+// installing the Node that holds it.
+func TestRunFindsABinaryOnlyOnTheChildsPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "lydite-only-here")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { //nolint:gosec // a test fixture that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+
+	res := RunQuietEnv(context.Background(), "", []string{"PATH=" + dir}, "lydite-only-here")
+	if !res.Ok() {
+		t.Fatalf("a binary on the child's PATH was not found: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "found") {
+		t.Errorf("output = %q, want the child's own", res.Output)
+	}
+}
+
+// A name no PATH entry holds is handed to os/exec untouched, so the failure
+// stays its own message naming the program the caller asked for rather than a
+// path lydite invented.
+func TestResolveLeavesAnUnfoundNameAlone(t *testing.T) {
+	if got := resolve("definitely-not-a-program", []string{"PATH=/nonexistent"}); got != "definitely-not-a-program" {
+		t.Errorf("resolve = %q, want the name unchanged", got)
+	}
+}
+
+// An absolute path is what every pinned scanner is invoked by, and rewriting
+// one against PATH could only find a different binary of the same name.
+func TestResolveLeavesAPathAlone(t *testing.T) {
+	want := filepath.Join(string(os.PathSeparator), "usr", "bin", "env")
+	if got := resolve(want, []string{"PATH=/nonexistent"}); got != want {
+		t.Errorf("resolve = %q, want %q", got, want)
 	}
 }
