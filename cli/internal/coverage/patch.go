@@ -153,7 +153,17 @@ func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
 			if err1 != nil || err2 != nil {
 				continue
 			}
-			hits[file][lineNo] = hitCount
+			// The greater count wins, never the later one. A line carrying
+			// more than one record is exactly what makes an lcov's LF differ
+			// from a tally of its DA lines — measured at 57 against 55 on the
+			// proving ground — so "DA:10,1" followed by "DA:10,0" is a line
+			// LH counts as hit. Taking the last would have the patch gate
+			// score it uncovered while the aggregate scored it covered, two
+			// figures disagreeing about one line. ParseGoProfile takes the
+			// max for the same reason.
+			if prev, seen := hits[file][lineNo]; !seen || hitCount > prev {
+				hits[file][lineNo] = hitCount
+			}
 		case strings.HasPrefix(line, "LF:"):
 			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LF:"))); err == nil {
 				count.Total += n

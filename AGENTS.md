@@ -194,6 +194,18 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   --noEmit`, since a JavaScript test run has no compile step and a syntactically broken mutant
   would read as a test failure.
 
+**Coverage is written under `.lydite-reports/coverage/`, never at `.lydite-reports/` itself**, and
+vitest is additionally told `--coverage.clean=false`. Vitest empties its reports directory before a
+run, and for a component rooted at the scan root that directory is where every component's log
+lives — including the logs of components running concurrently beside it, whose failing rows then
+name a file that no longer exists. Reproduced against vitest 3.2.7. The subdirectory alone fixes it
+for every component name but `coverage`; the flag fixes it for all of them.
+
+**A component's report path is cleared before its suite starts** — the directory created, anything
+already at the path removed. A suite that passes without writing a report would otherwise be
+measured from the previous run's file, which is a coverage number describing code that is no longer
+there, supplied by lydite itself.
+
 **One artefact per language, and both gates read it.** Go's profile, Rust's lcov, TypeScript's
 lcov. Rust exports the lcov alone: an lcov's summed `LF`/`LH` records give the same covered and
 total counts cargo-llvm-cov's `--json` totals carry — verified at 30 of 57 both ways against the

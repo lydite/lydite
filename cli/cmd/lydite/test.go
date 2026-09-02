@@ -196,11 +196,10 @@ the component's to declare.`,
 				Gate:        gateCoverage,
 				BaseBranch:  baseBranch,
 				Concurrency: limit,
+				Selected:    onlyAffected,
 			}
 			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, cov.Instrument, rep)
-			if err := addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov); err != nil {
-				return err
-			}
+			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}

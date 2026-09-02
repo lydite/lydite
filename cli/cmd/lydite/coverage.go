@@ -120,6 +120,16 @@ type coverageOptions struct {
 	// Concurrency is the bound a baseline measurement runs under, so the run
 	// that measures the base tree is bounded exactly as this one is.
 	Concurrency int
+	// Selected says the run narrowed by affected selection, which is the only
+	// narrowing that licenses carrying an unmeasured component's baseline
+	// forward: selection determined the change could not have broken it, so it
+	// is unchanged from the tree that entry describes.
+	//
+	// `--component` narrows for a different reason — the caller wanted these
+	// components run — and says nothing about the others. Carrying under it
+	// would attribute the merge-base's number to a component whose code this
+	// very change may have rewritten.
+	Selected bool
 }
 
 // addCoverageRows renders — and, when asked, gates — this run's coverage.
@@ -134,19 +144,36 @@ type coverageOptions struct {
 // otherwise report exactly the green a gated run does — the failure
 // wardnet/wardnet#957 shipped, where the patch gate never ran and the pull
 // request comment read as though it had.
-func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, decl component.File, ms []measurement, cfg config.Config, opts coverageOptions) error {
+// It returns nothing. Everything that can go wrong here goes wrong after every
+// suite has already run, so a returned error would discard a report that may
+// have taken twenty minutes to produce — no component rows, no logs named, no
+// --json document, for a failure about the gate rather than about the code.
+// The same reason the flag conflicts in newTestCmd are checked before the git
+// walks: a run must not pay for its work and then throw the answer away.
+//
+// A gate the caller asked for and lydite could not run is a failing row, not an
+// unmeasured one. The caller passed --gate-coverage; silently not gating is the
+// state this whole file exists to make impossible.
+func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, decl component.File, ms []measurement, cfg config.Config, opts coverageOptions) {
 	if !opts.Instrument {
-		return nil
+		return
 	}
-	ordered := inDeclarationOrder(decl, ms)
+	ordered := inDeclarationOrder(decl, ms, opts.Selected)
 	if !opts.Gate {
 		ungatedRows(rep, ordered)
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
 			Value: "not read — pass --gate-coverage to compare against it"})
 		floorRows(rep, ordered, cfg.Coverage.Floor)
-		return nil
+		return
 	}
-	return gatedRows(ctx, cmd, rep, dir, decl, ordered, cfg, opts)
+	if err := gatedRows(ctx, cmd, rep, dir, decl, ordered, cfg, opts); err != nil {
+		// The measurements are still worth showing: they are what a reader
+		// needs to act on the gate that could not run.
+		ungatedRows(rep, ordered)
+		rep.Add(ui.Row{Status: ui.StatusFail, Label: "baseline",
+			Value: "not gated", Detail: strings.Split(err.Error(), "\n")})
+		floorRows(rep, ordered, cfg.Coverage.Floor)
+	}
 }
 
 // inDeclarationOrder returns one measurement per declared component, in the
@@ -156,7 +183,7 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 // omitting the rest would make a narrowed run indistinguishable from a
 // complete one. Declaration order rather than completion order, so two runs of
 // one declaration produce the same document.
-func inDeclarationOrder(decl component.File, ms []measurement) []measurement {
+func inDeclarationOrder(decl component.File, ms []measurement, selected bool) []measurement {
 	byName := make(map[string]measurement, len(ms))
 	for _, m := range ms {
 		byName[m.Name] = m
@@ -167,10 +194,11 @@ func inDeclarationOrder(decl component.File, ms []measurement) []measurement {
 			out = append(out, m)
 			continue
 		}
-		// The only place a carryable measurement is made. Everything else in
-		// this file describes a component this run actually reached.
+		// The only place a carryable measurement is made, and only when
+		// affected selection is what left the component out. Everything else
+		// in this file describes a component this run actually reached.
 		m := unmeasuredComponent(c, "the component was not selected for this run")
-		m.Carryable = true
+		m.Carryable = selected
 		out = append(out, m)
 	}
 	return out
@@ -684,12 +712,48 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
 		return
 	}
-	if _, hit, _ := gitstate.ReadBaseline(ctx, dir, tree); hit {
-		return
+	// Merged onto whatever this tree already holds, never skipped because it
+	// holds something. A shard runs `--component` over part of the
+	// declaration, so the first one to finish would otherwise be the only one
+	// that ever records and every later shard's freshly measured components
+	// would be silently discarded.
+	//
+	// It is a read-then-write, so two shards finishing together can still lose
+	// one side. `lydite test merge` is what makes a sharded run's report one
+	// document; until it exists, a sharded *gated* run is not a supported
+	// shape and this only narrows the window rather than closing it.
+	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, tree); hit {
+		merged := gitstate.Baseline{}
+		for name, lines := range existing {
+			if declared[name] {
+				merged[name] = lines
+			}
+		}
+		for name, lines := range record {
+			merged[name] = lines
+		}
+		if len(merged) == len(existing) && sameCounts(merged, existing) {
+			return
+		}
+		record = merged
 	}
 	if err := gitstate.WriteBaseline(ctx, dir, tree, record); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to record this tree's coverage for %s: %v\n", tree, err)
 	}
+}
+
+// sameCounts reports whether two baselines hold the same entries, so a run
+// that would rewrite a tree's entry byte for byte does not push to do it.
+func sameCounts(a, b gitstate.Baseline) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, lines := range a {
+		if other, ok := b[name]; !ok || other != lines {
+			return false
+		}
+	}
+	return true
 }
 
 // withToleratedDipsRestored returns record with every component whose coverage

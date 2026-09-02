@@ -47,10 +47,8 @@ func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
 		{Name: "api", Dir: "api", Runner: runner.GoTest},
 	}}
 	ms := []measurement{measured("api", runner.Go, 9, 10)}
-	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
-		coverageOptions{Instrument: true}); err != nil {
-		t.Fatal(err)
-	}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
 	for _, label := range []string{"coverage(api)", "go coverage", "coverage"} {
 		row, ok := rows[label]
@@ -77,11 +75,9 @@ func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
 func TestNoCoverageEmitsNoRows(t *testing.T) {
 	rep := ui.NewReport("test")
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
-	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl,
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl,
 		[]measurement{unmeasuredComponent(decl.Components[0], "coverage is off for this run")},
-		config.Default(), coverageOptions{}); err != nil {
-		t.Fatal(err)
-	}
+		config.Default(), coverageOptions{})
 	if len(rep.Rows()) != 0 {
 		t.Errorf("rows = %v, want none", rep.Rows())
 	}
@@ -382,7 +378,7 @@ func TestEveryDeclaredComponentIsAccountedFor(t *testing.T) {
 		{Name: "api", Dir: "go/api", Runner: runner.GoTest},
 		{Name: "web", Dir: "web", Runner: runner.Vitest},
 	}}
-	got := inDeclarationOrder(decl, []measurement{measured("api", runner.Go, 1, 2)})
+	got := inDeclarationOrder(decl, []measurement{measured("api", runner.Go, 1, 2)}, true)
 	if len(got) != 3 {
 		t.Fatalf("got %d measurements, want one per declared component", len(got))
 	}
@@ -444,7 +440,7 @@ func TestMeasureReadsTheReportTheInvocationNamed(t *testing.T) {
 	for rel, content := range map[string]string{
 		"api/go.mod":                       "module example.com/api\n\ngo 1.26\n",
 		"api/main.go":                      "package api\n\nfunc F() int {\n\treturn 1\n}\n",
-		"api/.lydite-reports/coverage.out": "mode: set\nexample.com/api/main.go:3.16,5.2 1 1\n",
+		"api/.lydite-reports/coverage/coverage.out": "mode: set\nexample.com/api/main.go:3.16,5.2 1 1\n",
 	} {
 		p := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
@@ -538,7 +534,7 @@ func TestTheRemovedCoverageCommandNamesWhatReplacedIt(t *testing.T) {
 // measure.
 func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
-	ms := inDeclarationOrder(decl, nil)
+	ms := inDeclarationOrder(decl, nil, true)
 	baseline := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
 	// recordThisTree writes through git, so the assertion is on the shape it
 	// builds: every declared component present, and nothing else.
@@ -595,10 +591,8 @@ func TestALanguageThatMeasuredNothingIsUnmeasured(t *testing.T) {
 		measured("api", runner.Go, 9, 10),
 		unmeasuredComponent(decl.Components[1], "test(web) did not pass: failed"),
 	}
-	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
-		coverageOptions{Instrument: true}); err != nil {
-		t.Fatal(err)
-	}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
 	ts, ok := rows["typescript coverage"]
 	if !ok {
@@ -626,10 +620,8 @@ func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
 	rep := ui.NewReport("test")
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "test(api) did not pass: failed")}
-	if err := addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
-		coverageOptions{Instrument: true}); err != nil {
-		t.Fatal(err)
-	}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
 	if got := rowsOf(rep)["coverage"]; got.Status != ui.StatusUnmeasured {
 		t.Errorf("coverage = %+v, want unmeasured", got)
 	}
@@ -646,7 +638,7 @@ func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
 // the measurement rests on.
 func TestTheReportPathIsClearedBeforeTheSuiteRuns(t *testing.T) {
 	dir := t.TempDir()
-	report := ".lydite-reports/coverage.out"
+	report := ".lydite-reports/coverage/coverage.out"
 	path := filepath.Join(dir, filepath.FromSlash(report))
 
 	// The directory does not exist yet, which is the fresh-checkout case.
@@ -703,10 +695,8 @@ func TestGatingOnTheDefaultBranchRecordsRatherThanRemeasures(t *testing.T) {
 	rep := ui.NewReport("test")
 	cmd := newTestCmd()
 	cmd.SetErr(&strings.Builder{})
-	if err := addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
-		coverageOptions{Instrument: true, Gate: true, Concurrency: 1}); err != nil {
-		t.Fatal(err)
-	}
+	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
 	rows := rowsOf(rep)
 	base, ok := rows["baseline"]
 	if !ok {
@@ -717,5 +707,119 @@ func TestGatingOnTheDefaultBranchRecordsRatherThanRemeasures(t *testing.T) {
 	}
 	if got := rows["coverage(api)"].Status; got != ui.StatusContext {
 		t.Errorf("coverage(api) = %q, want a context row: nothing was compared", got)
+	}
+}
+
+// Only affected selection licenses carrying an unmeasured component forward.
+// It determined the change could not have broken that component, so it is
+// unchanged from the tree the baseline entry describes.
+//
+// `--component` narrows for an unrelated reason — the caller wanted these
+// components run — and says nothing about the others. Carrying under it
+// attributes the merge-base's number to a component this very change may have
+// rewritten, which is the failure Carryable exists to prevent one case of.
+func TestOnlyAffectedSelectionMakesAComponentCarryable(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "go/api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ran := []measurement{measured("api", runner.Go, 9, 10)}
+	for _, tc := range []struct {
+		name     string
+		selected bool
+		want     bool
+	}{
+		{"--affected narrowed the run", true, true},
+		{"--component narrowed the run", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := inDeclarationOrder(decl, ran, tc.selected)
+			var web measurement
+			for _, m := range got {
+				if m.Name == "web" {
+					web = m
+				}
+			}
+			if web.Carryable != tc.want {
+				t.Errorf("web.Carryable = %v, want %v", web.Carryable, tc.want)
+			}
+		})
+	}
+}
+
+// A baseline read that cannot happen fails through a row, never by discarding
+// the report. Everything here runs after every suite has finished, so a
+// returned error throws away component rows, log paths and the whole `--json`
+// document for a failure about the gate rather than about the code.
+//
+// A failing row and not an unmeasured one: the caller passed --gate-coverage,
+// and a gate that was asked for and silently did not run is the state this
+// whole file exists to make impossible.
+func TestAGateThatCouldNotRunFailsThroughARowAndKeepsTheReport(t *testing.T) {
+	// No git repository at all, so the merge-base cannot be resolved.
+	root := t.TempDir()
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	ms := []measurement{measured("api", runner.Go, 9, 10)}
+
+	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	rows := rowsOf(rep)
+	base, ok := rows["baseline"]
+	if !ok {
+		t.Fatalf("no baseline row; got %v", rep.Rows())
+	}
+	if base.Status != ui.StatusFail {
+		t.Errorf("baseline = %+v, want a failure — the gate was asked for and could not run", base)
+	}
+	if len(base.Detail) == 0 {
+		t.Error("the failing row carries no reason")
+	}
+	// The measurement survives, because it is what a reader needs in order to
+	// act on the gate that could not run.
+	if _, ok := rows["coverage(api)"]; !ok {
+		t.Errorf("the component's measurement was discarded: %v", rep.Rows())
+	}
+	if rep.ExitCode() == 0 {
+		t.Error("exit = 0 for a run whose gate never ran")
+	}
+}
+
+// Recording merges onto whatever the tree already holds rather than skipping
+// because it holds something. A shard runs `--component` over part of the
+// declaration, so the first to finish would otherwise be the only one that
+// ever records, and every later shard's freshly measured components would be
+// silently discarded.
+func TestRecordingMergesRatherThanSkipping(t *testing.T) {
+	existing := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
+	fresh := gitstate.Baseline{"web": lines(70, 100)}
+	declared := map[string]bool{"api": true, "web": true}
+
+	merged := gitstate.Baseline{}
+	for name, l := range existing {
+		if declared[name] {
+			merged[name] = l
+		}
+	}
+	for name, l := range fresh {
+		merged[name] = l
+	}
+	if len(merged) != 2 || merged["api"] != lines(50, 100) || merged["web"] != lines(70, 100) {
+		t.Errorf("merged = %v, want the earlier shard's api beside this one's web", merged)
+	}
+	// An entry for a component the declaration no longer holds does not
+	// survive the merge.
+	if _, ok := merged["gone"]; ok {
+		t.Error("a component the declaration no longer has kept its entry")
+	}
+	// A merge that changes nothing must not push.
+	if !sameCounts(merged, merged) {
+		t.Error("sameCounts says an identical baseline differs")
+	}
+	if sameCounts(merged, existing) {
+		t.Error("sameCounts says a changed baseline is identical")
 	}
 }

@@ -220,6 +220,15 @@ const ReportDir = ".lydite-reports"
 
 func report(name string) string { return path.Join(ReportDir, name) }
 
+// coverageDir is where a runner writes coverage, under ReportDir and never at
+// it.
+//
+// A JavaScript runner is handed this directory and empties it before the run,
+// and for a component rooted at the scan root ReportDir is where every
+// component's log lives. Pointing a runner at the directory holding another
+// component's output is a data-loss bug rather than an untidy layout.
+var coverageDir = path.Join(ReportDir, "coverage")
+
 // goTestArgs defaults to the module's whole package tree, because a `go
 // test` with no package argument tests the current directory alone — a
 // component that declared no args would report a pass having run almost
@@ -247,7 +256,7 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	case Plain:
 		return Invocation{Name: "go", Args: append([]string{"test"}, pkgs...)}, true
 	case Instrumented:
-		profile := report("coverage.out")
+		profile := path.Join(coverageDir, "coverage.out")
 		return Invocation{
 			Name:           "go",
 			Args:           append([]string{"test", "-coverprofile=" + profile, "-coverpkg=./..."}, pkgs...),
@@ -309,7 +318,7 @@ func buildCargoLLVMCovNextest(variant Variant, args []string) (Invocation, bool)
 // --output-path twice — which cargo-llvm-cov refuses to parse, before anything
 // executes.
 func llvmCovNextest(args []string) Invocation {
-	lcov := report("lcov.info")
+	lcov := path.Join(coverageDir, "lcov.info")
 	return Invocation{
 		Name:           "cargo",
 		Args:           append([]string{"llvm-cov", "nextest", "--lcov", "--output-path", lcov}, args...),
@@ -399,14 +408,23 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 		// component whose config says nothing would produce a coverage run
 		// with no report lydite can parse, and report as unmeasured having
 		// paid for the instrumentation.
+		//
+		// clean=false is not tidiness. Vitest empties its reports directory
+		// before a run, and for a component rooted at the scan root that
+		// directory is the one holding every component's log — including the
+		// logs of components running concurrently beside it, whose failing
+		// rows then name a file that no longer exists. The subdirectory alone
+		// would fix it for every name but `coverage`; the flag fixes it for
+		// all of them.
 		return Invocation{
 			Name: "npx",
 			Args: append([]string{
 				"vitest", "run", "--coverage",
 				"--coverage.reporter=lcovonly",
-				"--coverage.reportsDirectory=" + ReportDir,
+				"--coverage.reportsDirectory=" + coverageDir,
+				"--coverage.clean=false",
 			}, args...),
-			CoverageReport: report("lcov.info"),
+			CoverageReport: path.Join(coverageDir, "lcov.info"),
 			JUnitReport:    report("junit.xml"),
 		}, true
 	case BuildOnly:
@@ -427,15 +445,17 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 	case Instrumented:
 		// Named for the reason vitest's are: jest's default reporters do not
 		// include lcov, and a coverage run whose report lydite cannot parse
-		// costs the instrumentation and measures nothing.
+		// costs the instrumentation and measures nothing. Its own
+		// subdirectory for the reason vitest's is, so a runner that empties
+		// what it is pointed at cannot reach the component logs.
 		return Invocation{
 			Name: "npx",
 			Args: append([]string{
 				"jest", "--coverage",
 				"--coverageReporters=lcovonly",
-				"--coverageDirectory=" + ReportDir,
+				"--coverageDirectory=" + coverageDir,
 			}, args...),
-			CoverageReport: report("lcov.info"),
+			CoverageReport: path.Join(coverageDir, "lcov.info"),
 		}, true
 	case BuildOnly:
 		return Invocation{Name: "npx", Args: []string{"tsc", "--noEmit"}}, true

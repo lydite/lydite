@@ -33,7 +33,7 @@ func TestGoTestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "go test -race ./..."},
-		{Instrumented, "go test -coverprofile=.lydite-reports/coverage.out -coverpkg=./... -race ./..."},
+		{Instrumented, "go test -coverprofile=.lydite-reports/coverage/coverage.out -coverpkg=./... -race ./..."},
 		{BuildOnly, "go build -race ./..."},
 	} {
 		if got := line(argv(t, GoTest, tc.variant, "-race", "./...")); got != tc.want {
@@ -160,13 +160,41 @@ func TestJavaScriptInstrumentationNamesTheReportItWrites(t *testing.T) {
 	}
 }
 
+// A runner is never pointed at the directory holding the component logs.
+// Vitest empties its reports directory before a run, and for a component
+// rooted at the scan root that directory holds every component's log —
+// including the logs of components running concurrently beside it, whose
+// failing rows then name a file that no longer exists. Reproduced against
+// vitest 3.2.7 before this was written.
+func TestCoverageIsWrittenBelowTheLogDirectoryAndNotAtIt(t *testing.T) {
+	for _, name := range Names() {
+		r, _ := Lookup(Name(name))
+		inv, ok := r.Build(Instrumented, nil)
+		if !ok || inv.CoverageReport == "" {
+			continue
+		}
+		if dir := path.Dir(inv.CoverageReport); dir == ReportDir {
+			t.Errorf("%s writes coverage straight into %s, where every component's log lives", name, ReportDir)
+		}
+		for _, a := range inv.Args {
+			if strings.HasSuffix(a, "="+ReportDir) {
+				t.Errorf("%s points its runner at %s itself: %q", name, ReportDir, a)
+			}
+		}
+	}
+	// The one runner known to empty what it is handed says not to.
+	if inv := argv(t, Vitest, Instrumented); !slices.Contains(inv.Args, "--coverage.clean=false") {
+		t.Errorf("vitest = %v, want --coverage.clean=false", inv.Args)
+	}
+}
+
 func TestVitestVariants(t *testing.T) {
 	for _, tc := range []struct {
 		variant Variant
 		want    string
 	}{
 		{Plain, "npx vitest run --project app"},
-		{Instrumented, "npx vitest run --coverage --coverage.reporter=lcovonly --coverage.reportsDirectory=" + ReportDir + " --project app"},
+		{Instrumented, "npx vitest run --coverage --coverage.reporter=lcovonly --coverage.reportsDirectory=" + coverageDir + " --coverage.clean=false --project app"},
 		{BuildOnly, "npx tsc --noEmit"},
 	} {
 		if got := line(argv(t, Vitest, tc.variant, "--project", "app")); got != tc.want {
@@ -181,7 +209,7 @@ func TestJestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "npx jest"},
-		{Instrumented, "npx jest --coverage --coverageReporters=lcovonly --coverageDirectory=" + ReportDir},
+		{Instrumented, "npx jest --coverage --coverageReporters=lcovonly --coverageDirectory=" + coverageDir},
 		{BuildOnly, "npx tsc --noEmit"},
 	} {
 		if got := line(argv(t, Jest, tc.variant)); got != tc.want {

@@ -241,7 +241,11 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 			break
 		}
 	}
-	if !r.Ok() {
+	// A caller that passed no usable key found nothing, which is a miss. The
+	// zero Result reports Ok, so without this the unmarshal below runs on an
+	// empty string and answers with a parse error — a hard failure where the
+	// question was only whether an entry exists.
+	if found == "" || !r.Ok() {
 		return nil, false, nil
 	}
 	var report Baseline

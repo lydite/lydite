@@ -470,3 +470,26 @@ func TestBaseBranchPrefersOriginHead(t *testing.T) {
 		t.Errorf("BaseBranch = %q, want %q — origin/HEAD is authoritative where it is set", got, "develop")
 	}
 }
+
+// A lookup with no usable key found nothing, which is a cache miss. The zero
+// executil.Result reports Ok, so without an explicit check the unmarshal below
+// runs on an empty string and answers with a parse error — a hard failure
+// where the question was only whether an entry exists.
+func TestReadBaselineWithNoUsableKeyIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
+	run := gitRunner(t, ctx)
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+
+	for _, keys := range [][]string{nil, {""}, {"", ""}} {
+		report, hit, err := ReadBaseline(ctx, clone, keys...)
+		if err != nil {
+			t.Errorf("ReadBaseline(%v) = %v, want a miss rather than an error", keys, err)
+		}
+		if hit || report != nil {
+			t.Errorf("ReadBaseline(%v) = (%v, hit=%v), want a miss", keys, report, hit)
+		}
+	}
+}
