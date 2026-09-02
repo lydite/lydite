@@ -16,7 +16,7 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
-| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | next |
+| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | in progress |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
