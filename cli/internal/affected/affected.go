@@ -228,9 +228,21 @@ func Select(f component.File, changed []Path) Result {
 		for _, c := range f.Components {
 			switch {
 			case under(rel, c.Dir):
-				matched = true
+				// A component rooted at "." is selected by containment like
+				// any other, and is deliberately not evidence that the path
+				// was understood. `dir: .` says where a component is rooted —
+				// a Go module at the repository root has no other way to
+				// spell it — not that it tests every file in the tree, and
+				// reading it as a match switches the widening rule off for
+				// the whole repository: nothing is ever unmatched, so a
+				// root-level Makefile selects that component alone while
+				// every other one silently does not run.
+				matched = matched || !claimsEverything(c.Dir)
 				keep(reasons, c.Name, Reason{Kind: KindDir, Path: rel})
 			case matchesAny(c.Watch, rel):
+				// A watch always counts. It names a specific path outside the
+				// component's own directory, which is a statement about that
+				// file rather than about where the component lives.
 				matched = true
 				keep(reasons, c.Name, Reason{Kind: KindWatch, Path: rel})
 			}
@@ -306,14 +318,27 @@ func assemble(f component.File, reasons map[string]Reason) Result {
 	return res
 }
 
-// under reports whether p sits inside dir. A component rooted at "." claims
-// the whole tree, which is what the invalidator set exists to override.
+// under reports whether p sits inside dir. A component rooted at "." contains
+// every path, and is selected accordingly; whether that containment counts as
+// the path having been matched is the caller's question, and claimsEverything
+// is where it is answered.
 func under(p, dir string) bool {
 	dir = path.Clean(dir)
 	if dir == "." {
 		return true
 	}
 	return p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// claimsEverything reports whether a component's directory contains every path
+// in the repository, which is true of exactly one spelling: the scan root.
+//
+// Such a component contains a path without that containment saying anything
+// about the path, which is why it is not evidence of a match. Every other
+// directory is a real statement — a change under `web/` is a change to the
+// component rooted there.
+func claimsEverything(dir string) bool {
+	return path.Clean(dir) == "."
 }
 
 func matchesAny(patterns []string, p string) bool {

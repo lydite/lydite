@@ -1,0 +1,73 @@
+# lydite-baseline — this file is yours.
+#
+# Records this repository's per-component coverage on the `lydite` branch,
+# after a change has merged.
+#
+# It exists because recording needs `contents: write` and measuring needs to run
+# the repository's own test suite, and those two must not be the same job on a
+# pull request: a branch can edit its own workflow and its own component
+# declaration, so a job that runs a branch's code with a writable token is
+# arbitrary write access for anyone who can open a pull request. `ci-test.yml`
+# therefore gates read-only and records nothing.
+#
+# Here the code has already merged. It has passed review, the gate and every
+# other stage, so running it with a writable token is the risk any post-merge
+# job carries rather than a new one.
+#
+# Uploading the pull request's measurement and committing it from a separate job
+# does not solve the same problem: the measuring job runs the branch's code
+# whatever token it holds, so the numbers it emits are the branch's to choose.
+# That trades trusting the branch's token for trusting the branch's data, and
+# verifying the data means measuring it again — which is this workflow. See
+# lydite/lydite#49.
+#
+# Not a gt CI stage, deliberately. The orchestrator skips every stage for a tree
+# already validated on the pull request, which is exactly what a squash merge
+# produces — so a recording stage would never run.
+name: lydite-baseline
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# One at a time. Two runs recording different trees is fine — they are different
+# keys — but two racing on the same one make the loser retry for nothing, and
+# the branch is shared with every other repository job that reads it.
+concurrency:
+  group: lydite-baseline
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: record coverage baseline
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The gate resolves a merge-base, and on the default branch that is
+          # HEAD itself — which still needs history to resolve at all.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache: true
+
+      - name: build lydite
+        run: go build -o /tmp/lydite ./cmd/lydite
+
+      # On the default branch HEAD is its own merge-base, so nothing is
+      # compared: this measures the tree and records it. The next pull request's
+      # merge-base is this commit, so it reads the entry instead of measuring
+      # the tree again — which is the whole reason this job exists.
+      #
+      # It is deliberately not `--affected`: a partial run records nothing, so a
+      # narrowed run here would leave the entry it exists to write.
+      - name: lydite test --gate-coverage
+        run: /tmp/lydite test --dir .. --gate-coverage

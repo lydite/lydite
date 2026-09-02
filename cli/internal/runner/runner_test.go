@@ -2,6 +2,7 @@ package runner
 
 import (
 	"os"
+	"path"
 	"runtime"
 	"slices"
 	"strings"
@@ -32,7 +33,7 @@ func TestGoTestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "go test -race ./..."},
-		{Instrumented, "go test -coverprofile=.lydite-reports/coverage.out -coverpkg=./... -race ./..."},
+		{Instrumented, "go test -coverprofile=.lydite-reports/coverage/coverage.out -coverpkg=./... -race ./..."},
 		{BuildOnly, "go build -race ./..."},
 	} {
 		if got := line(argv(t, GoTest, tc.variant, "-race", "./...")); got != tc.want {
@@ -80,15 +81,40 @@ func TestCargoInstrumentedReplacesTheRunner(t *testing.T) {
 	}
 }
 
-// The JSON export carries the aggregate totals and no per-line data at all;
-// the lcov export carries the per-line hits the patch gate reads. Neither is
-// derivable from the other, so one run has to produce both.
-func TestCargoInstrumentedExportsBothReports(t *testing.T) {
+// One export, and it is the lcov: the aggregate counts are derivable from an
+// lcov's line records, and the per-line hits the patch gate reads are not
+// derivable from the JSON export, which carries no line data at all.
+//
+// Asking for both is not merely redundant. cargo-llvm-cov names every export's
+// destination with the same --output-path, so an invocation carrying two
+// exports carries that flag twice and is refused at argument parsing, before
+// anything executes — which a test asserting only that both flags are present
+// cannot see.
+func TestCargoInstrumentedExportsTheLCOVAlone(t *testing.T) {
 	inv := argv(t, CargoNextest, Instrumented)
-	for _, want := range []string{"--json", "--lcov"} {
-		if !slices.Contains(inv.Args, want) {
-			t.Errorf("instrumented cargo = %v, want %s", inv.Args, want)
+	if slices.Contains(inv.Args, "--json") {
+		t.Errorf("instrumented cargo = %v, want no --json export", inv.Args)
+	}
+	if !slices.Contains(inv.Args, "--lcov") {
+		t.Errorf("instrumented cargo = %v, want --lcov", inv.Args)
+	}
+	if n := slices.Index(inv.Args, "--output-path"); n < 0 {
+		t.Fatalf("instrumented cargo = %v, want --output-path", inv.Args)
+	}
+	outputs := 0
+	for _, a := range inv.Args {
+		if a == "--output-path" {
+			outputs++
 		}
+	}
+	if outputs != 1 {
+		t.Errorf("instrumented cargo = %v, want --output-path exactly once: cargo-llvm-cov refuses a second", inv.Args)
+	}
+	if inv.CoverageReport == "" || !strings.HasSuffix(inv.CoverageReport, "lcov.info") {
+		t.Errorf("CoverageReport = %q, want the lcov the invocation writes", inv.CoverageReport)
+	}
+	if !slices.Contains(inv.Args, inv.CoverageReport) {
+		t.Errorf("CoverageReport %q is not the path the invocation writes to: %v", inv.CoverageReport, inv.Args)
 	}
 }
 
@@ -109,13 +135,66 @@ func TestCargoBuildOnlyCompilesTestTargets(t *testing.T) {
 	}
 }
 
+// The reporter and the report directory are lydite's to name, not the
+// repository's. Neither runner emits lcov by default, so a component whose own
+// config says nothing would pay for the instrumentation and produce no report
+// either gate can read — measured, and reported as unmeasured.
+func TestJavaScriptInstrumentationNamesTheReportItWrites(t *testing.T) {
+	for _, name := range []Name{Vitest, Jest} {
+		inv := argv(t, name, Instrumented)
+		if inv.CoverageReport == "" {
+			t.Fatalf("%s's instrumented variant claims no coverage report", name)
+		}
+		found := false
+		for _, a := range inv.Args {
+			if strings.Contains(a, path.Dir(inv.CoverageReport)) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: CoverageReport %q is not a directory the invocation names: %v", name, inv.CoverageReport, inv.Args)
+		}
+		if !strings.HasSuffix(inv.CoverageReport, "lcov.info") {
+			t.Errorf("%s: CoverageReport = %q, want the lcov both gates read", name, inv.CoverageReport)
+		}
+	}
+}
+
+// A runner is never pointed at the directory holding the component logs.
+// Vitest empties its reports directory before a run, and for a component
+// rooted at the scan root that directory holds every component's log —
+// including the logs of components running concurrently beside it, whose
+// failing rows then name a file that no longer exists. Reproduced against
+// vitest 3.2.7 before this was written.
+func TestCoverageIsWrittenBelowTheLogDirectoryAndNotAtIt(t *testing.T) {
+	for _, name := range Names() {
+		r, _ := Lookup(Name(name))
+		inv, ok := r.Build(Instrumented, nil)
+		if !ok || inv.CoverageReport == "" {
+			continue
+		}
+		if dir := path.Dir(inv.CoverageReport); dir == ReportDir {
+			t.Errorf("%s writes coverage straight into %s, where every component's log lives", name, ReportDir)
+		}
+		for _, a := range inv.Args {
+			if strings.HasSuffix(a, "="+ReportDir) {
+				t.Errorf("%s points its runner at %s itself: %q", name, ReportDir, a)
+			}
+		}
+	}
+	// The one runner known to empty what it is handed says not to.
+	if inv := argv(t, Vitest, Instrumented); !slices.Contains(inv.Args, "--coverage.clean=false") {
+		t.Errorf("vitest = %v, want --coverage.clean=false", inv.Args)
+	}
+}
+
 func TestVitestVariants(t *testing.T) {
 	for _, tc := range []struct {
 		variant Variant
 		want    string
 	}{
 		{Plain, "npx vitest run --project app"},
-		{Instrumented, "npx vitest run --coverage --project app"},
+		{Instrumented, "npx vitest run --coverage --coverage.reporter=lcovonly --coverage.reportsDirectory=" + coverageDir + " --coverage.clean=false --project app"},
 		{BuildOnly, "npx tsc --noEmit"},
 	} {
 		if got := line(argv(t, Vitest, tc.variant, "--project", "app")); got != tc.want {
@@ -130,7 +209,7 @@ func TestJestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "npx jest"},
-		{Instrumented, "npx jest --coverage"},
+		{Instrumented, "npx jest --coverage --coverageReporters=lcovonly --coverageDirectory=" + coverageDir},
 		{BuildOnly, "npx tsc --noEmit"},
 	} {
 		if got := line(argv(t, Jest, tc.variant)); got != tc.want {
@@ -222,9 +301,9 @@ func TestCargoNextestIsPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Prepended, so an older cargo-nextest already on the machine cannot win.
-	env := nextestEnv()
+	env := cargoEnv()
 	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+dir+string(os.PathListSeparator)) {
-		t.Fatalf("nextestEnv = %v, want the pinned bin dir first on PATH", env)
+		t.Fatalf("cargoEnv = %v, want the pinned bin dir first on PATH", env)
 	}
 	for _, name := range []Name{CargoNextest, CargoLLVMCovNextest} {
 		r, _ := Lookup(name)
@@ -289,6 +368,69 @@ func TestEveryLangHasSourceExts(t *testing.T) {
 	for _, e := range SourceExts() {
 		if !strings.HasPrefix(e, ".") || e != strings.ToLower(e) {
 			t.Errorf("extension %q must be lowercase and dot-prefixed", e)
+		}
+	}
+}
+
+// cargo-llvm-cov is installed rather than hoped for, and that closes the
+// worst failure this repository has shipped: a runner without it measured
+// nothing, and an empty baseline cached as real makes every later pull
+// request a cache hit that gates on nothing — silently, permanently, with no
+// way to self-heal.
+//
+// The instrumented variant is what needs it, and only it: installing it for
+// every variant puts a multi-minute source build in front of a run that asked
+// not to be instrumented.
+func TestCargoLLVMCovIsPinnedAndOnPath(t *testing.T) {
+	if cargoLLVMCov.Version == "" {
+		t.Fatal("no version parsed from the pin manifest")
+	}
+	if v := cargoLLVMCov.Version; v[0] < '0' || v[0] > '9' {
+		t.Errorf("version = %q, want a bare version with cargo's `=` operator stripped", v)
+	}
+	dir, err := cargoLLVMCov.BinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := cargoEnv()
+	if len(env) != 1 || !strings.Contains(env[0], dir) {
+		t.Fatalf("cargoEnv = %v, want the pinned cargo-llvm-cov bin dir on PATH", env)
+	}
+	// The instrumented invocation runs `cargo llvm-cov`, so the directory
+	// holding it has to be on that invocation's own PATH — the registry
+	// entry alone proves nothing about what the suite runs with.
+	inv := argv(t, CargoNextest, Instrumented)
+	if len(inv.Env) != 1 || !strings.Contains(inv.Env[0], dir) {
+		t.Errorf("instrumented env = %v, want the pinned cargo-llvm-cov bin dir on PATH", inv.Env)
+	}
+}
+
+// The runner whose plain variant is already instrumented must still install
+// the instrumentation. Keying that decision on the variant answers "not
+// instrumented" for the one invocation that runs through cargo-llvm-cov, and
+// the suite fails with `no such command: llvm-cov` on a machine that has
+// never had it.
+//
+// What gets installed is read off the built command, so this asserts the
+// predicate against every variant of every Rust runner rather than executing
+// an install — running one here would test the machine.
+func TestInstrumentationIsInstalledForWhatActuallyRunsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    Name
+		variant Variant
+		want    bool
+	}{
+		{CargoNextest, Plain, false},
+		{CargoNextest, Instrumented, true},
+		{CargoNextest, BuildOnly, false},
+		{CargoLLVMCovNextest, Plain, true},
+		{CargoLLVMCovNextest, Instrumented, true},
+		{CargoLLVMCovNextest, BuildOnly, false},
+	} {
+		inv := argv(t, tc.name, tc.variant)
+		if got := runsLLVMCov(inv); got != tc.want {
+			t.Errorf("runsLLVMCov(%s/%s) = %v, want %v — the command is %q",
+				tc.name, tc.variant, got, tc.want, line(inv))
 		}
 	}
 }

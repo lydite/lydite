@@ -4,10 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 )
 
@@ -40,7 +40,7 @@ func TestReadBaselineTreatsEmptyAsCacheMiss(t *testing.T) {
 	run(seed, "config", "user.name", "t")
 	for key, content := range map[string]string{
 		"empty":  "{}",
-		"filled": `{"go":58.5}`,
+		"filled": `{"api":{"covered":117,"total":200}}`,
 	} {
 		path := filepath.Join(seed, filepath.FromSlash(StatePath(key)))
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -66,8 +66,8 @@ func TestReadBaselineTreatsEmptyAsCacheMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadBaseline: %v", err)
 	}
-	if !hit || report["go"] != 58.5 {
-		t.Errorf("ReadBaseline on a real baseline = (%v, hit=%v), want ({go:58.5}, hit=true)", report, hit)
+	if !hit || report["api"] != (coverage.LineCount{Covered: 117, Total: 200}) {
+		t.Errorf("ReadBaseline on a real baseline = (%v, hit=%v), want ({api:{117 200}}, hit=true)", report, hit)
 	}
 }
 
@@ -110,100 +110,10 @@ func seedStateBranch(t *testing.T, ctx context.Context, files map[string]string)
 	return origin
 }
 
-// PriorBaselines feeds the baseline writers' carry-forward: when a partial
-// run (path-filtered jobs, bare baseline worktree) measures only some of the
-// detected languages, the unmeasured ones keep their entry from the nearest
-// prior baseline instead of silently vanishing from the gate. Each language
-// must come from the nearest commit that has it — starting at sha ITSELF (a
-// re-run or a concurrent per-language job may already have recorded a fresher
-// entry for this very commit, which must beat any ancestor's), then
-// first-parent ancestors — skipping empty `{}` entries (poison, same as
-// ReadBaseline) and honoring maxDepth.
-func TestPriorBaselinesNearestCommitWinsPerLanguage(t *testing.T) {
-	ctx := context.Background()
-	run := gitRunner(t, ctx)
-
-	// A clone with a real main history c1 -> c2 -> c3 -> c4 (HEAD).
-	clone := t.TempDir()
-	run(clone, "init", "-b", "main", ".")
-	run(clone, "config", "user.email", "t@t")
-	run(clone, "config", "user.name", "t")
-	shas := make([]string, 0, 4)
-	for i := range 4 {
-		if err := os.WriteFile(filepath.Join(clone, "f.txt"), []byte{byte('a' + i)}, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		run(clone, "add", "-A")
-		run(clone, "commit", "-m", "c")
-		r := executil.Run(ctx, clone, "git", "rev-parse", "HEAD")
-		if !r.Ok() {
-			t.Fatalf("rev-parse: %v", r.Err)
-		}
-		shas = append(shas, strings.TrimSpace(r.Output))
-	}
-	c1, c2, c3, c4 := shas[0], shas[1], shas[2], shas[3]
-
-	// lydite has baselines for c4 itself (a concurrent job's fresh
-	// entry), c3 (empty — must be skipped), c2, and c1.
-	origin := seedStateBranch(t, ctx, map[string]string{
-		c4: `{"go":77}`,
-		c3: "{}",
-		c2: `{"rust":10}`,
-		c1: `{"rust":20,"typescript":93.8}`,
-	})
-	run(clone, "remote", "add", "origin", origin)
-
-	// Run from a SUBDIRECTORY of the repo, not its root: consumers point
-	// --dir at a subfolder (wardnet uses --dir source), and every git
-	// plumbing call here must be cwd-independent. `git ls-tree <ref>` without
-	// --full-tree silently scopes to the cwd's path inside the ref's tree —
-	// lydite has no such subtree, so the lookup found nothing and
-	// carry-forward silently no-opped on wardnet's real CI (PR #899's rerun).
-	subdir := filepath.Join(clone, "sub")
-	if err := os.Mkdir(subdir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	got := PriorBaselines(ctx, subdir, c4, []string{"go", "rust", "typescript"}, 10)
-	want := map[string]float64{"go": 77, "rust": 10, "typescript": 93.8}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("PriorBaselines from a repo subdirectory = %v, want %v (go from c4 itself, rust from c2, typescript from c1)", got, want)
-	}
-
-	// maxDepth counts commits inspected starting at sha, so depth 2 only
-	// reaches c4 and c3 (empty, skipped): rust/typescript stay unfilled.
-	if got := PriorBaselines(ctx, clone, c4, []string{"go", "rust", "typescript"}, 2); !reflect.DeepEqual(got, map[string]float64{"go": 77}) {
-		t.Errorf("PriorBaselines with maxDepth=2 = %v, want just c4's go entry", got)
-	}
-
-	// Nothing needed means nothing looked up (and certainly nothing returned).
-	if got := PriorBaselines(ctx, clone, c4, nil, 10); len(got) != 0 {
-		t.Errorf("PriorBaselines with no needed languages = %v, want empty", got)
-	}
-
-	// Best-effort everywhere: no lydite branch at all is no priors,
-	// not an error.
-	bare := t.TempDir()
-	run(bare, "init", "--bare", "-b", "main", ".")
-	orphan := t.TempDir()
-	run(orphan, "init", "-b", "main", ".")
-	run(orphan, "remote", "add", "origin", bare)
-	if got := PriorBaselines(ctx, orphan, c4, []string{"go"}, 10); len(got) != 0 {
-		t.Errorf("PriorBaselines with no state branch = %v, want empty", got)
-	}
-}
-
-// The exact race that lost wardnet's main-run baseline: the caller's local
-// origin/lydite tracking ref went stale (checkout fetched it at job
-// start; the scan then ran for minutes while a concurrent run pushed another
-// baseline), so a staging branch created from that stale ref pushes
-// non-fast-forward and is rejected. WriteBaseline must fetch the fresh remote
-// ref (and retry a genuinely concurrent push), not commit on top of stale
-// state and silently lose the baseline.
 func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	ctx := context.Background()
 	run := gitRunner(t, ctx)
-	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"go":10}`})
+	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
 
 	// The caller's repo: fetches lydite once, then the remote advances.
 	clone := t.TempDir()
@@ -220,14 +130,14 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(concurrent), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(concurrent, []byte(`{"go":20}`), 0o600); err != nil {
+	if err := os.WriteFile(concurrent, []byte(`{"api":{"covered":20,"total":100}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	run(writer, "add", "-A")
 	run(writer, "commit", "-m", "coverage baseline for concurrent")
 	run(writer, "push", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "stalerace", map[string]float64{"go": 30}); err != nil {
+	if err := WriteBaseline(ctx, clone, "stalerace", Baseline{"api": {Covered: 30, Total: 100}}); err != nil {
 		t.Fatalf("WriteBaseline over a stale tracking ref: %v", err)
 	}
 
@@ -247,7 +157,7 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
 	ctx := context.Background()
 	run := gitRunner(t, ctx)
-	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"go":10}`})
+	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
 
 	// Reject every push from here on.
 	hook := filepath.Join(origin, "hooks", "pre-receive")
@@ -260,7 +170,7 @@ func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
 	run(clone, "remote", "add", "origin", origin)
 	run(clone, "fetch", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "rejected", map[string]float64{"go": 30}); err == nil {
+	if err := WriteBaseline(ctx, clone, "rejected", Baseline{"api": {Covered: 30, Total: 100}}); err == nil {
 		t.Error("WriteBaseline returned nil even though the push was rejected and the baseline never landed")
 	}
 }
@@ -368,28 +278,28 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 	}
 
 	// Only a commit-keyed entry, as written before this change.
-	if err := WriteBaseline(ctx, repo, head, map[string]float64{"go": 11}); err != nil {
+	if err := WriteBaseline(ctx, repo, head, Baseline{"api": {Covered: 11, Total: 100}}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err := ReadBaseline(ctx, repo, tree, head)
 	if err != nil || !hit {
 		t.Fatalf("ReadBaseline(tree, commit) hit=%v err=%v, want the legacy commit entry found", hit, err)
 	}
-	if got["go"] != 11 {
-		t.Errorf("go = %v, want the commit-keyed 11", got["go"])
+	if got["api"].Covered != 11 {
+		t.Errorf("api = %v, want the commit-keyed 11", got["api"])
 	}
 
 	// Now a tree-keyed entry as well: it must win, because it is the one a
 	// pull request records and the one a later main commit shares.
-	if err := WriteBaseline(ctx, repo, tree, map[string]float64{"go": 77}); err != nil {
+	if err := WriteBaseline(ctx, repo, tree, Baseline{"api": {Covered: 77, Total: 100}}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err = ReadBaseline(ctx, repo, tree, head)
 	if err != nil || !hit {
 		t.Fatalf("ReadBaseline hit=%v err=%v, want the tree entry found", hit, err)
 	}
-	if got["go"] != 77 {
-		t.Errorf("go = %v, want the tree-keyed 77 to take precedence over the commit-keyed 11", got["go"])
+	if got["api"].Covered != 77 {
+		t.Errorf("api = %v, want the tree-keyed 77 to take precedence over the commit-keyed 11", got["api"])
 	}
 }
 
@@ -409,7 +319,7 @@ func TestReadBaselineIgnoresEntriesOutsideTheStateDir(t *testing.T) {
 	run(seed, "config", "user.email", "t@t")
 	run(seed, "config", "user.name", "t")
 	// Deliberately at the branch root, not under StatePath's directory.
-	if err := os.WriteFile(filepath.Join(seed, "deadbeef.json"), []byte(`{"go":58.5}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(seed, "deadbeef.json"), []byte(`{"api":{"covered":58,"total":100}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	run(seed, "add", "-A")
@@ -424,9 +334,234 @@ func TestReadBaselineIgnoresEntriesOutsideTheStateDir(t *testing.T) {
 	if report, hit, err := ReadBaseline(ctx, clone, "deadbeef"); err != nil || hit {
 		t.Errorf("ReadBaseline = (%v, hit=%v, err=%v), want a cache miss — the entry is outside %s", report, hit, err, StatePath(""))
 	}
-	// The carry-forward walk must agree: an entry it cannot compare against is
-	// not one to carry forward from either.
-	if got := PriorBaselines(ctx, clone, "deadbeef", []string{"go"}, 5); len(got) != 0 {
-		t.Errorf("PriorBaselines = %v, want nothing carried from an entry outside the state dir", got)
+}
+
+// The default branch is discovered, not assumed. A repository whose default
+// branch is `master` was refused outright by every gate that resolves a
+// merge-base — the coverage baseline, affected selection, `scan --diff-base
+// auto` and the referral diff all come through here — with an error that
+// named neither the cause nor a fix.
+//
+// Discovery is deliberately not "try main, then master": a repository
+// carrying both has not said which one is the default, and picking by
+// precedence measures a change against a branch nobody chose. Every failure
+// names the flag.
+func TestBaseBranchIsDiscovered(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+
+	// origin holds the branches; clone is where discovery runs.
+	//
+	// headless makes the remote report no HEAD, by pointing it at a branch
+	// that does not exist. That is the only state in which the main/master
+	// candidates are consulted at all — every ordinary remote answers `git
+	// ls-remote --symref HEAD` with its own default, which is why the guess
+	// below it is a last resort rather than the mechanism.
+	newRepoWithHead := func(noHead bool, branches ...string) string {
+		origin := t.TempDir()
+		run(origin, "init", "--bare", "-b", branches[0], ".")
+		seed := t.TempDir()
+		run(seed, "init", "-b", branches[0], ".")
+		run(seed, "config", "user.email", "t@t")
+		run(seed, "config", "user.name", "t")
+		if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(seed, "add", "-A")
+		run(seed, "commit", "-m", "seed")
+		run(seed, "remote", "add", "origin", origin)
+		for _, b := range branches {
+			run(seed, "push", "origin", branches[0]+":"+b)
+		}
+		if noHead {
+			run(origin, "symbolic-ref", "HEAD", "refs/heads/does-not-exist")
+		}
+		clone := t.TempDir()
+		run(clone, "clone", "--no-checkout", origin, ".")
+		// actions/checkout leaves no origin/HEAD, which is what makes the
+		// remote's own answer the path CI actually takes. Removing it here is
+		// what reproduces that.
+		_ = executil.Run(ctx, clone, "git", "remote", "set-head", "origin", "--delete")
+		return clone
+	}
+	// The ordinary remote: it states its own default.
+	newRepo := func(branches ...string) string { return newRepoWithHead(false, branches...) }
+	// A remote that reports no HEAD, so discovery falls to the candidates.
+	headless := func(branches ...string) string { return newRepoWithHead(true, branches...) }
+
+	t.Run("master alone is found", func(t *testing.T) {
+		got, err := BaseBranch(ctx, headless("master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "master" {
+			t.Errorf("BaseBranch = %q, want %q", got, "master")
+		}
+	})
+
+	t.Run("main alone is found", func(t *testing.T) {
+		got, err := BaseBranch(ctx, headless("main"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "main" {
+			t.Errorf("BaseBranch = %q, want %q", got, "main")
+		}
+	})
+
+	t.Run("the remote's own HEAD outranks the candidates", func(t *testing.T) {
+		// A repository whose default is `develop` and which still carries a
+		// stale `master`. The candidate list has exactly one answer here and
+		// it is the wrong one, so a discovery that stopped at the list would
+		// silently measure every change against a branch nobody chose.
+		got, err := BaseBranch(ctx, newRepo("develop", "master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "develop" {
+			t.Errorf("BaseBranch = %q, want %q — the remote states its own default", got, "develop")
+		}
+	})
+
+	t.Run("the remote's own HEAD outranks the candidates", func(t *testing.T) {
+		// A repository whose default is `develop` and which still carries a
+		// stale `master`. The candidate list has exactly one answer here and
+		// it is the wrong one, so a discovery that stopped at the list would
+		// silently measure every change against a branch nobody chose.
+		got, err := BaseBranch(ctx, newRepo("develop", "master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "develop" {
+			t.Errorf("BaseBranch = %q, want %q — the remote states its own default", got, "develop")
+		}
+	})
+
+	t.Run("a branch merely containing a candidate is not one", func(t *testing.T) {
+		got, err := BaseBranch(ctx, headless("master", "not-main"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "master" {
+			t.Errorf("BaseBranch = %q, want %q — refs are compared whole", got, "master")
+		}
+	})
+
+	t.Run("both, on a remote reporting no HEAD, is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, headless("main", "master"), "")
+		if err == nil {
+			t.Fatal("BaseBranch resolved a repository carrying both main and master")
+		}
+		if !strings.Contains(err.Error(), BaseBranchFlag) {
+			t.Errorf("error %q does not name %s", err, BaseBranchFlag)
+		}
+	})
+
+	t.Run("neither, on a remote reporting no HEAD, is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, headless("trunk"), "")
+		if err == nil {
+			t.Fatal("BaseBranch resolved a repository with neither main nor master")
+		}
+		if !strings.Contains(err.Error(), BaseBranchFlag) {
+			t.Errorf("error %q does not name %s", err, BaseBranchFlag)
+		}
+	})
+
+	t.Run("an override outranks discovery", func(t *testing.T) {
+		// A repository discovery would refuse, which is what shows the
+		// override is consulted before anything is looked up.
+		got, err := BaseBranch(ctx, headless("main", "master"), "trunk")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "trunk" {
+			t.Errorf("BaseBranch = %q, want %q", got, "trunk")
+		}
+	})
+}
+
+// origin/HEAD is git's own record of the remote's default branch, and it
+// outranks the listing: a repository whose default is `develop` while main
+// also exists resolves to develop, where the listing alone would answer main.
+func TestBaseBranchPrefersOriginHead(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	origin := t.TempDir()
+	run(origin, "init", "--bare", "-b", "develop", ".")
+	seed := t.TempDir()
+	run(seed, "init", "-b", "develop", ".")
+	run(seed, "config", "user.email", "t@t")
+	run(seed, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(seed, "add", "-A")
+	run(seed, "commit", "-m", "seed")
+	run(seed, "remote", "add", "origin", origin)
+	run(seed, "push", "origin", "develop")
+	run(seed, "push", "origin", "develop:main")
+	clone := t.TempDir()
+	run(clone, "clone", "--no-checkout", origin, ".")
+
+	got, err := BaseBranch(ctx, clone, "")
+	if err != nil {
+		t.Fatalf("BaseBranch: %v", err)
+	}
+	if got != "develop" {
+		t.Errorf("BaseBranch = %q, want %q — origin/HEAD is authoritative where it is set", got, "develop")
+	}
+}
+
+// A lookup with no usable key found nothing, which is a cache miss. The zero
+// executil.Result reports Ok, so without an explicit check the unmarshal below
+// runs on an empty string and answers with a parse error — a hard failure
+// where the question was only whether an entry exists.
+func TestReadBaselineWithNoUsableKeyIsAMiss(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
+	run := gitRunner(t, ctx)
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+
+	for _, keys := range [][]string{nil, {""}, {"", ""}} {
+		report, hit, err := ReadBaseline(ctx, clone, keys...)
+		if err != nil {
+			t.Errorf("ReadBaseline(%v) = %v, want a miss rather than an error", keys, err)
+		}
+		if hit || report != nil {
+			t.Errorf("ReadBaseline(%v) = (%v, hit=%v), want a miss", keys, report, hit)
+		}
+	}
+}
+
+// An unreadable cached entry is a miss, and never an error. Nothing rewrites
+// the base tree's entry — a run records the tree it measured — so returning an
+// error red-lines the gate for every change whose merge-base is that tree,
+// permanently and with no way back. A hand-edit, a truncated object or an entry
+// from a format this version does not know would all do it. A miss recomputes
+// and overwrites, which is the self-healing the empty-entry rule already has.
+func TestAnUnreadableBaselineIsAMissRatherThanAnError(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{
+		"broken": `{"api":{"covered":`,
+		"good":   `{"api":{"covered":10,"total":100}}`,
+	})
+	run := gitRunner(t, ctx)
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+
+	report, hit, err := ReadBaseline(ctx, clone, "broken")
+	if err != nil {
+		t.Errorf("ReadBaseline on a truncated entry returned %v, want a miss", err)
+	}
+	if hit || report != nil {
+		t.Errorf("ReadBaseline = (%v, hit=%v), want a miss", report, hit)
+	}
+	// A readable entry beside it is unaffected, so this did not buy the
+	// healing by treating everything as absent.
+	if _, hit, err := ReadBaseline(ctx, clone, "good"); err != nil || !hit {
+		t.Errorf("ReadBaseline on a good entry = (hit=%v, %v), want a hit", hit, err)
 	}
 }

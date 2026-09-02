@@ -23,7 +23,7 @@ import (
 
 // The plain variant is the fast path, and the only one `lydite test` wants.
 func TestInvocationIsThePlainVariant(t *testing.T) {
-	inv, err := invocation(component.Component{Runner: runner.GoTest, Args: []string{"-race", "./..."}})
+	inv, err := invocation(component.Component{Runner: runner.GoTest, Args: []string{"-race", "./..."}}, runner.Plain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestInvocationIsThePlainVariant(t *testing.T) {
 // A command is run as written: it opts out of the derived variants, so
 // nothing here may add to it.
 func TestInvocationRunsACommandAsWritten(t *testing.T) {
-	inv, err := invocation(component.Component{Command: []string{"make", "test"}})
+	inv, err := invocation(component.Component{Command: []string{"make", "test"}}, runner.Plain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,15 +171,31 @@ func TestOrphanGateOutsideAGitRepositoryIsUnmeasured(t *testing.T) {
 	}
 }
 
+// runTestCmd returns stdout alone, which is the report and — under --json —
+// the document.
+//
+// Separate buffers, and that is the point rather than tidiness. Merging them
+// made every assertion here pass on output that mixes the two, so a diagnostic
+// landing on stdout would be invisible to the tests whose whole subject is the
+// document. `lydite test` legitimately writes to stderr: toolchain
+// provisioning notes, unused-exclude warnings, and every coverage warning.
 func runTestCmd(t *testing.T, root string, extra ...string) (string, error) {
 	t.Helper()
+	out, _, err := runTestCmdStreams(t, root, extra...)
+	return out, err
+}
+
+// runTestCmdStreams is runTestCmd with stderr as well, for a test whose subject
+// is a diagnostic rather than the report.
+func runTestCmdStreams(t *testing.T, root string, extra ...string) (string, string, error) {
+	t.Helper()
 	cmd := newRootCmd()
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetErr(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetArgs(append([]string{"test", "--dir", root, "--no-color"}, extra...))
 	err := cmd.ExecuteContext(context.Background())
-	return out.String(), err
+	return out.String(), errOut.String(), err
 }
 
 // fixtureRepo is a scan root holding one buildable Go module with a passing
@@ -312,9 +328,9 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	// manager's behaviour — internal/nodedeps covers the detection.
 	cfg := config.Default()
 	cfg.TypeScript.Install = "exit 3"
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg)
+	}), cfg, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -342,11 +358,11 @@ func TestAGoComponentHasNoPreparationStep(t *testing.T) {
 func TestTeardownRunsWhenSetupFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -360,10 +376,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
 	marker := filepath.Join(root, "torn-down")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -376,10 +392,10 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 // so it fails a component that otherwise passed.
 func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -390,10 +406,10 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -402,13 +418,13 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 // Setup runs before the suite, not alongside it.
 func TestSetupRunsBeforeTheSuite(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		// The suite reads what setup wrote, so it can only pass if the
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -443,9 +459,9 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default())
+	}), config.Default(), false)
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -473,9 +489,9 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 // document and nothing else, so the log is the only place the output exists.
 func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
-	row := runComponent(context.Background(), root, planFor(t, root, component.Component{
+	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default())
+	}), config.Default(), false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -574,7 +590,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, nil, nil, config.Default(), 3, false, rep)
+	runComponents(context.Background(), root, declared, nil, nil, config.Default(), 3, false, false, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -629,7 +645,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, rep)
+	runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -857,7 +873,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 1, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), 1, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -907,7 +923,7 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -919,5 +935,33 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(row.Detail, " "), "ghost") {
 		t.Errorf("detail = %v, want the undeclared service still named", row.Detail)
+	}
+}
+
+// stdout carries the report and nothing else. `lydite test` provisions
+// toolchains, warns about unused excludes and warns about every coverage gap,
+// and all of it goes to stderr — under --json a single diagnostic on stdout
+// makes the document unparseable, which is what anything automated reads.
+func TestDiagnosticsStayOffStdout(t *testing.T) {
+	root := fixtureRepo(t, "components:\n  - name: mod\n    dir: mod\n    runner: go-test\n    args: [\"./...\"]\n")
+	out, errOut, err := runTestCmdStreams(t, root, "--json")
+	if err != nil {
+		t.Fatalf("run: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	var doc struct {
+		Rows []struct{ Label string } `json:"rows"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &doc); jsonErr != nil {
+		t.Fatalf("stdout is not a JSON document (%v):\n%s", jsonErr, out)
+	}
+	if len(doc.Rows) == 0 {
+		t.Error("the document carries no rows")
+	}
+	// The diagnostics this run does produce went somewhere, and it was not
+	// stdout. Toolchain provisioning always says what it resolved, so this
+	// run has one — without checking for it the test would pass on a run that
+	// printed nothing anywhere, proving nothing about where output goes.
+	if !strings.Contains(errOut, "go:") {
+		t.Errorf("stderr = %q, want the toolchain note this run produces", errOut)
 	}
 }

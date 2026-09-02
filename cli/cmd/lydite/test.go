@@ -24,6 +24,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
@@ -36,8 +37,8 @@ import (
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected bool
-	var concurrency string
+	var asJSON, noColor, stream, onlyAffected, noCoverage, gateCoverage bool
+	var concurrency, baseBranch string
 	cmd := &cobra.Command{
 		Use:           "test",
 		SilenceUsage:  true,
@@ -87,6 +88,12 @@ the component's to declare.`,
 			// above: the gates each walk the whole tree, and a flag conflict
 			// must not pay for that first and then discard a report the run
 			// had already computed.
+			if noCoverage && gateCoverage {
+				// Gating what was never measured has no answer to give, and
+				// silently ignoring one of the two flags would leave a
+				// workflow believing it gates.
+				return errors.New("--no-coverage measures nothing for --gate-coverage to gate; pass one")
+			}
 			if onlyAffected && len(components) > 0 {
 				// Two narrowing mechanisms composed. The planner emits
 				// per-shard --component lists that are already the selected
@@ -122,6 +129,20 @@ the component's to declare.`,
 			if err != nil {
 				return err
 			}
+			// Before any suite runs. `lydite test` is the command that invokes
+			// `go test`, `cargo llvm-cov` and `npx vitest`, so it is the one
+			// that has to make their toolchains present — a runner with no
+			// Node answers `npx: not found` rather than provisioning one, and
+			// a runner whose ambient Go is fine still needs GOTOOLCHAIN
+			// pinned, which is the whole reason internal/toolchain touches Go
+			// at all.
+			//
+			// It cannot be inherited from a `lydite scan` earlier in the same
+			// job: the result is applied with process-local os.Setenv, so it
+			// leaves with that process.
+			if err := ensureToolchains(ctx, cmd, dir, cfg, componentEcosystems(file)); err != nil {
+				return err
+			}
 			// Empty unless selection ran: with no skipped components the
 			// declaration order of the selected set is already the order of
 			// the whole set.
@@ -136,7 +157,7 @@ the component's to declare.`,
 			// into a hard error before any row is written.
 			if onlyAffected && len(file.Components) > 0 {
 				var res affected.Result
-				res, err = selectAffected(ctx, dir, file)
+				res, err = selectAffected(ctx, dir, file, baseBranch)
 				if err != nil {
 					return err
 				}
@@ -159,6 +180,13 @@ the component's to declare.`,
 				}
 				ordered = file.Components
 			}
+			cov := coverageOptions{
+				Instrument:  !noCoverage,
+				Gate:        gateCoverage,
+				BaseBranch:  baseBranch,
+				Concurrency: limit,
+				Selected:    onlyAffected,
+			}
 			if len(selected) == 0 {
 				// Nothing ran, so nothing interleaves: the skipped rows are
 				// the whole set, still in declaration order.
@@ -166,6 +194,15 @@ the component's to declare.`,
 					if r, ok := skipped[c.Name]; ok {
 						rep.Add(r)
 					}
+				}
+				// The gate still reports, because a caller that asked for it
+				// has to be able to tell this from a run where the flag was
+				// dropped. On the default branch this is also the run that
+				// records: a tree matching its base selects nothing and is
+				// still the tree whose coverage the next change gates
+				// against.
+				if len(file.Components) > 0 {
+					addCoverageRows(ctx, cmd, rep, dir, file, nil, cfg, cov)
 				}
 				// Only when the declaration is genuinely empty. A run that
 				// selected nothing has components declared and has already
@@ -185,7 +222,8 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, rep)
+			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, cov.Instrument, rep)
+			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -207,6 +245,21 @@ the component's to declare.`,
 	// so; a bare `lydite test` always runs every component.
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
 		"run only the components the change against the merge-base could have broken")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	// Instrumentation is on by default despite costing real time — cargo
+	// llvm-cov forces a separate instrumented build, and Go's -coverpkg=./...
+	// recompiles every package per test binary. The fast inner loop is `go
+	// test` or `cargo nextest` run directly; nothing reaches for lydite to
+	// re-run one package. A gate that is opt-in is a gate that is off where
+	// it matters.
+	cmd.Flags().BoolVar(&noCoverage, "no-coverage", false,
+		"run each component's plain variant and report no coverage at all")
+	// Explicit, the way --affected is. Measuring is local; gating fetches the
+	// baseline branch and pushes to it, and a developer's local run must
+	// never write to a shared branch. Inferring "am I in CI" is what ADR 0018
+	// already refused for selection, for the same reason.
+	cmd.Flags().BoolVar(&gateCoverage, "gate-coverage", false,
+		"compare each component's coverage against the baseline for the merge-base, and record this tree's")
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
@@ -288,13 +341,17 @@ type componentPlan struct {
 // a truncation visible only in the process exit code is a truncation the PR
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
-func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream, instrument bool, rep *ui.Report) []measurement {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
 	}
 
 	rows := make([]ui.Row, len(plans))
+	measured := make([]measurement, len(plans))
+	for i, p := range plans {
+		measured[i] = unmeasuredComponent(p.c, "the component did not run")
+	}
 	var items []scheduler.Item
 	var index []int
 	for i, p := range plans {
@@ -318,7 +375,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 
 	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
 		i := index[k]
-		rows[i] = runComponent(ctx, root, plans[i], cfg)
+		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, instrument)
 	})
 
 	// A cancelled run kills every suite it had started, so each one exits
@@ -351,6 +408,20 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 				Detail: []string{"the run was interrupted before this component finished"},
 				Log:    r.Log,
 			}
+			measured[i] = unmeasuredComponent(plans[i].c, "the run was interrupted before this component finished")
+		}
+	}
+
+	// Only a component that passed contributes a measurement. A report
+	// written by a suite that failed, was killed, or never started describes
+	// an unfinished run, and recording it would put a number in the baseline
+	// that nothing can be compared against honestly. Enforced here, over the
+	// final rows, so no path out of runComponent can forget it.
+	for i := range plans {
+		if rows[i].Status != ui.StatusPass {
+			// The row's own words, so the coverage row and the suite row give
+			// a reader the same account of one event rather than two.
+			measured[i] = unmeasuredComponent(plans[i].c, rows[i].Label+" did not pass: "+rows[i].Value)
 		}
 	}
 
@@ -359,7 +430,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 		for _, r := range rows {
 			rep.Add(r)
 		}
-		return
+		return measured
 	}
 	// Interleaved by the declaration, so a component selection skipped sits
 	// where its author wrote it rather than ahead of every component that
@@ -379,6 +450,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 			rep.Add(r)
 		}
 	}
+	return measured
 }
 
 // itemFor is what the scheduler locks on: the component's root, cleaned so
@@ -529,18 +601,30 @@ func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, lim
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config) (row ui.Row) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, instrument bool) (row ui.Row, m measurement) {
 	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
+	m = unmeasuredComponent(c, "the component did not run")
 
-	inv, err := invocation(c)
+	variant := runner.Plain
+	if instrument {
+		variant = runner.Instrumented
+	}
+	inv, err := invocation(c, variant)
 	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}
+		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, m
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-	if prepared, ok := prepare(ctx, dir, label, c, cfg, log); !ok {
-		return prepared
+	// Prepared before the suite runs, so what is measured afterwards is what
+	// this run wrote.
+	if inv.CoverageReport != "" {
+		if err := clearReport(dir, inv.CoverageReport); err != nil {
+			return failure(label, log, err.Error(), "not runnable", ""), m
+		}
+	}
+	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, log); !ok {
+		return prepared, m
 	}
 
 	// Deferred before anything starts, so every path out of here tears the
@@ -548,7 +632,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	// half-applied migration most needs undoing.
 	stop, started, ok := startServices(ctx, p, label)
 	if !ok {
-		return started
+		return started, m
 	}
 	defer stop()
 	defer func() {
@@ -565,13 +649,74 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	}()
 
 	if failed, ok := runCommands(ctx, dir, label, c, "setup", c.Setup, log); !ok {
-		return failed
+		return failed, m
 	}
 
 	if res := executil.RunOutput(ctx, dir, append(env(c), inv.Env...), log.out, inv.Name, inv.Args...); !res.Ok() {
-		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output)
+		// No measurement from a suite that failed. A report written by a run
+		// that did not finish describes the tests that got as far as running,
+		// and gating on it would let a broken suite record a baseline nothing
+		// can be compared against honestly.
+		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output),
+			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
-	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
+}
+
+// ignoreReports keeps lydite's own output out of git, by writing a `.gitignore`
+// ignoring everything into the report directory itself.
+//
+// lydite writes into the repository it is measuring, and what it writes must
+// never become part of what it measures. A committed `.lydite-reports/` lands
+// in the diff, where it matches no component and therefore widens affected
+// selection to everything on every change — observed on a fixture whose select
+// row named a coverage profile and a test log as the reason two components
+// ran. An uncommitted one is offered to the author by every `git status` and
+// `git add -A` until someone commits it.
+//
+// Inside the directory rather than in the repository's own `.gitignore`,
+// because that file is the repository's to write and lydite's output is
+// lydite's to disown. A repository that has already ignored the directory
+// loses nothing: this file is inside what it ignored.
+//
+// Best-effort. A report directory that cannot hold a `.gitignore` is not a
+// reason to fail a run, and the failure it prevents is a slow run rather than
+// a wrong answer.
+func ignoreReports(dir string) {
+	path := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	// "*" and not "**": a .gitignore ignores paths relative to itself, and a
+	// single star at the top of a directory covers everything under it,
+	// including this file.
+	_ = os.WriteFile(path, []byte("*\n"), 0o600)
+}
+
+// clearReport makes the component's report path ready to be written to: its
+// directory exists, and nothing is at the path itself.
+//
+// Both halves matter and neither is the other. `go test -coverprofile` fails
+// outright on a path whose parent is missing, which would report an
+// instrumented run as a failing suite. And a report left by an earlier run is
+// what a suite that passes without writing one gets measured from — a coverage
+// number describing code that is no longer there, supplied by lydite itself,
+// which is the failure this gate is arranged around with lydite as its source.
+//
+// Every runner lydite ships happens to truncate its own report today, so this
+// is a guarantee about the path rather than a fix for an observed defect in
+// one of them. It is the property the measurement depends on: what is read
+// back was written by the run that just finished.
+func clearReport(dir, report string) error {
+	path := filepath.Join(dir, filepath.FromSlash(report))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	ignoreReports(filepath.Join(dir, runner.ReportDir))
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // failure builds a failing row: what was run, the tail of what it printed, and
@@ -623,6 +768,7 @@ func openLog(root, name string, stream bool, width int) *componentLog {
 		fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", name, err)
 		return l.streamed(stream)
 	}
+	ignoreReports(filepath.Join(root, runner.ReportDir))
 	path := filepath.Join(dir, "test.log")
 	f, err := os.Create(path) // #nosec G304 -- the path is lydite's own report directory under the scan root, built from a validated component name
 	if err != nil {
@@ -909,12 +1055,12 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 // tests rather than the absent dependencies, and a Rust one without its pinned
 // runner fails with `no such command` — the same misattribution a suite run
 // without its database produces, and the same reason to stop first.
-func prepare(ctx context.Context, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
+func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
 	}
-	if err := r.Prepare(ctx, dir, cfg.TypeScript.Install, log.out); err != nil {
+	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
 			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
@@ -927,7 +1073,7 @@ func prepare(ctx context.Context, dir, label string, c component.Component, cfg 
 // invocation is the plain variant of a component's suite: the fast path, and
 // the only one this command wants. The coverage gate reads the instrumented
 // variant, and mutation needs all three.
-func invocation(c component.Component) (runner.Invocation, error) {
+func invocation(c component.Component, variant runner.Variant) (runner.Invocation, error) {
 	if len(c.Command) > 0 {
 		return runner.Invocation{Name: c.Command[0], Args: c.Command[1:]}, nil
 	}
@@ -935,9 +1081,9 @@ func invocation(c component.Component) (runner.Invocation, error) {
 	if !ok {
 		return runner.Invocation{}, fmt.Errorf("unknown runner %q", c.Runner)
 	}
-	inv, ok := r.Build(runner.Plain, c.Args)
+	inv, ok := r.Build(variant, c.Args)
 	if !ok {
-		return runner.Invocation{}, fmt.Errorf("runner %q supplies no plain variant", c.Runner)
+		return runner.Invocation{}, fmt.Errorf("runner %q supplies no %s variant", c.Runner, variant)
 	}
 	return inv, nil
 }
@@ -960,6 +1106,38 @@ func env(c component.Component) []string {
 	// environment in the same order: a map's iteration order is not one a
 	// failure can be reproduced from.
 	sort.Strings(out)
+	return out
+}
+
+// componentEcosystems is the set of language toolchains this declaration needs,
+// read from the components rather than from a walk of the tree.
+//
+// The declaration is the better source and is the direction the rest of this
+// change goes: a repository with a vendored Cargo.toml no component builds
+// needs no Rust toolchain, and detection would provision one. It is also every
+// declared component and not only the selected ones — narrowing here would make
+// which toolchains a run provisions depend on which components it happened to
+// choose, so two runs of one repository would prepare differently.
+func componentEcosystems(file component.File) []detect.Ecosystem {
+	byLang := map[runner.Lang]detect.Ecosystem{
+		runner.Go:         detect.Go,
+		runner.Rust:       detect.Rust,
+		runner.TypeScript: detect.TypeScript,
+	}
+	seen := map[detect.Ecosystem]bool{}
+	var out []detect.Ecosystem
+	// In detect.Ecosystems' own order, so two runs of one declaration
+	// provision in the same order and say so in the same order.
+	for _, e := range []detect.Ecosystem{detect.Rust, detect.TypeScript, detect.Go} {
+		for _, c := range file.Components {
+			r, ok := runner.Lookup(c.Runner)
+			if !ok || byLang[r.Lang] != e || seen[e] {
+				continue
+			}
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
 	return out
 }
 
@@ -1031,16 +1209,15 @@ func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) 
 // with no symptom other than a slow job, which is how a shallow checkout goes
 // unnoticed for months. `lydite scan --diff-base auto` refuses for the same
 // reason, and a shallow checkout is a fixable misconfiguration.
-func selectAffected(ctx context.Context, dir string, file component.File) (affected.Result, error) {
-	base, err := gitstate.BaseSHA(ctx, dir)
+func selectAffected(ctx context.Context, dir string, file component.File, baseBranch string) (affected.Result, error) {
+	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
 	if err != nil {
-		// Both causes, because the advice for one does not help the other
-		// and gitstate.BaseSHA resolves origin/main and nothing else — which
-		// is the same assumption --affected exists to avoid making about the
-		// event, made here about the branch name.
-		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with origin/main, and it could not be resolved: %w"+
-			"\n       a shallow checkout is the usual cause — fetch with depth 0 —"+
-			"\n       and a default branch not named main is the other", err)
+		// The base branch is resolved inside, so an undiscoverable one
+		// already arrives here as an error naming --base-branch. What is
+		// left to say is the other cause, which produces the same
+		// merge-base failure from a branch that resolved perfectly.
+		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the base branch, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
 	}
 	// On the default branch the merge-base is HEAD itself, so there is no
 	// change to select by and a computed selection narrows to nothing. ADR

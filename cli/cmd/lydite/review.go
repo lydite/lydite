@@ -16,7 +16,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, eventPath string
+	var dir, base, baseBranch, eventPath string
 	var asJSON, noColor, doPublish bool
 	cmd := &cobra.Command{
 		Use: "review",
@@ -39,7 +39,7 @@ referred — including a correct one.`,
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
 
-			baseSHA, err := resolveReviewBase(ctx, dir, base)
+			baseSHA, err := resolveReviewBase(ctx, dir, base, baseBranch)
 			if err != nil {
 				return err
 			}
@@ -82,7 +82,8 @@ referred — including a correct one.`,
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
-	cmd.Flags().StringVar(&base, "base", "auto", `commit this change is measured against ("auto" resolves the merge-base with origin/main)`)
+	cmd.Flags().StringVar(&base, "base", "auto", `commit this change is measured against ("auto" resolves the merge-base with the base branch)`)
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	// Publishing is off by default and errors rather than skipping when the
@@ -250,12 +251,12 @@ func remedyFor(ds []referral.Disqualification) string {
 //
 // A base that is not an ancestor of HEAD is refused for the same reason:
 // the diff would describe something other than what this branch introduces.
-func resolveReviewBase(ctx context.Context, dir, base string) (string, error) {
+func resolveReviewBase(ctx context.Context, dir, base, baseBranch string) (string, error) {
 	if base == "" {
-		return "", fmt.Errorf("--base is empty: name a commit, or use \"auto\" to resolve the merge-base with origin/main")
+		return "", fmt.Errorf("--base is empty: name a commit, or use \"auto\" to resolve the merge-base with the base branch")
 	}
 	if base == "auto" {
-		baseSHA, err := gitstate.BaseSHA(ctx, dir)
+		baseSHA, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
 		if err != nil {
 			return "", fmt.Errorf("--base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
 		}

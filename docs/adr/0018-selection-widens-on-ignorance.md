@@ -26,10 +26,9 @@ It also inverts what the invalidator list is for. Under this rule a root
 `go.work`, a top-level `Cargo.lock` and a `rust-toolchain.toml` beside them all
 match no component and already select everything, so they need no entry. What
 survives is the opposite case: a file matching a component's directory *too
-narrowly*. A repository with one component rooted at `.` and another at `web/`
-would otherwise have a change to `.lydite/components.yml` select the root
-component alone, when a change to the component declaration is precisely the
-change that can affect all of them.
+narrowly*. A `package-lock.json` inside the `web` component is claimed by that
+component and by nothing else, so it would select `web` alone — when what a
+lockfile changes is what every component in the tree resolves to.
 
 ## Consequences
 
@@ -40,16 +39,30 @@ change that can affect all of them.
 - **The invalidator set is built in and cannot be removed or added to.**
   Lockfiles, manifests and toolchain files match at any depth, since one
   matters wherever it sits; `.lydite/` stays anchored, since the scan root is
-  the only place lydite reads configuration from. Not removable for the reason the built-in disqualifier set is
-  not: a repository able to drop `.lydite/**` could make a change to its own
-  component declaration run nothing. Not extensible because `watch` already says
-  "this outside file invalidates me" one level down.
-- **A component rooted at `.` switches the widening rule off.** It claims every
-  path, so nothing in that repository is ever unmatched, and only the
-  invalidator set keeps a change at the root from selecting the root component
-  alone. `.github/workflows/**` and `.github/actions/**` are on the set for
-  that reason. This is a limit of the rule rather than a hole closed: anything
-  at the root not on the set is absorbed.
+  the only place lydite reads configuration from. Not removable for the reason
+  the built-in disqualifier set is not: a repository able to drop `.lydite/**`
+  could make a change to its own component declaration run nothing. Not
+  extensible because `watch` already says "this outside file invalidates me"
+  one level down.
+  The set earns its place only where a path *is* specifically claimed by some
+  component and still affects every other one, since a path no component claims
+  already widens.
+- **A component rooted at `.` does not suppress widening.** `dir: .` states
+  where a component is rooted, not that it tests every file in the tree — a Go
+  module at the repository root has no other way to spell its location. So a
+  path counts as matched only when a component with a non-`.` directory
+  contains it, or a `watch` pattern names it; a `.`-rooted component is still
+  selected by containment, but it is not evidence that the path was understood.
+  Without this the rule is switched off entirely by one declaration: such a
+  component claims every path, nothing is ever unmatched, and a root-level
+  `Makefile` or `tsconfig.base.json` selects it alone while every other
+  component silently does not run.
+  The cost is accepted and it is large: in a repository with components at `.`
+  and `web/`, nearly every path is matched only by the root component, so
+  nearly every change widens and selection degrades to running everything. That
+  is the same bluntness accepted below, on the same grounds — it costs time and
+  it is visible in the `select` row, where the precise alternative is a
+  conditional rule whose mistakes are silent.
 - **Bluntness is accepted twice.** A `web/package-lock.json` change selects
   every component, not just `web`; and in a monorepo scanned with `--dir source`,
   any change outside that subtree selects everything. Both cost time and fail

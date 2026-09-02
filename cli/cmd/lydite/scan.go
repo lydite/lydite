@@ -20,7 +20,7 @@ import (
 )
 
 func newScanCmd() *cobra.Command {
-	var dir, diffBase string
+	var dir, diffBase, baseBranch string
 	var asJSON, noColor bool
 	cmd := &cobra.Command{
 		Use: "scan",
@@ -101,7 +101,7 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 			if cfg.Semgrep.Enabled {
-				baseSHA, err := resolveDiffBase(ctx, dir, diffBase)
+				baseSHA, err := resolveDiffBase(ctx, dir, diffBase, baseBranch)
 				if err != nil {
 					return err
 				}
@@ -114,8 +114,32 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory to scan")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
-	cmd.Flags().StringVar(&diffBase, "diff-base", "", `only report findings introduced since this commit ("auto" resolves the merge-base with origin/main); empty scans everything`)
+	cmd.Flags().StringVar(&diffBase, "diff-base", "", `only report findings introduced since this commit ("auto" resolves the merge-base with the base branch); empty scans everything`)
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	return cmd
+}
+
+// enabledEcosystems drops languages disabled in .lydite/config.yml from the
+// detected set. `enabled: false` says lydite runs no check over that
+// language's code, so provisioning its toolchain would download a compiler
+// nothing is going to invoke.
+func enabledEcosystems(detected []detect.Ecosystem, cfg config.Config) []detect.Ecosystem {
+	var out []detect.Ecosystem
+	for _, e := range detected {
+		enabled := true
+		switch e {
+		case detect.Rust:
+			enabled = cfg.Rust.Enabled
+		case detect.TypeScript:
+			enabled = cfg.TypeScript.Enabled
+		case detect.Go:
+			enabled = cfg.Go.Enabled
+		}
+		if enabled {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // resolveDiffBase turns the --diff-base flag into a commit SHA for Semgrep's
@@ -128,7 +152,7 @@ func newScanCmd() *cobra.Command {
 // scopes itself to the diff already — resolving a merge-base there would cost
 // a `git fetch` whose result nothing reads, and would newly require a full
 // checkout depth from token-bearing consumers that don't need one today.
-func resolveDiffBase(ctx context.Context, dir, diffBase string) (string, error) {
+func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (string, error) {
 	if diffBase == "" || os.Getenv(semgrep.AppTokenEnv) != "" {
 		return "", nil
 	}
@@ -140,7 +164,7 @@ func resolveDiffBase(ctx context.Context, dir, diffBase string) (string, error) 
 	// that quietly changes scope, and starts blocking on findings the PR
 	// never touched. A shallow checkout is a fixable CI misconfiguration
 	// (fetch-depth: 0), so say so.
-	baseSHA, err := gitstate.BaseSHA(ctx, dir)
+	baseSHA, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
 	if err != nil {
 		return "", fmt.Errorf("--diff-base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
 	}

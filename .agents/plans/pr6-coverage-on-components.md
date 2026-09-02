@@ -79,30 +79,113 @@ naming the removal rather than silently ignored — the stance
 silently dropped key means a repository measuring something other than what its
 author wrote while every run still reports a pass.
 
-Yours to settle in the challenge interview, with a recommendation for each:
+## Settled — the challenge interview is done, do not reopen these
 
-- **What the coverage unit is when a component declares `command:`.** It opts
-  out of the derived variants entirely, so there is no instrumented form to ask
-  for. Decide whether such a component is unmeasured, excluded, or required to
-  declare something, and note that `unmeasured` is a status that already exists
-  and already does not vote.
-- **What happens to `coverage.{go,rust}.report` and the `--*-report` flags.**
-  They are keyed by discovered module/crate directory. If the unit is the
-  component, the natural key is the component name — which is a rename of a
-  published surface, and the old keys are in consumers' `.lydite/config.yml`
-  today.
-- **Whether the baseline's shape changes, and therefore its path.**
-  `gitstate.StatePath` writes `v2/<key>.json` and the entries are
-  language-keyed. Per-component entries are a different quantity, and ADR 0007
-  already established that a changed quantity takes a new path and a clean cache
-  miss rather than being read as the old one.
-- **What `coverage.floor` gates now.** It is per measured unit today. A
-  component is a coarser unit than a crate, so the same number means something
-  different — decide whether that is a silent change in strictness.
-- **Whether `lydite coverage` still exists as its own command.** A component's
-  suite is run once; instrumenting it is a variant, not a second run. If
-  `lydite test` can produce coverage, a separate command that re-runs everything
-  is the duplication `coverage.source: report` was invented to avoid.
+Recorded in [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md),
+with `CONTEXT.md`'s **Aggregate coverage**, **Baseline**, **Affected** and
+**Invalidator** entries updated and [ADR 0018](../../docs/adr/0018-selection-widens-on-ignorance.md)
+amended. Read ADR 0019 first; it carries the reasoning and the rejected
+alternatives.
+
+1. **`lydite coverage` is removed.** `lydite test` measures coverage always;
+   `--no-coverage` opts out of instrumentation and emits no coverage rows at all;
+   `--gate-coverage` adds the baseline read/compare/record. Measuring is local,
+   gating touches the network, and a local run must never push to the `lydite`
+   branch — so the flag is explicit, the way `--affected` is.
+2. **A run that measured but did not gate renders distinctly from a pass.** This
+   is the wardnet#957 distinction and the reason a flag was acceptable at all.
+   Do not let ungated rows disappear or read as green.
+3. **A baseline is per-component line counts at `v3/<tree>.json`.** Counts, not
+   percentages: a percentage cannot be re-weighted, and the per-language and
+   global figures are `Σ covered / Σ total` over subsets of the same entries.
+   Three altitudes — per component, per language, global — all gated, all derived
+   from one stored quantity so they cannot disagree.
+4. **A composed figure names what it measured.** Under `--affected` the language
+   and global figures mix fresh counts with carried-forward ones; the row says
+   how many of each, the `N of M unit(s)` shape `floorReport` already uses.
+5. **No run on the default branch is required.** Tree-keying carries the baseline
+   chain through pull requests: CI builds `refs/pull/N/merge`, a squash merge
+   lands that same tree, and the next pull request's merge-base resolves to it.
+   Requiring a main run is a consumer obligation a PR-only pipeline never meets.
+6. **A cache miss recomputes, and never substitutes.** Check the base tree out
+   into a throwaway worktree and measure it through the same path `lydite test`
+   uses, so the compose services a component declares actually start. Gating
+   against the nearest ancestor baseline was considered and rejected.
+7. **`coverage.floor` gates per component.** A change in the unit, not a
+   weakening — an untested crate still contributes uncovered lines to its
+   component. What is lost is catching a *small* untested sub-unit. Say so in
+   the release note; do not claim nothing changed.
+8. **Removed keys and flags, each rejected with an error naming the removal:**
+   `coverage.source`, `coverage.go.report`, `coverage.rust.{report,lcov}`,
+   `--source`, `--tests`, `--go-report`, `--rust-report`, `--rust-lcov-report`.
+   Never silently ignored.
+9. **Patch coverage gates per component** against that component's own baseline,
+   from the same instrumented run.
+10. **A `command:` component is `unmeasured`** — it has no instrumented variant.
+    Not excluded, which would drop it from the global figure silently. No new key
+    naming where its coverage lands.
+11. **Rust exports lcov only; the `--json` export is dropped.** One artefact per
+    language serving both gates: Go's profile, Rust's lcov, TypeScript's lcov.
+    `coverage-summary.json` goes too.
+12. **`gitstate.BaseSHA` takes a base ref.** Resolution order: an explicit
+    `--base-branch`; then `git symbolic-ref refs/remotes/origin/HEAD`; then
+    whichever of `origin/main` / `origin/master` exists, erroring if both or
+    neither do; then error naming the flag. The remote stays `origin`
+    deliberately — half-solving it is worse than naming the limit.
+13. **A `.`-rooted component no longer suppresses affected selection's widening.**
+    A path counts as matched only when a component with a non-`.` directory
+    contains it or a `watch` names it; `.`-rooted components are still selected by
+    containment. The cost is accepted and large: in a `.`+`web/` repository nearly
+    every change now widens.
+
+### Verified against the tools, not assumed
+
+Four things were checked directly during the interview. Re-verify rather than
+trust this list if anything depends on it.
+
+- **`internal/runner`'s Rust instrumented variant cannot run.** It builds
+  `cargo llvm-cov nextest --json --output-path X --lcov --output-path Y`, and
+  cargo-llvm-cov 0.6.16 answers `error: the argument '--output-path' was provided
+  more than once`. It fails at argument parsing, before anything executes.
+  `TestCargoInstrumentedExportsBothReports` asserts both flags are present and
+  passes, because the runner tests assert argv and never execute. Nothing else
+  reaches it: `lydite test` runs the *plain* variant for `cargo-nextest`, and the
+  only route in is `runner: cargo-llvm-cov-nextest`, which the proving ground does
+  not declare. Decision 11 is the fix.
+- **An lcov's summed `LF`/`LH` equal the JSON export's
+  `totals.lines.{count,covered}`** — measured 10/7 both ways on a one-crate
+  workspace. Confirm this on the proving ground's three-crate `rust/` component
+  before relying on it; a discrepancy there costs a cache miss, not a wrong gate,
+  since `v3` is new anyway.
+- **#36 reproduces at 75 points.** A two-package module where `b` is exercised
+  only through `a`'s test: without `-coverpkg=./...` the total is 25.0% and `b`
+  reads 0.0%; with it, 100.0%. `internal/runner` carries the flag and
+  `internal/coverage` does not, which is why consolidating on the runner is the
+  fix rather than a tidy-up.
+- **`-coverpkg` emits duplicate blocks, and this is NOT a bug.** A package
+  instrumented by several test binaries appears several times in the profile. The
+  hypothesis that `goProfileLines`'s `total += b.NumStmt` double-counts was
+  wrong — `cover.ParseProfiles` merges them, and both profiles compute 1/4 =
+  25.0%, matching `go tool cover -func`. No change needed.
+
+### CI edits are approved, on this basis
+
+`.github/assert-proving-ground.py` and, only if an extra probe step proves
+necessary, `.github/workflows/ci-end2end.yml`. Assert the **negative**: `rust/`
+reports as **one** unit and not three, `web/` as one and not two, `go/api` and
+`go/sdk` as two; under `--affected` with a change under `go/api/`, `tally` is
+**not measured**; and the measured-but-not-gated state renders distinctly from a
+pass. Asserting the run was green proves nothing.
+
+Asserting the *gate* end to end is out of scope — it needs a baseline on the
+proving ground's own `lydite` branch and a token with push rights to it. File it.
+
+### Follow-up issues to file, not to build here
+
+- The action should pass `GITHUB_BASE_REF` on `pull_request` events, which is what
+  actually fixes stacked pull requests. That is `lydite/actions`; decision 12 only
+  makes the flag exist and stops the assumption.
+- The end-to-end gate assertion on the proving ground, above.
 
 ## The failure class this step is most exposed to
 
@@ -123,31 +206,42 @@ somewhere and go looking, rather than waiting for a test to say so.
 
 ### What step 5 learned, and what it cost
 
-Step 5 took two review rounds where step 4 took seven, and the difference was
-not luck — the core was pure functions over paths, with no goroutines and no
-clock. What still bit:
+Step 5 took **four review rounds and produced fourteen findings**, where step 4
+took seven rounds. None of the fourteen was a regression — nothing a later round
+found was a gap in an earlier fix — which is the real difference from step 4 and
+supports the theory that step 4's tail was concurrency-specific. But the rate did
+not fall until the end: two findings, then six, then five, then three that turned
+out to be one bug. **Round 3 found the worst defect in the slice.** Budget for
+four rounds here and do not read a quiet second round as a finished one.
 
-- **A latent bug in code with no caller reads as working code.** The first
-  review found that a path outside the scan root narrowed instead of widening,
-  in a package nothing yet imported. Tests passed, lint passed, and the defect
-  was one string comparison. Wire the thing up early enough that end-to-end
-  behaviour is observable.
-- **Injecting the defect is what establishes a test.** Twelve injections were
-  run across that step and all twelve were caught, but two of them only proved
-  their point after a lossy grep was fixed — the test had fired and the harness
-  had hidden it. Read the actual failure output, not a filtered summary.
-- **One hypothesis in that round was wrong.** An order-dependence predicted
-  alongside a real bug did not exist; the bug masked it. Reproduce before
-  fixing, and say so when the reproduction disagrees.
+What bit, and will bite again:
+
+- **A latent bug in code with no caller reads as working code.** The first round
+  found that a path outside the scan root narrowed instead of widening, in a
+  package nothing yet imported. Clean build, clean lint, passing suite, and the
+  defect was one string comparison. Wire new code to a caller early enough that
+  end-to-end behaviour is observable.
+- **Injecting the defect is what establishes a test — and the harness can hide
+  it.** Twenty-four injections were run and all twenty-four were caught, but one
+  injection left a variable unused, so nothing compiled and no test ran at all.
+  The filtered output showed nothing, which reads exactly like a passing
+  injection. Read the actual failure text, never a grep summary.
+- **Reproduce before fixing, and check what you actually ran.** One review
+  finding was partly wrong; one hypothesis raised alongside a real bug did not
+  exist, because the bug masked it; and one "fix" was verified against a stale
+  binary, because a `cd` had failed silently and the run never used the new code.
+- **A rule that lives only in prose is a rule that is not true.** "The default
+  branch runs everything" sat in AGENTS.md for three rounds before anything
+  enforced it. Enforce a rule in the code, or expect to find it violated.
 - **Assert what was skipped, not that the run was green.** The proving-ground
   assertion names the components that must *not* have run, because a selection
-  returning everything satisfies every claim about correctness. The coverage
-  equivalent is asserting which units were *not* measured.
+  that quietly returned everything satisfies every claim about correctness. The
+  coverage equivalent is naming the units that must **not** have been measured.
 - **Run it against the real repository.** The proving ground's declaration was
   read from GitHub rather than trusted from the prompt, and its component names
   (`tally`, `api`, `sdk`, `web`) differ from its directories (`rust`, `go/api`,
-  `go/sdk`, `web`) — a constant naming a directory would have matched nothing
-  and passed.
+  `go/sdk`, `web`) — a constant naming a directory would have matched nothing and
+  passed.
 
 ## Validate it against the proving ground
 
@@ -161,6 +255,35 @@ line-weighted aggregate must not change meaning when the unit does.
 Extend `.github/assert-proving-ground.py`, which already holds the orphan gate,
 the scheduler's observed concurrency, and selection's chosen and skipped sets.
 **Editing CI requires asking the user first.**
+
+## Two gaps step 5 left open, to be closed here
+
+Both are in scope. **Both are now settled** — decisions 12 and 13 above carry the
+answers; what follows is the evidence behind them.
+
+**`gitstate.BaseSHA` hardcodes `origin/main`** — the remote *and* the branch, in
+both the `git fetch origin main` and the `git merge-base HEAD origin/main`. Step
+5 only widened the error message (`cmd/lydite/test.go`'s `selectAffected` names a
+non-`main` default branch as one of two causes), so `--affected` still cannot run
+on a repository whose default branch is `master`, and neither can `lydite
+coverage`, `lydite scan --diff-base auto` or `lydite review --base auto` — all
+four resolve through the same function. That is why it lands here rather than in
+step 5: fixing it changes how the coverage baseline resolves its base, which is
+this step's subject. Decide how the default branch is discovered (`git
+symbolic-ref refs/remotes/origin/HEAD` is not set by `actions/checkout`, so a
+discovery that only works locally is worse than none) and whether the remote is
+discovered too, and make the fallback loud rather than silent.
+
+**A component rooted at `.` switches the widening rule off.** `affected.under`
+returns true for every path when `dir` is `"."`, so `matched` is always true, the
+`KindUnmatched` branch is unreachable in such a repository, and only the built-in
+invalidator set protects the other components. ADR 0018 records this as a limit
+of the rule rather than a hole closed. Closing it means deciding what a path
+matched *only* by the catch-all root should count as — the widening direction
+says treat it as unmatched and select everything, which is safe and costs such a
+repository the optimisation almost entirely. Whatever is decided, it must be
+enforced in code: step 5's lesson is that a rule living only in prose is a rule
+that is not true.
 
 ## Out of scope
 

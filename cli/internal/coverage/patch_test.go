@@ -95,7 +95,7 @@ func TestParseLCOV(t *testing.T) {
 			"end_of_record\n",
 	)
 
-	got := ParseLCOV(data, "/repo")
+	_, got := ParseLCOV(data, "/repo")
 	want := LineHits{
 		"src/foo.rs": {1: 1, 2: 0, 5: 3},
 		"src/bar.rs": {10: 0},
@@ -107,7 +107,7 @@ func TestParseLCOV(t *testing.T) {
 
 func TestParseLCOVRelativePathsPassThrough(t *testing.T) {
 	data := []byte("SF:src/foo.rs\nDA:1,4\nend_of_record\n")
-	got := ParseLCOV(data, "/repo")
+	_, got := ParseLCOV(data, "/repo")
 	want := LineHits{"src/foo.rs": {1: 4}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ParseLCOV = %+v, want %+v", got, want)
@@ -431,4 +431,24 @@ func trimNL(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// A line carrying more than one DA record takes the greater count, never the
+// later one. That duplication is exactly what makes an lcov's LF differ from a
+// tally of its DA lines — 57 against 55 on the proving ground's three-crate
+// workspace — so taking the last would have the patch gate score a line
+// uncovered while LH counted it as hit, two figures disagreeing about one line.
+func TestParseLCOVTakesTheGreaterCountForADuplicatedLine(t *testing.T) {
+	for _, order := range []string{
+		"SF:src/lib.rs\nDA:10,1\nDA:10,0\nLF:1\nLH:1\nend_of_record\n",
+		"SF:src/lib.rs\nDA:10,0\nDA:10,1\nLF:1\nLH:1\nend_of_record\n",
+	} {
+		count, hits := ParseLCOV([]byte(order), "/repo")
+		if got := hits["src/lib.rs"][10]; got == 0 {
+			t.Errorf("line 10 scored uncovered, but LH counts it hit: %q", order)
+		}
+		if count != (LineCount{Covered: 1, Total: 1}) {
+			t.Errorf("counts = %+v, want {1 1}", count)
+		}
+	}
 }

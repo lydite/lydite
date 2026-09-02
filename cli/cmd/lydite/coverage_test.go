@@ -1,1058 +1,1463 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
+	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
-// A push to main that measures NOTHING must still record a baseline —
-// carried wholesale from the nearest prior one — not early-return "no
-// coverage measured". A docs-only merge measures nothing (every coverage
-// producer path-filtered away, no reports for --tests=skip to read), and
-// skipping the record leaves that main commit with no baseline at all: the
-// first PR against it recomputes nothing in a bare worktree, reports every
-// language as [NEW], and the gate enforces nothing (wardnet/wardnet#899).
-func TestCoverageOnMainRecordsFullyCarriedBaselineWhenNothingMeasured(t *testing.T) {
-	ctx := context.Background()
-	run := func(dir string, args ...string) {
-		t.Helper()
-		if r := executil.Run(ctx, dir, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+// lines is a measured count, for a test that cares about the ratio rather than
+// about which report produced it.
+func lines(covered, total int) coverage.LineCount {
+	return coverage.LineCount{Covered: covered, Total: total}
+}
+
+// measured is a component that produced a measurement.
+func measured(name string, lang runner.Lang, covered, total int) measurement {
+	return measurement{Name: name, Dir: name, Lang: lang, Lines: lines(covered, total)}
+}
+
+// rowsOf renders a report to a label -> row map for assertions.
+func rowsOf(rep *ui.Report) map[string]ui.Row {
+	out := map[string]ui.Row{}
+	for _, r := range rep.Rows() {
+		out[r.Label] = r
+	}
+	return out
+}
+
+// A run that measured but did not gate must not render as a pass. A workflow
+// that forgot --gate-coverage would otherwise report exactly the green a gated
+// run reports, which is the wardnet/wardnet#957 failure one layer out: a gate
+// that never ran, indistinguishable from one that passed.
+func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+	}}
+	ms := []measurement{measured("api", runner.Go, 9, 10)}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
+	rows := rowsOf(rep)
+	for _, label := range []string{"coverage(api)", "go coverage", "coverage"} {
+		row, ok := rows[label]
+		if !ok {
+			t.Fatalf("no %q row; got %v", label, rep.Rows())
+		}
+		if row.Status == ui.StatusPass {
+			t.Errorf("%s is a pass, but nothing was gated: %+v", label, row)
+		}
+		if row.Status != ui.StatusContext {
+			t.Errorf("%s status = %q, want context", label, row.Status)
 		}
 	}
-	revParse := func(dir, ref string) string {
-		t.Helper()
-		r := executil.Run(ctx, dir, "git", "rev-parse", ref)
-		if !r.Ok() {
-			t.Fatalf("rev-parse %s: %v", ref, r.Err)
-		}
-		return strings.TrimSpace(r.Output)
-	}
-
-	origin := t.TempDir()
-	run(origin, "init", "--bare", "-b", "main", ".")
-
-	// The consumer checkout: c1 (code) then c2 (docs-only) on main, with
-	// HEAD == origin/main — the record-on-main shape.
-	repo := t.TempDir()
-	run(repo, "init", "-b", "main", ".")
-	run(repo, "config", "user.email", "t@t")
-	run(repo, "config", "user.name", "t")
-	if err := os.WriteFile(filepath.Join(repo, "package.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Coverage production is described by the repo's own config file, the way
-	// a real consumer does it now — not by a flag at the call site.
-	writeUnder(t, repo, config.FileName, "coverage:\n  source: report\n")
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "code")
-	c1 := revParse(repo, "HEAD")
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("docs"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "docs only")
-	c2 := revParse(repo, "HEAD")
-	run(repo, "remote", "add", "origin", origin)
-	run(repo, "push", "origin", "main")
-	run(repo, "fetch", "origin")
-
-	// lydite already carries c1's baseline.
-	seed := t.TempDir()
-	run(seed, "init", "-b", gitstate.BranchName, ".")
-	run(seed, "config", "user.email", "t@t")
-	run(seed, "config", "user.name", "t")
-	seeded := filepath.Join(seed, filepath.FromSlash(gitstate.StatePath(c1)))
-	if err := os.MkdirAll(filepath.Dir(seeded), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(seeded, []byte(`{"typescript":93.8}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	run(seed, "add", "-A")
-	run(seed, "commit", "-m", "baseline")
-	run(seed, "remote", "add", "origin", origin)
-	run(seed, "push", "origin", gitstate.BranchName)
-
-	cmd := newCoverageCmd()
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--dir", repo})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("coverage on main with nothing measured: %v\nstdout: %s\nstderr: %s", err, out.String(), errOut.String())
-	}
-	if !strings.Contains(out.String(), "baseline recorded") {
-		t.Errorf("expected a recorded-baseline line, got stdout: %q", out.String())
-	}
-
-	run(repo, "fetch", "origin", gitstate.BranchName)
-	// Keyed by tree, not commit: the tree is what the coverage describes, and
-	// the identifier the commit shares with the pull request that produced it.
-	tree, err := gitstate.TreeSHA(ctx, repo, c2)
-	if err != nil {
-		t.Fatalf("resolve tree for %s: %v", c2, err)
-	}
-	r := executil.Run(ctx, repo, "git", "show", "origin/"+gitstate.BranchName+":"+gitstate.StatePath(tree))
-	if !r.Ok() {
-		t.Fatalf("no baseline recorded for tree %s (commit %s): %v\nstdout: %s\nstderr: %s", tree, c2, r.Err, out.String(), errOut.String())
-	}
-	if !strings.Contains(r.Output, "93.8") {
-		t.Errorf("baseline for %s = %s, want typescript 93.8 carried from %s", tree, r.Output, c1)
+	// The verdict is still a pass: measuring without gating is not a failure,
+	// it is a run that made no claim.
+	if rep.ExitCode() != 0 {
+		t.Errorf("exit = %d, want 0 — an ungated run gates nothing and fails nothing", rep.ExitCode())
 	}
 }
 
-// The trap this whole change has to step around. Baseline computation runs
-// in a throwaway worktree checked out at a historical main commit — a bare
-// tree with no CI-produced report in it — so it must run tests no matter
-// what the repo's coverage.source says. Reading `source: report` as "never
-// run tests" anywhere in this path would hand every report-sourced repo an
-// empty baseline, which the caller then declines to cache, leaving the gate
-// permanently comparing against nothing.
-//
-// The fixture module has a test and no committed profile, so the only way a
-// Go percentage can come back at all is if the suite actually ran.
-func TestComputeBaselineAtRunsTestsEvenWhenSourceIsReport(t *testing.T) {
-	ctx := context.Background()
-	run := func(dir string, args ...string) {
-		t.Helper()
-		if r := executil.Run(ctx, dir, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
-		}
-	}
-
-	repo := t.TempDir()
-	run(repo, "init", "-b", "main", ".")
-	run(repo, "config", "user.email", "t@t")
-	run(repo, "config", "user.name", "t")
-	for name, body := range map[string]string{
-		"go.mod":       "module fixture\n\ngo 1.26\n",
-		"main.go":      "package fixture\n\nfunc Foo() int { return 1 }\n",
-		"main_test.go": "package fixture\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\tif Foo() != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
-		// The very setting that must NOT reach the baseline worktree.
-		config.FileName: "coverage:\n  source: report\n",
-	} {
-		writeUnder(t, repo, name, body)
-	}
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "fixture")
-	r := executil.Run(ctx, repo, "git", "rev-parse", "HEAD")
-	if !r.Ok() {
-		t.Fatalf("rev-parse: %v", r.Err)
-	}
-	sha := strings.TrimSpace(r.Output)
-
-	cfg, err := config.Load(repo)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Coverage.Source != config.SourceReport {
-		t.Fatalf("fixture config did not take: %+v", cfg.Coverage)
-	}
-
-	cmd := newCoverageCmd()
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-
-	baseline, err := computeBaselineAt(ctx, cmd, repo, sha, cfg)
-	if err != nil {
-		t.Fatalf("computeBaselineAt: %v\nstderr: %s", err, errOut.String())
-	}
-	got, ok := baseline["go"]
-	if !ok {
-		t.Fatalf("baseline has no go entry — the worktree honoured coverage.source: report and measured nothing: %+v\nstderr: %s", baseline, errOut.String())
-	}
-	if got != 100 {
-		t.Fatalf("go baseline = %v%%, want 100%% from actually running the fixture's test", got)
+// --no-coverage emits no coverage row at all. A row saying `unmeasured` on
+// every fast local run trains readers to ignore the tag that exists to be
+// noticed; the state that must stay visible is measured-and-not-gated.
+func TestNoCoverageEmitsNoRows(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl,
+		[]measurement{unmeasuredComponent(decl.Components[0], "coverage is off for this run")},
+		config.Default(), coverageOptions{})
+	if len(rep.Rows()) != 0 {
+		t.Errorf("rows = %v, want none", rep.Rows())
 	}
 }
 
-func TestResolveSource(t *testing.T) {
+// The three altitudes are sums over one stored quantity, so they cannot
+// disagree — and the language figure weights by lines rather than averaging
+// percentages. A 1000-line component at 90% and a 10-line one at 0% is 89.1%,
+// not the 45% a mean would report.
+func TestComposedFiguresAreLineWeighted(t *testing.T) {
+	ms := []measurement{
+		measured("big", runner.Go, 900, 1000),
+		measured("tiny", runner.Go, 0, 10),
+	}
+	got, fresh, carried := composed(ms, nil, everything)
+	if got != lines(900, 1010) {
+		t.Fatalf("composed = %+v, want {900 1010}", got)
+	}
+	if fresh != 2 || carried != 0 {
+		t.Errorf("contributors = %d fresh, %d carried; want 2 and 0", fresh, carried)
+	}
+	if pct := got.Percent(); pct < 89.1 || pct > 89.2 {
+		t.Errorf("percent = %v, want ~89.1 — a mean of the two would be 45", pct)
+	}
+}
+
+// A component that produced no measurement contributes the counts already
+// recorded for the tree it is unchanged from, and the row says how many of
+// each the figure is made of. A composed figure that does not say what it
+// measured is indistinguishable from one that measured everything.
+func TestACarriedComponentIsCountedAndNamed(t *testing.T) {
+	current := []measurement{
+		measured("api", runner.Go, 50, 100),
+		{Name: "sdk", Dir: "sdk", Lang: runner.Go, Lines: lines(80, 100)},
+	}
+	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(80, 100)}
+	row := composedRow("go coverage", current, map[string]bool{"sdk": true}, baseline, byLang(runner.Go), 0.1)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v, want a pass", row)
+	}
+	if !strings.Contains(row.Value, "2 of 2 component(s), 1 carried forward") {
+		t.Errorf("value = %q, want it to name what it measured and what it carried", row.Value)
+	}
+}
+
+// The baseline side of a composed comparison sums exactly the components the
+// current side covers. Summing the whole baseline instead would compare this
+// run's components against the base tree's, so every narrowed run would read
+// as a regression the size of the component it did not run.
+func TestAComposedComparisonOnlyCoversWhatItMeasured(t *testing.T) {
+	// api is measured and unchanged; sdk did not run and the baseline has no
+	// entry for it, so it contributes to neither side.
+	current := []measurement{
+		measured("api", runner.Go, 50, 100),
+		unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest}, "not affected"),
+	}
+	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(5, 1000)}
+	row := composedRow("go coverage", current, nil, baseline, byLang(runner.Go), 0.1)
+	if row.Status == ui.StatusFail {
+		t.Fatalf("row = %+v — the unrun component's baseline must not drag the comparison", row)
+	}
+	if !strings.Contains(row.Value, "1 of 2 component(s)") {
+		t.Errorf("value = %q, want it to say only one component was in the figure", row.Value)
+	}
+}
+
+// A composed figure whose baseline does not cover every component in it is
+// reported as new rather than compared. A partial comparison is a different
+// quantity, and rendering one as a comparison is exactly the class of error
+// this gate exists to avoid.
+func TestAComposedFigureWithAnIncompleteBaselineIsNotCompared(t *testing.T) {
+	current := []measurement{
+		measured("api", runner.Go, 50, 100),
+		measured("sdk", runner.Go, 90, 100),
+	}
+	row := composedRow("go coverage", current, nil, gitstate.Baseline{"api": lines(50, 100)}, byLang(runner.Go), 0.1)
+	if row.Status != ui.StatusNew {
+		t.Errorf("row = %+v, want new — the baseline covers one of the two components", row)
+	}
+}
+
+// A component's own baseline is what gates it, and a dip beyond the tolerance
+// fails. The comparison is at display precision, so a component shown as
+// holding steady is never failed for a difference the report cannot show.
+func TestAComponentIsGatedAgainstItsOwnBaseline(t *testing.T) {
+	base := gitstate.Baseline{"api": lines(80, 100)}
 	for _, tc := range []struct {
-		name       string
-		sourceFlag string
-		testsMode  string
-		fromFile   config.Source
-		want       coverage.Source
-		wantErr    bool
+		name    string
+		covered int
+		want    ui.Status
 	}{
-		// The file is the normal path: no flags, config decides.
-		{name: "file report", fromFile: config.SourceReport, want: coverage.SourceReport},
-		{name: "file run", fromFile: config.SourceRun, want: coverage.SourceRun},
-		// An explicit flag outranks the file, in both directions — a local
-		// dev must be able to force a real run in a report-sourced repo.
-		{name: "flag beats file", sourceFlag: "run", fromFile: config.SourceReport, want: coverage.SourceRun},
-		{name: "flag report beats file run", sourceFlag: "report", fromFile: config.SourceRun, want: coverage.SourceReport},
-		// The deprecated spelling, still honoured, still outranking the file.
-		{name: "tests skip maps to report", testsMode: "skip", fromFile: config.SourceRun, want: coverage.SourceReport},
-		{name: "tests run maps to run", testsMode: "run", fromFile: config.SourceReport, want: coverage.SourceRun},
-		{name: "source wins over tests", sourceFlag: "report", testsMode: "run", fromFile: config.SourceRun, want: coverage.SourceReport},
-		// "skip" is the old vocabulary and means nothing to --source.
-		{name: "source rejects skip", sourceFlag: "skip", fromFile: config.SourceRun, wantErr: true},
-		{name: "source rejects junk", sourceFlag: "nope", fromFile: config.SourceRun, wantErr: true},
-		{name: "tests rejects report", testsMode: "report", fromFile: config.SourceRun, wantErr: true},
+		{"a real dip fails", 70, ui.StatusFail},
+		{"holding steady passes", 80, ui.StatusPass},
+		{"an improvement passes", 90, ui.StatusPass},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := &cobra.Command{}
-			cmd.SetOut(&bytes.Buffer{})
-			cmd.SetErr(&bytes.Buffer{})
+			row := componentRow(measured("api", runner.Go, tc.covered, 100), base, 0.1)
+			if row.Status != tc.want {
+				t.Errorf("row = %+v, want %q", row, tc.want)
+			}
+		})
+	}
+	// A component the baseline has never seen is reported, not failed —
+	// mirroring how a language with no baseline was always handled.
+	if row := componentRow(measured("web", runner.TypeScript, 1, 10), base, 0.1); row.Status != ui.StatusNew {
+		t.Errorf("row = %+v, want new", row)
+	}
+}
 
-			got, err := resolveSource(cmd, tc.sourceFlag, tc.testsMode, tc.fromFile)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("resolveSource(%q, %q, %q) = %q, want an error", tc.sourceFlag, tc.testsMode, tc.fromFile, got)
-				}
-				return
+// A component that could not be measured names why, and says when the figures
+// above it are carrying its baseline forward. A carried number that says
+// nothing about itself is one a reader takes for a measurement.
+func TestAnUnmeasuredComponentNamesWhyAndWhatIsCarried(t *testing.T) {
+	c := component.Component{Name: "tally", Dir: "rust", Runner: runner.CargoNextest}
+	base := gitstate.Baseline{"tally": lines(60, 100)}
+
+	skipped := unmeasuredComponent(c, "the component was not selected for this run")
+	skipped.Carryable = true
+	row := componentRow(skipped, base, 0.1)
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured", row)
+	}
+	if !strings.Contains(row.Value, "not selected") {
+		t.Errorf("value = %q, want it to name the reason", row.Value)
+	}
+	if !strings.Contains(row.Value, "60.0%") {
+		t.Errorf("value = %q, want it to say the baseline is being carried forward", row.Value)
+	}
+
+	// A component that ran and failed carries nothing, so its row must not
+	// claim a number is standing in for it.
+	failed := unmeasuredComponent(c, "test(tally) did not pass: failed")
+	if got := componentRow(failed, base, 0.1); strings.Contains(got.Value, "60.0%") {
+		t.Errorf("value = %q — a failed component's old figure is a guess, not a stand-in", got.Value)
+	}
+}
+
+// Only a component this run did not select carries its baseline forward. One
+// that ran and failed may be exactly what changed, so its old entry is a guess
+// — and carrying it renders as a pass, so a language whose only component
+// failed to build would report that component's last good figure with a ✓
+// beside it.
+func TestOnlyAnUnselectedComponentCarriesForward(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	for _, tc := range []struct {
+		name      string
+		carryable bool
+		want      ui.Status
+	}{
+		{"a component selection skipped", true, ui.StatusPass},
+		{"a component that failed", false, ui.StatusUnmeasured},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := unmeasuredComponent(decl.Components[0], "why")
+			m.Carryable = tc.carryable
+			baseline := gitstate.Baseline{"web": lines(80, 100)}
+			current := []measurement{m}
+			carried := map[string]bool{}
+			if tc.carryable {
+				current = []measurement{{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: baseline["web"]}}
+				carried["web"] = true
 			}
-			if err != nil {
-				t.Fatalf("resolveSource: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("resolveSource(%q, %q, %q) = %q, want %q", tc.sourceFlag, tc.testsMode, tc.fromFile, got, tc.want)
+			row := composedRow("typescript coverage", current, carried, baseline, byLang(runner.TypeScript), 0.1)
+			if row.Status != tc.want {
+				t.Errorf("row = %+v, want %q", row, tc.want)
 			}
 		})
 	}
 }
 
-// Both flags default to "" precisely so that "unset" is distinguishable from
-// "explicitly run". With a "run" default the flag would always be populated,
-// always outrank the file, and coverage.source would never be consulted at
-// all — a silent failure that looks exactly like the config key not working.
-func TestCoverageFlagDefaultsLeaveConfigInCharge(t *testing.T) {
-	cmd := newCoverageCmd()
-	for _, name := range []string{"source", "tests"} {
-		if got := cmd.Flags().Lookup(name).DefValue; got != "" {
-			t.Errorf("--%s defaults to %q; it must default to empty so .lydite/config.yml is consulted", name, got)
-		}
+// The floor gates every measured component and needs no baseline, which is why
+// it applies whether or not the run reads one. An unmeasured component is
+// named and never folded into the passing count: a gate that did not run must
+// be visibly distinct from one that passed and from one that failed.
+func TestTheFloorGatesEachComponentAndNamesWhatItSkipped(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		measured("api", runner.Go, 90, 100),
+		measured("sdk", runner.Go, 10, 100),
+		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not affected"),
+	}, 50)
+	rows := rowsOf(rep)
+	if got := rows["floor(sdk)"].Status; got != ui.StatusFail {
+		t.Errorf("floor(sdk) = %q, want a failure at 10%% against a 50%% floor", got)
+	}
+	if _, ok := rows["floor(api)"]; ok {
+		t.Errorf("a component clearing the floor produced a row: %+v", rows["floor(api)"])
+	}
+	if got := rows["floor(web)"].Status; got != ui.StatusUnmeasured {
+		t.Errorf("floor(web) = %q, want unmeasured", got)
+	}
+	// With one component below the floor there is no summary line to
+	// mistake for a repository-wide pass.
+	if _, ok := rows["floor"]; ok {
+		t.Errorf("a summary row appeared beside a failing component: %+v", rows["floor"])
 	}
 }
 
-func TestResolveReports(t *testing.T) {
-	cfg := config.Default()
-	cfg.Coverage.Go.Report = config.Reports{"": "from-file.out"}
-	cfg.Coverage.Rust.Report = config.Reports{"daemon": "file-llvm.json"}
-	cfg.Coverage.Rust.LCOV = config.Reports{"daemon": "file-lcov.info"}
-
-	// Nothing on the command line: the file supplies all three.
-	got := resolveReports(cfg, nil, nil, nil)
-	if !reflect.DeepEqual(got.Go, coverage.ReportOverrides{"": "from-file.out"}) {
-		t.Errorf("Go = %+v, want the file's value", got.Go)
-	}
-	if !reflect.DeepEqual(got.Rust, coverage.ReportOverrides{"daemon": "file-llvm.json"}) {
-		t.Errorf("Rust = %+v, want the file's value", got.Rust)
-	}
-	if !reflect.DeepEqual(got.RustLCOV, coverage.ReportOverrides{"daemon": "file-lcov.info"}) {
-		t.Errorf("RustLCOV = %+v, want the file's value", got.RustLCOV)
-	}
-
-	// A flag replaces its own kind wholesale and leaves the others alone.
-	// Wholesale, not merged, so a flag can drop a stale keyed entry the file
-	// declares rather than only ever being able to add to it.
-	got = resolveReports(cfg, []string{"wctl=flag.out", "sdk=flag2.out"}, nil, nil)
-	wantGo := coverage.ReportOverrides{"wctl": "flag.out", "sdk": "flag2.out"}
-	if !reflect.DeepEqual(got.Go, wantGo) {
-		t.Errorf("Go = %+v, want the flag's value replacing the file's entirely", got.Go)
-	}
-	if !reflect.DeepEqual(got.Rust, coverage.ReportOverrides{"daemon": "file-llvm.json"}) {
-		t.Errorf("--go-report disturbed Rust: %+v", got.Rust)
+// The summary says N of M, because the two differ exactly when some component
+// went ungated — so a partial run cannot read as a repository-wide pass.
+func TestTheFloorSummarySaysHowManyItCovered(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		measured("api", runner.Go, 90, 100),
+		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not affected"),
+	}, 50)
+	if got := rowsOf(rep)["floor"].Value; !strings.Contains(got, "1 of 2 component(s)") {
+		t.Errorf("floor summary = %q, want it to say one of two was gated", got)
 	}
 }
 
-func TestResolveReportsEmptyConfigYieldsNil(t *testing.T) {
-	got := resolveReports(config.Default(), nil, nil, nil)
-	if got.Go != nil || got.Rust != nil || got.RustLCOV != nil {
-		t.Fatalf("a zero-config repo should carry no overrides at all, got %+v", got)
+// A floor of 0 is off, which is the default: upgrading lydite must never start
+// failing a repository over a gap it has always had.
+func TestTheFloorIsOffByDefault(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{measured("api", runner.Go, 0, 100)}, config.Default().Coverage.Floor)
+	if len(rep.Rows()) != 0 {
+		t.Errorf("rows = %v, want none with the floor disabled", rep.Rows())
 	}
 }
 
-// unmeasuredLanguages is the single source of truth for "detected but not
-// measured this run" — the predicate the unmeasured warning, the
-// carry-forward trigger, and the merge all share, so it cannot drift between
-// them. An undetected language in the report (shouldn't happen, but) is not
-// unmeasured; a detected one absent from the report is.
-func TestUnmeasuredLanguages(t *testing.T) {
-	got := unmeasuredLanguages(
-		[]detect.Ecosystem{detect.Rust, detect.TypeScript, detect.Go},
-		map[string]float64{"rust": 86},
-	)
-	if !reflect.DeepEqual(got, []string{"go", "typescript"}) {
-		t.Errorf("unmeasuredLanguages = %v, want [go typescript] (sorted)", got)
+// A diff is scoped to the files a component's own report could speak for:
+// under its directory, in a language its runner implies. Without both halves a
+// repository with a Go and a TypeScript component over one root would score
+// each against the other's changed files.
+func TestChangedLinesAreScopedToTheComponent(t *testing.T) {
+	changed := map[string][]int{
+		"go/api/main.go": {1, 2},
+		"go/sdk/main.go": {3},
+		"web/src/app.ts": {4},
+		"go/api/README":  {5},
 	}
-	if got := unmeasuredLanguages([]detect.Ecosystem{detect.Rust}, map[string]float64{"rust": 86}); len(got) != 0 {
-		t.Errorf("fully measured: unmeasuredLanguages = %v, want none", got)
+	got := scopeToComponent(changed, measurement{Name: "api", Dir: "go/api", Lang: runner.Go})
+	if len(got) != 1 || got["go/api/main.go"] == nil {
+		t.Errorf("scoped = %v, want only go/api/main.go", got)
 	}
-}
-
-// mergeCarried is what makes a partial run safe to record as a baseline: a
-// detected-but-unmeasured language keeps its entry from the prior lookup
-// (the code is still there; only this run's measurement is missing), while
-// anything the lookup couldn't fill is returned as missing so the caller
-// warns instead of shrinking the baseline in silence. Measured values are
-// never touched, and the input map is never mutated.
-func TestMergeCarried(t *testing.T) {
-	current := map[string]float64{"rust": 86}
-	record, carried, missing := mergeCarried(current, []string{"go", "typescript"}, map[string]float64{"typescript": 93.8})
-
-	want := map[string]float64{"rust": 86, "typescript": 93.8}
-	if !reflect.DeepEqual(record, want) {
-		t.Errorf("mergeCarried record = %v, want %v", record, want)
+	web := scopeToComponent(changed, measurement{Name: "web", Dir: "web", Lang: runner.TypeScript})
+	if len(web) != 1 || web["web/src/app.ts"] == nil {
+		t.Errorf("scoped = %v, want only web/src/app.ts", web)
 	}
-	if !reflect.DeepEqual(carried, []string{"typescript"}) || !reflect.DeepEqual(missing, []string{"go"}) {
-		t.Errorf("carried = %v missing = %v, want [typescript] / [go]", carried, missing)
-	}
-	if len(current) != 1 {
-		t.Errorf("mergeCarried mutated its input: %v", current)
-	}
-
-	record, carried, missing = mergeCarried(current, nil, nil)
-	if !reflect.DeepEqual(record, current) || len(carried) != 0 || len(missing) != 0 {
-		t.Errorf("nothing unmeasured: record = %v carried = %v missing = %v, want record == current and empty lists", record, carried, missing)
+	// A component rooted at the scan root claims every path under it, which
+	// is the right answer to "whose report could contain this file" — and is
+	// deliberately not the answer affected selection gives to "was this path
+	// understood".
+	root := scopeToComponent(changed, measurement{Name: "root", Dir: ".", Lang: runner.Go})
+	if len(root) != 2 {
+		t.Errorf("scoped = %v, want both Go files", root)
 	}
 }
 
-// enabledEcosystems makes `enabled: false` in .lydite/config.yml behave exactly
-// like source removal for the coverage gate: the language stops being
-// "detected", so its baseline entry dies on the next record instead of being
-// carried forward (and [UNMEASURED]-reported) forever.
-func TestEnabledEcosystemsDropsDisabledLanguages(t *testing.T) {
-	cfg := config.Default()
-	cfg.TypeScript.Enabled = false
-	got := enabledEcosystems([]detect.Ecosystem{detect.Rust, detect.TypeScript, detect.Go}, cfg)
-	if !reflect.DeepEqual(got, []detect.Ecosystem{detect.Rust, detect.Go}) {
-		t.Errorf("enabledEcosystems = %v, want [rust go] with typescript disabled", got)
-	}
-}
-
-// reportText renders a report the way the assertions below read it: one
-// line per row, status name first. The status name rather than the glyph,
-// because three statuses share the "!" glyph on purpose and a test asserting
-// on the glyph could not tell a referral from an unmeasured gate.
-func reportText(rep *ui.Report) string {
-	var b strings.Builder
-	for _, row := range rep.Rows() {
-		fmt.Fprintf(&b, "%s %s: %s\n", row.Status, row.Label, row.Value)
-		for _, d := range row.Detail {
-			fmt.Fprintf(&b, "  %s\n", d)
-		}
-	}
-	return b.String()
-}
-
-// reportErr is the gate's verdict as an error, matching what the command
-// returns to main once the rows have been rendered.
-func reportErr(rep *ui.Report) error { return rep.Err() }
-
-func runDiffReport(t *testing.T, tolerance float64, current, baseline map[string]float64, detected ...detect.Ecosystem) (string, error) {
-	t.Helper()
-	rep := ui.NewReport("coverage")
-	diffReport(rep, current, baseline, tolerance, detected)
-	return reportText(rep), reportErr(rep)
-}
-
-func TestDiffReportNewLanguage(t *testing.T) {
-	out, err := runDiffReport(t, 0, map[string]float64{"go": 50}, map[string]float64{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out, "new") || !strings.Contains(out, "go") {
-		t.Fatalf("expected a [NEW] line for go, got: %q", out)
-	}
-}
-
-// TestDiffReportDroppedLanguage guards the fix for a language present in the
-// baseline but missing from current (its coverage tooling became unavailable,
-// or a real regression removed it entirely from the measured set): it must be
-// reported, not silently omitted — regression for the bug where diffReport
-// only iterated current's keys and such a language was never mentioned at all.
-func TestDiffReportDroppedLanguage(t *testing.T) {
-	out, err := runDiffReport(t, 0, map[string]float64{}, map[string]float64{"typescript": 85})
-	if err != nil {
-		t.Fatalf("a dropped language must not fail the check on its own, got error: %v", err)
-	}
-	if !strings.Contains(out, "dropped") || !strings.Contains(out, "typescript") {
-		t.Fatalf("expected a [DROPPED] line mentioning typescript, got: %q", out)
-	}
-}
-
-// A language that is still detected in the tree but produced no measurement
-// this run (a path-filtered CI job skipped its coverage step — wardnet PR
-// #892) is not "no longer measured": the code is right there. It must be
-// reported as [UNMEASURED], reserving [DROPPED] for a language whose source
-// actually left the tree. Neither fails the check on its own.
-func TestDiffReportUnmeasuredWhenLanguageStillDetected(t *testing.T) {
-	out, err := runDiffReport(t, 0, map[string]float64{"rust": 86},
-		map[string]float64{"rust": 85.8, "typescript": 93.8},
-		detect.Rust, detect.TypeScript)
-	if err != nil {
-		t.Fatalf("an unmeasured-but-detected language must not fail the check, got error: %v", err)
-	}
-	if !strings.Contains(out, "unmeasured") || !strings.Contains(out, "not measured this run") {
-		t.Fatalf("expected an [UNMEASURED] line for typescript, got: %q", out)
-	}
-	if strings.Contains(out, "dropped") {
-		t.Fatalf("a detected language must not be reported as [DROPPED], got: %q", out)
-	}
-}
-
-func TestDiffReportRegression(t *testing.T) {
-	out, err := runDiffReport(t, 0, map[string]float64{"go": 40}, map[string]float64{"go": 50})
-	if err == nil {
-		t.Fatal("expected an error for a regressed language")
-	}
-	if !strings.Contains(out, "fail") {
-		t.Fatalf("expected a [FAIL] line, got: %q", out)
-	}
-}
-
-// A dip smaller than the configured tolerance is measurement noise, not a
-// regression — regression test for the gate failing PRs with "rust: 86.1%
-// (baseline 86.1%, regressed 0.0%)", a sub-rounding-error dip, on PRs
-// containing no Rust changes at all.
-func TestDiffReportPassesWithinTolerance(t *testing.T) {
-	out, err := runDiffReport(t, 0.1, map[string]float64{"rust": 86.05}, map[string]float64{"rust": 86.1})
-	if err != nil {
-		t.Fatalf("a dip within the tolerance must not fail the gate, got error: %v", err)
-	}
-	if !strings.Contains(out, "pass") {
-		t.Fatalf("expected a [PASS] line for a within-tolerance dip, got: %q", out)
-	}
-}
-
-// The tolerance only absorbs noise — a dip larger than it is still a real
-// regression and must fail.
-func TestDiffReportFailsBeyondTolerance(t *testing.T) {
-	out, err := runDiffReport(t, 0.1, map[string]float64{"rust": 85.6}, map[string]float64{"rust": 86.1})
-	if err == nil {
-		t.Fatal("expected an error for a dip beyond the tolerance")
-	}
-	if !strings.Contains(out, "fail") {
-		t.Fatalf("expected a [FAIL] line for a beyond-tolerance dip, got: %q", out)
-	}
-}
-
-// An exactly-at-tolerance dip must gate identically regardless of the
-// operands' float64 representation: 86.2-86.1 exceeds 0.1 in raw float math
-// while 86.1-86.0 does not, so a raw comparison failed one "regressed 0.1%"
-// and passed an identical-looking other. The gate compares at display
-// precision (regressedBeyond) so both pass.
-func TestDiffReportToleranceBoundaryIsRepresentationIndependent(t *testing.T) {
-	for _, pair := range [][2]float64{{86.1, 86.2}, {86.0, 86.1}, {50.0, 50.1}} {
-		out, err := runDiffReport(t, 0.1, map[string]float64{"go": pair[0]}, map[string]float64{"go": pair[1]})
-		if err != nil {
-			t.Fatalf("a 0.1pp dip with tolerance 0.1 must pass for %v vs %v, got error: %v (out: %q)", pair[0], pair[1], err, out)
-		}
-	}
-}
-
-func TestRegressedBeyond(t *testing.T) {
-	cases := []struct {
-		name           string
-		cur, base, tol float64
-		want           bool
+// Patch coverage gates against that component's own aggregate baseline. A
+// component with no baseline is reported, not failed.
+func TestPatchIsGatedAgainstTheComponentsOwnBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hit, tot  int
+		base      coverage.LineCount
+		wantState ui.Status
 	}{
-		{"improvement never regresses", 86.2, 86.1, 0, false},
-		{"equal never regresses", 86.1, 86.1, 0, false},
-		{"sub-display dip with zero tolerance shows 0.0%, passes", 86.06, 86.1, 0, false},
-		{"visible dip with zero tolerance fails", 86.0, 86.1, 0, true},
-		{"dip equal to tolerance passes (either representation)", 86.1, 86.2, 0.1, false},
-		{"dip equal to tolerance passes (other representation)", 86.0, 86.1, 0.1, false},
-		{"dip beyond tolerance fails", 85.9, 86.1, 0.1, true},
-	}
-	for _, c := range cases {
-		if got := regressedBeyond(c.cur, c.base, c.tol); got != c.want {
-			t.Errorf("%s: regressedBeyond(%v, %v, %v) = %v, want %v", c.name, c.cur, c.base, c.tol, got, c.want)
-		}
+		{"untested new code fails", 0, 4, lines(80, 100), ui.StatusFail},
+		{"well tested new code passes", 4, 4, lines(80, 100), ui.StatusPass},
+		{"no baseline is reported", 0, 4, coverage.LineCount{}, ui.StatusNew},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := patchRow("patch(api)", tc.hit, tc.tot, tc.base, 0.1); got.Status != tc.wantState {
+				t.Errorf("row = %+v, want %q", got, tc.wantState)
+			}
+		})
 	}
 }
 
-// Recording a within-tolerance dip verbatim would let tolerated dips
-// compound: each merge lowers the baseline by up to the tolerance and the
-// next PR dips again from the lower floor. The baseline writers restore such
-// dips to the prior (high-water) value; only a beyond-tolerance drop — which
-// was FAIL-visible on the PR that introduced it — resets the baseline.
-func TestWithToleratedDipsRestored(t *testing.T) {
-	record := map[string]float64{"go": 86.01, "rust": 70.0, "typescript": 90.0, "kotlin": 55.5}
-	prior := map[string]float64{"go": 86.1, "rust": 71.0, "typescript": 89.5}
-	got := withToleratedDipsRestored(record, prior, 0.1)
-	want := map[string]float64{
-		"go":         86.1, // dipped 0.09, within tolerance → restored
-		"rust":       70.0, // dipped 1.0, beyond tolerance → deliberate reset, kept
-		"typescript": 90.0, // improved → kept (baseline ratchets up)
-		"kotlin":     55.5, // no prior → kept
+// A tolerated dip is recorded as the baseline's own value, so the tolerance
+// cannot become an unbounded downward ratchet: each change dipping by less than
+// the tolerance would otherwise lower what the next one is measured against,
+// and coverage bleeds one tolerance per merge with every gate green.
+func TestAToleratedDipDoesNotLowerTheBaseline(t *testing.T) {
+	baseline := gitstate.Baseline{"api": lines(800, 1000), "web": lines(500, 1000)}
+	// api dips 0.1pp — inside the tolerance. web drops 10pp, which failed
+	// visibly on the change that introduced it, so it is recorded as measured.
+	record := gitstate.Baseline{"api": lines(799, 1000), "web": lines(400, 1000)}
+	got := withToleratedDipsRestored(record, baseline, 0.1)
+	if got["api"] != baseline["api"] {
+		t.Errorf("api = %+v, want the baseline's %+v restored", got["api"], baseline["api"])
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("withToleratedDipsRestored = %v, want %v", got, want)
-	}
-	if record["go"] != 86.01 {
-		t.Fatal("input map must not be mutated")
+	if got["web"] != record["web"] {
+		t.Errorf("web = %+v, want the measured %+v recorded", got["web"], record["web"])
 	}
 }
 
-func TestDiffReportPass(t *testing.T) {
-	out, err := runDiffReport(t, 0, map[string]float64{"go": 55}, map[string]float64{"go": 50})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// Every declared component produces exactly one measurement, including one this
+// invocation never selected. Omitting the rest would make a narrowed run
+// indistinguishable from a complete one.
+func TestEveryDeclaredComponentIsAccountedFor(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "tally", Dir: "rust", Runner: runner.CargoNextest},
+		{Name: "api", Dir: "go/api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	got := inDeclarationOrder(decl, []measurement{measured("api", runner.Go, 1, 2)}, true)
+	if len(got) != 3 {
+		t.Fatalf("got %d measurements, want one per declared component", len(got))
 	}
-	if !strings.Contains(out, "pass") {
-		t.Fatalf("expected a [PASS] line, got: %q", out)
+	for i, want := range []string{"tally", "api", "web"} {
+		if got[i].Name != want {
+			t.Errorf("position %d is %q, want %q — declaration order", i, got[i].Name, want)
+		}
+	}
+	if got[0].Why == "" || got[2].Why == "" {
+		t.Errorf("an unselected component produced no reason: %+v", got)
+	}
+	// The language comes from the declaration, so a component that never ran
+	// still lands in its language's figure as unmeasured rather than in none.
+	if got[0].Lang != runner.Rust || got[2].Lang != runner.TypeScript {
+		t.Errorf("languages = %q, %q; want rust and typescript", got[0].Lang, got[2].Lang)
 	}
 }
 
-// TestDiffReportOnlyCountsRealRegressions confirms a dropped/new language
-// never contributes to the failure count — only an actual measured decrease
-// does, even when all three cases occur in the same run.
-func TestDiffReportOnlyCountsRealRegressions(t *testing.T) {
-	current := map[string]float64{"go": 40, "rust": 60}
-	baseline := map[string]float64{"go": 50, "typescript": 85}
-	rep := ui.NewReport("coverage")
-	diffReport(rep, current, baseline, 0, nil)
-	out := reportText(rep)
-	if err := reportErr(rep); err == nil {
-		t.Fatalf("expected the run to fail, got: %v", err)
+// A component declaring a raw command has no instrumented variant to ask for,
+// and there is deliberately no key naming where its coverage lands. It is
+// unmeasured with the reason said out loud, never excluded: excluding it drops
+// it from the composed figures silently, and a gate covering fewer components
+// than the repository has would read as a complete one.
+func TestARawCommandComponentIsUnmeasuredAndNotExcluded(t *testing.T) {
+	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "check"}}
+	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{Name: "make"}, true)
+	if m.Measured() {
+		t.Fatal("a raw command produced a measurement")
 	}
-	// Counted from the rows, not from the error text. The error is the
-	// verdict's exit code and says nothing about how many languages
-	// regressed, so asserting on its message would pass for any number.
-	failing := 0
-	for _, row := range rep.Rows() {
-		if row.Status == ui.StatusFail {
-			failing++
-		}
+	if !strings.Contains(m.Why, "raw command") {
+		t.Errorf("why = %q, want it to name the raw command", m.Why)
 	}
-	if failing != 1 {
-		t.Fatalf("expected exactly 1 regressed language, got %d:\n%s", failing, out)
-	}
-	for _, want := range []string{"fail", "new", "dropped"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected output to contain %q, got: %q", want, out)
-		}
+	if m.Name != "docs" {
+		t.Errorf("name = %q — the component must still be accounted for", m.Name)
 	}
 }
 
-// The coverage gates share one renderer with every other command, so they
-// cannot drift apart on formatting. What is worth pinning is that they all
-// reach it: a gate that printed its own line would drift from the others on
-// every later change to the grammar.
-func TestCoverageRowsShareTheGrammar(t *testing.T) {
-	rep := ui.NewReport("coverage")
-	diffReport(rep, map[string]float64{"go": 50}, map[string]float64{"go": 50}, 0, []detect.Ecosystem{detect.Go})
-	var buf bytes.Buffer
-	if err := rep.WriteText(&buf, false); err != nil {
-		t.Fatalf("WriteText: %v", err)
+// A report lydite cannot read leaves the component unmeasured with the error,
+// never with a zero measurement. A component measured at 0% and one whose
+// report is missing read identically as a percentage and mean opposite things.
+func TestAMissingReportIsUnmeasuredNotZero(t *testing.T) {
+	c := component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}
+	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{CoverageReport: ".lydite-reports/coverage.out"}, true)
+	if m.Measured() {
+		t.Fatal("a missing report produced a measurement")
 	}
-	line := strings.SplitN(buf.String(), "\n", 2)[0]
-	if !strings.HasPrefix(line, "✓ go ") || !strings.Contains(line, "....") {
-		t.Fatalf("expected a glyph row with leader dots, got %q", line)
+	if m.Lines.Total != 0 || m.Lines.Covered != 0 {
+		t.Errorf("lines = %+v, want nothing", m.Lines)
 	}
-}
-
-func TestFilterByExt(t *testing.T) {
-	changed := map[string][]int{
-		"main.go":       {1, 2},
-		"lib.rs":        {3},
-		"index.ts":      {4},
-		"component.tsx": {5},
-	}
-	got := filterByExt(changed, []string{".ts", ".tsx"})
-	want := map[string][]int{"index.ts": {4}, "component.tsx": {5}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("filterByExt = %+v, want %+v", got, want)
+	if m.Why == "" {
+		t.Error("no reason given for an unreadable report")
 	}
 }
 
-// TestTSPatchPercentDoesNotClobberAcrossPackages guards the fix for a bug
-// where merging every TS package's LineHits into one shared map (via
-// maps.Copy, keyed by package-relative path) let two packages with the same
-// relative file name silently clobber each other's hit data under Go's
-// unordered map iteration. tsPatchPercent must instead resolve each
-// package's contribution independently, scoped to that package's own
-// repo-relative prefix.
-func TestTSPatchPercentDoesNotClobberAcrossPackages(t *testing.T) {
-	dir := t.TempDir()
-	webDir := filepath.Join(dir, "web")
-	apiDir := filepath.Join(dir, "api")
-	writeLCOV := func(coverageDir, sf string, hit int) {
-		t.Helper()
-		if err := os.MkdirAll(coverageDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		data := fmt.Sprintf("SF:%s\nDA:1,%d\nend_of_record\n", sf, hit)
-		if err := os.WriteFile(filepath.Join(coverageDir, "lcov.info"), []byte(data), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Two packages, each with its own src/index.ts at the same
-	// package-relative path — only distinguishable by which package prefix
-	// the changed file actually falls under.
-	writeLCOV(filepath.Join(webDir, "coverage"), filepath.Join(webDir, "src", "index.ts"), 1)
-	writeLCOV(filepath.Join(apiDir, "coverage"), filepath.Join(apiDir, "src", "index.ts"), 0)
-
-	tsLCOV := map[string]string{
-		webDir: filepath.Join(webDir, "coverage", "lcov.info"),
-		apiDir: filepath.Join(apiDir, "coverage", "lcov.info"),
-	}
-	changed := map[string][]int{
-		"web/src/index.ts": {1},
-		"api/src/index.ts": {1},
-	}
-
-	hit, total := tsPatchPercent(dir, tsLCOV, changed)
-	if total != 2 {
-		t.Fatalf("total = %d, want 2 (one coverable changed line per package)", total)
-	}
-	if hit != 1 {
-		t.Fatalf("hit = %d, want 1 (web's line is hit, api's is not — a clobbered merge would report 0 or 2, not 1)", hit)
-	}
-}
-
-// TestRustPatchPercentDoesNotClobberAcrossPackages mirrors
-// TestTSPatchPercentDoesNotClobberAcrossPackages for rustPatchPercent — two
-// discovered crates, each with a file at the same crate-relative path, must
-// not clobber each other's hit data.
-func TestRustPatchPercentDoesNotClobberAcrossPackages(t *testing.T) {
-	dir := t.TempDir()
-	crateA := filepath.Join(dir, "crates", "a")
-	crateB := filepath.Join(dir, "crates", "b")
-	writeLCOV := func(coverageDir, sf string, hit int) {
-		t.Helper()
-		if err := os.MkdirAll(coverageDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		data := fmt.Sprintf("SF:%s\nDA:1,%d\nend_of_record\n", sf, hit)
-		if err := os.WriteFile(filepath.Join(coverageDir, "lcov.info"), []byte(data), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeLCOV(filepath.Join(crateA, "coverage"), filepath.Join(crateA, "src", "lib.rs"), 1)
-	writeLCOV(filepath.Join(crateB, "coverage"), filepath.Join(crateB, "src", "lib.rs"), 0)
-
-	rustLCOV := map[string]string{
-		crateA: filepath.Join(crateA, "coverage", "lcov.info"),
-		crateB: filepath.Join(crateB, "coverage", "lcov.info"),
-	}
-	changed := map[string][]int{
-		"crates/a/src/lib.rs": {1},
-		"crates/b/src/lib.rs": {1},
-	}
-
-	hit, total := rustPatchPercent(dir, rustLCOV, changed)
-	if total != 2 {
-		t.Fatalf("total = %d, want 2 (one coverable changed line per crate)", total)
-	}
-	if hit != 1 {
-		t.Fatalf("hit = %d, want 1 (crate a's line is hit, crate b's is not — a clobbered merge would report 0 or 2, not 1)", hit)
-	}
-}
-
-// patchReportRepo builds a repo with one committed base revision and one
-// commit on top of it touching the given files, returning the repo dir and
-// the base SHA to use as the merge-base for patchReport.
-func patchReportRepo(t *testing.T, files map[string]string) (string, string) {
-	t.Helper()
-	ctx := context.Background()
-	run := func(dir string, args ...string) {
-		t.Helper()
-		if r := executil.Run(ctx, dir, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
-		}
-	}
-	repo := t.TempDir()
-	run(repo, "init", "-b", "main", ".")
-	run(repo, "config", "user.email", "t@t")
-	run(repo, "config", "user.name", "t")
-	for name, content := range files {
-		p := filepath.Join(repo, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+// The whole point of measuring: a component's report is read back into the
+// counts the baseline stores, from the artefact its own instrumented run wrote.
+func TestMeasureReadsTheReportTheInvocationNamed(t *testing.T) {
+	root := t.TempDir()
+	for rel, content := range map[string]string{
+		"api/go.mod":  "module example.com/api\n\ngo 1.26\n",
+		"api/main.go": "package api\n\nfunc F() int {\n\treturn 1\n}\n",
+		"api/.lydite-reports/coverage/coverage.out": "mode: set\nexample.com/api/main.go:3.16,5.2 1 1\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "base")
-	r := executil.Run(ctx, repo, "git", "rev-parse", "HEAD")
-	if !r.Ok() {
-		t.Fatalf("rev-parse: %v", r.Err)
+	c := component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}
+	inv, err := invocation(c, runner.Instrumented)
+	if err != nil {
+		t.Fatal(err)
 	}
-	base := strings.TrimSpace(r.Output)
-	for name, content := range files {
-		p := filepath.Join(repo, filepath.FromSlash(name))
-		if err := os.WriteFile(p, []byte(content+"\nfn added() {}\n"), 0o600); err != nil {
-			t.Fatal(err)
+	m := measure(context.Background(), root, c, inv, true)
+	if !m.Measured() {
+		t.Fatalf("unmeasured: %s", m.Why)
+	}
+	if m.Lines != lines(1, 1) {
+		t.Errorf("lines = %+v, want {1 1}", m.Lines)
+	}
+	if _, ok := m.Hits["api/main.go"]; !ok {
+		t.Errorf("hits = %v, want a scan-root-relative key", m.Hits)
+	}
+}
+
+// The instrumented variant is what a run measures from, so the report path the
+// gate reads has to be the one the invocation actually writes. A test asserting
+// the two separately passes while they disagree.
+func TestTheMeasuredPathIsTheOneTheInvocationWrites(t *testing.T) {
+	for _, name := range []runner.Name{runner.GoTest, runner.CargoNextest, runner.Vitest, runner.Jest} {
+		inv, err := invocation(component.Component{Name: "c", Dir: "c", Runner: name}, runner.Instrumented)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if inv.CoverageReport == "" {
+			t.Errorf("%s's instrumented variant names no coverage report", name)
+			continue
+		}
+		joined := strings.Join(inv.Args, " ")
+		if !strings.Contains(joined, inv.CoverageReport) && !strings.Contains(joined, filepath.Dir(inv.CoverageReport)) {
+			t.Errorf("%s: CoverageReport %q is nowhere in %q", name, inv.CoverageReport, joined)
 		}
 	}
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "change")
-	return repo, base
 }
 
-// A detected language whose files the diff touches, with the patch gate
-// enabled but no per-line source resolved, must be reported as [UNMEASURED]
-// (with a stderr hint), not skipped in silence — the silent skip let
-// wardnet/wardnet#957 ship a green lydite comment while Codecov, fed the
-// same lcov export, failed the very same diff's patch coverage. Like
-// diffReport's [UNMEASURED], it must not fail the gate on its own.
-func TestPatchReportUnmeasuredWhenSourceMissing(t *testing.T) {
-	repo, base := patchReportRepo(t, map[string]string{"src/lib.rs": "fn a() {}"})
-
-	cmd := &cobra.Command{}
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	rep := ui.NewReport("coverage")
-	err := patchReport(rep, cmd, context.Background(), repo,
-		coverage.PatchWanted{Rust: true}, coverage.PatchSources{}, base,
-		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
-	if err != nil {
-		t.Fatalf("an unmeasured patch gate must not fail on its own, got: %v", err)
+// --no-coverage and --gate-coverage together have no answer to give: there is
+// nothing measured for the gate to compare. Silently honouring one of the two
+// would leave a workflow believing it gates.
+func TestNoCoverageAndGateCoverageAreRefusedTogether(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"test", "--dir", t.TempDir(), "--no-coverage", "--gate-coverage"})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("the two flags were accepted together")
 	}
-	if got := reportText(rep); !strings.Contains(got, "unmeasured") || !strings.Contains(got, "rust patch") {
-		t.Fatalf("expected an unmeasured rust patch row, got: %q", got)
-	}
-	if !strings.Contains(errOut.String(), "rust-lcov-report") {
-		t.Fatalf("expected a stderr hint naming the missing wiring, got: %q", errOut.String())
+	if !strings.Contains(err.Error(), "--no-coverage") || !strings.Contains(err.Error(), "--gate-coverage") {
+		t.Errorf("error %q does not name both flags", err)
 	}
 }
 
-// The unmeasured report is scoped to detected ecosystems: patch gates default
-// to enabled for all three languages regardless of what the repo contains, so
-// a changed file of an undetected language (a stray script in a repo that
-// isn't that language's ecosystem) must not produce a line for it.
-func TestPatchReportUndetectedLanguageStaysSilent(t *testing.T) {
-	repo, base := patchReportRepo(t, map[string]string{"tools/gen.go": "package main"})
-
-	cmd := &cobra.Command{}
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	rep := ui.NewReport("coverage")
-	err := patchReport(rep, cmd, context.Background(), repo,
-		coverage.PatchWanted{Go: true, Rust: true}, coverage.PatchSources{}, base,
-		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := reportText(rep); strings.Contains(got, "go patch") || strings.Contains(errOut.String(), "go ") {
-		t.Fatalf("undetected go must stay silent, got rows: %q stderr: %q", got, errOut.String())
-	}
-}
-
-// A diff that touches none of a detected language's files has nothing to
-// gate — no [UNMEASURED] line, no warning, even with its source unresolved.
-func TestPatchReportNoChangedLinesStaysSilent(t *testing.T) {
-	repo, base := patchReportRepo(t, map[string]string{"README.md": "docs"})
-
-	cmd := &cobra.Command{}
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	rep := ui.NewReport("coverage")
-	err := patchReport(rep, cmd, context.Background(), repo,
-		coverage.PatchWanted{Rust: true}, coverage.PatchSources{}, base,
-		map[string]float64{"rust": 86.4}, 0.1, []detect.Ecosystem{detect.Rust})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := reportText(rep); got != "" || errOut.String() != "" {
-		t.Fatalf("expected silence for a diff with no rust changes, got rows: %q stderr: %q", got, errOut.String())
-	}
-}
-
-func TestParseRustReportOverrides(t *testing.T) {
-	cases := []struct {
-		name   string
-		values []string
-		want   map[string]string
-	}{
-		{"nil for no values", nil, nil},
-		{
-			name:   "bare value stored under empty key",
-			values: []string{"daemon/coverage/daemon-llvm-cov.json"},
-			want:   map[string]string{"": "daemon/coverage/daemon-llvm-cov.json"},
-		},
-		{
-			name:   "keyed value",
-			values: []string{"daemon=daemon/coverage/daemon-llvm-cov.json"},
-			want:   map[string]string{"daemon": "daemon/coverage/daemon-llvm-cov.json"},
-		},
-		{
-			name:   "mixed bare and keyed",
-			values: []string{"daemon=daemon/coverage/daemon-llvm-cov.json", "other=other/coverage/llvm-cov.json"},
-			want: map[string]string{
-				"daemon": "daemon/coverage/daemon-llvm-cov.json",
-				"other":  "other/coverage/llvm-cov.json",
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseReportOverrides(tc.values)
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
+// `lydite coverage` is gone, and says so. Cobra's unknown-command answer leaves
+// a consumer to guess whether it was renamed, dropped, or never existed — the
+// same guess a silently ignored config key produces, one layer out.
+func TestTheRemovedCoverageCommandNamesWhatReplacedIt(t *testing.T) {
+	for _, args := range [][]string{
+		{"coverage"},
+		{"coverage", "--source=report"},
+		{"coverage", "--go-report", "coverage.out"},
+	} {
+		cmd := newRootCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(&strings.Builder{})
+		cmd.SetErr(&strings.Builder{})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatalf("%v was accepted", args)
+		}
+		for _, want := range []string{"lydite test", "--gate-coverage"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%v: error %q does not name %q", args, err, want)
 			}
-			for k, v := range tc.want {
-				if got[k] != v {
-					t.Errorf("got[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// A component the base tree had and this one no longer declares is gone from
+// the recorded baseline, rather than carried forever as an entry nobody can
+// measure.
+func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	ms := inDeclarationOrder(decl, nil, true)
+	baseline := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
+	// recordThisTree writes through git, so the assertion is on the shape it
+	// builds: every declared component present, and nothing else.
+	record := gitstate.Baseline{}
+	for _, m := range ms {
+		if b, ok := baseline[m.Name]; ok {
+			record[m.Name] = b
+		}
+	}
+	if _, ok := record["gone"]; ok {
+		t.Error("a component the declaration no longer has kept its baseline entry")
+	}
+	if len(record) != 1 {
+		t.Errorf("record = %v, want only the declared component", record)
+	}
+}
+
+// A language figure covers only its own components, so a repository's Rust
+// coverage is never diluted by its Go.
+func TestALanguageFigureCoversOnlyItsOwnComponents(t *testing.T) {
+	ms := []measurement{
+		measured("api", runner.Go, 90, 100),
+		measured("tally", runner.Rust, 10, 100),
+	}
+	goLines, _, _ := composed(ms, nil, byLang(runner.Go))
+	rustLines, _, _ := composed(ms, nil, byLang(runner.Rust))
+	if goLines != lines(90, 100) || rustLines != lines(10, 100) {
+		t.Fatalf("go = %+v, rust = %+v", goLines, rustLines)
+	}
+	all, _, _ := composed(ms, nil, everything)
+	if all != lines(100, 200) {
+		t.Errorf("global = %+v, want the sum of both", all)
+	}
+	if got := fmt.Sprint(languages(ms)); got != "[go rust]" {
+		t.Errorf("languages = %s, want a stable sorted order", got)
+	}
+}
+
+// A figure no component contributed to is unmeasured, never a 0.0% row. 0/0
+// renders as 0.0%, which reads as a real measurement of no coverage at all: a
+// language whose only component failed would report the worst possible number
+// as though it had been measured, and a reader acting on it would go looking
+// for missing tests rather than for the failing suite.
+//
+// Found on the proving ground, where the `web` component fails for want of a
+// coverage provider and its language reported `0.0% (0/0 lines)`.
+func TestALanguageThatMeasuredNothingIsUnmeasured(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasuredComponent(decl.Components[1], "test(web) did not pass: failed"),
+	}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
+	rows := rowsOf(rep)
+	ts, ok := rows["typescript coverage"]
+	if !ok {
+		t.Fatalf("no typescript row; got %v", rep.Rows())
+	}
+	if ts.Status != ui.StatusUnmeasured {
+		t.Errorf("typescript coverage = %+v, want unmeasured rather than a figure", ts)
+	}
+	if strings.Contains(ts.Value, "0.0%") {
+		t.Errorf("typescript coverage value = %q, want no percentage at all", ts.Value)
+	}
+	// The language that did measure is unaffected, and so is the global
+	// figure — which still has something in it.
+	if rows["go coverage"].Status != ui.StatusContext {
+		t.Errorf("go coverage = %+v, want a measured-but-ungated row", rows["go coverage"])
+	}
+	if rows["coverage"].Status != ui.StatusContext {
+		t.Errorf("global coverage = %+v, want a measured-but-ungated row", rows["coverage"])
+	}
+}
+
+// With nothing measured at all, the global figure says so too — a repository
+// whose every component failed must not report 0.0% coverage.
+func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	ms := []measurement{unmeasuredComponent(decl.Components[0], "test(api) did not pass: failed")}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+		coverageOptions{Instrument: true})
+	if got := rowsOf(rep)["coverage"]; got.Status != ui.StatusUnmeasured {
+		t.Errorf("coverage = %+v, want unmeasured", got)
+	}
+}
+
+// The report a run is measured from has to have been written by that run.
+// A report left behind by an earlier one is what a suite that passes without
+// writing one gets measured from — a coverage number describing code that is
+// no longer there, supplied by lydite itself.
+//
+// Asserted on clearReport rather than through a component run: every runner
+// lydite ships truncates its own report, so an end-to-end test passes with the
+// guarantee removed and establishes nothing. What is asserted is the property
+// the measurement rests on.
+func TestTheReportPathIsClearedBeforeTheSuiteRuns(t *testing.T) {
+	dir := t.TempDir()
+	report := ".lydite-reports/coverage/coverage.out"
+	path := filepath.Join(dir, filepath.FromSlash(report))
+
+	// The directory does not exist yet, which is the fresh-checkout case.
+	if err := clearReport(dir, report); err != nil {
+		t.Fatalf("clearReport on a missing directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("the report directory was not created: %v", err)
+	}
+
+	// A report from an earlier run is gone afterwards.
+	if err := os.WriteFile(path, []byte("mode: set\nexample.com/svc/gone.go:1.1,2.2 9 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearReport(dir, report); err != nil {
+		t.Fatalf("clearReport over an existing report: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the previous run's report is still there (%v), so a suite that writes none would be measured from it", err)
+	}
+}
+
+// On the default branch HEAD is its own merge-base, so the tree this run just
+// measured is the tree a baseline would be read for. Reading it would miss on
+// the first build and measure the whole repository a second time, in a
+// throwaway worktree, to reproduce numbers already in hand.
+//
+// There is nothing to compare against either, so the figures render as an
+// ungated run's do. Rendering them as passes would claim a comparison that
+// never happened.
+func TestGatingOnTheDefaultBranchRecordsRatherThanRemeasures(t *testing.T) {
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: ".", Runner: runner.GoTest}}}
+	ms := []measurement{measured("api", runner.Go, 9, 10)}
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+	rows := rowsOf(rep)
+	base, ok := rows["baseline"]
+	if !ok {
+		t.Fatalf("no baseline row; got %v", rep.Rows())
+	}
+	if strings.Contains(base.Value, "measuring it now") {
+		t.Errorf("baseline row = %q — the tree this run measured was measured again", base.Value)
+	}
+	if got := rows["coverage(api)"].Status; got != ui.StatusContext {
+		t.Errorf("coverage(api) = %q, want a context row: nothing was compared", got)
+	}
+}
+
+// Only affected selection licenses carrying an unmeasured component forward.
+// It determined the change could not have broken that component, so it is
+// unchanged from the tree the baseline entry describes.
+//
+// `--component` narrows for an unrelated reason — the caller wanted these
+// components run — and says nothing about the others. Carrying under it
+// attributes the merge-base's number to a component this very change may have
+// rewritten, which is the failure Carryable exists to prevent one case of.
+func TestOnlyAffectedSelectionMakesAComponentCarryable(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "go/api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ran := []measurement{measured("api", runner.Go, 9, 10)}
+	for _, tc := range []struct {
+		name     string
+		selected bool
+		want     bool
+	}{
+		{"--affected narrowed the run", true, true},
+		{"--component narrowed the run", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := inDeclarationOrder(decl, ran, tc.selected)
+			var web measurement
+			for _, m := range got {
+				if m.Name == "web" {
+					web = m
 				}
+			}
+			if web.Carryable != tc.want {
+				t.Errorf("web.Carryable = %v, want %v", web.Carryable, tc.want)
 			}
 		})
 	}
 }
 
-func TestFormatReport(t *testing.T) {
-	// Sorted, so the recorded-baseline line on main doesn't reshuffle between
-	// runs over Go's map iteration order.
-	got := formatReport(map[string]float64{"typescript": 93.94, "go": 58.5, "rust": 85.7})
-	want := "go: 58.5%, rust: 85.7%, typescript: 93.9%"
-	if got != want {
-		t.Errorf("formatReport = %q, want %q", got, want)
+// A baseline read that cannot happen fails through a row, never by discarding
+// the report. Everything here runs after every suite has finished, so a
+// returned error throws away component rows, log paths and the whole `--json`
+// document for a failure about the gate rather than about the code.
+//
+// A failing row and not an unmeasured one: the caller passed --gate-coverage,
+// and a gate that was asked for and silently did not run is the state this
+// whole file exists to make impossible.
+func TestAGateThatCouldNotRunFailsThroughARowAndKeepsTheReport(t *testing.T) {
+	// No git repository at all, so the merge-base cannot be resolved.
+	root := t.TempDir()
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
+	ms := []measurement{measured("api", runner.Go, 9, 10)}
+
+	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	rows := rowsOf(rep)
+	base, ok := rows["baseline"]
+	if !ok {
+		t.Fatalf("no baseline row; got %v", rep.Rows())
 	}
-	if got := formatReport(map[string]float64{}); got != "" {
-		t.Errorf("formatReport(empty) = %q, want \"\"", got)
+	if base.Status != ui.StatusFail {
+		t.Errorf("baseline = %+v, want a failure — the gate was asked for and could not run", base)
+	}
+	if len(base.Detail) == 0 {
+		t.Error("the failing row carries no reason")
+	}
+	// The measurement survives, because it is what a reader needs in order to
+	// act on the gate that could not run.
+	if _, ok := rows["coverage(api)"]; !ok {
+		t.Errorf("the component's measurement was discarded: %v", rep.Rows())
+	}
+	if rep.ExitCode() == 0 {
+		t.Error("exit = 0 for a run whose gate never ran")
 	}
 }
 
-func runFloorReport(t *testing.T, floor float64, units ...coverage.Unit) (string, error) {
-	t.Helper()
-	cmd := &cobra.Command{}
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	rep := ui.NewReport("coverage")
-	floorReport(rep, cmd, units, floor, []detect.Ecosystem{detect.Go, detect.Rust, detect.TypeScript})
-	return reportText(rep), reportErr(rep)
-}
+// Recording merges onto whatever the tree already holds rather than skipping
+// because it holds something. A shard runs `--component` over part of the
+// declaration, so the first to finish would otherwise be the only one that
+// ever records, and every later shard's freshly measured components would be
+// silently discarded.
+func TestRecordingMergesRatherThanSkipping(t *testing.T) {
+	existing := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
+	fresh := gitstate.Baseline{"web": lines(70, 100)}
+	declared := map[string]bool{"api": true, "web": true}
 
-// The floor is opt-in: a repo that never set one must see no new line and no
-// new failure when it upgrades, however bad its worst unit is.
-func TestFloorReportDisabledByDefault(t *testing.T) {
-	out, err := runFloorReport(t, config.Default().Coverage.Floor,
-		coverage.Unit{Lang: "typescript", Dir: "packages/layout", Lines: coverage.LineCount{Covered: 0, Total: 8}})
-	if err != nil {
-		t.Fatalf("floor 0 must gate nothing, got error: %v", err)
-	}
-	if out != "" {
-		t.Errorf("floor 0 printed %q, want nothing at all", out)
-	}
-}
-
-// What the line-weighted aggregate cannot see: an untested package that is
-// 8 lines of 8,305 moves the headline by 0.1%, so only a per-unit floor
-// reports it.
-func TestFloorReportFailsAUnitBelowTheFloor(t *testing.T) {
-	out, err := runFloorReport(t, 50,
-		coverage.Unit{Lang: "typescript", Dir: "packages/expressions", Lines: coverage.LineCount{Covered: 4300, Total: 4494}},
-		coverage.Unit{Lang: "typescript", Dir: "packages/layout", Lines: coverage.LineCount{Covered: 0, Total: 8}})
-	if err == nil {
-		t.Fatal("a unit at 0% against a 50% floor must fail the gate")
-	}
-	if !strings.Contains(out, "fail") || !strings.Contains(out, "packages/layout") {
-		t.Errorf("expected a [FAIL] line naming packages/layout, got: %q", out)
-	}
-	if !strings.Contains(out, "0/8 lines") {
-		t.Errorf("expected the unit's counts in the line, got: %q", out)
-	}
-	if strings.Contains(out, "packages/expressions") {
-		t.Errorf("a unit above the floor must not be listed individually, got: %q", out)
-	}
-}
-
-func TestFloorReportPassesWhenEveryUnitClears(t *testing.T) {
-	out, err := runFloorReport(t, 50,
-		coverage.Unit{Lang: "go", Dir: "", Lines: coverage.LineCount{Covered: 9, Total: 10}},
-		coverage.Unit{Lang: "go", Dir: "sdk", Lines: coverage.LineCount{Covered: 6, Total: 10}})
-	if err != nil {
-		t.Fatalf("every unit clears the floor, got error: %v", err)
-	}
-	if !strings.Contains(out, "pass") || !strings.Contains(out, "floor: 2 of 2 unit(s)") {
-		t.Errorf("expected a single [PASS] summary line naming cleared-of-total, got: %q", out)
-	}
-}
-
-// A unit with no coverage report must be named, never folded into the passing
-// count. The language-level warning cannot cover this: a language reports a
-// percentage as soon as one of its units measures, so a repo whose CI
-// path-filtered most of its packages has a fully measured language and a
-// floor gate that saw one package — and a bare "[PASS] floor: N unit(s)"
-// reads in the PR comment as if the gate covered the repo.
-func TestFloorReportNamesUnmeasuredUnits(t *testing.T) {
-	cmd := &cobra.Command{}
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	rep := ui.NewReport("coverage")
-	floorReport(rep, cmd, []coverage.Unit{
-		{Lang: "typescript", Dir: "packages/measured", Lines: coverage.LineCount{Covered: 90, Total: 100}},
-		{Lang: "typescript", Dir: "packages/skipped"},
-	}, 50, []detect.Ecosystem{detect.TypeScript})
-	got := reportText(rep)
-	if err := reportErr(rep); err != nil {
-		t.Fatalf("an unmeasured unit must not fail the gate on its own, got: %v", err)
-	}
-	if !strings.Contains(got, "unmeasured") || !strings.Contains(got, "packages/skipped") {
-		t.Errorf("expected an unmeasured row naming packages/skipped, got: %q", got)
-	}
-	if !strings.Contains(got, "1 of 2 unit(s)") {
-		t.Errorf("the passing row must show cleared-of-total so a partial run is visible, got: %q", got)
-	}
-	// Stderr, not stdout: action.yml's PR-comment builder scrapes bracketed
-	// tags from stdout with a pattern that is not line-anchored.
-	if !strings.Contains(errOut.String(), "packages/skipped") {
-		t.Errorf("expected a stderr warning naming the missing report, got: %q", errOut.String())
-	}
-}
-
-// An unmeasured unit is not a unit at 0%: it must never be failed against the
-// floor, which is the whole reason Compute returns it with a zero LineCount
-// rather than dropping it.
-func TestFloorReportDoesNotFailAnUnmeasuredUnit(t *testing.T) {
-	_, err := runFloorReport(t, 90,
-		coverage.Unit{Lang: "rust", Dir: "daemon"},
-		coverage.Unit{Lang: "rust", Dir: "cli", Lines: coverage.LineCount{Covered: 95, Total: 100}})
-	if err != nil {
-		t.Errorf("an unmeasured unit must not be gated as 0%%, got: %v", err)
-	}
-}
-
-// The floor is compared at the report's display precision, like the
-// tolerances: a unit shown as meeting the floor must never be failed over a
-// difference the report cannot show.
-func TestFloorReportComparesAtDisplayPrecision(t *testing.T) {
-	// 8524/10000 = 85.24%, displayed as 85.2%, against a floor of 85.2%.
-	if _, err := runFloorReport(t, 85.2,
-		coverage.Unit{Lang: "rust", Dir: "daemon", Lines: coverage.LineCount{Covered: 8524, Total: 10000}}); err != nil {
-		t.Errorf("a unit displayed at exactly the floor must pass, got error: %v", err)
-	}
-}
-
-// A unit rooted at --dir itself has an empty relative directory, which would
-// otherwise print as nothing at all and leave the line unattributable.
-func TestFloorReportNamesTheRootUnit(t *testing.T) {
-	out, _ := runFloorReport(t, 90,
-		coverage.Unit{Lang: "go", Dir: "", Lines: coverage.LineCount{Covered: 1, Total: 10}})
-	if !strings.Contains(out, "go floor: .: 10.0%") {
-		t.Errorf("expected the root unit named \".\", got: %q", out)
-	}
-}
-
-// coverage.Compute measures every language it detects without consulting
-// `enabled:` in .lydite/config.yml, so its units can carry a language the repo
-// opted out of gating. A per-unit gate must not turn that into one build
-// failure per crate for a language nobody asked to be gated on.
-func TestFloorReportSkipsDisabledLanguages(t *testing.T) {
-	cmd := &cobra.Command{}
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	rep := ui.NewReport("coverage")
-	floorReport(rep, cmd, []coverage.Unit{
-		{Lang: "go", Dir: "", Lines: coverage.LineCount{Covered: 90, Total: 100}},
-		{Lang: "rust", Dir: "daemon", Lines: coverage.LineCount{Covered: 0, Total: 500}},
-	}, 60, []detect.Ecosystem{detect.Go})
-	got := reportText(rep)
-	if err := reportErr(rep); err != nil {
-		t.Fatalf("a crate in a disabled language must not fail the floor gate, got: %v", err)
-	}
-	if strings.Contains(got, "rust") {
-		t.Errorf("a disabled language must not appear in the floor report, got: %q", got)
-	}
-	if !strings.Contains(got, "1 of 1 unit(s)") {
-		t.Errorf("the enabled language's unit must still be counted, got: %q", got)
-	}
-}
-
-// The floor is an absolute standard with no baseline, so unlike the aggregate
-// and patch gates it is meaningful on main too: the current commit IS the
-// baseline there, but a unit is still either above the bar or below it.
-// Skipping it would leave main ungated on a unit that arrived through a path
-// no pull request measured. The baseline is still recorded first, and
-// unconditionally — losing it over a floor failure would push every later
-// pull request into a recompute-nothing cache miss.
-func TestCoverageOnMainRecordsBaselineThenGatesOnTheFloor(t *testing.T) {
-	ctx := context.Background()
-	run := func(dir string, args ...string) {
-		t.Helper()
-		if r := executil.Run(ctx, dir, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+	merged := gitstate.Baseline{}
+	for name, l := range existing {
+		if declared[name] {
+			merged[name] = l
 		}
 	}
-
-	origin := t.TempDir()
-	run(origin, "init", "--bare", "-b", "main", ".")
-
-	repo := t.TempDir()
-	run(repo, "init", "-b", "main", ".")
-	run(repo, "config", "user.email", "t@t")
-	run(repo, "config", "user.name", "t")
-	// One Go module, entirely uncovered, against a floor it cannot meet.
-	for name, body := range map[string]string{
-		"go.mod":        "module fixture\n\ngo 1.26\n",
-		"main.go":       "package fixture\n\nfunc Foo() int { return 1 }\n",
-		"coverage.out":  "mode: set\nfixture/main.go:3.16,3.28 1 0\n",
-		config.FileName: "coverage:\n  source: report\n  floor: 50\n",
-	} {
-		writeUnder(t, repo, name, body)
+	for name, l := range fresh {
+		merged[name] = l
 	}
-	run(repo, "add", "-A")
-	run(repo, "commit", "-m", "fixture")
-	run(repo, "remote", "add", "origin", origin)
-	run(repo, "push", "origin", "main")
-	run(repo, "fetch", "origin")
-
-	cmd := newCoverageCmd()
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--dir", repo})
-	err := cmd.Execute()
-
-	if !strings.Contains(out.String(), "baseline recorded") {
-		t.Errorf("the baseline must be recorded even when the floor fails, got stdout: %q", out.String())
+	if len(merged) != 2 || merged["api"] != lines(50, 100) || merged["web"] != lines(70, 100) {
+		t.Errorf("merged = %v, want the earlier shard's api beside this one's web", merged)
 	}
-	if err == nil {
-		t.Errorf("a unit at 0%% against a 50%% floor must fail the main run too, got nil\nstdout: %s", out.String())
+	// An entry for a component the declaration no longer holds does not
+	// survive the merge.
+	if _, ok := merged["gone"]; ok {
+		t.Error("a component the declaration no longer has kept its entry")
 	}
-	if !strings.Contains(out.String(), "fail") || !strings.Contains(out.String(), "floor") {
-		t.Errorf("expected a [FAIL] floor line on the main run, got stdout: %q", out.String())
+	// A merge that changes nothing must not push.
+	if !sameCounts(merged, merged) {
+		t.Error("sameCounts says an identical baseline differs")
 	}
-
-	// The recorded baseline must have landed on the branch regardless.
-	run(repo, "fetch", "origin", gitstate.BranchName)
-	tree, treeErr := gitstate.TreeSHA(ctx, repo, "HEAD")
-	if treeErr != nil {
-		t.Fatalf("resolve tree: %v", treeErr)
-	}
-	if r := executil.Run(ctx, repo, "git", "show", "origin/"+gitstate.BranchName+":"+gitstate.StatePath(tree)); !r.Ok() {
-		t.Errorf("no baseline recorded for tree %s despite the floor failure: %v", tree, r.Err)
+	if sameCounts(merged, existing) {
+		t.Error("sameCounts says a changed baseline is identical")
 	}
 }
 
-// writeUnder writes a repository-relative path, creating the directories it
-// names — lydite's config files live under .lydite/, which a plain
-// Join-and-write would have no parent to write into.
-func writeUnder(t *testing.T, root, rel, body string) {
-	t.Helper()
-	p := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+// A gate that fails partway through must not leave two rows under one label.
+// gatedRows adds rows as it goes and can fail after most of them are in — a
+// failing `git diff` inside patchRows is the live path — so the recovery
+// rendering would otherwise put a gated `pass` and a `context` "not compared"
+// under `coverage(api)`, and a consumer keying rows by label picks one of two
+// contradictory answers.
+func TestAFailedGateLeavesNoDuplicateRows(t *testing.T) {
+	// No git repository, so the merge-base resolution fails before any gated
+	// row is written; the assertion is about the labels either way.
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ms := []measurement{measured("api", runner.Go, 9, 10), measured("web", runner.TypeScript, 1, 10)}
+	cfg := config.Default()
+	cfg.Coverage.Floor = 50
+
+	addCoverageRows(context.Background(), cmd, rep, t.TempDir(), decl, ms, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	seen := map[string]int{}
+	for _, r := range rep.Rows() {
+		seen[r.Label]++
+	}
+	for label, n := range seen {
+		if n > 1 {
+			t.Errorf("label %q appears %d times — a consumer keying rows by label gets one of two answers", label, n)
+		}
+	}
+}
+
+// Anchoring a within-tolerance dip to the high-water mark must anchor the
+// ratio, not the size. Writing the baseline's own counts back freezes the
+// component's weight: one that grew from 1,000 lines to 2,000 while dipping
+// inside the tolerance would be recorded as 1,000 lines, and the language and
+// global baselines are sums of exactly these counts — so a stale weight decides
+// how much the component counts towards a figure describing a tree it no
+// longer matches.
+func TestARestoredDipKeepsThisTreesSize(t *testing.T) {
+	baseline := gitstate.Baseline{"api": lines(800, 1000)}
+	// The component doubled in size and dipped 0.05pp, which is inside the
+	// tolerance.
+	record := gitstate.Baseline{"api": lines(1599, 2000)}
+	got := withToleratedDipsRestored(record, baseline, 0.1)["api"]
+	if got.Total != 2000 {
+		t.Errorf("total = %d, want this tree's 2000 rather than the baseline's 1000", got.Total)
+	}
+	if pct := got.Percent(); pct < 79.95 || pct > 80.05 {
+		t.Errorf("percent = %v, want the baseline's 80%% anchored over the new size", pct)
+	}
+}
+
+// A run that could not measure a component it was supposed to has not
+// established this tree's baseline. Recording a partial one is worse than
+// recording none: any non-empty entry reads as a cache hit, so the missing
+// component is `new` on every later change — and a composed figure refuses to
+// compare unless the baseline covers every component in it, so that language's
+// row and the global row stop gating too.
+//
+// A component nothing could ever measure does not block it: it contributes to
+// neither side of any comparison, so its absence is permanent and expected.
+func TestAPartialRunDoesNotRecordAPartialBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gap        measurement
+		wantRecord bool
+	}{
+		{"a component whose suite failed", unmeasuredComponent(
+			component.Component{Name: "web", Dir: "web", Runner: runner.Vitest},
+			"test(web) did not pass: failed"), false},
+		{"a component nothing could measure", unmeasurableComponent(
+			component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "check"}},
+			"the component declares a raw command, which has no instrumented variant"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The record holds only what was measured, which is what the
+			// predicate reads.
+			record := gitstate.Baseline{"api": lines(9, 10)}
+			gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), tc.gap}, record)
+			if blocked == tc.wantRecord {
+				t.Errorf("recordingBlockedBy = (%v, %v), want blocked = %v", gap.Name, blocked, !tc.wantRecord)
+			}
+		})
+	}
+}
+
+// A component affected selection deselected carries forward rather than
+// blocking the recording: selection determined the change could not have
+// broken it, so the baseline entry still describes it.
+func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
+	skipped := unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not selected")
+	skipped.Carryable = true
+	ms := []measurement{measured("api", runner.Go, 9, 10), skipped}
+
+	// It carried, so the record holds an entry for it.
+	carried := gitstate.Baseline{"api": lines(9, 10), "web": lines(5, 10)}
+	if gap, blocked := recordingBlockedBy(ms, carried); blocked {
+		t.Errorf("recording blocked by %q, but selection determined it could not have been broken", gap.Name)
+	}
+
+	// It was entitled to carry and had nothing to carry, which is a different
+	// thing. Recording anyway writes the same gap forward on every merge, and
+	// it can then never heal: each run reproduces it from the last.
+	if _, blocked := recordingBlockedBy(ms, gitstate.Baseline{"api": lines(9, 10)}); !blocked {
+		t.Error("a deselected component with no baseline entry did not block recording")
+	}
+}
+
+// lydite writes into the repository it is measuring, and what it writes must
+// never become part of what it measures. A committed `.lydite-reports/` lands
+// in the diff, where it matches no component and therefore widens affected
+// selection to everything on every change — observed on a fixture whose select
+// row named a coverage profile and a test log as the reason a second component
+// ran.
+func TestTheReportDirectoryDisownsItself(t *testing.T) {
+	root := t.TempDir()
+	reports := filepath.Join(root, runner.ReportDir)
+	if err := os.MkdirAll(reports, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	ignoreReports(reports)
+
+	data, err := os.ReadFile(filepath.Join(reports, ".gitignore"))
+	if err != nil {
+		t.Fatalf("no .gitignore in the report directory: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "*" {
+		t.Errorf("ignore file = %q, want everything ignored", data)
+	}
+
+	// A repository that already wrote its own rules there keeps them: this
+	// directory is lydite's, but the file is whoever wrote it first's.
+	own := filepath.Join(reports, ".gitignore")
+	if err := os.WriteFile(own, []byte("!keep\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	ignoreReports(reports)
+	data, _ = os.ReadFile(own)
+	if strings.TrimSpace(string(data)) != "!keep" {
+		t.Errorf("ignore file = %q, want the existing one untouched", data)
+	}
+}
+
+// A worktree holds the whole repository, and the scan root may sit below it. A
+// base-tree measurement rooted at the worktree instead looks for the component
+// declaration where there is none, finds no components, and hands back an
+// empty baseline — so every component reads as new, every composed row refuses
+// to compare, and the gate passes having compared nothing.
+//
+// A monorepo run as `--dir source` is the shape, and it is the one
+// `ChangedLines` and `selectAffected` already account for. Asserted through
+// `gitdiff.Prefix`, which is the mapping, rather than by measuring a base tree:
+// what can be wrong here is which directory is treated as the scan root.
+func TestTheBaseTreeIsMeasuredAtTheScanRootNotTheWorktreeRoot(t *testing.T) {
+	repo := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(repo, "init", "-b", "main", ".")
+	scanRoot := filepath.Join(repo, "source")
+	if err := os.MkdirAll(filepath.Join(scanRoot, ".lydite"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	prefix, err := gitdiff.Prefix(context.Background(), scanRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix != "source/" {
+		t.Fatalf("prefix = %q, want %q", prefix, "source/")
+	}
+	// The join is what measureBaseTree does with a worktree path, and it has
+	// to land on the scan root's copy rather than on the repository root.
+	worktree := t.TempDir()
+	if got, want := filepath.Join(worktree, filepath.FromSlash(prefix)), filepath.Join(worktree, "source"); got != want {
+		t.Errorf("base scan root = %q, want %q", got, want)
+	}
+	// At the repository root the mapping is the identity, so the common case
+	// is unchanged.
+	rootPrefix, err := gitdiff.Prefix(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootPrefix != "" {
+		t.Errorf("prefix at the repository root = %q, want empty", rootPrefix)
+	}
+}
+
+// A base tree lydite could not measure completely is not a baseline. A bare
+// worktree is where a measurement most often fails — no container runtime for
+// a component's services, an install that fails there — and a partial entry,
+// once cached, reads as a hit for every later change: the missing component is
+// new forever, and its language's row and the global row refuse to compare and
+// stop gating, with a green verdict.
+func TestAPartiallyMeasuredBaseTreeIsNotCached(t *testing.T) {
+	// The predicate the base-tree path applies, over the measurements it
+	// collected. A component nothing could ever measure is the one exemption.
+	for _, tc := range []struct {
+		name string
+		ms   []measurement
+		want bool
+	}{
+		{"every component measured", []measurement{
+			measured("api", runner.Go, 9, 10),
+		}, false},
+		{"one component failed there", []measurement{
+			measured("api", runner.Go, 9, 10),
+			unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "no container runtime"),
+		}, true},
+		{"a component nothing could measure", []measurement{
+			measured("api", runner.Go, 9, 10),
+			unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}}, "raw command"),
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// What measureBaseTree collected, and what came of it — the same
+			// two things a run hands the predicate when it records.
+			out := gitstate.Baseline{}
+			for _, m := range tc.ms {
+				if m.Measured() {
+					out[m.Name] = m.Lines
+				}
+			}
+			gap, blocked := recordingBlockedBy(tc.ms, out)
+			if blocked != tc.want {
+				t.Errorf("recordingBlockedBy = (%q, %v), want blocked = %v", gap.Name, blocked, tc.want)
+			}
+		})
+	}
+}
+
+// A tolerated dip is anchored against what this tree already holds, not only
+// against the base baseline. A pull request records the anchored high-water
+// entry for its tree; a squash merge lands a commit carrying that same tree; a
+// run on the default branch measures it again and would otherwise replace the
+// anchor with a raw dipped number, handing the next change a lowered figure to
+// gate against — the per-merge ratchet the anchoring exists to prevent,
+// reintroduced one path over.
+func TestARerunOfOneTreeDoesNotLowerItsAnchoredEntry(t *testing.T) {
+	anchored := gitstate.Baseline{"api": lines(800, 1000)}
+	// The same tree measured again, 0.05pp lower: noise, which is what the
+	// tolerance is for.
+	remeasured := gitstate.Baseline{"api": lines(799, 1000)}
+	got := withToleratedDipsRestored(remeasured, anchored, 0.1)
+	if pct := got["api"].Percent(); pct < 79.95 || pct > 80.05 {
+		t.Errorf("api = %v%%, want the anchored 80%% kept", pct)
+	}
+	// A drop beyond the tolerance is recorded: it failed visibly on the change
+	// that introduced it, so accepting it is deliberate.
+	dropped := withToleratedDipsRestored(gitstate.Baseline{"api": lines(700, 1000)}, anchored, 0.1)
+	if dropped["api"] != lines(700, 1000) {
+		t.Errorf("api = %v, want the measured drop recorded", dropped["api"])
+	}
+}
+
+// The base tree is read leniently, because it is being measured rather than
+// configuring lydite. The base tree of the pull request that removes a retired
+// key is by construction the tree that still carries it, and the metric version
+// bump makes that run a cache miss — so validating it would fail every
+// migration, and keep failing every branch cut before the removal landed.
+func TestAHistoricalConfigIsReadLenientlyAndACurrentOneIsNot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".lydite"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what a pre-upgrade tree carries.
+	stale := "coverage:\n  source: report\n  go:\n    report: coverage.out\ntypescript:\n  install: \"yarn install\"\n"
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(dir); err == nil {
+		t.Error("Load accepted a retired key — the rejection is what tells an author their config is stale")
+	}
+	got, err := config.LoadHistorical(dir)
+	if err != nil {
+		t.Fatalf("LoadHistorical refused the tree it exists to read: %v", err)
+	}
+	// What it is read for still arrives.
+	if got.TypeScript.Install != "yarn install" {
+		t.Errorf("TypeScript.Install = %q, want the historical tree's own value", got.TypeScript.Install)
+	}
+	// A file that is not YAML at all is still an error: there is nothing to
+	// read there.
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte("coverage:\n\tsource: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.LoadHistorical(dir); err == nil {
+		t.Error("LoadHistorical accepted a file that is not YAML")
+	}
+}
+
+// A floor that cleared nothing examined nothing, whatever the count reads like.
+// Without this a run where every component's report was unreadable renders
+// `✓ floor … 0 of 4 component(s) at or above 80.0%` — a tick on a gate that
+// looked at no component at all.
+func TestAFloorThatClearedNothingIsNotAPass(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		unmeasuredComponent(component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}, "no report"),
+		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "no report"),
+	}, 80)
+	got := rowsOf(rep)["floor"]
+	if got.Status == ui.StatusPass {
+		t.Errorf("floor = %+v, want no pass — it was applied to nothing", got)
+	}
+	if got.Status != ui.StatusUnmeasured {
+		t.Errorf("floor = %+v, want unmeasured", got)
+	}
+}
+
+// `go list -m` run inside a module answers with the enclosing module, so a
+// component whose dir is not a module root would take the root module's path —
+// and goRelPath then strips that path and puts the component's dir back on,
+// keying every profile entry `services/api/services/api/x.go`. Nothing
+// downstream notices: the patch gate finds no overlap and emits no row, and the
+// generated-file check stats a path that does not exist.
+func TestAGoComponentBelowItsModuleRootIsRefused(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One module at the repository root; the component points below it.
+	write("go.mod", "module example.com/m\n\ngo 1.26\n")
+	write("services/api/api.go", "package api\n\nfunc F() int { return 1 }\n")
+	write("services/api/.lydite-reports/coverage/coverage.out",
+		"mode: set\nexample.com/m/services/api/api.go:3.20,3.32 1 1\n")
+
+	c := component.Component{Name: "api", Dir: "services/api", Runner: runner.GoTest}
+	m := measure(context.Background(), root, c, runner.Invocation{CoverageReport: ".lydite-reports/coverage/coverage.out"}, true)
+	if m.Measured() {
+		t.Fatalf("measured %+v from a directory that is not a module root", m.Lines)
+	}
+	if !strings.Contains(m.Why, "module root") {
+		t.Errorf("why = %q, want it to name what is wrong with the declaration", m.Why)
+	}
+}
+
+// The two are different events in one run — the baseline read this change is
+// gated against, and the entry it leaves for the next one — so they carry
+// different labels. Sharing one puts two rows under it, which is what a
+// consumer keying rows by label cannot survive.
+func TestTheBaselineReadAndTheRecordAreDifferentRows(t *testing.T) {
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: ".", Runner: runner.GoTest}}}
+	addCoverageRows(context.Background(), cmd, rep, root, decl,
+		[]measurement{measured("api", runner.Go, 9, 10)}, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	seen := map[string]int{}
+	for _, r := range rep.Rows() {
+		seen[r.Label]++
+	}
+	for label, n := range seen {
+		if n > 1 {
+			t.Errorf("label %q appears %d times", label, n)
+		}
+	}
+	if seen["record"] == 0 {
+		t.Errorf("no record row: a run that writes a baseline must say what it wrote; rows were %v", rep.Rows())
+	}
+}
+
+// gateRepo is a repository with an origin, one Go component, and a base commit
+// whose coverage is known. It exists so the gate can be exercised through the
+// command rather than through its parts: the paths this drives —
+// `baselineFor`, `measureBaseTree`, `patchRows`, `recordThisTree` — are where
+// both of the severe defects found while building this lived, and neither was
+// reachable from a unit test.
+func gateRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+
+	write(t, root, component.FileName, "components:\n  - name: svc\n    dir: svc\n    runner: go-test\n    args: [\"./...\"]\n")
+	write(t, root, "svc/go.mod", "module example.com/svc\n\ngo 1.26\n")
+	// Two of four statements covered: Keep is exercised, Skip is not.
+	write(t, root, "svc/lib.go", "package svc\n\n// Keep is exercised.\nfunc Keep(n int) int {\n\treturn n + 1\n}\n\n// Skip is not.\nfunc Skip(n int) int {\n\treturn n - 1\n}\n")
+	write(t, root, "svc/lib_test.go", "package svc\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep(1) != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "base")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+	return root
+}
+
+// The whole gate, through the command, against a real repository: a cache miss
+// measures the base tree, the comparison fails a change that lowers coverage,
+// the patch gate scores the new lines, the measurement is recorded, and the
+// next run hits the cache instead of measuring the base tree again.
+//
+// Driven end to end because that is the only way these paths run at all — and
+// because both severe defects found while building this were in exactly this
+// code: a base tree measured at the wrong root, and a base tree's config
+// validated with rules it predates. Each produced a green gate that had
+// compared nothing.
+func TestTheGateAgainstARealRepository(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run("switch", "--quiet", "-c", "change")
+	// A new function nobody tests: the aggregate falls and the patch gate has
+	// a coverable new line to score.
+	write(t, root, "svc/lib.go", "package svc\n\n// Keep is exercised.\nfunc Keep(n int) int {\n\treturn n + 1\n}\n\n// Skip is not.\nfunc Skip(n int) int {\n\treturn n - 1\n}\n\n// Added is not either.\nfunc Added(n int) int {\n\treturn n * 2\n}\n")
+	run("add", "-A")
+	run("commit", "-m", "add an untested function")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err == nil {
+		t.Fatalf("the gate passed a change that lowered coverage\nstdout: %s\nstderr: %s", out, errOut)
+	}
+	rows := jsonRows(t, out)
+
+	// The base tree had no entry, so it was measured rather than substituted.
+	if got := rows["baseline"]; !strings.Contains(got.Value, "measuring it now") {
+		t.Errorf("baseline = %q, want a miss resolved by measuring", got.Value)
+	}
+	// The comparison happened, against a number that came from the base tree.
+	comp := rows["coverage(svc)"]
+	if comp.Status != "fail" {
+		t.Errorf("coverage(svc) = %+v, want a failure", comp)
+	}
+	if !strings.Contains(comp.Value, "baseline") || !strings.Contains(comp.Value, "regressed") {
+		t.Errorf("coverage(svc) = %q, want it to name the baseline and the regression", comp.Value)
+	}
+	// The patch gate scored the new lines rather than skipping in silence.
+	patch := rows["patch(svc)"]
+	if patch.Status != "fail" {
+		t.Errorf("patch(svc) = %+v, want a failure — the new function has no test", patch)
+	}
+	if !strings.Contains(patch.Value, "new lines") {
+		t.Errorf("patch(svc) = %q, want the changed-line counts", patch.Value)
+	}
+	// This tree's measurement was recorded for whatever comes next.
+	if got := rows["record"]; !strings.Contains(got.Value, "recorded for") {
+		t.Errorf("record = %q, want this tree's measurement recorded", got.Value)
+	}
+
+	// The second run hits the cache. Without this the assertion above passes on
+	// an implementation that measures the base tree on every single run, which
+	// is the cost the caching exists to pay once.
+	out2, errOut2, err2 := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err2 == nil {
+		t.Fatalf("the gate passed on the second run\nstdout: %s\nstderr: %s", out2, errOut2)
+	}
+	if got, ok := jsonRows(t, out2)["baseline"]; ok && strings.Contains(got.Value, "measuring it now") {
+		t.Errorf("baseline = %q on the second run, want a cache hit", got.Value)
+	}
+}
+
+// A change that raises coverage passes, and the run that follows it gates
+// against the number it recorded. Without this the suite would be satisfied by
+// a gate that fails everything.
+func TestTheGatePassesAChangeThatRaisesCoverage(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run("switch", "--quiet", "-c", "better")
+	write(t, root, "svc/lib_test.go", "package svc\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep(1) != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n\nfunc TestSkip(t *testing.T) {\n\tif Skip(2) != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	run("add", "-A")
+	run("commit", "-m", "test the other branch")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err != nil {
+		t.Fatalf("the gate failed a change that raised coverage: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	rows := jsonRows(t, out)
+	if got := rows["coverage(svc)"]; got.Status != "pass" {
+		t.Errorf("coverage(svc) = %+v, want a pass", got)
+	}
+	if got := rows["coverage"]; got.Status != "pass" {
+		t.Errorf("coverage = %+v, want a pass", got)
+	}
+}
+
+// jsonRows decodes the document's rows by label.
+func jsonRows(t *testing.T, out string) map[string]struct {
+	Status string   `json:"status"`
+	Label  string   `json:"label"`
+	Value  string   `json:"value"`
+	Detail []string `json:"detail"`
+} {
+	t.Helper()
+	var doc struct {
+		Rows []struct {
+			Status string   `json:"status"`
+			Label  string   `json:"label"`
+			Value  string   `json:"value"`
+			Detail []string `json:"detail"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not a JSON document (%v):\n%s", err, out)
+	}
+	byLabel := map[string]struct {
+		Status string   `json:"status"`
+		Label  string   `json:"label"`
+		Value  string   `json:"value"`
+		Detail []string `json:"detail"`
+	}{}
+	for _, r := range doc.Rows {
+		byLabel[r.Label] = r
+	}
+	return byLabel
+}
+
+// The branch that is its own base reads no baseline — there is nothing to gate
+// against — so a tolerated dip recorded there has nothing to anchor to, and
+// each merge dips up to one tolerance from the last recorded value and passes.
+// That is the per-merge downward ratchet the anchoring exists to prevent, on
+// the one path with no prior number in hand.
+//
+// The anchor is the commit immediately before, never the nearest ancestor that
+// happens to have an entry: a fixed step is reproducible from the change, and a
+// walk makes the number depend on how far back history went. It anchors a
+// recording and gates nothing, so a miss simply means no anchor.
+func TestTheSelfBasePathAnchorsAgainstThePreviousCommit(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	// The first run on the default branch records this tree.
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("first run: %v\n%s", err, errOut)
+	}
+	first := previousOrCurrentBaseline(t, root, "HEAD")
+	if len(first) == 0 {
+		t.Fatal("the first run recorded nothing to anchor against")
+	}
+
+	// A second commit on the same branch: no gating, and previousTreeBaseline
+	// is the only thing standing between a dip and the recorded number.
+	write(t, root, "svc/notes.md", "not code\n")
+	run("add", "-A")
+	run("commit", "-m", "second")
+
+	got := previousTreeBaseline(context.Background(), root)
+	if len(got) == 0 {
+		t.Fatal("no anchor found for the commit immediately before")
+	}
+	if got["svc"] != first["svc"] {
+		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got["svc"], first["svc"])
+	}
+}
+
+// previousOrCurrentBaseline reads whatever is recorded for a revision's tree.
+func previousOrCurrentBaseline(t *testing.T, dir, rev string) gitstate.Baseline {
+	t.Helper()
+	tree, err := gitstate.TreeSHA(context.Background(), dir, rev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := gitstate.ReadBaseline(context.Background(), dir, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// The floor's denominator counts only components a run could ever measure. A
+// raw `command:` is not a gap in this run's coverage, and counting it renders a
+// complete run as `1 of 2 component(s)` — the "N of M" shape that exists so a
+// partial run cannot read as a repository-wide pass, saying the opposite of
+// what happened.
+func TestTheFloorDenominatorExcludesWhatItCanNeverApplyTo(t *testing.T) {
+	rep := ui.NewReport("test")
+	floorRows(rep, []measurement{
+		measured("api", runner.Go, 90, 100),
+		unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
+			"the component declares a raw command, which has no instrumented variant"),
+	}, 50)
+	rows := rowsOf(rep)
+	if got := rows["floor"].Value; !strings.Contains(got, "1 of 1 component(s)") {
+		t.Errorf("floor summary = %q, want 1 of 1 — the raw-command component is not a gap", got)
+	}
+	// It is still named, because a component the floor can never apply to is
+	// worth knowing about.
+	if got := rows["floor(docs)"].Status; got != ui.StatusUnmeasured {
+		t.Errorf("floor(docs) = %q, want it named as unmeasured", got)
 	}
 }

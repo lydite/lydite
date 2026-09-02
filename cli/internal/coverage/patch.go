@@ -56,14 +56,27 @@ func ChangedLines(ctx context.Context, dir, mergeBase string, exts ...string) (m
 	// vanished from the patch gate's denominator. It also scopes the diff to
 	// dir, which is exactly the gate's remit — changes outside --dir aren't
 	// measured, so they can't be gated.
-	args := []string{"-c", "diff.mnemonicPrefix=false", "diff", "--relative", "--unified=0", mergeBase + "..HEAD"}
+	// core.quotePath=false as well as the prefix pin, and for the same class
+	// of reason internal/gitdiff pins it: with git's default a changed file
+	// whose name is not ASCII is emitted quoted and octal-escaped
+	// (`+++ "b/caf\303\251.go"`), the `b/` strip does not match the leading
+	// quote, and the key matches nothing in the report — so those changed
+	// lines drop silently out of the patch denominator.
+	args := []string{
+		"-c", "core.quotePath=false",
+		"-c", "diff.mnemonicPrefix=false",
+		"diff", "--relative", "--unified=0", mergeBase + "..HEAD",
+	}
 	if len(exts) > 0 {
 		args = append(args, "--")
 		for _, ext := range exts {
 			args = append(args, "*"+ext)
 		}
 	}
-	r := executil.Run(ctx, dir, "git", args...)
+	// Quiet, because a diff is data this parses and not output anyone
+	// watches: streamed, the whole patch lands in the middle of the report,
+	// and under --json in the middle of the document.
+	r := executil.RunQuiet(ctx, dir, "git", args...)
 	if !r.Ok() {
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), r.Err)
 	}
@@ -109,12 +122,22 @@ func parseUnifiedDiff(diff string) map[string][]int {
 	return changed
 }
 
-// ParseLCOV extracts per-file, per-line hit counts from an lcov trace file
-// (the format cargo-llvm-cov's --lcov and Istanbul/Vitest's lcov reporter
-// both emit natively): "SF:<path>", "DA:<line>,<hits>" pairs per file,
-// terminated by "end_of_record". File paths are normalized relative to
-// baseDir when absolute, so they line up with git's repo-relative paths.
-func ParseLCOV(data []byte, baseDir string) LineHits {
+// ParseLCOV extracts an lcov trace file's two quantities in one pass: the
+// summed line counts, and the per-file per-line hits. It is the format
+// cargo-llvm-cov's --lcov and Istanbul/Vitest's lcov reporter both emit
+// natively — "SF:<path>", "DA:<line>,<hits>" pairs and an "LF:"/"LH:" summary
+// per file, terminated by "end_of_record". File paths are normalized relative
+// to baseDir when absolute, so they line up with git's repo-relative paths.
+//
+// The counts come from LF and LH, never from tallying the DA lines. Measured
+// against the proving ground's three-crate workspace the LF/LH sums are 30 of
+// 57, matching cargo-llvm-cov's own JSON export exactly, while the DA lines
+// number 55: a line carrying more than one record is one line to LF and two to
+// a DA tally. Counting DA would report a denominator smaller than the tool's
+// own, in a number the gate then compares against a baseline recorded by that
+// same tool.
+func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
+	var count LineCount
 	hits := LineHits{}
 	var file string
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -136,16 +159,86 @@ func ParseLCOV(data []byte, baseDir string) LineHits {
 				continue
 			}
 			lineNo, err1 := strconv.Atoi(parts[0])
-			count, err2 := strconv.Atoi(strings.SplitN(parts[1], ",", 2)[0])
+			hitCount, err2 := strconv.Atoi(strings.SplitN(parts[1], ",", 2)[0])
 			if err1 != nil || err2 != nil {
 				continue
 			}
-			hits[file][lineNo] = count
+			// The greater count wins, never the later one. A line carrying
+			// more than one record is exactly what makes an lcov's LF differ
+			// from a tally of its DA lines — measured at 57 against 55 on the
+			// proving ground — so "DA:10,1" followed by "DA:10,0" is a line
+			// LH counts as hit. Taking the last would have the patch gate
+			// score it uncovered while the aggregate scored it covered, two
+			// figures disagreeing about one line. ParseGoProfile takes the
+			// max for the same reason.
+			if prev, seen := hits[file][lineNo]; !seen || hitCount > prev {
+				hits[file][lineNo] = hitCount
+			}
+		case strings.HasPrefix(line, "LF:"):
+			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LF:"))); err == nil {
+				count.Total += n
+			}
+		case strings.HasPrefix(line, "LH:"):
+			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LH:"))); err == nil {
+				count.Covered += n
+			}
 		case line == "end_of_record":
 			file = ""
 		}
 	}
-	return hits
+	return count, hits
+}
+
+// GoModuleProfile locates one component's Go coverage profile, together with
+// what turning that profile's package-qualified file names into scan-root
+// relative paths takes: the module path to strip off the front, and the
+// component's own directory to put back on.
+//
+// Both halves are carried rather than derived, because neither implies the
+// other. A module path need not resemble where the module sits —
+// `wardnet.network/go` lives under `sdk/wardnet-go` — so nothing about the
+// path says which directory to put back.
+type GoModuleProfile struct {
+	// Profile is the path to the module's `go test -coverprofile` output.
+	Profile string
+	// ModuleName is the module's path, as `go list -m` reports it.
+	ModuleName string
+	// RelDir is the component's directory relative to the scan root, "" when
+	// the component is rooted at the scan root itself.
+	RelDir string
+}
+
+// goProfileLines counts a component's covered and total statements straight
+// from its profile — the two numbers behind the ratio `go tool cover -func`
+// prints on its `total:` line, minus generated files.
+//
+// Parsing rather than shelling out to `go tool cover -func` is what lets this
+// work from anywhere. That command resolves each profile entry's
+// package-qualified name through the module graph, so it only succeeds when
+// run from inside the module the profile came from — from a monorepo root it
+// fails outright, which is how Go coverage came to be silently absent from
+// wardnet's gate. The number is the same either way; it is already in the file.
+//
+// It is also the only place a generated file can be dropped from the
+// denominator, which `go tool cover` offers no way to do.
+func goProfileLines(src GoModuleProfile, root string) (LineCount, error) {
+	profiles, err := cover.ParseProfiles(src.Profile)
+	if err != nil {
+		return LineCount{}, fmt.Errorf("parsing the coverage profile at %s: %w", src.Profile, err)
+	}
+	var lines LineCount
+	for _, p := range profiles {
+		if isGeneratedGoFile(filepath.Join(root, filepath.FromSlash(goRelPath(p.FileName, src)))) {
+			continue
+		}
+		for _, b := range p.Blocks {
+			lines.Total += b.NumStmt
+			if b.Count > 0 {
+				lines.Covered += b.NumStmt
+			}
+		}
+	}
+	return lines, nil
 }
 
 // ParseGoProfile extracts per-file, per-line hit counts from a Go coverage

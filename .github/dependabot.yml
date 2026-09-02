@@ -117,6 +117,25 @@ updates:
       default-days: 7
     open-pull-requests-limit: 25
 
+  # cargo-llvm-cov (internal/runner), the instrumentation a Rust component's
+  # coverage is measured through. Installed rather than assumed on PATH: a
+  # runner without it measures nothing, and an empty baseline cached as real
+  # makes every later pull request a cache hit that gates on nothing.
+  - package-ecosystem: "cargo"
+    directory: "/cli/internal/runner/cargo-llvm-cov-pin"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+
   # gosec / govulncheck (internal/golang). A bump here must be mirrored into
   # golang.go's constants; internal/golang/pins_test.go fails if it is not.
   #

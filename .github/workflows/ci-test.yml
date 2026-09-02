@@ -2,13 +2,36 @@
 #
 # gt created it once and will never modify or delete it again.
 #
-# The Go suite, moved from ci.yml, now also producing a coverage profile.
+# The Go suite, run through lydite itself.
+#
+# Dogfooding, and the only place the coverage gate runs against a repository
+# whose history it did not create: `lydite test --gate-coverage` measures every
+# declared component, compares it against the baseline for the merge-base, and
+# records this tree's. A gate lydite asks consumers to adopt and does not run
+# on itself is one nobody has checked end to end.
 name: ci-test
 
 on:
   workflow_call:
 
 permissions:
+  # read, and the gate still gates. This job executes the repository's own test
+  # suite — `go test` from the component declaration, plus any `setup` and
+  # `teardown` shell that declaration carries — so on a pull request it runs
+  # code the pull request wrote. A token that can push to any branch, handed to
+  # a job that runs a branch's own code, is arbitrary write access to the
+  # repository for anyone who can open a pull request from a branch.
+  #
+  # Recording the baseline is the only thing that wants write, and it is
+  # best-effort by design: the write fails, a warning says so, and the verdict
+  # is unaffected. What lydite loses is the cache, so every run measures the
+  # base tree instead of reading a recorded one — one extra instrumented run,
+  # which is the right price.
+  #
+  # Recording on a push to the default branch instead would not help here: gt's
+  # orchestrator skips every stage for a tree already validated on the pull
+  # request, which is exactly what a squash merge produces. Tree-keying is what
+  # makes that survivable — ADR 0019 requires no default-branch run at all.
   contents: read
 
 jobs:
@@ -20,6 +43,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The gate resolves the merge-base with the base branch, and a
+          # shallow checkout cannot reach it. lydite refuses rather than
+          # quietly widening or narrowing, so without this the run fails with
+          # exactly the message a consumer would get.
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -31,21 +60,31 @@ jobs:
       - name: go build
         run: go build ./...
 
-      # -coverprofile so the lydite stage reads a report instead of running
-      # the suite again. .lydite/config.yml here declares `report`, and lydite exits
-      # rather than shrugging when told to read one nothing produced.
-      - name: go test
-        run: go test -race -coverprofile=coverage.out ./...
+      - name: build lydite
+        run: go build -o /tmp/lydite ./cmd/lydite
 
-  # Dogfooding: lydite scans itself. This is the only thing that would have
-  # caught a regression in the scanner logic itself (a broken auto-install, a
-  # findings-suppression that stops working, a version pin that drifts) —
-  # go test alone doesn't exercise the actual scan/report path end-to-end
-  # against a real repo the way this does.
-
-      - name: Upload coverage for the lydite stage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gt-coverage
-          path: cli/coverage.out
-          if-no-files-found: error
+      # The suite runs through lydite rather than beside it. The instrumented
+      # variant of the `cli` component's runner IS `go test -race`, with
+      # -coverprofile and -coverpkg added, so nothing is run twice and nothing
+      # is measured that the suite did not produce.
+      #
+      # --gate-coverage compares each component against the baseline for the
+      # merge-base. With a read-only token nothing is cached, so it measures
+      # the base tree in a throwaway worktree every run rather than once — the
+      # cost a consumer pays on the first change against a new base, paid here
+      # on every one. That is the trade for not handing a writable token to a
+      # job that runs a pull request's own code.
+      # No working-directory override, and that is deliberate. A step-level
+      # relative working-directory is resolved against the workspace rather
+      # than against the job's default, so `..` names the parent of the
+      # checkout — a directory with no declaration and no work tree, where
+      # `lydite test` reports "no components declared" and exits 0. The suite
+      # and the gate would both stop running while this job stayed green,
+      # which is the failure the whole gate exists to prevent, in the workflow
+      # that runs it.
+      #
+      # So the step keeps the job's `cli` default and the scan root is named
+      # by the flag, which is resolved by lydite relative to the process's own
+      # directory and needs no runner semantics to be right.
+      - name: lydite test
+        run: /tmp/lydite test --dir .. --gate-coverage
