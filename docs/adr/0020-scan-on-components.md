@@ -51,7 +51,11 @@ gosec nor govulncheck sees it. A component rooted at `.` in a repository with a
 second module at `sdk/` contains every Go file in the tree and scans only its
 own. That was verified against the tools rather than reasoned about — the same
 G306 in both modules is reported once — and it is exact rather than heuristic,
-being a property of the go command.
+being a property of the go command. The same property supplies the exception:
+a `go.mod` under `testdata/`, or under a `.`- or `_`-prefixed directory, is not
+a boundary, because the go command ignores those directories too — so a fixture
+module is no more scanned by its parent than it was before, and warning about
+one would fire on an ordinary repository layout.
 
 **Rust deliberately gets no equivalent rule.** A `Cargo.toml` between the
 component root and a file may be a workspace member cargo already covers or an

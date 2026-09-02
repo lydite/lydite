@@ -661,7 +661,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output),
 			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
-	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, tc, instrument)
 }
 
 // ignoreReports keeps lydite's own output out of git, by writing a `.gitignore`

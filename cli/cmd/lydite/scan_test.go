@@ -461,3 +461,27 @@ func TestOneModuleUnderARootComponentIsSilent(t *testing.T) {
 		t.Fatalf("gaps = %+v, want silence in a single-module repository", got)
 	}
 }
+
+// A go.mod under testdata/ is a fixture, not a project — the go command
+// ignores those directories when resolving packages, so the enclosing module
+// does not scan them and neither does anything else. Treating one as a module
+// boundary would warn about an ordinary Go repository layout on every run.
+func TestATestdataModuleIsNotAModuleBoundary(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeLydite(t, dir, "testdata/broken/go.mod", "module broken\n\ngo 1.26\n")
+	writeLydite(t, dir, "testdata/broken/x.go", "package broken\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want silence: a testdata module is a fixture", got)
+	}
+}

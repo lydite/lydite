@@ -90,7 +90,7 @@ func TestGoProfileLinesExcludeGeneratedFiles(t *testing.T) {
 // path strips nothing and every file silently fails to match the diff, which
 // is how Go patch coverage came to be reported as unmeasured in wardnet.
 func TestModuleNameRejectsNonModuleDir(t *testing.T) {
-	got, err := moduleName(context.Background(), t.TempDir())
+	got, err := moduleName(context.Background(), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("moduleName returned an error for a directory it could ask about: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestMeasureReadsAGoProfile(t *testing.T) {
 		"example.com/svc/main.go:3.20,4.10 1 1\n"+
 		"example.com/svc/main.go:4.10,6.3 1 0\n")
 
-	got, err := Measure(context.Background(), root, "svc", ".lydite-reports/coverage.out", runner.Go)
+	got, err := Measure(context.Background(), root, "svc", ".lydite-reports/coverage.out", runner.Go, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestMeasurePrefixesLCOVPathsWithTheComponentDirectory(t *testing.T) {
 	write(t, root, "admin/.lydite-reports/lcov.info", lcov)
 
 	for _, dir := range []string{"web", "admin"} {
-		got, err := Measure(context.Background(), root, dir, ".lydite-reports/lcov.info", runner.TypeScript)
+		got, err := Measure(context.Background(), root, dir, ".lydite-reports/lcov.info", runner.TypeScript, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -171,7 +171,7 @@ func TestMeasurePrefixesLCOVPathsWithTheComponentDirectory(t *testing.T) {
 func TestMeasureAtTheScanRootAddsNoPrefix(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, ".lydite-reports/lcov.info", "SF:src/lib.rs\nDA:1,1\nLF:1\nLH:1\nend_of_record\n")
-	got, err := Measure(context.Background(), root, ".", ".lydite-reports/lcov.info", runner.Rust)
+	got, err := Measure(context.Background(), root, ".", ".lydite-reports/lcov.info", runner.Rust, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestMeasureAtTheScanRootAddsNoPrefix(t *testing.T) {
 // could not run comes to read as one that passed.
 func TestMeasureRefusesAMissingReport(t *testing.T) {
 	root := t.TempDir()
-	_, err := Measure(context.Background(), root, "web", ".lydite-reports/lcov.info", runner.TypeScript)
+	_, err := Measure(context.Background(), root, "web", ".lydite-reports/lcov.info", runner.TypeScript, nil)
 	if err == nil {
 		t.Fatal("Measure returned no error for a report that does not exist")
 	}
@@ -202,7 +202,7 @@ func TestMeasureRefusesAMissingReport(t *testing.T) {
 func TestMeasureRefusesAGoComponentThatIsNotAModuleRoot(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "svc/.lydite-reports/coverage.out", "mode: set\n")
-	_, err := Measure(context.Background(), root, "svc", ".lydite-reports/coverage.out", runner.Go)
+	_, err := Measure(context.Background(), root, "svc", ".lydite-reports/coverage.out", runner.Go, nil)
 	if err == nil {
 		t.Fatal("Measure returned no error for a directory holding no go.mod")
 	}
@@ -230,15 +230,15 @@ func TestAModuleInsideAGoWorkspaceIsStillItsOwnModule(t *testing.T) {
 	write(t, root, "a/go.mod", "module example.com/a\n\ngo 1.24\n")
 	write(t, root, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
 
-	if got, _ := moduleName(context.Background(), filepath.Join(root, "a")); got != "example.com/a" {
+	if got, _ := moduleName(context.Background(), filepath.Join(root, "a"), nil); got != "example.com/a" {
 		t.Errorf("moduleName = %q, want example.com/a — the workspace lists both members", got)
 	}
-	if got, _ := moduleName(context.Background(), filepath.Join(root, "b")); got != "example.com/b" {
+	if got, _ := moduleName(context.Background(), filepath.Join(root, "b"), nil); got != "example.com/b" {
 		t.Errorf("moduleName = %q, want example.com/b", got)
 	}
 	// A directory that is genuinely not a module root is still refused, so
 	// this did not buy the workspace case by loosening the check.
-	if got, _ := moduleName(context.Background(), root); got != "" {
+	if got, _ := moduleName(context.Background(), root, nil); got != "" {
 		t.Errorf("moduleName at the workspace root = %q, want none", got)
 	}
 }
@@ -255,7 +255,7 @@ func TestAnOutOfTreeLCOVPathIsDroppedRatherThanPrefixed(t *testing.T) {
 		"SF:/somewhere/else/.cargo/registry/src/dep.rs\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
 	write(t, root, "rust/.lydite-reports/coverage/lcov.info", lcov)
 
-	got, err := Measure(context.Background(), root, "rust", ".lydite-reports/coverage/lcov.info", runner.Rust)
+	got, err := Measure(context.Background(), root, "rust", ".lydite-reports/coverage/lcov.info", runner.Rust, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

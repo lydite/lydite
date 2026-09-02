@@ -40,13 +40,16 @@ func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	}
 
 	if bin, err := ensure(ctx, env, "cargo-audit", cargoAuditVersion); err != nil {
-		results = append(results, executil.Result{Name: "cargo-audit", Err: err})
+		// Detail as well as Err: report() prints Detail under a failing row
+		// and nothing else, so a tool that would not install renders as a
+		// bare `✗ cargo-audit` with the cause nowhere in the report.
+		results = append(results, executil.Result{Name: "cargo-audit", Err: err, Detail: err.Error()})
 	} else {
 		results = append(results, named("cargo-audit", executil.RunEnv(ctx, dir, env, bin, "audit")))
 	}
 
 	if bin, err := ensure(ctx, env, "cargo-deny", cargoDenyVersion); err != nil {
-		results = append(results, executil.Result{Name: "cargo-deny", Err: err})
+		results = append(results, executil.Result{Name: "cargo-deny", Err: err, Detail: err.Error()})
 	} else {
 		// advisories is intentionally excluded here: cargo-audit already
 		// covers RustSec CVEs, and running both would double-report them.

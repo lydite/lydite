@@ -320,7 +320,10 @@ func nodeRequirement(root, dir string) (Requirement, error) {
 		}
 	}
 	consider(nvmrc(dir), relSource(root, dir, ".nvmrc"))
-	if req.Raw != "" {
+	// On a comparable version, not merely on having said something: an
+	// `engines.node` of "*" states no floor, so it cannot be the answer when
+	// the scan root's .nvmrc names one.
+	if req.Version != "" {
 		return req, nil
 	}
 	consider(nvmrc(root), ".nvmrc")

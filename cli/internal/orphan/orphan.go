@@ -276,11 +276,32 @@ func sameGoModule(file, dir string, modules map[string]bool) bool {
 func goModuleDirs(tracked []string) map[string]bool {
 	dirs := map[string]bool{}
 	for _, p := range tracked {
-		if path.Base(p) == "go.mod" {
-			dirs[path.Dir(p)] = true
+		if path.Base(p) != "go.mod" || goIgnored(path.Dir(p)) {
+			continue
 		}
+		dirs[path.Dir(p)] = true
 	}
 	return dirs
+}
+
+// goIgnored reports whether the Go toolchain itself ignores a directory when
+// resolving packages: "testdata", and any name beginning with "." or "_".
+//
+// It matters here for the reason it mattered to discovery: a go.mod under
+// testdata/ is a fixture rather than a project, and routinely unbuildable on
+// purpose. Treating one as a module boundary would put every fixture .go file
+// outside its component's module and warn that nothing scans it — on an
+// ordinary Go repository layout, on every run, which is how a diagnostic earns
+// being ignored. The go command ignores those directories too, so a fixture is
+// not scanned by the enclosing module either; nothing is being claimed as
+// covered that is not.
+func goIgnored(dir string) bool {
+	for _, seg := range strings.Split(dir, "/") {
+		if seg == "testdata" || strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "_") {
+			return true
+		}
+	}
+	return false
 }
 
 // sourceOf keeps the paths written in a language lydite has a runner for.

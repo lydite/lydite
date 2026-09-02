@@ -381,3 +381,17 @@ func TestAnUnpinnedEnginesDoesNotHideTheNvmrc(t *testing.T) {
 		t.Errorf("Version = %q, want the .nvmrc's v22.11.0", got)
 	}
 }
+
+// An engines.node that pins nothing must not suppress the scan root's .nvmrc
+// either. Keying the early return on having said *something* rather than on
+// having said something comparable leaves the component unpinned in a
+// repository that names a version one directory up.
+func TestAnUnpinnedEnginesDoesNotHideTheRootNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22.11.0\n")
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":"*"}}`)
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want the root .nvmrc's v22.11.0", got)
+	}
+}

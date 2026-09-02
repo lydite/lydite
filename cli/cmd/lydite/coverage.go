@@ -20,6 +20,7 @@ import (
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -99,7 +100,7 @@ func langOf(c component.Component) runner.Lang {
 // instead would drop it from the language and global figures silently, leaving
 // a gate that covered fewer components than the repository has reading as a
 // complete one.
-func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, instrument bool) measurement {
+func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, tc *toolchain.Env, instrument bool) measurement {
 	switch {
 	case !instrument:
 		return unmeasuredComponent(c, "coverage is off for this run")
@@ -108,7 +109,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	case inv.CoverageReport == "":
 		return unmeasurableComponent(c, "the runner's instrumented variant names no coverage report")
 	}
-	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c))
+	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c), childEnv(tc, c, runner.Invocation{}))
 	if err != nil {
 		return unmeasuredComponent(c, err.Error())
 	}

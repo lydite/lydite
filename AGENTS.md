@@ -784,7 +784,9 @@ runs — and the gate belongs to `lydite test`, which a consumer can run scan wi
 **For Go it asks one thing more**, and the exception is exact rather than heuristic: a nested
 `go.mod` starts a separate module the enclosing module's package graph excludes, so `./...` at an
 ancestor never compiles it and neither gosec nor govulncheck sees it. Verified against the tools —
-the same G306 in a root module and in a nested one is reported once. **Rust gets no equivalent
+the same G306 in a root module and in a nested one is reported once. A `go.mod` under
+`testdata/` or a `.`/`_`-prefixed directory is not a boundary, for the same reason: the go
+command ignores those directories, so a fixture module is not scanned by its parent either. **Rust gets no equivalent
 rule**, because a `Cargo.toml` between the component root and a file may be a workspace member
 cargo already covers or an unrelated crate it does not, and telling those apart means reading the
 manifest; a path-shaped rule would warn about crates that are perfectly well scanned. TypeScript

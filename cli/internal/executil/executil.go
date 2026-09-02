@@ -153,9 +153,19 @@ func resolve(dir, name string, extraEnv []string) string {
 			entry = filepath.Join(dir, entry)
 		}
 		candidate := filepath.Join(entry, name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		// Absolute, because exec.Cmd evaluates a relative Path against Dir —
+		// so returning the path this stat'ed would apply dir twice and look
+		// for `web/web/tools/x`. The stat is from lydite's working
+		// directory and the child's Path must not be.
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
 			return candidate
 		}
+		return abs
 	}
 	return name
 }

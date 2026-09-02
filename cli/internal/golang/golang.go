@@ -40,7 +40,10 @@ func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	var results []executil.Result
 
 	if bin, err := ensure(ctx, env, "gosec", gosecVersion, gosecPkg); err != nil {
-		results = append(results, executil.Result{Name: "gosec", Err: err})
+		// Detail as well as Err: report() prints Detail under a failing row
+		// and nothing else, so a tool that would not install renders as a
+		// bare `✗ gosec` with the cause in neither the terminal nor --json.
+		results = append(results, executil.Result{Name: "gosec", Err: err, Detail: err.Error()})
 	} else {
 		// -exclude-generated skips files carrying the standard
 		// "Code generated ... DO NOT EDIT." header. Findings there are not
@@ -55,7 +58,7 @@ func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	}
 
 	if bin, err := ensure(ctx, env, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
-		results = append(results, executil.Result{Name: "govulncheck", Err: err})
+		results = append(results, executil.Result{Name: "govulncheck", Err: err, Detail: err.Error()})
 	} else {
 		r := executil.RunEnv(ctx, dir, env, bin, "./...")
 		r.Name = "govulncheck"

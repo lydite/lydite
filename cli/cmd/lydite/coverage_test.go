@@ -406,7 +406,7 @@ func TestEveryDeclaredComponentIsAccountedFor(t *testing.T) {
 // than the repository has would read as a complete one.
 func TestARawCommandComponentIsUnmeasuredAndNotExcluded(t *testing.T) {
 	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "check"}}
-	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{Name: "make"}, true)
+	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{Name: "make"}, nil, true)
 	if m.Measured() {
 		t.Fatal("a raw command produced a measurement")
 	}
@@ -423,7 +423,7 @@ func TestARawCommandComponentIsUnmeasuredAndNotExcluded(t *testing.T) {
 // report is missing read identically as a percentage and mean opposite things.
 func TestAMissingReportIsUnmeasuredNotZero(t *testing.T) {
 	c := component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}
-	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{CoverageReport: ".lydite-reports/coverage.out"}, true)
+	m := measure(context.Background(), t.TempDir(), c, runner.Invocation{CoverageReport: ".lydite-reports/coverage.out"}, nil, true)
 	if m.Measured() {
 		t.Fatal("a missing report produced a measurement")
 	}
@@ -457,7 +457,7 @@ func TestMeasureReadsTheReportTheInvocationNamed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := measure(context.Background(), root, c, inv, true)
+	m := measure(context.Background(), root, c, inv, nil, true)
 	if !m.Measured() {
 		t.Fatalf("unmeasured: %s", m.Why)
 	}
@@ -1166,7 +1166,7 @@ func TestAGoComponentBelowItsModuleRootIsRefused(t *testing.T) {
 		"mode: set\nexample.com/m/services/api/api.go:3.20,3.32 1 1\n")
 
 	c := component.Component{Name: "api", Dir: "services/api", Runner: runner.GoTest}
-	m := measure(context.Background(), root, c, runner.Invocation{CoverageReport: ".lydite-reports/coverage/coverage.out"}, true)
+	m := measure(context.Background(), root, c, runner.Invocation{CoverageReport: ".lydite-reports/coverage/coverage.out"}, nil, true)
 	if m.Measured() {
 		t.Fatalf("measured %+v from a directory that is not a module root", m.Lines)
 	}

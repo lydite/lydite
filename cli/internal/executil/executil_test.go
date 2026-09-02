@@ -145,9 +145,46 @@ func TestResolveReadsARelativePathEntryFromTheChildsDirectory(t *testing.T) {
 	if got := resolve(dir, "lydite-relative", []string{"PATH=tools"}); got != bin {
 		t.Errorf("resolve = %q, want %q", got, bin)
 	}
+	// Absolute, and this is the half an absolute `dir` cannot show: exec.Cmd
+	// evaluates a relative Path against Dir, so returning the joined relative
+	// path would apply dir twice and look for `web/web/tools/x`.
+	if !filepath.IsAbs(resolve(dir, "lydite-relative", []string{"PATH=tools"})) {
+		t.Error("resolve returned a relative path, which exec would resolve against Dir a second time")
+	}
 	// From anywhere else the same entry names nothing, and the bare name is
 	// what os/exec should report on.
 	if got := resolve(t.TempDir(), "lydite-relative", []string{"PATH=tools"}); got != "lydite-relative" {
 		t.Errorf("resolve = %q, want the name unchanged where the entry holds nothing", got)
+	}
+}
+
+// The failure a test passing an absolute directory cannot see: with a relative
+// `dir` — which is what `--dir .` and the documented `--dir ..` give — a
+// relative PATH entry has to be joined once, not applied twice by exec.
+func TestARelativeWorkingDirectoryResolvesARelativePathEntryOnce(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "web", "tools"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(base, "web", "tools", "lydite-rel-run")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { //nolint:gosec // a test fixture that has to be executable
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(base); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+
+	res := RunQuietEnv(context.Background(), "web", []string{"PATH=tools"}, "lydite-rel-run")
+	if !res.Ok() {
+		t.Fatalf("a binary on the child's relative PATH was not found: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "found") {
+		t.Errorf("output = %q, want the child's own", res.Output)
 	}
 }
