@@ -823,3 +823,100 @@ func TestRecordingMergesRatherThanSkipping(t *testing.T) {
 		t.Error("sameCounts says a changed baseline is identical")
 	}
 }
+
+// A gate that fails partway through must not leave two rows under one label.
+// gatedRows adds rows as it goes and can fail after most of them are in — a
+// failing `git diff` inside patchRows is the live path — so the recovery
+// rendering would otherwise put a gated `pass` and a `context` "not compared"
+// under `coverage(api)`, and a consumer keying rows by label picks one of two
+// contradictory answers.
+func TestAFailedGateLeavesNoDuplicateRows(t *testing.T) {
+	// No git repository, so the merge-base resolution fails before any gated
+	// row is written; the assertion is about the labels either way.
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	ms := []measurement{measured("api", runner.Go, 9, 10), measured("web", runner.TypeScript, 1, 10)}
+	cfg := config.Default()
+	cfg.Coverage.Floor = 50
+
+	addCoverageRows(context.Background(), cmd, rep, t.TempDir(), decl, ms, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+
+	seen := map[string]int{}
+	for _, r := range rep.Rows() {
+		seen[r.Label]++
+	}
+	for label, n := range seen {
+		if n > 1 {
+			t.Errorf("label %q appears %d times — a consumer keying rows by label gets one of two answers", label, n)
+		}
+	}
+}
+
+// Anchoring a within-tolerance dip to the high-water mark must anchor the
+// ratio, not the size. Writing the baseline's own counts back freezes the
+// component's weight: one that grew from 1,000 lines to 2,000 while dipping
+// inside the tolerance would be recorded as 1,000 lines, and the language and
+// global baselines are sums of exactly these counts — so a stale weight decides
+// how much the component counts towards a figure describing a tree it no
+// longer matches.
+func TestARestoredDipKeepsThisTreesSize(t *testing.T) {
+	baseline := gitstate.Baseline{"api": lines(800, 1000)}
+	// The component doubled in size and dipped 0.05pp, which is inside the
+	// tolerance.
+	record := gitstate.Baseline{"api": lines(1599, 2000)}
+	got := withToleratedDipsRestored(record, baseline, 0.1)["api"]
+	if got.Total != 2000 {
+		t.Errorf("total = %d, want this tree's 2000 rather than the baseline's 1000", got.Total)
+	}
+	if pct := got.Percent(); pct < 79.95 || pct > 80.05 {
+		t.Errorf("percent = %v, want the baseline's 80%% anchored over the new size", pct)
+	}
+}
+
+// A run that could not measure a component it was supposed to has not
+// established this tree's baseline. Recording a partial one is worse than
+// recording none: any non-empty entry reads as a cache hit, so the missing
+// component is `new` on every later change — and a composed figure refuses to
+// compare unless the baseline covers every component in it, so that language's
+// row and the global row stop gating too.
+//
+// A component nothing could ever measure does not block it: it contributes to
+// neither side of any comparison, so its absence is permanent and expected.
+func TestAPartialRunDoesNotRecordAPartialBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gap        measurement
+		wantRecord bool
+	}{
+		{"a component whose suite failed", unmeasuredComponent(
+			component.Component{Name: "web", Dir: "web", Runner: runner.Vitest},
+			"test(web) did not pass: failed"), false},
+		{"a component nothing could measure", unmeasurableComponent(
+			component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "check"}},
+			"the component declares a raw command, which has no instrumented variant"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), tc.gap})
+			if blocked == tc.wantRecord {
+				t.Errorf("recordingBlockedBy = (%v, %v), want blocked = %v", gap.Name, blocked, !tc.wantRecord)
+			}
+		})
+	}
+}
+
+// A component affected selection deselected carries forward rather than
+// blocking the recording: selection determined the change could not have
+// broken it, so the baseline entry still describes it.
+func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
+	skipped := unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not selected")
+	skipped.Carryable = true
+	if gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), skipped}); blocked {
+		t.Errorf("recording blocked by %q, but selection determined it could not have been broken", gap.Name)
+	}
+}

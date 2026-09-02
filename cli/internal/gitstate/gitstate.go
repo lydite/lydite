@@ -117,19 +117,29 @@ const remote = "origin"
 //
 //  1. override — what a caller passed, which is the caller's own statement
 //     and outranks anything discovered.
-//  2. refs/remotes/origin/HEAD — git's own record of the remote's default
-//     branch. Authoritative where it is set, and `actions/checkout` does not
-//     set it, so it resolves for a developer's clone and almost never in CI.
-//  3. whichever of main and master the remote actually has. Exactly one, or
-//     this is an error: a repository carrying both has not said which one is
-//     the default, and picking by a hardcoded precedence would measure a
-//     change against a branch nobody chose.
+//  2. refs/remotes/origin/HEAD — git's own local record of the remote's
+//     default branch. Free and offline where a clone has it, and
+//     `actions/checkout` does not set it.
+//  3. the remote's own HEAD, asked for over the network. This is the
+//     authoritative answer and the one that works in CI, which is why the
+//     guess below is very nearly unreachable.
+//  4. whichever of main and master the remote actually has. A last resort for
+//     a remote that reports no HEAD at all, and exactly one of the two or this
+//     is an error: a repository carrying both has not said which one is the
+//     default, and picking by a hardcoded precedence would measure a change
+//     against a branch nobody chose.
 //
 // Every failure names the flag. The alternative — falling back to `main`
 // whatever the remote holds — is how a repository whose default branch is
 // `master` came to have --affected, `scan --diff-base auto` and the coverage
 // gate all fail with a merge-base error that named neither the cause nor the
 // fix.
+//
+// Step 3 is what keeps step 4 from being that same guess wearing a different
+// hat. A repository whose default is `develop` and which still carries a stale
+// `master` has exactly one candidate, so step 4 alone would answer `master`
+// with no diagnostic at all — silently measuring every change against a branch
+// nobody chose, which is worse than the hardcoded `main` it replaced.
 func BaseBranch(ctx context.Context, dir, override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -139,9 +149,11 @@ func BaseBranch(ctx context.Context, dir, override string) (string, error) {
 			return name, nil
 		}
 	}
+	if name := remoteHead(ctx, dir); name != "" {
+		return name, nil
+	}
 	// One query for both candidates rather than one each: a second network
-	// round trip to learn the same thing is pure latency on every run that
-	// reaches here, which in CI is every run.
+	// round trip to learn the same thing is pure latency.
 	r := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--heads", remote, "main", "master")
 	if !r.Ok() {
 		return "", fmt.Errorf("listing %s's branches to find the default: %w\n       name it with %s", remote, r.Err, BaseBranchFlag)
@@ -172,6 +184,32 @@ func BaseBranch(ctx context.Context, dir, override string) (string, error) {
 	default:
 		return "", fmt.Errorf("%s has both a main and a master branch, so which one is the default is not lydite's to guess — name it with %s", remote, BaseBranchFlag)
 	}
+}
+
+// remoteHead asks the remote which branch its HEAD points at, which is the
+// authoritative statement of its default branch and needs nothing set up
+// locally — unlike refs/remotes/origin/HEAD, which a CI checkout does not
+// create.
+//
+// `git ls-remote --symref origin HEAD` answers with a "ref: refs/heads/<name>
+// HEAD" line before the SHA line. An empty answer is a remote that reports no
+// HEAD, and is left to the caller's last resort rather than being an error:
+// this is a discovery step, and the caller has the better message.
+func remoteHead(ctx context.Context, dir string) string {
+	r := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--symref", remote, "HEAD")
+	if !r.Ok() {
+		return ""
+	}
+	for _, line := range strings.Split(r.Output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "ref:" {
+			continue
+		}
+		if name := strings.TrimPrefix(fields[1], "refs/heads/"); name != fields[1] {
+			return name
+		}
+	}
+	return ""
 }
 
 // BaseSHA resolves the commit on the base branch this branch diverged from,

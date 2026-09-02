@@ -351,7 +351,13 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 	run := gitRunner(t, ctx)
 
 	// origin holds the branches; clone is where discovery runs.
-	newRepo := func(branches ...string) string {
+	//
+	// headless makes the remote report no HEAD, by pointing it at a branch
+	// that does not exist. That is the only state in which the main/master
+	// candidates are consulted at all — every ordinary remote answers `git
+	// ls-remote --symref HEAD` with its own default, which is why the guess
+	// below it is a last resort rather than the mechanism.
+	newRepoWithHead := func(noHead bool, branches ...string) string {
 		origin := t.TempDir()
 		run(origin, "init", "--bare", "-b", branches[0], ".")
 		seed := t.TempDir()
@@ -367,17 +373,24 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 		for _, b := range branches {
 			run(seed, "push", "origin", branches[0]+":"+b)
 		}
+		if noHead {
+			run(origin, "symbolic-ref", "HEAD", "refs/heads/does-not-exist")
+		}
 		clone := t.TempDir()
 		run(clone, "clone", "--no-checkout", origin, ".")
 		// actions/checkout leaves no origin/HEAD, which is what makes the
-		// listing below the path CI actually takes. Removing it here is what
-		// reproduces that.
+		// remote's own answer the path CI actually takes. Removing it here is
+		// what reproduces that.
 		_ = executil.Run(ctx, clone, "git", "remote", "set-head", "origin", "--delete")
 		return clone
 	}
+	// The ordinary remote: it states its own default.
+	newRepo := func(branches ...string) string { return newRepoWithHead(false, branches...) }
+	// A remote that reports no HEAD, so discovery falls to the candidates.
+	headless := func(branches ...string) string { return newRepoWithHead(true, branches...) }
 
 	t.Run("master alone is found", func(t *testing.T) {
-		got, err := BaseBranch(ctx, newRepo("master"), "")
+		got, err := BaseBranch(ctx, headless("master"), "")
 		if err != nil {
 			t.Fatalf("BaseBranch: %v", err)
 		}
@@ -387,7 +400,7 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 	})
 
 	t.Run("main alone is found", func(t *testing.T) {
-		got, err := BaseBranch(ctx, newRepo("main"), "")
+		got, err := BaseBranch(ctx, headless("main"), "")
 		if err != nil {
 			t.Fatalf("BaseBranch: %v", err)
 		}
@@ -396,8 +409,36 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 		}
 	})
 
+	t.Run("the remote's own HEAD outranks the candidates", func(t *testing.T) {
+		// A repository whose default is `develop` and which still carries a
+		// stale `master`. The candidate list has exactly one answer here and
+		// it is the wrong one, so a discovery that stopped at the list would
+		// silently measure every change against a branch nobody chose.
+		got, err := BaseBranch(ctx, newRepo("develop", "master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "develop" {
+			t.Errorf("BaseBranch = %q, want %q — the remote states its own default", got, "develop")
+		}
+	})
+
+	t.Run("the remote's own HEAD outranks the candidates", func(t *testing.T) {
+		// A repository whose default is `develop` and which still carries a
+		// stale `master`. The candidate list has exactly one answer here and
+		// it is the wrong one, so a discovery that stopped at the list would
+		// silently measure every change against a branch nobody chose.
+		got, err := BaseBranch(ctx, newRepo("develop", "master"), "")
+		if err != nil {
+			t.Fatalf("BaseBranch: %v", err)
+		}
+		if got != "develop" {
+			t.Errorf("BaseBranch = %q, want %q — the remote states its own default", got, "develop")
+		}
+	})
+
 	t.Run("a branch merely containing a candidate is not one", func(t *testing.T) {
-		got, err := BaseBranch(ctx, newRepo("master", "not-main"), "")
+		got, err := BaseBranch(ctx, headless("master", "not-main"), "")
 		if err != nil {
 			t.Fatalf("BaseBranch: %v", err)
 		}
@@ -406,8 +447,8 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 		}
 	})
 
-	t.Run("both is an error naming the flag", func(t *testing.T) {
-		_, err := BaseBranch(ctx, newRepo("main", "master"), "")
+	t.Run("both, on a remote reporting no HEAD, is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, headless("main", "master"), "")
 		if err == nil {
 			t.Fatal("BaseBranch resolved a repository carrying both main and master")
 		}
@@ -416,8 +457,8 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 		}
 	})
 
-	t.Run("neither is an error naming the flag", func(t *testing.T) {
-		_, err := BaseBranch(ctx, newRepo("trunk"), "")
+	t.Run("neither, on a remote reporting no HEAD, is an error naming the flag", func(t *testing.T) {
+		_, err := BaseBranch(ctx, headless("trunk"), "")
 		if err == nil {
 			t.Fatal("BaseBranch resolved a repository with neither main nor master")
 		}
@@ -429,7 +470,7 @@ func TestBaseBranchIsDiscovered(t *testing.T) {
 	t.Run("an override outranks discovery", func(t *testing.T) {
 		// A repository discovery would refuse, which is what shows the
 		// override is consulted before anything is looked up.
-		got, err := BaseBranch(ctx, newRepo("main", "master"), "trunk")
+		got, err := BaseBranch(ctx, headless("main", "master"), "trunk")
 		if err != nil {
 			t.Fatalf("BaseBranch: %v", err)
 		}

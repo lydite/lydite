@@ -47,6 +47,11 @@ type measurement struct {
 	// not affected" and "this component's report could not be read" are the
 	// same absence and want opposite reactions from a reader.
 	Why string
+	// Unmeasurable marks a component no run could ever measure: it declares a
+	// raw command, or its runner's instrumented variant names no report. Its
+	// absence from a baseline is permanent and expected rather than a gap one
+	// run created, so it never blocks a recording.
+	Unmeasurable bool
 	// Carryable marks a component whose absence says nothing about its
 	// content: this invocation did not select it, so it is unchanged from the
 	// tree the baseline was recorded for and that entry still describes it.
@@ -65,6 +70,14 @@ func (m measurement) Measured() bool { return m.Why == "" && m.Lines.Measured() 
 // unmeasuredComponent is a component with no measurement, and the reason.
 func unmeasuredComponent(c component.Component, why string) measurement {
 	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c), Why: why}
+}
+
+// unmeasurableComponent is a component no run could ever measure, as opposed to
+// one this run happened not to.
+func unmeasurableComponent(c component.Component, why string) measurement {
+	m := unmeasuredComponent(c, why)
+	m.Unmeasurable = true
+	return m
 }
 
 // langOf is the language a component's runner implies. A component declaring a
@@ -89,9 +102,9 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	case !instrument:
 		return unmeasuredComponent(c, "coverage is off for this run")
 	case len(c.Command) > 0:
-		return unmeasuredComponent(c, "the component declares a raw command, which has no instrumented variant")
+		return unmeasurableComponent(c, "the component declares a raw command, which has no instrumented variant")
 	case inv.CoverageReport == "":
-		return unmeasuredComponent(c, "the runner's instrumented variant names no coverage report")
+		return unmeasurableComponent(c, "the runner's instrumented variant names no coverage report")
 	}
 	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c))
 	if err != nil {
@@ -166,13 +179,24 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 		floorRows(rep, ordered, cfg.Coverage.Floor)
 		return
 	}
-	if err := gatedRows(ctx, cmd, rep, dir, decl, ordered, cfg, opts); err != nil {
+	// Into a report of its own, committed only once it succeeds. gatedRows
+	// adds rows as it goes and can fail after most of them are in — a failing
+	// `git diff` inside patchRows is the live path — and the recovery below
+	// would then leave two rows per component under one label, with
+	// contradictory statuses. A consumer keying rows by label silently picks
+	// one of two answers.
+	gated := ui.NewReport("test")
+	if err := gatedRows(ctx, cmd, gated, dir, decl, ordered, cfg, opts); err != nil {
 		// The measurements are still worth showing: they are what a reader
-		// needs to act on the gate that could not run.
+		// needs in order to act on the gate that could not run.
 		ungatedRows(rep, ordered)
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "baseline",
 			Value: "not gated", Detail: strings.Split(err.Error(), "\n")})
 		floorRows(rep, ordered, cfg.Coverage.Floor)
+		return
+	}
+	for _, row := range gated.Rows() {
+		rep.Add(row)
 	}
 }
 
@@ -404,6 +428,17 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	scratch := ui.NewReport("baseline")
 	ms := runComponents(ctx, tmp, decl.Components, nil, nil, baseCfg, opts.Concurrency, false, true, scratch)
 
+	// The worktree — and every log written into it — is removed on the way
+	// out, so the tail under a failing row is the only account of what went
+	// wrong that can outlive this function. It goes into the warning rather
+	// than being deleted with the directory that holds it.
+	tails := map[string][]string{}
+	for _, row := range scratch.Rows() {
+		if name, ok := strings.CutPrefix(row.Label, "test("); ok && row.Status == ui.StatusFail {
+			tails[strings.TrimSuffix(name, ")")] = row.Detail
+		}
+	}
+
 	out := gitstate.Baseline{}
 	for _, m := range ms {
 		if m.Measured() {
@@ -415,6 +450,9 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 		// as new and gate it against nothing, and the cause is here rather
 		// than in the run that later notices.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: the baseline at %s has no entry for component %q: %s\n", shortSHA(base), m.Name, m.Why)
+		for _, line := range tails[m.Name] {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", line)
+		}
 	}
 	return out, nil
 }
@@ -706,6 +744,27 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 	if len(record) == 0 {
 		return
 	}
+	// A run that could not measure a component it was supposed to has not
+	// established this tree's baseline, and recording a partial one is worse
+	// than recording none: ReadBaseline reports a hit for any non-empty entry,
+	// so the missing component reads as new on every later change — and
+	// because a composed figure refuses to compare unless the baseline covers
+	// every component in it, that language's row and the global row stop
+	// gating too. Silently, and with no way to notice.
+	//
+	// Recording nothing leaves the next change a clean cache miss, which
+	// measures the base tree. That is slower and correct.
+	//
+	// A component nothing could ever measure — a raw `command:`, a runner
+	// naming no report — does not block it. It contributes to neither side of
+	// any comparison, so its absence from the baseline is permanent and
+	// expected rather than a gap this run created.
+	if gap, blocked := recordingBlockedBy(ms); blocked {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: component %q was not measured (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
+			gap.Name, gap.Why)
+		return
+	}
 	record = withToleratedDipsRestored(record, baseline, tolerance)
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
 	if err != nil {
@@ -756,6 +815,22 @@ func sameCounts(a, b gitstate.Baseline) bool {
 	return true
 }
 
+// recordingBlockedBy names the component that stops this run establishing the
+// tree's baseline, if any: one it was supposed to measure and did not.
+//
+// A component this run did not select is unchanged from the tree the baseline
+// describes and carries forward; one nothing could ever measure contributes to
+// neither side of any comparison. Neither is a gap this run created.
+func recordingBlockedBy(ms []measurement) (measurement, bool) {
+	for _, m := range ms {
+		if m.Measured() || m.Carryable || m.Unmeasurable {
+			continue
+		}
+		return m, true
+	}
+	return measurement{}, false
+}
+
 // withToleratedDipsRestored returns record with every component whose coverage
 // dipped below its baseline by no more than the tolerance restored to the
 // baseline's counts.
@@ -777,10 +852,25 @@ func withToleratedDipsRestored(record, baseline gitstate.Baseline, tolerance flo
 			continue
 		}
 		if lines.Percent() < b.Percent() && !regressedBeyond(lines.Percent(), b.Percent(), tolerance) {
-			out[name] = b
+			out[name] = atPercentOf(b.Percent(), lines.Total)
 		}
 	}
 	return out
+}
+
+// atPercentOf is the ratio to anchor to, expressed over the size the component
+// actually is now.
+//
+// Writing the baseline's own counts back would freeze the component's *weight*
+// as well as its ratio: a component that grew from 1,000 lines to 2,000 while
+// dipping inside the tolerance would be recorded as 1,000 lines. The language
+// and global baselines are sums of these counts, so that stale weight then
+// decides how much this component counts towards a figure describing a tree it
+// no longer matches — and the distortion compounds over successive
+// within-tolerance merges. The anchor is the percentage; the size is this
+// tree's.
+func atPercentOf(pct float64, total int) coverage.LineCount {
+	return coverage.LineCount{Covered: int(math.Round(pct / 100 * float64(total))), Total: total}
 }
 
 // regressedBeyond reports whether cur dipped below base by more than tolerance

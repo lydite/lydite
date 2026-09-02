@@ -165,6 +165,13 @@ the component's to declare.`,
 				}
 				ordered = file.Components
 			}
+			cov := coverageOptions{
+				Instrument:  !noCoverage,
+				Gate:        gateCoverage,
+				BaseBranch:  baseBranch,
+				Concurrency: limit,
+				Selected:    onlyAffected,
+			}
 			if len(selected) == 0 {
 				// Nothing ran, so nothing interleaves: the skipped rows are
 				// the whole set, still in declaration order.
@@ -172,6 +179,15 @@ the component's to declare.`,
 					if r, ok := skipped[c.Name]; ok {
 						rep.Add(r)
 					}
+				}
+				// The gate still reports, because a caller that asked for it
+				// has to be able to tell this from a run where the flag was
+				// dropped. On the default branch this is also the run that
+				// records: a tree matching its base selects nothing and is
+				// still the tree whose coverage the next change gates
+				// against.
+				if len(file.Components) > 0 {
+					addCoverageRows(ctx, cmd, rep, dir, file, nil, cfg, cov)
 				}
 				// Only when the declaration is genuinely empty. A run that
 				// selected nothing has components declared and has already
@@ -191,13 +207,6 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			cov := coverageOptions{
-				Instrument:  !noCoverage,
-				Gate:        gateCoverage,
-				BaseBranch:  baseBranch,
-				Concurrency: limit,
-				Selected:    onlyAffected,
-			}
 			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, cov.Instrument, rep)
 			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
 			return renderTestReport(cmd, rep, asJSON, noColor)
