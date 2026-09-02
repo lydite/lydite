@@ -36,7 +36,7 @@ import (
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected bool
+	var asJSON, noColor, stream, onlyAffected, noCoverage, gateCoverage bool
 	var concurrency, baseBranch string
 	cmd := &cobra.Command{
 		Use:           "test",
@@ -87,6 +87,12 @@ the component's to declare.`,
 			// above: the gates each walk the whole tree, and a flag conflict
 			// must not pay for that first and then discard a report the run
 			// had already computed.
+			if noCoverage && gateCoverage {
+				// Gating what was never measured has no answer to give, and
+				// silently ignoring one of the two flags would leave a
+				// workflow believing it gates.
+				return errors.New("--no-coverage measures nothing for --gate-coverage to gate; pass one")
+			}
 			if onlyAffected && len(components) > 0 {
 				// Two narrowing mechanisms composed. The planner emits
 				// per-shard --component lists that are already the selected
@@ -185,7 +191,16 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, rep)
+			cov := coverageOptions{
+				Instrument:  !noCoverage,
+				Gate:        gateCoverage,
+				BaseBranch:  baseBranch,
+				Concurrency: limit,
+			}
+			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, cov.Instrument, rep)
+			if err := addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov); err != nil {
+				return err
+			}
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
 	}
@@ -208,6 +223,20 @@ the component's to declare.`,
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
 		"run only the components the change against the merge-base could have broken")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	// Instrumentation is on by default despite costing real time — cargo
+	// llvm-cov forces a separate instrumented build, and Go's -coverpkg=./...
+	// recompiles every package per test binary. The fast inner loop is `go
+	// test` or `cargo nextest` run directly; nothing reaches for lydite to
+	// re-run one package. A gate that is opt-in is a gate that is off where
+	// it matters.
+	cmd.Flags().BoolVar(&noCoverage, "no-coverage", false,
+		"run each component's plain variant and report no coverage at all")
+	// Explicit, the way --affected is. Measuring is local; gating fetches the
+	// baseline branch and pushes to it, and a developer's local run must
+	// never write to a shared branch. Inferring "am I in CI" is what ADR 0018
+	// already refused for selection, for the same reason.
+	cmd.Flags().BoolVar(&gateCoverage, "gate-coverage", false,
+		"compare each component's coverage against the baseline for the merge-base, and record this tree's")
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
@@ -289,13 +318,17 @@ type componentPlan struct {
 // a truncation visible only in the process exit code is a truncation the PR
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
-func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream bool, rep *ui.Report) {
+func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream, instrument bool, rep *ui.Report) []measurement {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
 	}
 
 	rows := make([]ui.Row, len(plans))
+	measured := make([]measurement, len(plans))
+	for i, p := range plans {
+		measured[i] = unmeasuredComponent(p.c, "the component did not run")
+	}
 	var items []scheduler.Item
 	var index []int
 	for i, p := range plans {
@@ -319,7 +352,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 
 	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
 		i := index[k]
-		rows[i] = runComponent(ctx, root, plans[i], cfg)
+		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, instrument)
 	})
 
 	// A cancelled run kills every suite it had started, so each one exits
@@ -352,6 +385,18 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 				Detail: []string{"the run was interrupted before this component finished"},
 				Log:    r.Log,
 			}
+			measured[i] = unmeasuredComponent(plans[i].c, "the run was interrupted before this component finished")
+		}
+	}
+
+	// Only a component that passed contributes a measurement. A report
+	// written by a suite that failed, was killed, or never started describes
+	// an unfinished run, and recording it would put a number in the baseline
+	// that nothing can be compared against honestly. Enforced here, over the
+	// final rows, so no path out of runComponent can forget it.
+	for i := range plans {
+		if rows[i].Status != ui.StatusPass {
+			measured[i] = unmeasuredComponent(plans[i].c, rows[i].Value)
 		}
 	}
 
@@ -360,7 +405,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 		for _, r := range rows {
 			rep.Add(r)
 		}
-		return
+		return measured
 	}
 	// Interleaved by the declaration, so a component selection skipped sits
 	// where its author wrote it rather than ahead of every component that
@@ -380,6 +425,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 			rep.Add(r)
 		}
 	}
+	return measured
 }
 
 // itemFor is what the scheduler locks on: the component's root, cleaned so
@@ -530,19 +576,31 @@ func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, lim
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config) (row ui.Row) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, instrument bool) (row ui.Row, m measurement) {
 	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
+	m = unmeasuredComponent(c, "the component did not run")
 
 	variant := runner.Plain
+	if instrument {
+		variant = runner.Instrumented
+	}
 	inv, err := invocation(c, variant)
 	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}
+		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, m
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+	// The runner writes its report into a directory it does not create: `go
+	// test -coverprofile` fails outright on a path whose parent is missing,
+	// which would report an instrumented run as a failing suite.
+	if inv.CoverageReport != "" {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(inv.CoverageReport))), 0o750); err != nil {
+			return failure(label, log, err.Error(), "not runnable", ""), m
+		}
+	}
 	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, log); !ok {
-		return prepared
+		return prepared, m
 	}
 
 	// Deferred before anything starts, so every path out of here tears the
@@ -550,7 +608,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	// half-applied migration most needs undoing.
 	stop, started, ok := startServices(ctx, p, label)
 	if !ok {
-		return started
+		return started, m
 	}
 	defer stop()
 	defer func() {
@@ -567,13 +625,18 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	}()
 
 	if failed, ok := runCommands(ctx, dir, label, c, "setup", c.Setup, log); !ok {
-		return failed
+		return failed, m
 	}
 
 	if res := executil.RunOutput(ctx, dir, append(env(c), inv.Env...), log.out, inv.Name, inv.Args...); !res.Ok() {
-		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output)
+		// No measurement from a suite that failed. A report written by a run
+		// that did not finish describes the tests that got as far as running,
+		// and gating on it would let a broken suite record a baseline nothing
+		// can be compared against honestly.
+		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output),
+			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
-	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
 }
 
 // failure builds a failing row: what was run, the tail of what it printed, and

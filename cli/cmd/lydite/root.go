@@ -41,7 +41,7 @@ func newRootCmd() *cobra.Command {
 		newTestCmd(),
 		newReviewCmd(),
 		newClearanceCmd(),
-		newCoverageCmd(),
+		newRemovedCoverageCmd(),
 		newVersionCmd(),
 		newUpdateCmd(),
 	)

@@ -95,6 +95,15 @@ var sourceExts = map[Lang][]string{
 	TypeScript: {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"},
 }
 
+// SourceExtsFor returns the extensions one language's source is written in,
+// or nothing for a component whose runner implies no language. It is what
+// scopes a diff to the files a component's coverage report could speak for,
+// and it reads the same table the orphan gate does so the two cannot come
+// apart.
+func SourceExtsFor(l Lang) []string {
+	return sourceExts[l]
+}
+
 // SourceExts returns every extension the languages lydite runs are written
 // in, lowercase and dot-prefixed, sorted.
 func SourceExts() []string {

@@ -1,6 +1,13 @@
 // Package gitstate stores and retrieves coverage baselines on a dedicated
 // `lydite` branch, keyed by the TREE they were computed against.
 //
+// A baseline is one component's covered and total line counts, per component.
+// Counts rather than percentages, because a percentage cannot be re-weighted:
+// the per-language and global figures lydite gates are sums over these
+// entries, and a run that measured only some components composes the rest from
+// what is already here. It carries no language, because the component
+// declaration already states that and a second statement could only drift.
+//
 // The tree, not the commit, because coverage is a property of content and
 // because the tree is the one identifier a pull request shares with the commit
 // it becomes: GitHub builds a pull request as refs/pull/N/merge, and a squash
@@ -28,6 +35,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 )
 
@@ -37,21 +45,21 @@ const BranchName = "lydite"
 // stateDir is the directory inside BranchName that baselines are written to
 // and read from, and it is keyed to the coverage metric rather than to the
 // file format. A baseline is only comparable to one produced by the same
-// metric: today's figure is a language's units' summed line counts, and
+// metric: today's entry is one component's covered and total line counts, and
 // diffing it against a figure computed some other way measures the change of
 // definition, not a change in coverage — which surfaces as a step change of
 // several points that the gate reads as a regression.
 //
-// So any change to how a language's percentage is derived must bump this
-// constant. Entries at the superseded directory are then simply never found,
+// So any change to what is measured, or to the unit it is measured over, must
+// bump this constant. Entries at the superseded directory are then simply never found,
 // every consumer takes one clean cache miss, and the gate recovers by
 // recording afresh.
 //
 // A directory rather than a marker inside the file: the entries stay a plain
-// language -> percentage object, which is what makes them readable by hand on
-// the branch, and the superseded ones stay in place to be inspected rather
-// than overwritten.
-const stateDir = "v2"
+// component -> counts object, which is what makes them readable by hand on the
+// branch, and the superseded ones stay in place to be inspected rather than
+// overwritten.
+const stateDir = "v3"
 
 // StatePath is the path, inside BranchName, of the baseline for key (a tree
 // or commit SHA).
@@ -201,9 +209,17 @@ func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
 	return BaseSHA(ctx, dir, branch)
 }
 
-// ReadBaseline returns the cached report for sha, and false if none exists
+// Baseline is one tree's measurement: each component's line counts, keyed by
+// the name the component declaration gives it.
+//
+// The name and not the directory, because a repository may legitimately
+// declare two components over one directory tree and the name is the only one
+// of the two that is unique by construction.
+type Baseline map[string]coverage.LineCount
+
+// ReadBaseline returns the cached baseline for sha, and false if none exists
 // yet (a cache miss, not an error — the caller computes and writes one).
-func ReadBaseline(ctx context.Context, dir string, keys ...string) (map[string]float64, bool, error) {
+func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bool, error) {
 	// A missing remote branch is the expected first-ever-run state, not an
 	// error: there's nothing to fetch yet.
 	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
@@ -228,110 +244,23 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (map[string]f
 	if !r.Ok() {
 		return nil, false, nil
 	}
-	var report map[string]float64
+	var report Baseline
 	if err := json.Unmarshal([]byte(r.Output), &report); err != nil {
 		return nil, false, fmt.Errorf("parsing cached baseline for %s: %w", found, err)
 	}
-	// An empty baseline ("{}") is a cache miss, not a baseline of nothing.
-	// Coverage.Compute silently omits any language it couldn't measure, so a
-	// baseline computed on a runner missing that language's tooling comes back
-	// empty — and once written, it's indistinguishable from a valid entry:
-	// every later PR gets a cache *hit* on it, reports every language as [NEW],
-	// and the gate enforces nothing, permanently and silently. wardnet's
-	// lydite branch accumulated nine of these. WriteBaseline now refuses
-	// to cache an empty report in the first place; treating one as a miss here
-	// heals the entries that were already written, without a manual purge.
+	// An empty baseline ("{}") is a cache miss, not a baseline of nothing. A
+	// run whose measurement failed for every component records nothing worth
+	// keeping, and once such an entry is written it is indistinguishable from
+	// a valid one: every later pull request gets a cache *hit* on it, reports
+	// every component as new, and the gate enforces nothing, permanently and
+	// silently. wardnet's lydite branch accumulated nine of these. The writer
+	// refuses to cache an empty baseline in the first place; treating one as a
+	// miss here heals the entries that were already written, without a manual
+	// purge.
 	if len(report) == 0 {
 		return nil, false, nil
 	}
 	return report, true, nil
-}
-
-// PriorBaselines returns, for each language in langs, that language's entry
-// from the nearest prior cached baseline that has one. "Nearest" starts at
-// sha ITSELF — a re-run or a concurrent per-language job may already have
-// recorded a fresher entry for this very commit, which must beat any
-// ancestor's — and then walks first-parent ancestors, inspecting at most
-// maxDepth commits. It feeds the baseline writers' carry-forward of
-// detected-but-unmeasured languages, so it is entirely best-effort: a missing
-// state branch, shallow history, or an unparsable entry yields fewer (or no)
-// entries, never an error — the caller records what it measured either way,
-// and warns about what it couldn't fill.
-func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDepth int) map[string]float64 {
-	found := make(map[string]float64, len(langs))
-	if len(langs) == 0 {
-		return found
-	}
-	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
-		return found
-	}
-	// One ls-tree up front so only commits that actually have a cached
-	// baseline cost a `git show`. --full-tree is load-bearing: dir is often a
-	// subdirectory of the repo (consumers pass --dir source), and without it
-	// ls-tree scopes to the cwd's path inside the ref's tree — lydite
-	// has no such subtree, so the listing comes back empty and carry-forward
-	// silently finds nothing (`show ref:path` below is root-relative and
-	// unaffected). -r is load-bearing for the same reason: baselines live in
-	// a subdirectory of the branch, and a non-recursive listing names that
-	// directory rather than the entries inside it.
-	ls := executil.RunQuiet(ctx, dir, "git", "ls-tree", "-r", "--full-tree", "--name-only", "origin/"+BranchName)
-	if !ls.Ok() {
-		return found
-	}
-	cached := make(map[string]bool)
-	for _, name := range strings.Fields(ls.Output) {
-		cached[name] = true
-	}
-	// rev-list from sha (not sha~1) keeps this working on a shallow checkout
-	// too: even at fetch-depth 1 it can still see the same-sha entry.
-	// Commit AND tree for each entry, in one walk: baselines are keyed by tree
-	// now, and by commit for anything written before that. Asking git for both
-	// costs nothing here and avoids a rev-parse per commit.
-	rev := executil.RunQuiet(ctx, dir, "git", "log", "--first-parent",
-		fmt.Sprintf("--max-count=%d", maxDepth), "--format=%H %T", sha)
-	if !rev.Ok() {
-		return found
-	}
-	for _, line := range strings.Split(strings.TrimSpace(rev.Output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		key := ""
-		// Tree first, so a commit that has both resolves to the same entry
-		// ReadBaseline would pick.
-		for i := len(fields) - 1; i >= 0; i-- {
-			if cached[StatePath(fields[i])] {
-				key = fields[i]
-				break
-			}
-		}
-		if key == "" {
-			continue
-		}
-		r := executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
-		if !r.Ok() {
-			continue
-		}
-		var report map[string]float64
-		// Same poison rule as ReadBaseline: an empty (or unparsable) entry
-		// carries no information worth forwarding.
-		if err := json.Unmarshal([]byte(r.Output), &report); err != nil || len(report) == 0 {
-			continue
-		}
-		for _, lang := range langs {
-			if _, have := found[lang]; have {
-				continue
-			}
-			if val, ok := report[lang]; ok {
-				found[lang] = val
-			}
-		}
-		if len(found) == len(langs) {
-			break
-		}
-	}
-	return found
 }
 
 // WriteBaseline caches report for sha on the lydite branch, via a
@@ -348,7 +277,7 @@ func PriorBaselines(ctx context.Context, dir, sha string, langs []string, maxDep
 // that's fatal, but it must never be reported as recorded (wardnet's main
 // run printed "recorded coverage baseline" while the push had been rejected,
 // and its PRs gated against nothing).
-func WriteBaseline(ctx context.Context, dir, sha string, report map[string]float64) error {
+func WriteBaseline(ctx context.Context, dir, sha string, report Baseline) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err

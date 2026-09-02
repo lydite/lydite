@@ -176,132 +176,48 @@ func TestLoadTypeScriptInstallDefaultsEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadCoverageSourceDefaultsToRun(t *testing.T) {
-	got, err := Load(t.TempDir())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got.Coverage.Source != SourceRun {
-		t.Fatalf("Coverage.Source = %q, want %q with no config file", got.Coverage.Source, SourceRun)
-	}
-}
-
-func TestLoadCoverageSourceReport(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "coverage:\n  source: report\n")
-
-	got, err := Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got.Coverage.Source != SourceReport {
-		t.Fatalf("Coverage.Source = %q, want %q", got.Coverage.Source, SourceReport)
-	}
-	// The coverage section is shared with the tolerance knobs and the patch
-	// gates; naming source must not zero its neighbours.
-	if got.Coverage.Tolerance != 0.1 || got.Coverage.Patch.Tolerance != 0.1 {
-		t.Fatalf("setting coverage.source disturbed the tolerances: %+v", got.Coverage)
-	}
-	if !got.Coverage.Patch.Go.Enabled || !got.Coverage.Patch.Rust.Enabled || !got.Coverage.Patch.TypeScript.Enabled {
-		t.Fatalf("setting coverage.source disabled a patch gate: %+v", got.Coverage.Patch)
-	}
-}
-
-// A typo'd source must be an error, not a silent fall back to "run". Falling
-// back would have lydite execute a full test suite in a CI job built on the
-// assumption that it wouldn't — and on a runner without the toolchain, that
-// measures nothing while looking like a real result.
-func TestLoadRejectsUnknownCoverageSource(t *testing.T) {
-	for _, bad := range []string{"skip", "reports", "Run", ""} {
-		t.Run(bad, func(t *testing.T) {
+// Every key lydite has stopped reading is rejected by name, never ignored.
+//
+// Ignoring is what makes a repository measure something other than what its
+// author wrote while every run still reports a pass, and `coverage.source:
+// report` in particular said "never run the tests" — accepted silently, lydite
+// would run every suite in a pipeline built on the promise that it would not.
+func TestLoadRejectsRemovedCoverageKeys(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		yaml string
+	}{
+		{"coverage.source", "coverage:\n  source: report\n"},
+		{"coverage.source", "coverage:\n  source: run\n"},
+		{"coverage.go.report", "coverage:\n  go:\n    report: coverage.out\n"},
+		{"coverage.rust.report", "coverage:\n  rust:\n    report: coverage/llvm-cov.json\n"},
+		{"coverage.rust.lcov", "coverage:\n  rust:\n    lcov: coverage/lcov.info\n"},
+	} {
+		t.Run(tc.key+" "+tc.yaml, func(t *testing.T) {
 			dir := t.TempDir()
-			write(t, dir, "coverage:\n  source: \""+bad+"\"\n")
-
+			write(t, dir, tc.yaml)
 			_, err := Load(dir)
 			if err == nil {
-				t.Fatalf("Load accepted coverage.source: %q", bad)
+				t.Fatalf("Load accepted %s, which lydite no longer reads", tc.key)
 			}
-			if !strings.Contains(err.Error(), "coverage.source") {
-				t.Fatalf("error should name the offending key, got: %v", err)
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name %s", err, tc.key)
 			}
 		})
 	}
 }
 
-// The single-unit form. A repo with one Go module shouldn't have to invent a
-// key for it, so a bare scalar lands under "" — the key findReportForUnit
-// already reserves for "the only unit discovered".
-func TestLoadCoverageReportScalarForm(t *testing.T) {
+// A repository that never carried one of those keys is untouched: the
+// rejection must fire on the key being written, not on the section existing.
+func TestLoadAcceptsACoverageSectionWithoutRemovedKeys(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "coverage:\n  source: report\n  go:\n    report: coverage.out\n")
-
+	write(t, dir, "coverage:\n  tolerance: 0.5\n  floor: 40\n  patch:\n    tolerance: 0.2\n")
 	got, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !reflect.DeepEqual(got.Coverage.Go.Report, Reports{"": "coverage.out"}) {
-		t.Fatalf("Coverage.Go.Report = %+v, want the bare path under the \"\" key", got.Coverage.Go.Report)
-	}
-}
-
-// The multi-unit form — the case the old newline-separated "<dir>=<path>"
-// action input existed to encode, and the reason wardnet's monorepo couldn't
-// be described by a single pair of paths.
-func TestLoadCoverageReportMappingForm(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, `coverage:
-  source: report
-  go:
-    report:
-      wctl: coverage/wctl.out
-      sdk/wardnet-go: coverage/sdk.out
-  rust:
-    report:
-      daemon: daemon/coverage/daemon-llvm-cov.json
-    lcov:
-      daemon: daemon/coverage/lcov.info
-`)
-
-	got, err := Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	wantGo := Reports{"wctl": "coverage/wctl.out", "sdk/wardnet-go": "coverage/sdk.out"}
-	if !reflect.DeepEqual(got.Coverage.Go.Report, wantGo) {
-		t.Fatalf("Coverage.Go.Report = %+v, want %+v", got.Coverage.Go.Report, wantGo)
-	}
-	wantRust := Reports{"daemon": "daemon/coverage/daemon-llvm-cov.json"}
-	if !reflect.DeepEqual(got.Coverage.Rust.Report, wantRust) {
-		t.Fatalf("Coverage.Rust.Report = %+v, want %+v", got.Coverage.Rust.Report, wantRust)
-	}
-	wantLCOV := Reports{"daemon": "daemon/coverage/lcov.info"}
-	if !reflect.DeepEqual(got.Coverage.Rust.LCOV, wantLCOV) {
-		t.Fatalf("Coverage.Rust.LCOV = %+v, want %+v", got.Coverage.Rust.LCOV, wantLCOV)
-	}
-}
-
-// `report:` with nothing after it is unset, not the empty path. An empty
-// path would resolve to the scan root itself, miss, and read as a broken
-// config rather than an absent one.
-func TestLoadCoverageReportNullIsUnset(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "coverage:\n  source: report\n  go:\n    report:\n")
-
-	got, err := Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got.Coverage.Go.Report != nil {
-		t.Fatalf("Coverage.Go.Report = %+v, want nil for an explicit null", got.Coverage.Go.Report)
-	}
-}
-
-func TestLoadCoverageReportRejectsWrongShape(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "coverage:\n  go:\n    report: [a, b]\n")
-
-	if _, err := Load(dir); err == nil {
-		t.Fatal("expected an error for a sequence where a path or mapping was wanted")
+	if got.Coverage.Tolerance != 0.5 || got.Coverage.Floor != 40 || got.Coverage.Patch.Tolerance != 0.2 {
+		t.Errorf("coverage = %+v, want the file's values", got.Coverage)
 	}
 }
 
@@ -335,7 +251,7 @@ func TestLoadToolchainOverride(t *testing.T) {
 	}
 	// The section is new and sits alongside the rest; naming it must not
 	// zero its neighbours.
-	if !got.Rust.Enabled || got.Coverage.Tolerance != 0.1 || got.Coverage.Source != SourceRun {
+	if !got.Rust.Enabled || got.Coverage.Tolerance != 0.1 || !got.Coverage.Patch.Go.Enabled {
 		t.Errorf("the toolchain section disturbed other defaults: %+v", got)
 	}
 }
@@ -448,7 +364,7 @@ func TestCoverageFloorLoadsFromFile(t *testing.T) {
 		t.Errorf("coverage.floor = %v, want 60", cfg.Coverage.Floor)
 	}
 	// Setting the floor must not disturb the other coverage defaults.
-	if cfg.Coverage.Tolerance != 0.1 || cfg.Coverage.Source != SourceRun {
+	if cfg.Coverage.Tolerance != 0.1 || cfg.Coverage.Patch.Tolerance != 0.1 {
 		t.Errorf("coverage defaults disturbed: %+v", cfg.Coverage)
 	}
 }

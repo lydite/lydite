@@ -95,7 +95,7 @@ func TestParseLCOV(t *testing.T) {
 			"end_of_record\n",
 	)
 
-	got := ParseLCOV(data, "/repo")
+	_, got := ParseLCOV(data, "/repo")
 	want := LineHits{
 		"src/foo.rs": {1: 1, 2: 0, 5: 3},
 		"src/bar.rs": {10: 0},
@@ -107,7 +107,7 @@ func TestParseLCOV(t *testing.T) {
 
 func TestParseLCOVRelativePathsPassThrough(t *testing.T) {
 	data := []byte("SF:src/foo.rs\nDA:1,4\nend_of_record\n")
-	got := ParseLCOV(data, "/repo")
+	_, got := ParseLCOV(data, "/repo")
 	want := LineHits{"src/foo.rs": {1: 4}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ParseLCOV = %+v, want %+v", got, want)

@@ -119,6 +119,29 @@ func newScanCmd() *cobra.Command {
 	return cmd
 }
 
+// enabledEcosystems drops languages disabled in .lydite/config.yml from the
+// detected set. `enabled: false` says lydite runs no check over that
+// language's code, so provisioning its toolchain would download a compiler
+// nothing is going to invoke.
+func enabledEcosystems(detected []detect.Ecosystem, cfg config.Config) []detect.Ecosystem {
+	var out []detect.Ecosystem
+	for _, e := range detected {
+		enabled := true
+		switch e {
+		case detect.Rust:
+			enabled = cfg.Rust.Enabled
+		case detect.TypeScript:
+			enabled = cfg.TypeScript.Enabled
+		case detect.Go:
+			enabled = cfg.Go.Enabled
+		}
+		if enabled {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // resolveDiffBase turns the --diff-base flag into a commit SHA for Semgrep's
 // scan-mode --baseline-commit. "auto" resolves the same merge-base
 // `lydite coverage` already gates against, so a PR's scan and coverage agree

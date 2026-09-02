@@ -87,109 +87,6 @@ type Semgrep struct {
 	Config  string `yaml:"config"`
 }
 
-// Source names who produces the coverage data lydite gates on. It is
-// deliberately not phrased as "run tests or not": that framing describes
-// lydite's own behavior, while the decision a repo actually makes is which
-// side of the pipeline owns coverage production. A repo whose CI already
-// runs an instrumented test job owns it; a repo with no such job hands the
-// job to lydite.
-type Source string
-
-const (
-	// SourceRun has lydite execute each ecosystem's test suite itself (`go
-	// test -coverprofile`, `cargo llvm-cov`, a package's `test:coverage`
-	// script). The default, and the right one for local dev and for a repo
-	// whose CI has no separate instrumented test job: one command, nothing
-	// to sequence beforehand.
-	SourceRun Source = "run"
-	// SourceReport has a prior job own coverage production; lydite never
-	// executes anything and only parses the report that job already wrote.
-	// This mirrors how Codecov and Sonar work. Use it whenever a test job
-	// already runs with coverage instrumentation on, so the suite isn't
-	// executed a second (or third) time.
-	SourceReport Source = "report"
-)
-
-// Reports maps a discovered unit directory — a Rust crate/workspace root, or
-// a Go module root — relative to the scan root, to an explicit report path
-// (also relative to the scan root). The empty-string key is the override
-// applied when discovery finds exactly one such unit.
-//
-// It accepts either YAML shape, because the two cases want different
-// ergonomics and forcing one on the other is how config files get verbose
-// for the common case or unexpressive for the rare one:
-//
-//	report: coverage.out                 # single unit — stored under ""
-//	report:                              # multi-unit — keyed by unit dir
-//	  wctl: coverage/wctl.out
-//	  sdk/wardnet-go: coverage/sdk.out
-//
-// Only consulted under SourceReport; under SourceRun lydite writes its own
-// reports and nothing here is read.
-type Reports map[string]string
-
-// UnmarshalYAML accepts a bare scalar (the single-unit form, stored under
-// the "" key that findReportForUnit already reserves for exactly that) or a
-// mapping of unit dir to path.
-//
-// An explicit null (`report:` with no value) and an explicit empty string
-// (`report: ""`) are both unset rather than an empty path. An empty path
-// would join to the scan root directory itself, and since os.Stat succeeds on
-// a directory the lookup would report the scan root as a *found* report —
-// neither missing nor falling back to the conventional candidates, just
-// silently wrong. Treating both spellings as absent is the only reading that
-// can't produce that.
-func (r *Reports) UnmarshalYAML(value *yaml.Node) error {
-	switch {
-	case value.Tag == "!!null":
-		*r = nil
-		return nil
-	case value.Kind == yaml.ScalarNode:
-		var s string
-		if err := value.Decode(&s); err != nil {
-			return err
-		}
-		if strings.TrimSpace(s) == "" {
-			*r = nil
-			return nil
-		}
-		*r = Reports{"": s}
-		return nil
-	case value.Kind == yaml.MappingNode:
-		m := map[string]string{}
-		if err := value.Decode(&m); err != nil {
-			return err
-		}
-		*r = m
-		return nil
-	default:
-		return fmt.Errorf("line %d: expected a report path or a mapping of unit directory to report path", value.Line)
-	}
-}
-
-// GoCoverage carries Go's coverage-production settings — where an
-// already-produced profile lives, when a prior job owns production.
-type GoCoverage struct {
-	// Report locates each Go module's `go test -coverprofile` output.
-	// Usually unnecessary: each discovered module's own
-	// coverage.out/cover.out/c.out is found without configuration.
-	Report Reports `yaml:"report,omitempty"`
-}
-
-// RustCoverage carries Rust's coverage-production settings. Rust needs two
-// paths where Go needs one: cargo-llvm-cov's JSON export has no per-line
-// data, so the aggregate percentage and the patch gate read different files.
-type RustCoverage struct {
-	// Report locates each crate's `cargo llvm-cov --json` export, which the
-	// aggregate percentage is read from. Default per crate:
-	// coverage/llvm-cov.json, llvm-cov.json, target/llvm-cov/llvm-cov.json.
-	Report Reports `yaml:"report,omitempty"`
-	// LCOV locates each crate's `cargo llvm-cov --lcov` export, which patch
-	// coverage's per-line hit data is read from. Default per crate:
-	// coverage/lcov.info, lcov.info, target/llvm-cov/lcov.info.
-	LCOV Reports `yaml:"lcov,omitempty"`
-}
-
 // PatchLanguage is the opt-out surface for one language's patch-coverage gate.
 type PatchLanguage struct {
 	Enabled bool `yaml:"enabled"`
@@ -220,22 +117,6 @@ type PatchCoverage struct {
 // override to say — the existing no-override precedent for TS carries over
 // unchanged.
 type Coverage struct {
-	// Source says who produces the coverage data: lydite itself
-	// (SourceRun, the default) or a prior CI job (SourceReport). This lives
-	// in the config file rather than in a CLI flag or action input because it
-	// is a property of how the repo's pipeline is built, not of a single
-	// invocation — the same answer holds for every run in that repo.
-	//
-	// One invocation deliberately ignores it: computing a baseline at a
-	// historical main commit always runs tests, because that commit's
-	// throwaway worktree contains no CI-produced report to read. See
-	// cmd/lydite/coverage.go's computeBaselineAt.
-	Source Source `yaml:"source"`
-	// Go and Rust locate already-produced reports, for SourceReport. Both
-	// are usually unnecessary — each language's conventional per-unit paths
-	// are searched without configuration.
-	Go    GoCoverage    `yaml:"go"`
-	Rust  RustCoverage  `yaml:"rust"`
 	Patch PatchCoverage `yaml:"patch"`
 	// Tolerance is the number of percentage points a language's aggregate
 	// coverage may dip below its baseline before the gate fails. Coverage
@@ -319,7 +200,6 @@ func Default() Config {
 		Semgrep:    Semgrep{Enabled: true, Config: "auto"},
 		Toolchain:  Toolchain{Enabled: true},
 		Coverage: Coverage{
-			Source:    SourceRun,
 			Tolerance: 0.1,
 			Patch: PatchCoverage{
 				Rust:       PatchLanguage{Enabled: true},
@@ -349,10 +229,10 @@ func Load(root string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	if err := validateTolerances(cfg); err != nil {
+	if err := rejectRemoved(data); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	if err := validateSource(cfg); err != nil {
+	if err := validateTolerances(cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := validateLinter(cfg); err != nil {
@@ -364,19 +244,83 @@ func Load(root string) (Config, error) {
 	return cfg, nil
 }
 
-// validateSource rejects any coverage.source other than the two defined
-// values. Silently falling back to "run" on a typo ("reports", "skip") would
-// have lydite execute a full test suite in a CI job built on the assumption
-// that it wouldn't — slow, and on a runner without the toolchain, a measured
-// nothing that reads as a real result.
-func validateSource(cfg Config) error {
-	switch cfg.Coverage.Source {
-	case SourceRun, SourceReport:
-		return nil
-	default:
-		return fmt.Errorf("coverage.source must be %q or %q, got %q", SourceRun, SourceReport, cfg.Coverage.Source)
-	}
+// removedKeys names the keys lydite once read and no longer does, so a
+// repository carrying one is told rather than quietly measured differently.
+//
+// Every one of them existed to locate a coverage report some other job
+// produced. lydite now writes every report itself, to a path it chose, from
+// the instrumented variant the component's own runner derives — so there is
+// nothing left for any of them to say.
+var removedKeys = []struct {
+	Key string
+	Why string
+}{
+	{"coverage.source",
+		"lydite measures coverage from each component's own instrumented run, so there is no longer a pipeline half that owns producing it"},
+	{"coverage.go.report", reportKeyRemoved},
+	{"coverage.rust.report", reportKeyRemoved},
+	{"coverage.rust.lcov", reportKeyRemoved},
 }
+
+// rejectRemoved refuses a config file that still carries a key lydite has
+// stopped reading.
+//
+// Rejecting rather than ignoring, the stance validateLinter takes for `linter:
+// eslint` and for the same reason. A dropped key means a repository measuring
+// something other than what its author wrote, while every run still reports a
+// pass — and `coverage.source: report` in particular said "never run the
+// tests", so ignoring it would have lydite run every suite in a pipeline built
+// on the promise that it would not.
+//
+// It walks the document rather than decoding into a shadow struct. A struct
+// answers "was this key present" only through whatever its field types accept,
+// and a mismatch there fails the decode instead of finding the key — which is
+// a rejection that silently stops rejecting.
+func rejectRemoved(data []byte) error {
+	var doc yaml.Node
+	// A document this cannot parse is one Load's own unmarshal has already
+	// rejected with a better message.
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil //nolint:nilerr // the parse error is the caller's to report
+	}
+	for _, k := range removedKeys {
+		if nodeAt(&doc, strings.Split(k.Key, ".")) != nil {
+			return fmt.Errorf("%s is no longer supported: %s. Remove the key; see docs/adr/0019-coverage-per-component-gated-by-lydite-test.md", k.Key, k.Why)
+		}
+	}
+	return nil
+}
+
+// nodeAt returns the node at a dotted key path, or nil when the path is not
+// present. Only the presence of the key matters: a value of any shape, an
+// explicit null included, is the repository having written it.
+func nodeAt(n *yaml.Node, path []string) *yaml.Node {
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		n = n.Content[0]
+	}
+	for _, key := range path {
+		if n.Kind != yaml.MappingNode {
+			return nil
+		}
+		found := false
+		// Mapping content alternates key, value.
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == key {
+				n = n.Content[i+1]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+	return n
+}
+
+// reportKeyRemoved is the one sentence every removed report path wants, said
+// once so the four cannot drift.
+const reportKeyRemoved = "lydite writes every coverage report itself, at a path derived from the component's runner, so there is nothing left to locate"
 
 // validateLinter accepts only LinterBiome, and gives the retired ESLint value
 // its own message.
