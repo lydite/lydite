@@ -4,15 +4,20 @@ lydite unifies SAST/SCA/lint/coverage gating for Rust, TypeScript, and Go projec
 ## Language
 
 **Aggregate coverage**:
-The current whole-tree coverage percentage for one ecosystem, compared against a cached per-main-commit baseline (`lydite` branch). Catches regressions in code the current PR never touches (e.g. a deleted test file).
-_Avoid_: "total coverage", "overall coverage".
+Coverage as a ratio of covered to coverable lines, reported at three altitudes and gated at all of them: per **Component**, per language, and globally. All three are the same quantity — `Σ covered / Σ total` — derived from one stored measurement per component, so they cannot drift apart or disagree. It catches regressions in code the current change never touches, which is the class **Patch coverage** cannot see at all.
+_Note_: the language and global figures blend units that are not quite identical — a Go profile counts statements where lcov counts lines — and the global figure blends across languages. This is accepted and stated rather than hidden: the alternative is a mean of percentages, which ADR 0007 rejected for giving a 230-line unit the same vote as a 4,494-line one.
+_Note_: under **Affected** selection a run measures only some components, so the language and global figures compose fresh counts with counts carried forward for components that did not run. A composed figure must say how many components it measured, because a gate that reports a number it mostly inherited is otherwise indistinguishable from one that measured everything.
+_Avoid_: "total coverage", "overall coverage" for the global figure specifically — it is the global **Aggregate coverage**, and the other two altitudes are equally aggregate.
 
 **Patch coverage**:
 The coverage percentage of only the lines added/modified by the current PR (HEAD vs. merge-base), gated against that same ecosystem's aggregate baseline (`patch% >= baseline%`). Catches untested new code even when the codebase is too large for it to move the aggregate percentage. Computed alongside aggregate coverage, not instead of it — they catch disjoint regression classes.
 _Avoid_: "diff coverage" (used interchangeably by other tools like Codecov, but this repo standardizes on "patch coverage").
 
 **Baseline**:
-The aggregate coverage value cached on the `lydite` branch for a specific main-branch commit SHA, computed once per SHA. Both aggregate and patch coverage compare against this same value — patch coverage has no baseline concept of its own.
+The per-**Component** line counts cached on the `lydite` branch for one **tree**, against which both **Aggregate coverage** and **Patch coverage** are gated — patch coverage has no baseline of its own.
+Counts rather than percentages, because a percentage cannot be re-weighted: composing a language or global figure from components, or from a run that measured only some of them, needs each component's size and not only its ratio.
+Keyed by tree rather than by commit, because coverage is a property of content and because the tree is the one identifier a pull request shares with the commit it becomes. A run measures the merged result; a squash merge lands a commit carrying that same tree, so the number the pull request already measured is the baseline for the commit it produces, and no separate run on the default branch is needed to record it.
+_Note_: it is a **Cache**, so a miss costs time rather than information — the measurement is reproduced by checking the tree out and measuring it again. What must never happen is a miss that reads as a hit: an entry that is empty, partial, or recorded under a different quantity gates on nothing while every run reports success, which is the failure this repository has already shipped once.
 
 **Coverable line**:
 A source line that a language's own coverage tool (`go tool cover`, `cargo llvm-cov`, Istanbul) reports an entry for. Comments, blank lines, imports, and braces are never coverable — they simply never appear in a coverage report, so patch coverage's denominator (coverable changed lines) excludes them automatically, without lydite doing any language-aware filtering itself.
@@ -27,14 +32,14 @@ The exact version of a tool lydite installs and runs, recorded in a real package
 _Avoid_: "vendored version", "bundled version" (lydite vendors no tool source; it installs pinned releases).
 
 **Quality history**:
-The record of a project's quality measurements over time, accumulated across runs and rendered as a dashboard. Distinct from **Baseline**, which is a single cached value for one commit: a baseline answers "did this PR regress?", quality history answers "where has this project been trending?".
-_Avoid_: "reporting" (already means uploading to Codecov/Semgrep in `action.yml`, and `coverage.source: report` means a pre-existing coverage file), "state" (conflates it with the cache).
+The record of a project's quality measurements over time, accumulated across runs and rendered as a dashboard. Distinct from **Baseline**, which is a single cached measurement for one tree: a baseline answers "did this PR regress?", quality history answers "where has this project been trending?".
+_Avoid_: "reporting" (already means uploading to Codecov/Semgrep in `action.yml`), "state" (conflates it with the cache).
 
 **Ledger**:
 A measurement record that cannot be recomputed after the fact — the toolchain **Pin**s that produced it may have moved, and the commit may no longer exist after a squash-merge. Ledger entries are append-only and are never deleted, only compacted. Contrast **Cache**.
 
 **Cache**:
-Derived data that can be regenerated on demand by re-running the tool that produced it. Losing a cache entry costs time, not information, so cache writes are best-effort and non-fatal. The per-commit **Baseline** is a cache; **Quality history** is a **Ledger**. The distinction is not stylistic: it dictates whether a failed write may be ignored.
+Derived data that can be regenerated on demand by re-running the tool that produced it. Losing a cache entry costs time, not information, so cache writes are best-effort and non-fatal. The per-tree **Baseline** is a cache; **Quality history** is a **Ledger**. The distinction is not stylistic: it dictates whether a failed write may be ignored.
 
 **Projection**:
 A pre-computed rollup derived from the **Ledger**, existing so the dashboard reads one small file instead of walking every partition. Regenerable by definition, so it is a **Cache** in every respect except that its source is the ledger rather than a scanner.
@@ -70,10 +75,11 @@ _Avoid_: "queue" (the constraint is a resource lock, not arrival order), "pipeli
 **Affected**:
 The set of **Component**s a change could have broken, and therefore the set a pull request runs. A component is affected when the change touches its directory, touches one of its `watch` paths, touches a component it `depends_on` transitively, or touches an **Invalidator**. Pushes to the default branch run every component regardless, which is what makes selecting an optimisation with a bounded failure rather than a correctness mechanism: a forgotten `depends_on` edge surfaces one merge late instead of never.
 _Note_: the default on ignorance is to widen, never to narrow. A changed path matching no component, no `watch` and no invalidator selects **every** component, mirroring the way a change matching no **Exemption** is referred. This is what keeps the invalidator list from being a safety mechanism that rots — a gap in it costs a slower run, never a missed one.
+_Note_: a component rooted at `.` is selected by containment like any other, but does not count as having matched a path. `dir: .` says where a component is rooted, not that it tests every file in the tree; treating it as a match would let one declaration switch the widening rule off for a whole repository.
 _Avoid_: "impacted", "dirty", "changed components" — the change touches files, not components, and the whole point is the inference between the two. Avoid "affected selection" as a noun for the mechanism; the components are affected, and selecting them is what lydite does.
 
 **Invalidator**:
-A path that makes every **Component** affected, whatever else the change touches. Its purpose is to override a **Component** `dir` match that is too narrow: a repository with a component rooted at `.` would otherwise have a change to `.lydite/components.yml` select that one component and not the others, when a change to the component declaration is precisely the change that can affect all of them.
+A path that makes every **Component** affected, whatever else the change touches. Its purpose is to override a **Component** `dir` match that is too narrow — a lockfile inside one component's directory decides what every component in the tree resolves to, so a match on that directory alone understates what the change can break.
 _Note_: the set is built in and cannot be removed or added to. Lockfiles, manifests and toolchain files are matched at any depth, because one matters wherever it sits; `.lydite/` stays anchored to the scan root, because that is the only place lydite reads its configuration from — the same floor argument as the built-in **Disqualifier** set, since a repository able to drop `.lydite/**` from its invalidators could make a change to its own component declaration run nothing. There is no declarable form because `watch` already says "this outside file invalidates me", one level down, and a second mechanism for it would be surface bought with nothing.
 _Avoid_: "global watch" (`watch` is per component and this is not declarable), "trigger", "wildcard".
 

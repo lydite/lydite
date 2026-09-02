@@ -15,7 +15,7 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 3 | — | `internal/compose`: runtime probe, ports, up/wait/down | `pr1-component-model.md` | done — folded into #39 |
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
-| 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | not started |
+| 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | in progress — challenged, see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
 | 7 | — | Scan onto components; `internal/detect` deleted | — | not started |
 | 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
@@ -71,6 +71,12 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
 - Mutation is built for all three languages, not delegated.
 - Configuration lives under `.lydite/`. `coverage.source` is removed, but only
   when coverage actually moves onto components at step 6.
+- Coverage is measured per component, from the runner's instrumented variant.
+  `lydite test` measures and gates it and `lydite coverage` is removed; a
+  baseline is per-component line counts keyed by tree. See
+  [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
+- A component rooted at `.` no longer suppresses affected selection's widening.
+  `dir: .` says where a component is rooted, not that it tests every file.
 
 ## Still open
 
