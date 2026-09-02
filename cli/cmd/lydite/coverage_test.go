@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1219,4 +1220,165 @@ func TestTheBaselineReadAndTheRecordAreDifferentRows(t *testing.T) {
 	if seen["record"] == 0 {
 		t.Errorf("no record row: a run that writes a baseline must say what it wrote; rows were %v", rep.Rows())
 	}
+}
+
+// gateRepo is a repository with an origin, one Go component, and a base commit
+// whose coverage is known. It exists so the gate can be exercised through the
+// command rather than through its parts: the paths this drives —
+// `baselineFor`, `measureBaseTree`, `patchRows`, `recordThisTree` — are where
+// both of the severe defects found while building this lived, and neither was
+// reachable from a unit test.
+func gateRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+
+	write(t, root, component.FileName, "components:\n  - name: svc\n    dir: svc\n    runner: go-test\n    args: [\"./...\"]\n")
+	write(t, root, "svc/go.mod", "module example.com/svc\n\ngo 1.26\n")
+	// Two of four statements covered: Keep is exercised, Skip is not.
+	write(t, root, "svc/lib.go", "package svc\n\n// Keep is exercised.\nfunc Keep(n int) int {\n\treturn n + 1\n}\n\n// Skip is not.\nfunc Skip(n int) int {\n\treturn n - 1\n}\n")
+	write(t, root, "svc/lib_test.go", "package svc\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep(1) != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "base")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+	return root
+}
+
+// The whole gate, through the command, against a real repository: a cache miss
+// measures the base tree, the comparison fails a change that lowers coverage,
+// the patch gate scores the new lines, the measurement is recorded, and the
+// next run hits the cache instead of measuring the base tree again.
+//
+// Driven end to end because that is the only way these paths run at all — and
+// because both severe defects found while building this were in exactly this
+// code: a base tree measured at the wrong root, and a base tree's config
+// validated with rules it predates. Each produced a green gate that had
+// compared nothing.
+func TestTheGateAgainstARealRepository(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run("switch", "--quiet", "-c", "change")
+	// A new function nobody tests: the aggregate falls and the patch gate has
+	// a coverable new line to score.
+	write(t, root, "svc/lib.go", "package svc\n\n// Keep is exercised.\nfunc Keep(n int) int {\n\treturn n + 1\n}\n\n// Skip is not.\nfunc Skip(n int) int {\n\treturn n - 1\n}\n\n// Added is not either.\nfunc Added(n int) int {\n\treturn n * 2\n}\n")
+	run("add", "-A")
+	run("commit", "-m", "add an untested function")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err == nil {
+		t.Fatalf("the gate passed a change that lowered coverage\nstdout: %s\nstderr: %s", out, errOut)
+	}
+	rows := jsonRows(t, out)
+
+	// The base tree had no entry, so it was measured rather than substituted.
+	if got := rows["baseline"]; !strings.Contains(got.Value, "measuring it now") {
+		t.Errorf("baseline = %q, want a miss resolved by measuring", got.Value)
+	}
+	// The comparison happened, against a number that came from the base tree.
+	comp := rows["coverage(svc)"]
+	if comp.Status != "fail" {
+		t.Errorf("coverage(svc) = %+v, want a failure", comp)
+	}
+	if !strings.Contains(comp.Value, "baseline") || !strings.Contains(comp.Value, "regressed") {
+		t.Errorf("coverage(svc) = %q, want it to name the baseline and the regression", comp.Value)
+	}
+	// The patch gate scored the new lines rather than skipping in silence.
+	patch := rows["patch(svc)"]
+	if patch.Status != "fail" {
+		t.Errorf("patch(svc) = %+v, want a failure — the new function has no test", patch)
+	}
+	if !strings.Contains(patch.Value, "new lines") {
+		t.Errorf("patch(svc) = %q, want the changed-line counts", patch.Value)
+	}
+	// This tree's measurement was recorded for whatever comes next.
+	if got := rows["record"]; !strings.Contains(got.Value, "recorded for") {
+		t.Errorf("record = %q, want this tree's measurement recorded", got.Value)
+	}
+
+	// The second run hits the cache. Without this the assertion above passes on
+	// an implementation that measures the base tree on every single run, which
+	// is the cost the caching exists to pay once.
+	out2, errOut2, err2 := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err2 == nil {
+		t.Fatalf("the gate passed on the second run\nstdout: %s\nstderr: %s", out2, errOut2)
+	}
+	if got, ok := jsonRows(t, out2)["baseline"]; ok && strings.Contains(got.Value, "measuring it now") {
+		t.Errorf("baseline = %q on the second run, want a cache hit", got.Value)
+	}
+}
+
+// A change that raises coverage passes, and the run that follows it gates
+// against the number it recorded. Without this the suite would be satisfied by
+// a gate that fails everything.
+func TestTheGatePassesAChangeThatRaisesCoverage(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run("switch", "--quiet", "-c", "better")
+	write(t, root, "svc/lib_test.go", "package svc\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep(1) != 2 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n\nfunc TestSkip(t *testing.T) {\n\tif Skip(2) != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+	run("add", "-A")
+	run("commit", "-m", "test the other branch")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err != nil {
+		t.Fatalf("the gate failed a change that raised coverage: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	rows := jsonRows(t, out)
+	if got := rows["coverage(svc)"]; got.Status != "pass" {
+		t.Errorf("coverage(svc) = %+v, want a pass", got)
+	}
+	if got := rows["coverage"]; got.Status != "pass" {
+		t.Errorf("coverage = %+v, want a pass", got)
+	}
+}
+
+// jsonRows decodes the document's rows by label.
+func jsonRows(t *testing.T, out string) map[string]struct {
+	Status string   `json:"status"`
+	Label  string   `json:"label"`
+	Value  string   `json:"value"`
+	Detail []string `json:"detail"`
+} {
+	t.Helper()
+	var doc struct {
+		Rows []struct {
+			Status string   `json:"status"`
+			Label  string   `json:"label"`
+			Value  string   `json:"value"`
+			Detail []string `json:"detail"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not a JSON document (%v):\n%s", err, out)
+	}
+	byLabel := map[string]struct {
+		Status string   `json:"status"`
+		Label  string   `json:"label"`
+		Value  string   `json:"value"`
+		Detail []string `json:"detail"`
+	}{}
+	for _, r := range doc.Rows {
+		byLabel[r.Label] = r
+	}
+	return byLabel
 }
