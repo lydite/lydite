@@ -633,3 +633,37 @@ func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
 		t.Errorf("coverage = %+v, want unmeasured", got)
 	}
 }
+
+// The report a run is measured from has to have been written by that run.
+// A report left behind by an earlier one is what a suite that passes without
+// writing one gets measured from — a coverage number describing code that is
+// no longer there, supplied by lydite itself.
+//
+// Asserted on clearReport rather than through a component run: every runner
+// lydite ships truncates its own report, so an end-to-end test passes with the
+// guarantee removed and establishes nothing. What is asserted is the property
+// the measurement rests on.
+func TestTheReportPathIsClearedBeforeTheSuiteRuns(t *testing.T) {
+	dir := t.TempDir()
+	report := ".lydite-reports/coverage.out"
+	path := filepath.Join(dir, filepath.FromSlash(report))
+
+	// The directory does not exist yet, which is the fresh-checkout case.
+	if err := clearReport(dir, report); err != nil {
+		t.Fatalf("clearReport on a missing directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("the report directory was not created: %v", err)
+	}
+
+	// A report from an earlier run is gone afterwards.
+	if err := os.WriteFile(path, []byte("mode: set\nexample.com/svc/gone.go:1.1,2.2 9 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearReport(dir, report); err != nil {
+		t.Fatalf("clearReport over an existing report: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the previous run's report is still there (%v), so a suite that writes none would be measured from it", err)
+	}
+}

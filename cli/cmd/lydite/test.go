@@ -593,11 +593,10 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	}
 
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-	// The runner writes its report into a directory it does not create: `go
-	// test -coverprofile` fails outright on a path whose parent is missing,
-	// which would report an instrumented run as a failing suite.
+	// Prepared before the suite runs, so what is measured afterwards is what
+	// this run wrote.
 	if inv.CoverageReport != "" {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(inv.CoverageReport))), 0o750); err != nil {
+		if err := clearReport(dir, inv.CoverageReport); err != nil {
 			return failure(label, log, err.Error(), "not runnable", ""), m
 		}
 	}
@@ -639,6 +638,31 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
 	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
+}
+
+// clearReport makes the component's report path ready to be written to: its
+// directory exists, and nothing is at the path itself.
+//
+// Both halves matter and neither is the other. `go test -coverprofile` fails
+// outright on a path whose parent is missing, which would report an
+// instrumented run as a failing suite. And a report left by an earlier run is
+// what a suite that passes without writing one gets measured from — a coverage
+// number describing code that is no longer there, supplied by lydite itself,
+// which is the failure this gate is arranged around with lydite as its source.
+//
+// Every runner lydite ships happens to truncate its own report today, so this
+// is a guarantee about the path rather than a fix for an observed defect in
+// one of them. It is the property the measurement depends on: what is read
+// back was written by the run that just finished.
+func clearReport(dir, report string) error {
+	path := filepath.Join(dir, filepath.FromSlash(report))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // failure builds a failing row: what was run, the tail of what it printed, and
