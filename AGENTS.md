@@ -1073,6 +1073,13 @@ same argument that keeps a types-only TypeScript package from being reported.
   accumulated nine of them. Treating one as a miss heals the already-written entries with no manual
   purge.
 
+**A run on the default branch records rather than re-measures.** There, HEAD is its own merge-base,
+so the tree the run just measured is the tree a baseline would be read for. Reading it would miss on
+the first build and measure the whole repository a second time, in a throwaway worktree, to
+reproduce numbers already in hand. There is nothing to compare against either — the current commit
+*is* the baseline — so the figures render the way an ungated run's do, and the measurement is
+recorded.
+
 **No run on the default branch is required.** Keying by tree carries the chain through pull
 requests: CI builds `refs/pull/N/merge`, a squash merge lands a commit carrying that same tree, and
 the next pull request's merge-base resolves to it — so the number a change measured *is* the

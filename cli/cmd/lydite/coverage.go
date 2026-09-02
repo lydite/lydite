@@ -141,6 +141,8 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 	ordered := inDeclarationOrder(decl, ms)
 	if !opts.Gate {
 		ungatedRows(rep, ordered)
+		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
+			Value: "not read — pass --gate-coverage to compare against it"})
 		floorRows(rep, ordered, cfg.Coverage.Floor)
 		return nil
 	}
@@ -181,6 +183,17 @@ func inDeclarationOrder(decl component.File, ms []measurement) []measurement {
 // and a workflow missing --gate-coverage would report the green a gated run
 // reports.
 func ungatedRows(rep *ui.Report, ms []measurement) {
+	ungatedComponentRows(rep, ms)
+	for _, l := range languages(ms) {
+		rep.Add(ungatedComposedRow(string(l)+" coverage", ms, byLang(l)))
+	}
+	rep.Add(ungatedComposedRow("coverage", ms, everything))
+}
+
+// ungatedComponentRows is the per-component half, shared by the two runs that
+// compare nothing: one that was never asked to, and one on the default branch
+// where HEAD is its own merge-base.
+func ungatedComponentRows(rep *ui.Report, ms []measurement) {
 	for _, m := range ms {
 		if !m.Measured() {
 			rep.Add(unmeasuredRow("coverage("+m.Name+")", m.Why))
@@ -188,14 +201,6 @@ func ungatedRows(rep *ui.Report, ms []measurement) {
 		}
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "coverage(" + m.Name + ")", Value: lineValue(m.Lines)})
 	}
-	for _, l := range languages(ms) {
-		rep.Add(ungatedComposedRow(string(l)+" coverage", ms, byLang(l)))
-	}
-	global := ungatedComposedRow("coverage", ms, everything)
-	if global.Status == ui.StatusContext {
-		global.Detail = []string{"nothing was compared: pass --gate-coverage to gate against the baseline"}
-	}
-	rep.Add(global)
 }
 
 // ungatedComposedRow renders one language's or the repository's figure for a
@@ -223,6 +228,27 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 		return fmt.Errorf("--gate-coverage needs the merge-base with the base branch, and it could not be resolved: %w"+
 			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
 	}
+	// On the default branch HEAD is its own merge-base, so the tree this run
+	// just measured IS the tree a baseline would be read for. Reading it would
+	// miss on the first build and measure the whole repository a second time,
+	// in a throwaway worktree, to reproduce the numbers already in hand.
+	//
+	// There is nothing to gate against either — the current commit is the
+	// baseline — so the figures render the way an ungated run's do, and the
+	// measurement is recorded. Rendering them as passes would claim a
+	// comparison that did not happen.
+	headTree, headErr := gitstate.TreeSHA(ctx, dir, "HEAD")
+	baseTree, baseErr := gitstate.TreeSHA(ctx, dir, base)
+	if headErr == nil && baseErr == nil && headTree == baseTree {
+		ungatedRows(rep, ms)
+		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
+			Value:  fmt.Sprintf("recording %s — this tree is its own base", shortSHA(headTree)),
+			Detail: []string{"nothing was compared: HEAD is the merge-base, so there is no earlier measurement to gate against"}})
+		floorRows(rep, ms, cfg.Coverage.Floor)
+		recordThisTree(ctx, cmd, dir, decl, ms, nil, cfg.Coverage.Tolerance)
+		return nil
+	}
+
 	baseline, err := baselineFor(ctx, cmd, rep, dir, base, opts)
 	if err != nil {
 		return err

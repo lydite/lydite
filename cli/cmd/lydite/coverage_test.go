@@ -11,6 +11,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
@@ -665,5 +666,56 @@ func TestTheReportPathIsClearedBeforeTheSuiteRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the previous run's report is still there (%v), so a suite that writes none would be measured from it", err)
+	}
+}
+
+// On the default branch HEAD is its own merge-base, so the tree this run just
+// measured is the tree a baseline would be read for. Reading it would miss on
+// the first build and measure the whole repository a second time, in a
+// throwaway worktree, to reproduce numbers already in hand.
+//
+// There is nothing to compare against either, so the figures render as an
+// ungated run's do. Rendering them as passes would claim a comparison that
+// never happened.
+func TestGatingOnTheDefaultBranchRecordsRatherThanRemeasures(t *testing.T) {
+	root := t.TempDir()
+	origin := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: ".", Runner: runner.GoTest}}}
+	ms := []measurement{measured("api", runner.Go, 9, 10)}
+	rep := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	if err := addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	rows := rowsOf(rep)
+	base, ok := rows["baseline"]
+	if !ok {
+		t.Fatalf("no baseline row; got %v", rep.Rows())
+	}
+	if strings.Contains(base.Value, "measuring it now") {
+		t.Errorf("baseline row = %q — the tree this run measured was measured again", base.Value)
+	}
+	if got := rows["coverage(api)"].Status; got != ui.StatusContext {
+		t.Errorf("coverage(api) = %q, want a context row: nothing was compared", got)
 	}
 }
