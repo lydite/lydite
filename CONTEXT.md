@@ -10,7 +10,8 @@ _Note_: under **Affected** selection a run measures only some components, so the
 _Avoid_: "total coverage", "overall coverage" for the global figure specifically — it is the global **Aggregate coverage**, and the other two altitudes are equally aggregate.
 
 **Patch coverage**:
-The coverage percentage of only the lines added/modified by the current PR (HEAD vs. merge-base), gated against that same ecosystem's aggregate baseline (`patch% >= baseline%`). Catches untested new code even when the codebase is too large for it to move the aggregate percentage. Computed alongside aggregate coverage, not instead of it — they catch disjoint regression classes.
+The coverage percentage of only the lines added or modified by the current change (HEAD vs. merge-base), gated per **Component** against that component's own aggregate **Baseline** (`patch% >= baseline%`). Catches untested new code even when the codebase is too large for it to move the aggregate percentage. Computed alongside **Aggregate coverage**, not instead of it — they catch disjoint regression classes.
+_Note_: per component and not repository-wide, because a change to a well-tested component held to the repository's average is held to nothing, and one to a poorly tested component is failed for reaching the standard it already has.
 _Avoid_: "diff coverage" (used interchangeably by other tools like Codecov, but this repo standardizes on "patch coverage").
 
 **Baseline**:
@@ -90,6 +91,7 @@ _Avoid_: "fixture" and "test data" for the repository as a whole — both sugges
 
 **Gate**:
 A check a change must satisfy to merge, which the change's author clears by doing more work — adding an assertion that kills a surviving mutant, raising patch coverage. Gates are meant to be iterated against, including by an agent, because every way of satisfying one improves the code. Contrast **Referral**.
+_Note_: a gate that could not run must never render as one that passed, and a measurement taken without being gated must not render as one either. Both are distinct statuses in the report and in `--json`, because a workflow that forgot to ask for a gate otherwise reports the same green as one that ran it.
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
 
 **Referral**:
@@ -114,10 +116,10 @@ _Avoid_: "approval" — GitHub's review approval is a different mechanism, with 
 ## Flagged ambiguities
 **"Threshold"** for referral — there is none, deliberately. Because **Exemption**s are an allowlist and the default is to refer, lydite computes no riskiness score and has nothing to tune. `coverage.tolerance` and `coverage.patch.tolerance` are **Gate** knobs and say nothing about whether a change is referred.
 
-**"Threshold"** — the original patch-coverage feature request proposed a `coverage.patch.threshold` config (an arbitrary fixed percentage per language). This was superseded: patch coverage has no independent threshold — it always gates against the aggregate baseline (see **Patch coverage**). Only an `enabled: bool` (default `true`, opt-out) remains in config.
+**"Threshold"** — the original patch-coverage feature request proposed a `coverage.patch.threshold` config (an arbitrary fixed percentage per language). This was superseded: patch coverage has no independent threshold — it always gates against the component's aggregate baseline (see **Patch coverage**). Only an `enabled: bool` (default `true`, opt-out) remains in config.
 
 ## Example dialogue
 > **Dev:** If a PR adds 9 new lines with 0% patch coverage, does lydite fail it?
-> **Domain expert:** Only if the aggregate baseline for that language is above 0% — patch coverage gates against baseline, not a fixed number. If the language has no baseline yet (first time seen), it's reported informationally and doesn't fail, same as aggregate coverage's `[NEW]` case.
+> **Domain expert:** Only if the baseline for the **Component** those lines are in is above 0% — patch coverage gates against that component's own baseline, not a fixed number. If the component has no baseline yet (first time seen), it's reported informationally and doesn't fail, same as aggregate coverage's new case.
 > **Dev:** What about a changed comment line — does that count against patch coverage?
 > **Domain expert:** No — it's never a coverable line, so it's excluded automatically once we intersect changed lines with what the coverage tool actually reports.
