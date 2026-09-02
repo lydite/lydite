@@ -119,10 +119,10 @@ const biomeNestedRootConfig = "Found a nested root configuration"
 
 // lintDirBiome runs Biome over one package and reports only lydite's own
 // findings.
-func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, configPath string) (executil.Result, error) {
+func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, configPath string) executil.Result {
 	out, err := os.CreateTemp("", "lydite-biome-*.json")
 	if err != nil {
-		return executil.Result{}, err
+		return executil.Result{Name: "biome", Err: err}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -150,19 +150,19 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 		r.Err = fmt.Errorf("nested biome.json conflicts with lydite's bundled config")
 		r.Detail = "Biome refused to run: a biome.json below this package is treated as a second root config.\n" +
 			"Add \"root\": false to it (Biome's own requirement for nested configs), or exclude that\n" +
-			"directory via typescript.exclude in .lydite/config.yml."
-		return r, nil
+			"directory in Biome's own configuration."
+		return r
 	}
 
 	data, readErr := os.ReadFile(outPath) // #nosec G304 -- outPath is our own CreateTemp result, not user input
 	if readErr != nil {
 		// No report to read: leave Biome's own exit status and output as-is
 		// rather than inventing a verdict.
-		return r, nil
+		return r
 	}
 	var report biomeReport
 	if jsonErr := json.Unmarshal(data, &report); jsonErr != nil {
-		return r, nil
+		return r
 	}
 
 	var b strings.Builder
@@ -177,7 +177,7 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 
 	if count == 0 {
 		r.Err = nil
-		return r, nil
+		return r
 	}
 	// Detail, not Output: Output is Biome's own stream, which already reached
 	// the terminal and holds no findings, and overwriting it would discard the
@@ -185,5 +185,5 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 	// they are what report() has to print.
 	r.Detail = b.String()
 	r.Err = fmt.Errorf("%d finding(s)", count)
-	return r, nil
+	return r
 }

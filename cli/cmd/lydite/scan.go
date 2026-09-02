@@ -98,11 +98,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Rust:
 					results = rust.Check(ctx, cdir, env)
 				case runner.TypeScript:
-					tsResults, err := typescript.Check(ctx, cdir, env)
-					if err != nil {
-						return err
-					}
-					results = tsResults
+					results = typescript.Check(ctx, cdir, env)
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env)
 				}

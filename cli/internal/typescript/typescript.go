@@ -35,17 +35,20 @@ import (
 //
 // The result is named for the tool alone. Which component it belongs to is
 // the caller's to say.
-func Check(ctx context.Context, dir string, env []string) ([]executil.Result, error) {
+//
+// A toolchain that cannot be installed is reported as this component's failing
+// result rather than returned as an error, matching how internal/rust reports
+// a cargo-audit that would not install. Under the component model the
+// difference is what the reader gets: an error aborts the run and discards
+// every row already collected, so one component's broken install would take
+// the other components' findings and Semgrep's with it.
+func Check(ctx context.Context, dir string, env []string) []executil.Result {
 	toolchainDir, err := ensureBiome(ctx, env)
 	if err != nil {
-		return nil, err
+		return []executil.Result{{Name: "biome", Err: err}}
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")
 
-	res, err := lintDirBiome(ctx, dir, env, biomeBin, configPath)
-	if err != nil {
-		return nil, err
-	}
-	return []executil.Result{res}, nil
+	return []executil.Result{lintDirBiome(ctx, dir, env, biomeBin, configPath)}
 }
