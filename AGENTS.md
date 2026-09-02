@@ -774,6 +774,15 @@ deliberately not the treatment a **disabled** language gets: `rust.enabled: fals
 at all, because that is an opt-out the repository stated rather than a check that could not run,
 and a row per opted-out component trains readers to ignore the tag that exists to be noticed.
 
+**A language no component declares is named on stderr.** The orphan gate is what normally makes a
+declared list safe to rely on, and it does not cover this: a component rooted at `.` covers every
+path in the repository, so a Go component at the root leaves a TypeScript directory beside it
+orphaning nothing while no TypeScript check runs — and the orphan gate belongs to `lydite test`,
+which a consumer can run scan without. It reads git's file list and file extensions and no
+manifest, which is the orphan gate's own question rather than detection under a new name: it
+decides nothing about what runs, and its answer is a sentence. A language switched off in
+`.lydite/config.yml` is silent, because that is an answer rather than an oversight.
+
 **Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the
 scan root whatever the declaration says.
 

@@ -513,9 +513,21 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// engines.node this change raises needs the version the base tree asked
 	// for — measuring it under the branch's would be measuring a tree that
 	// never existed.
+	//
+	// A failure here warns and measures with what is on PATH rather than
+	// ending the run. The only thing that can fail is a `toolchain.go` or
+	// `toolchain.node` override the base tree wrote and lydite cannot parse,
+	// and the author of a historical tree is not being addressed and cannot
+	// act — the argument config.LoadHistorical is built on, which erroring
+	// here would undo one layer up. The branch's own override is still
+	// checked, by the resolution this run did for itself, so a repository
+	// carrying a bad value is told about it exactly once and on the tree
+	// whose author can fix it.
 	envs, err := ensureToolchains(ctx, cmd, root, baseCfg, componentUnits(decl))
 	if err != nil {
-		return nil, err
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: could not resolve the base tree's toolchains (%v) — measuring it with what is on PATH\n", err)
+		envs = nil
 	}
 	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, envs, opts.Concurrency, false, true, scratch)
 

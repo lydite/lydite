@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -963,5 +965,43 @@ func TestDiagnosticsStayOffStdout(t *testing.T) {
 	// printed nothing anywhere, proving nothing about where output goes.
 	if !strings.Contains(errOut, "go:") {
 		t.Errorf("stderr = %q, want the toolchain note this run produces", errOut)
+	}
+}
+
+// A component's declared PATH has to reach the child. Composed as a variable
+// beside lydite's own, it would always be the earlier of two PATH entries and
+// the child would drop it — with nothing in argv or the log to show for it,
+// which is the same invisible duplicate-key failure the composition exists to
+// prevent.
+func TestAComponentsDeclaredPathReachesTheChild(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{
+		"PATH": "/declared/bin",
+		"FOO":  "bar",
+	}}
+	tc := &toolchain.Env{PathDirs: []string{"/resolved/bin"}}
+	inv := runner.Invocation{PathDirs: []string{"/pinned/bin"}}
+
+	got := childEnv(tc, c, inv)
+
+	var paths []string
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			paths = append(paths, v)
+		}
+	}
+	if len(paths) != 1 {
+		t.Fatalf("env = %q, want exactly one PATH entry", got)
+	}
+	sep := string(os.PathListSeparator)
+	// The pinned runner first, then what lydite resolved, then what the
+	// component added: a component may extend the path but must not displace
+	// the build of the runner lydite installed for it.
+	want := "/pinned/bin" + sep + "/resolved/bin" + sep + "/declared/bin" + sep + "/usr/bin"
+	if paths[0] != want {
+		t.Errorf("PATH = %q, want %q", paths[0], want)
+	}
+	if !slices.Contains(got, "FOO=bar") {
+		t.Errorf("env = %q, want the component's other variables untouched", got)
 	}
 }

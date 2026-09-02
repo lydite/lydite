@@ -290,3 +290,22 @@ func TestInstallOnceIsAtomicAndSkipsExisting(t *testing.T) {
 		t.Error("installOnce re-ran the installer for an already-present toolchain")
 	}
 }
+
+// "Nothing is declared" is now a statement about one component's directory
+// rather than about the repository, and for Go it is also the reason
+// GOTOOLCHAIN goes unpinned — the quietest thing this package does. The
+// diagnostic names the component so a reader can go and look at the right
+// directory.
+func TestAnUnpinnedRequirementNamesTheComponent(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "svc"), "go.mod", "module x\n")
+
+	var log bytes.Buffer
+	if _, err := Ensure(context.Background(), dir,
+		[]Unit{{Name: "svc", Lang: runner.Go, Dir: "svc"}}, Overrides{}, &log); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !strings.Contains(log.String(), "component svc declares no version") {
+		t.Errorf("log = %q, want it to name the component that declared nothing", log.String())
+	}
+}

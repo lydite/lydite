@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -273,5 +274,86 @@ func writeLydite(t *testing.T, root, name, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The hole the orphan gate cannot close. A component rooted at `.` covers
+// every path in the repository, so a Go component at the root leaves a
+// TypeScript directory beside it orphaning nothing while no TypeScript check
+// ever runs — and the orphan gate belongs to `lydite test`, which a consumer
+// can run scan without. Silence there would be a scan that narrowed itself.
+func TestScanWarnsAboutALanguageNoComponentDeclares(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "main.go", "package main\n")
+	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := warnUndeclaredLanguages(context.Background(), &w, dir, file, config.Default())
+
+	if !slices.Equal(got, []runner.Lang{runner.TypeScript}) {
+		t.Fatalf("found = %v, want TypeScript alone — Go is declared", got)
+	}
+	if !strings.Contains(w.String(), component.FileName) {
+		t.Errorf("warning = %q, want it to name the file that fixes it", w.String())
+	}
+}
+
+// A language switched off is an answer, not an oversight: the repository said
+// it wants no check over that code, and warning about it would be lydite
+// arguing with a decision it was told about.
+func TestScanIsSilentAboutADisabledLanguage(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
+	gitInit(t, dir)
+
+	cfg := config.Default()
+	cfg.TypeScript.Enabled = false
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUndeclaredLanguages(context.Background(), &w, dir, file, cfg); len(got) != 0 {
+		t.Fatalf("found = %v, want nothing when the language is switched off", got)
+	}
+}
+
+// Outside a git repository there is no file list and therefore no question to
+// answer, which is the shape the orphan gate already has for the same case.
+func TestScanSaysNothingOutsideAGitRepository(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUndeclaredLanguages(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("found = %v, want nothing outside a repository", got)
+	}
+	if w.Len() != 0 {
+		t.Errorf("warning = %q, want silence", w.String())
+	}
+}
+
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{{"init", "-b", "main", "."}, {"add", "-A"}} {
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
 	}
 }

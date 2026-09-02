@@ -36,6 +36,7 @@ import (
 	"context"
 	"io"
 	"path"
+	"slices"
 	"sort"
 
 	"lydite/lydite/internal/cargotool"
@@ -100,6 +101,19 @@ var sourceExts = map[Lang][]string{
 // apart.
 func SourceExtsFor(l Lang) []string {
 	return sourceExts[l]
+}
+
+// LangForExt returns the language a source file's extension belongs to, and
+// whether it belongs to one at all. It reads the same table SourceExtsFor
+// does, so a language that gains an extension gains it in both directions at
+// once.
+func LangForExt(ext string) (Lang, bool) {
+	for lang, exts := range sourceExts {
+		if slices.Contains(exts, ext) {
+			return lang, true
+		}
+	}
+	return "", false
 }
 
 // SourceExts returns every extension the languages lydite runs are written

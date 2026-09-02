@@ -1100,13 +1100,42 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 // first because it is the more specific of the two, and the component's own
 // variables go last because they are the repository's statement and nothing
 // lydite resolves should overrule them.
+//
+// A PATH the component declares is folded into that one entry rather than set
+// as a variable of its own, and it goes after what lydite resolved: a
+// component adding a directory must not displace the pinned runner lydite
+// installed for it, and a variable that lost every time would be worse than
+// one that is refused. It is the single key a component cannot simply state,
+// because the composed entry would always be the later of the two.
 func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) []string {
 	dirs := append([]string{}, inv.PathDirs...)
-	if tc == nil {
-		return toolchain.Compose(dirs, env(c))
+	if tc != nil {
+		dirs = append(dirs, tc.PathDirs...)
 	}
-	dirs = append(dirs, tc.PathDirs...)
-	return toolchain.Compose(dirs, tc.Vars, env(c))
+	declared, vars := splitPath(env(c))
+	dirs = append(dirs, declared...)
+	if tc == nil {
+		return toolchain.Compose(dirs, vars)
+	}
+	return toolchain.Compose(dirs, tc.Vars, vars)
+}
+
+// splitPath separates a PATH a component declared into its directories,
+// returning the remaining variables untouched. The last PATH wins, matching
+// how a process reads duplicate keys out of its own environment.
+func splitPath(declared []string) (dirs, vars []string) {
+	path := ""
+	for _, kv := range declared {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+			continue
+		}
+		vars = append(vars, kv)
+	}
+	if path == "" {
+		return nil, vars
+	}
+	return filepath.SplitList(path), vars
 }
 
 // env renders a component's declared environment as the "KEY=value" entries

@@ -30,6 +30,17 @@ source file under no component and no exclude is an **Orphan**, and reporting on
 is a gate. That is the property ADR 0016 introduced precisely so a declared list
 could replace a discovered one, and this decision is the second half of it.
 
+**That backstop has a hole, and it is named rather than papered over.** A
+component rooted at `.` covers every path in the repository, so a Go component at
+the root leaves a TypeScript directory beside it orphaning nothing while no
+TypeScript check ever runs. The orphan gate also belongs to `lydite test`, and a
+consumer can run `scan` without it. So `scan` warns on stderr when source in a
+language no component declares is present in the tree — reading git's file list
+and file extensions, the same path question the orphan gate asks, deciding
+nothing and returning no unit. It is a warning and not a gate because what a
+repository should do about it is declare a component, which is `lydite test`'s
+demand to make; what must not happen is the narrowing being silent.
+
 ## A repository declaring no components is an error, not a row
 
 `lydite scan` with nothing declared has nothing to scan. Rendering that as an
@@ -116,6 +127,14 @@ would be one the child could use and the lookup could not find. That is not
 hypothetical: it reproduced as `npm ci: executable file not found in $PATH`,
 printed moments after lydite reported installing the Node that held it.
 
+A third consequence is smaller and worth stating because it is surface a
+repository can see: **`PATH` is the one variable a component cannot simply
+declare.** A component's `env:` is composed into the child like any other
+variable, but the composed `PATH` would always be the later entry and would win,
+so a declared one is folded into the composition instead — after the pinned
+runner and the resolved toolchain, so a component may extend the path without
+displacing the build of the runner lydite installed for it.
+
 ## Consequences
 
 - A consumer upgrading must declare its components before `lydite scan` will run,
@@ -127,6 +146,12 @@ printed moments after lydite reported installing the Node that held it.
 - A component declaring a raw `command:` implies no language, so nothing scans
   it. It gets an `unmeasured` row saying so rather than being skipped in silence,
   which would read as a component that was scanned and found clean.
+- A Go component whose `dir` is not its module root resolves an unpinned
+  requirement, so `GOTOOLCHAIN` is not pinned for it. Such a component is broken
+  in louder ways first — `govulncheck` exits with `no go.mod file` and
+  `internal/coverage` reports it unmeasurable — and the diagnostic names the
+  component that declared no version, so the quiet half is at least said out
+  loud.
 - A language disabled in `.lydite/config.yml` produces no rows at all. That is an
   opt-out the repository stated, not a check that failed to run, and a row per
   opted-out component trains readers to skip the tag that exists to be noticed.

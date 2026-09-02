@@ -1461,3 +1461,43 @@ func TestTheFloorDenominatorExcludesWhatItCanNeverApplyTo(t *testing.T) {
 		t.Errorf("floor(docs) = %q, want it named as unmeasured", got)
 	}
 }
+
+// A base tree carrying a `toolchain.go` value lydite cannot parse must still
+// be measurable. config.LoadHistorical validates nothing precisely because the
+// author of a historical tree is not being addressed and cannot act, and
+// resolving that tree's toolchains is a second place the same rejection can
+// fire — on the one tree it must not, the base of the pull request that fixes
+// the value. The branch's own config is still checked, by the resolution this
+// run does for itself.
+func TestABaseTreeWithAnUnparseableToolchainOverrideIsStillMeasured(t *testing.T) { //nolint:paralleltest // drives git and go test
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	// The base tree states it; the change is the one that removes it.
+	write(t, root, config.FileName, "toolchain:\n  go: \"1.26.x\"\n")
+	run("add", "-A")
+	run("commit", "-m", "a go override lydite cannot compare")
+	run("push", "origin", "main")
+
+	run("switch", "--quiet", "-c", "fix-the-override")
+	write(t, root, config.FileName, "toolchain:\n  go: \"1.26.6\"\n")
+	run("add", "-A")
+	run("commit", "-m", "fix it")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err != nil {
+		t.Fatalf("the gate failed on a change whose own config is correct: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	rows := jsonRows(t, out)
+	if got := rows["baseline"]; !strings.Contains(got.Value, "measuring it now") {
+		t.Fatalf("baseline = %q, want the base tree measured rather than refused", got.Value)
+	}
+	// Measured, and its coverage compared — not skipped past with a shrug.
+	if got := rows["coverage(svc)"]; !strings.Contains(got.Value, "baseline") {
+		t.Errorf("coverage(svc) = %q, want a comparison against the measured base tree", got.Value)
+	}
+}

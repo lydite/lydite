@@ -299,6 +299,13 @@ func declaredBy(req Requirement) string {
 		if req.Raw != "" {
 			return fmt.Sprintf("%s declares the %q channel", req.Source, req.Raw)
 		}
+		// Named, because with one toolchain per component "nothing is
+		// declared" is a statement about one directory rather than about the
+		// repository — and for Go it is also the reason GOTOOLCHAIN goes
+		// unpinned, which is otherwise the quietest thing this package does.
+		if req.Unit.Name != "" {
+			return fmt.Sprintf("component %s declares no version", req.Unit.Name)
+		}
 		return "no version declared by this repo"
 	}
 	return fmt.Sprintf("satisfies %s from %s", displayRaw(req), req.Source)

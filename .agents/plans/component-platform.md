@@ -97,6 +97,11 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   validation also runs over historical trees during base-tree measurement,
   where a new rule fires on a tree its author cannot fix. That is the step-6
   defect, and the reason this stayed where it is.
+- **A language no component declares is a warning, not a gate.** `lydite scan`
+  names it on stderr; making it fail would be a second orphan gate, in the
+  command that has no baseline for one. The orphan gate cannot cover it because
+  a component rooted at `.` covers every path, which is the same property
+  affected selection already had to special-case.
 - **`typescript.install` is still repository-wide.** See below; the half that
   could produce a wrong answer — which Node runs the install — is per component
   now.
