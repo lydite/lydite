@@ -315,8 +315,13 @@ const (
 // Each of them narrowed a walk for manifests, and the walk is gone: what
 // lydite scans is what the component declaration names, so a directory no
 // component declares is already out of scope and one it does declare is in
-// scope because a repository said so. A subdirectory inside a component that
-// should not be linted is that language's own tool config to state.
+// scope because a repository said so.
+//
+// A subdirectory inside a component that should not be linted is stated to
+// that language's own tooling — and for TypeScript that means a biome.json in
+// the subdirectory carrying `"root": false`, not the project's root config:
+// lydite always passes --config-path, which beats a root biome.json outright,
+// and only a nested non-root config is merged into lydite's own.
 const excludeKeyRemoved = "lydite scans what .lydite/components.yml declares rather than walking for manifests, so there is no detection left to narrow"
 
 // rejectRemoved refuses a config file that still carries a key lydite has

@@ -232,7 +232,21 @@ type Gap struct {
 func coveredByLanguage(file string, lang runner.Lang, components []component.Component, modules map[string]bool) bool {
 	for _, c := range components {
 		r, ok := runner.Lookup(c.Runner)
-		if !ok || r.Lang != lang {
+		if !ok {
+			// A component declaring a raw command implies no language, so
+			// nothing here can say whether its checks reach this file. It is
+			// not a gap: a component *is* declared for it, and `lydite scan`
+			// already reports that component unmeasured with the reason. A
+			// warning too would say the same thing twice, once wrongly —
+			// telling an author to declare a component they have declared,
+			// with an exclude as the only way to silence it, which would take
+			// those files out of the orphan gate as well.
+			if coveredByComponent(file, []component.Component{c}) {
+				return true
+			}
+			continue
+		}
+		if r.Lang != lang {
 			continue
 		}
 		if !coveredByComponent(file, []component.Component{c}) {

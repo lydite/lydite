@@ -39,14 +39,16 @@ Dependabot at dozens of transitive dependencies lydite does not use.
 
 ## Consequences
 
-The manifests are real `package.json`/`Cargo.toml`/`go.mod` files sitting in the tree, so
-detection would treat each as a package to lint, a crate to audit or a module to scan. lydite
-therefore gains its first `.lydite.yml`, excluding them from its own self-scan.
+The manifests are real `package.json`/`Cargo.toml`/`go.mod` files sitting in the tree. While
+lydite discovered its own units by walking for them, each was a package to lint, a crate to
+audit or a module to scan, and lydite gained its first config file to exclude them from its own
+self-scan — three edits per pin, the third of them silent when forgotten.
 
-Adding a future pin is three edits, not one — manifest, Dependabot entry, `.lydite.yml`
-exclude — and forgetting the third is silent rather than loud, so
-`internal/config`'s `TestPinDirectoriesAreExcluded` fails when a `*-pin` directory isn't
-excluded.
+[ADR 0020](0020-scan-on-components.md) removes that cost rather than managing it: lydite scans
+what `.lydite/components.yml` declares, and a pin directory is deliberately not a component, so
+it is out of scope because nothing claims it. **Adding a pin is two edits — the manifest and a
+`.github/dependabot.yml` entry** — and nothing enforces the second, so a pin can still be added
+that no bot ever bumps.
 
 The npm cache directory is now keyed by a hash of the lockfile rather than a hand-maintained
 string of concatenated versions. That key could previously be forgotten when a dependency was

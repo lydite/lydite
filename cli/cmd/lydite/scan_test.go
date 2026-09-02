@@ -485,3 +485,57 @@ func TestATestdataModuleIsNotAModuleBoundary(t *testing.T) {
 		t.Fatalf("gaps = %+v, want silence: a testdata module is a fixture", got)
 	}
 }
+
+// Every opt-out taken together is a different fact from any one of them. A
+// language switched off produces no row, deliberately — but a run where that
+// is true of every declared component and of Semgrep produced no rows at all,
+// and an empty document renders as `verdict: pass`: the green of a scan that
+// never happened, which is what the status exists to prevent.
+func TestAScanThatRanNothingSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsemgrep:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	var doc struct {
+		Rows []struct{ Status, Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	if len(doc.Rows) != 1 || doc.Rows[0].Status != string(ui.StatusUnmeasured) || doc.Rows[0].Label != "scan" {
+		t.Fatalf("rows = %+v, want one unmeasured scan row rather than an empty document", doc.Rows)
+	}
+}
+
+// A component declaring a raw command has a component declared for it, and
+// scan already reports it unmeasured with the reason. Warning as well would
+// tell its author to declare what they have declared, and the only way to
+// silence it would be an exclude that also drops those files from the orphan
+// gate.
+func TestARawCommandComponentsSourceIsNotWarnedAbout(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: legacy\n    dir: legacy\n    command: [\"make\", \"check\"]\n")
+	writeLydite(t, dir, "legacy/main.go", "package main\n")
+	gitInit(t, dir)
+
+	var w bytes.Buffer
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
+		t.Fatalf("gaps = %+v, want none: scan already reports scan(legacy) unmeasured", got)
+	}
+}

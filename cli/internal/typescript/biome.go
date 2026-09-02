@@ -153,8 +153,9 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 	if !r.Ok() && strings.Contains(r.Output, biomeNestedRootConfig) {
 		r.Err = fmt.Errorf("nested biome.json conflicts with lydite's bundled config")
 		r.Detail = "Biome refused to run: a biome.json below this package is treated as a second root config.\n" +
-			"Add \"root\": false to it (Biome's own requirement for nested configs), or exclude that\n" +
-			"directory in Biome's own configuration."
+			"Add \"root\": false to it (Biome's own requirement for nested configs), which is also\n" +
+			"how a subdirectory states its own ignores: lydite passes --config-path, which beats a\n" +
+			"root biome.json, and only a nested non-root config is merged into lydite's."
 		return r
 	}
 

@@ -121,6 +121,21 @@ func newScanCmd() *cobra.Command {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
 			}
 
+			// A run that produced no row at all ran no check at all — every
+			// declared component's language switched off, and Semgrep too.
+			// Without a row of its own that renders as `verdict: pass` over an
+			// empty document, and a pull-request comment shows the green of a
+			// scan that never happened. Each opt-out is the repository's to
+			// make and none of them is reported on its own; all of them
+			// together is a different fact, and it is this one.
+			if len(rep.Rows()) == 0 && len(results) == 0 {
+				rep.Add(ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "scan",
+					Value:  "nothing ran — every declared component's language is disabled in " + config.FileName,
+				})
+			}
+
 			return report(cmd, rep, results, asJSON, noColor)
 		},
 	}

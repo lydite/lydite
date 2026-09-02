@@ -112,6 +112,14 @@ repository wanting a subdirectory inside a component left unlinted states that i
 that language's own tool configuration, which is where the rest of its lint
 policy already lives.
 
+For TypeScript that is narrower than it sounds, and worth saying rather than
+leaving to be discovered: lydite always passes `--config-path`, which beats the
+scanned project's own root `biome.json`, so ignores written there have no effect
+on lydite's run. What does work is a `biome.json` in the subdirectory carrying
+`"root": false`, which Biome merges into lydite's config — the same merge that
+is a real limitation in the other direction, since such a file can also narrow
+what lydite checks.
+
 ## Toolchains resolve per component
 
 `engines.node` was read from every detected package and the highest floor won. A
