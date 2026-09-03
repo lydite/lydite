@@ -1501,3 +1501,62 @@ func TestABaseTreeWithAnUnparseableToolchainOverrideIsStillMeasured(t *testing.T
 		t.Errorf("coverage(svc) = %q, want a comparison against the measured base tree", got.Value)
 	}
 }
+
+// The aggregate says the repository did not get worse; the per-component patch
+// rows say each component's new code met its own standard. Neither answers what
+// a reviewer asks about a change spanning several components — was the new code
+// in this change tested — so a composed patch figure gates it.
+func TestComposedPatchGatesNewCodeAcrossComponents(t *testing.T) {
+	// Each component's own patch clears its own baseline on tolerance, and the
+	// change as a whole does not: this is the case the per-component rows and
+	// the aggregate both let through.
+	base := coverage.LineCount{Covered: 825, Total: 1000} // 82.5%
+	parts := []patchPart{
+		{Name: "a", Lang: runner.Go, Hit: 40, Total: 50, Base: base},
+		{Name: "b", Lang: runner.Go, Hit: 40, Total: 50, Base: base},
+	}
+	got := composedPatchRow("go patch", parts, 0.1)
+	if got.Status != ui.StatusFail {
+		t.Fatalf("80.0%% of new lines against an 82.5%% baseline must fail: %+v", got)
+	}
+	for _, want := range []string{"80.0%", "baseline 82.5%", "below it by 2.5%"} {
+		if !strings.Contains(got.Value, want) {
+			t.Errorf("the row does not say %q: %q", want, got.Value)
+		}
+	}
+}
+
+// Summed over changed lines, never averaged over components: a mean lets a
+// two-line component outvote a two-hundred-line one, which is the error
+// ADR 0007 records for the aggregate.
+func TestComposedPatchIsWeightedByChangedLines(t *testing.T) {
+	base := coverage.LineCount{Covered: 50, Total: 100} // 50%
+	parts := []patchPart{
+		{Name: "big", Lang: runner.Go, Hit: 190, Total: 200, Base: base},
+		{Name: "tiny", Lang: runner.Go, Hit: 0, Total: 2, Base: base},
+	}
+	got := composedPatchRow("go patch", parts, 0.1)
+	if got.Status != ui.StatusPass {
+		t.Fatalf("190/202 new lines against a 50%% baseline must pass; a mean of 95%% and 0%% would fail it. got %+v", got)
+	}
+	if !strings.Contains(got.Value, "190/202 new lines") {
+		t.Errorf("the row does not show the summed counts: %q", got.Value)
+	}
+}
+
+// A component with no baseline contributes new lines to the figure and nothing
+// to the comparison, so comparing anyway would report movement nobody caused —
+// the rule composedRow already follows for the aggregate.
+func TestComposedPatchWillNotCompareAgainstAPartialBaseline(t *testing.T) {
+	parts := []patchPart{
+		{Name: "a", Lang: runner.Go, Hit: 40, Total: 50, Base: coverage.LineCount{Covered: 80, Total: 100}},
+		{Name: "fresh", Lang: runner.Go, Hit: 50, Total: 50},
+	}
+	got := composedPatchRow("go patch", parts, 0.1)
+	if got.Status != ui.StatusNew {
+		t.Fatalf("a partial baseline must not be compared against: %+v", got)
+	}
+	if !strings.Contains(got.Value, "fresh") {
+		t.Errorf("the row does not name the component missing a baseline: %q", got.Value)
+	}
+}

@@ -116,6 +116,21 @@ Artifacts belong to a run, so a publish triggered by another workflow's
 completion could not see the referral's report — it would have to recompute the
 verdict, or look a run up by head SHA and race it.
 
+## The comment must show a comparison wherever it shows a number
+
+A figure with no baseline beside it is a number a reader cannot act on. That was
+already true of the aggregate, which reports at three altitudes and gates all
+three; patch coverage reported only per component, so a change spanning several
+of them had no line saying whether *this change's* new code was tested. The
+aggregate could not answer it — it says the repository did not get worse overall
+— and the per-component rows could not either, since each is held to its own
+component's standard and a change adding untested code to three components
+clears all of them on tolerance.
+
+So patch is now composed at the same three altitudes, and gates at all three.
+The comment shows a baseline beside every figure it can compute one for, and
+names what is missing where it cannot.
+
 ## One marker, and no new status contexts
 
 One comment per change, upserted by a marker in its body. A pull request

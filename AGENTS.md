@@ -1443,6 +1443,22 @@ coverage:
       enabled: false   # defaults to true
 ```
 
+**Patch is composed at the same three altitudes the aggregate is** — per component, per language,
+and globally — and all three gate. The per-component rows and the aggregate between them still
+leave a hole: the aggregate says the repository did not get worse overall, and each per-component
+row says that component's new code met that component's own standard, so a change adding untested
+code to three components can clear every row on tolerance and still be the change that should not
+merge. `go patch: 83.9% (366/436 new lines), baseline 80.9%` is the row that answers the question a
+reviewer actually has about a change spanning components.
+
+Composed by **summing changed lines**, never by averaging the components' percentages — the same
+weighting [ADR 0007](docs/adr/0007-line-weighted-coverage-aggregation.md) requires of the
+aggregate, and for the same reason: a mean lets a two-line component outvote a two-hundred-line
+one. The baseline side sums exactly the components the current side covers, and a figure whose
+baseline does not cover all of them is reported `new` rather than compared — a component with no
+baseline contributes its new lines to the numerator and nothing to the comparison, which would
+render as movement nobody caused. A language nothing changed emits no row at all.
+
 **A diff is scoped to the files a component's report could speak for**: under its directory, in a
 language its runner implies. Both halves are needed — a repository declaring a Go and a TypeScript
 component over one root would otherwise score each against the other's changed files. One

@@ -683,6 +683,7 @@ func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, bas
 		return err
 	}
 
+	var parts []patchPart
 	for _, m := range ms {
 		if !wanted[m.Lang] {
 			continue
@@ -712,8 +713,104 @@ func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, bas
 			continue
 		}
 		rep.Add(patchRow(label, hit, total, baseline[m.Name], cfg.Coverage.Patch.Tolerance))
+		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: baseline[m.Name]})
+	}
+
+	// Nothing of a language changed means no row for it. Silent, because a row
+	// on every change that happened not to touch a language is the noise that
+	// trains readers to skip the rows that matter.
+	for _, l := range patchLanguages(parts) {
+		rep.Add(composedPatchRow(string(l)+" patch", inLang(parts, l), cfg.Coverage.Patch.Tolerance))
+	}
+	if len(parts) > 0 {
+		rep.Add(composedPatchRow("patch", parts, cfg.Coverage.Patch.Tolerance))
 	}
 	return nil
+}
+
+// patchPart is one component's contribution to a composed patch figure: the
+// changed lines it had, how many of them the report covers, and the baseline
+// that component is held to.
+type patchPart struct {
+	Name  string
+	Lang  runner.Lang
+	Hit   int
+	Total int
+	Base  coverage.LineCount
+}
+
+// composedPatchRow gates a language's, or the repository's, changed lines.
+//
+// It exists because the per-component rows and the aggregate rows between them
+// still leave a hole. The aggregate says the repository did not get worse
+// overall; the per-component patch rows say each component's new code met that
+// component's own standard. Neither answers the question a reviewer actually
+// has about a change spanning several components — was the new code in this
+// change tested — and a change adding untested code to three components can
+// clear every per-component row on tolerance and still be the change that
+// should not merge.
+//
+// Summed over changed lines rather than averaged over components, for the
+// reason ADR 0007 gives for the aggregate: a mean of percentages lets a
+// two-line component outvote a two-hundred-line one.
+//
+// The baseline side sums exactly the components the current side covers, and a
+// figure whose baseline does not cover all of them is reported rather than
+// compared — the same rule composedRow follows, for the same reason. A
+// component with no baseline contributes its new lines to the numerator and
+// nothing to the comparison, which would read as movement nobody caused.
+func composedPatchRow(label string, parts []patchPart, tolerance float64) ui.Row {
+	var hit, total int
+	var base coverage.LineCount
+	var missing []string
+	for _, p := range parts {
+		hit += p.Hit
+		total += p.Total
+		if p.Base.Measured() {
+			base = base.Add(p.Base)
+			continue
+		}
+		missing = append(missing, p.Name)
+	}
+	pct := float64(hit) / float64(total) * 100
+	counts := fmt.Sprintf("%.1f%% (%d/%d new lines), %d component(s)", pct, hit, total, len(parts))
+	if len(missing) > 0 {
+		return ui.Row{Status: ui.StatusNew, Label: label,
+			Value: fmt.Sprintf("%s, no baseline yet for %s", counts, strings.Join(missing, ", "))}
+	}
+	basePct := base.Percent()
+	if regressedBeyond(pct, basePct, tolerance) {
+		return ui.Row{Status: ui.StatusFail, Label: label,
+			Value: fmt.Sprintf("%s, baseline %.1f%%, below it by %.1f%%", counts, basePct, basePct-pct)}
+	}
+	return ui.Row{Status: ui.StatusPass, Label: label,
+		Value: fmt.Sprintf("%s, baseline %.1f%%", counts, basePct)}
+}
+
+// patchLanguages is the languages that actually had changed lines, in a stable
+// order so two runs of the same change render identically.
+func patchLanguages(parts []patchPart) []runner.Lang {
+	seen := map[runner.Lang]bool{}
+	var out []runner.Lang
+	for _, l := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript} {
+		for _, p := range parts {
+			if p.Lang == l && !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
+		}
+	}
+	return out
+}
+
+func inLang(parts []patchPart, l runner.Lang) []patchPart {
+	var out []patchPart
+	for _, p := range parts {
+		if p.Lang == l {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // patchRow renders one component's patch verdict. The gate is that component's
