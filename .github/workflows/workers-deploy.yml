@@ -2,9 +2,9 @@
 #
 # The same tag deliberately. ADR 0010's release coupling is that everything in
 # the monorepo ships from one tag so the parts cannot drift apart, and the relay
-# is now part of what a consumer's pull-request comment depends on: a relay
-# expecting a marker the CLI no longer writes is a comment that stops being
-# edited and starts being duplicated.
+# is part of what a consumer's pull-request comment depends on: a relay whose
+# marker and the CLI's disagree is a comment that stops being edited and starts
+# being duplicated.
 #
 # Outside the gt pipeline, as `lydite-pr.yml` is. gt's CD stages are disabled in
 # this repository and `release.yml` is already hand-written for the same reason.

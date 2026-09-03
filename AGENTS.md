@@ -1862,7 +1862,7 @@ the binary the pull request built, because a dogfood against the last release te
 release. **A consumer's comment is rendered by `lydite publish` and nothing else** — the posting
 step takes a file and a marker and knows nothing about coverage, components or verdicts, which
 is what stops a refinement to the comment becoming a two-repository release. It also means the
-sticky-comment action is no longer needed: the marker upsert is `lydite-comment`, in twenty
+sticky-comment action earns nothing here: the marker upsert is `lydite-comment`, in twenty
 lines of `gh api`, and the relay does the same thing on the authenticated path.
 
 Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),

@@ -122,7 +122,7 @@ _Avoid_: "report" for the surface — a report is what a run prints, and `lydite
 
 **Relay**:
 The vendor-operated service that posts the **Surface** on a consumer's behalf, so a CI job needs no credential of its own. The job presents the identity token its platform minted for that run; the relay establishes from that token alone which repository and which pull request may be written to, borrows the narrowest possible permission for exactly that, writes, and discards it. It stores nothing.
-_Note_: what makes it worth having is what a job no longer holds. Running a suite and writing a verdict in one job previously needed a token that could push, in a job executing the change's own code; a job that holds no such token cannot write anywhere, whatever it runs.
+_Note_: what makes it worth having is what a job does not hold. Running a suite and writing a verdict in one job otherwise needs a token that can push, in a job executing the change's own code; a job holding no such token cannot write anywhere, whatever it runs.
 _Note_: it is optional, and a consumer who has not installed lydite's app still gets the surface — posted by their own workflow, under their platform's generic identity. What they lose is whose name is on it.
 _Avoid_: "server", "backend", or "the lydite service" — each suggests something that holds your data, and holding none of it is the point. See [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md).
 
