@@ -1,7 +1,17 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="lydite">
-  <g transform="translate(-10.8929 -10.8830) scale(0.395385)">
-
+<svg
+   viewBox="0 0 1350 1350.0001"
+   width="1350"
+   height="1350"
+   role="img"
+   aria-label="Dark lydite with an inset violet gemstone"
+   version="1.1"
+   id="svg50"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#">
   <defs
      id="defs20">
     <linearGradient
@@ -184,7 +194,13 @@
   </defs>
   <!-- LYDITE / dark stone: compact square composition with transparent outer background -->
   <!-- restrained outer edge -->
-  
+  <metadata
+     id="metadata78">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="" />
+    </rdf:RDF>
+  </metadata>
   <g
      id="layer1"
      transform="translate(1244.4142,1077.042)"
@@ -385,7 +401,5 @@
          id="path50-5-3"
          style="display:inline;stroke:#fbffff;stroke-opacity:1" />
     </g>
-  </g>
-
   </g>
 </svg>

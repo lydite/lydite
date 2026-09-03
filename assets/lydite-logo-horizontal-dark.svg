@@ -1,1 +1,437 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1563.44 394" fill="none"><defs><linearGradient id="ls" gradientUnits="userSpaceOnUse" x1="59.9" y1="683.1" x2="-159.5" y2="215.1"><stop offset="0" stop-color="#1A1EF9"></stop><stop offset="1" stop-color="#7222F4"></stop></linearGradient><linearGradient id="lb" gradientUnits="userSpaceOnUse" x1="168" y1="596.5" x2="568" y2="571.5"><stop offset="0" stop-color="#0A0C38"></stop><stop offset="1" stop-color="#191A5E"></stop></linearGradient></defs><g transform="translate(0 0) scale(0.6)"><path d="M234.51 53.36A95.5 95.5 0 0 1 320.21 0L464.95 0L464.95 0L134.17 641.61A16.5 16.5 0 0 1 119.7 650.54L94.3 650.85A94.91 94.91 0 0 1 7.98 514.06Z" fill="url(#ls)"></path><path d="M213.97 550.73A79 79 0 0 1 282.81 510.13L686.59 509.12A2.25 2.25 0 0 1 688.5 512.56L624.89 614.72A86.11 86.11 0 0 1 551.79 655.31L158.36 655.31A1.5 1.5 0 0 1 157.05 653.08Z" fill="url(#lb)"></path><path d="M343.3 365L491.5 365" stroke="#8B89B0" stroke-width="22.6" stroke-linecap="round"></path><path d="M316.7 417L460.8 417" stroke="#8B89B0" stroke-width="22.6" stroke-linecap="round"></path><path d="M289.4 468.9L428.7 468.8" stroke="#8B89B0" stroke-width="22.3" stroke-linecap="round"></path><path d="M476.4 314.7L524.3 194.8" stroke="#581CF3" stroke-width="19.9" stroke-linecap="round"></path><path d="M448 219.3L401.5 253.3L443.5 286.2" stroke="#581CF3" stroke-width="20.8" stroke-linecap="round" stroke-linejoin="round"></path><path d="M557.3 219.4L600.6 253.3L556.5 286.4" stroke="#581CF3" stroke-width="20.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M681 340.6L569.4 449L529.2 409.5" stroke="#00D397" stroke-width="22.5" stroke-linecap="round" stroke-linejoin="round"></path></g><g transform="translate(481.44 39.4)"><path d="M0 0H59.85V250.16H48A48 48 0 0 1 0 202.16ZM147.68 315.21Q131.75 315.21 121.2 313.31Q110.65 311.41 107.64 310.71L107.64 278.19L133.9 278.19Q144.67 278.19 153.28 274.21Q161.89 270.23 168.35 263.83Q174.81 257.43 177.82 250.16L89.13 68.16L152.42 68.16L191.17 152.24Q193.75 158.13 196.98 166.95Q200.21 175.77 203.66 185.29Q207.1 194.8 209.25 202.07L211.41 202.07Q213.13 197.22 215.28 190.65Q217.43 184.08 219.8 177.16Q222.17 170.24 224.54 163.83Q226.91 157.43 228.63 152.59L260.92 68.16L321.2 68.16L244.13 241.51Q237.67 256.74 229.27 270.06Q220.88 283.38 209.68 293.59Q198.49 303.79 183.2 309.5Q167.92 315.21 147.68 315.21ZM430.56 254.32Q402.57 254.32 382.12 244.11Q361.67 233.9 350.48 212.79Q339.28 191.69 339.28 158.82Q339.28 125.95 350.69 105.01Q362.1 84.08 382.12 74.05Q402.14 64.01 428.41 64.01Q443.05 64.01 455.75 66.61Q468.45 69.2 478.14 74.74Q487.83 80.27 494.71 88.23L497.3 88.23L497.3 0L557.15 0L557.15 250.16L508.06 250.16L503.33 225.6L500.31 225.6Q489.12 240.13 471.03 247.22Q452.95 254.32 430.56 254.32ZM449.51 214.87Q466.3 214.87 476.85 208.64Q487.4 202.41 492.56 190.65Q497.73 178.89 497.73 162.62L497.73 156.4Q497.73 144.29 494.93 134.25Q492.13 124.22 486.1 117.47Q480.08 110.72 471.03 107.09Q461.99 103.46 449.51 103.46Q431.42 103.46 420.66 109.17Q409.89 114.87 405.16 126.47Q400.42 138.06 400.42 155.36L400.42 163.32Q400.42 180.62 405.16 192.03Q409.89 203.45 420.66 209.16Q431.42 214.87 449.51 214.87ZM612.26 250.16L612.26 68.16L672.11 68.16L672.11 250.16L612.26 250.16ZM794.82 254.32Q773.29 254.32 759.94 248.09Q746.59 241.86 740.57 231.31Q734.54 220.75 734.54 207.95L734.54 105.19L706.55 105.19L706.55 68.16L736.69 68.16L747.88 16.26L794.39 16.26L794.39 68.16L835.72 68.16L835.72 105.19L794.39 105.19L794.39 199.99Q794.39 208.3 799.12 212.62Q803.86 216.95 814.62 216.95L835.72 216.95L835.72 248.78Q830.55 250.16 823.66 251.37Q816.77 252.59 809.02 253.45Q801.27 254.32 794.82 254.32ZM977.37 254.32Q939.91 254.32 914.51 244.11Q889.11 233.9 876.19 212.79Q863.28 191.69 863.28 159.16Q863.28 126.29 876.19 105.36Q889.11 84.43 914.3 74.22Q939.48 64.01 976.08 64.01Q1010.53 64.01 1034.21 73.87Q1057.89 83.73 1069.94 104.32Q1082 124.91 1082 157.43L1082 169.89L923.98 169.89Q924.85 185.81 930.23 196.88Q935.61 207.95 947.02 213.31Q958.43 218.68 977.37 218.68Q987.71 218.68 996.1 216.6Q1004.5 214.52 1010.53 210.37Q1016.55 206.22 1020 199.99Q1023.44 193.76 1023.44 185.81L1082 185.81Q1082 203.11 1074.25 215.91Q1066.5 228.71 1052.72 237.19Q1038.94 245.67 1019.78 249.99Q1000.62 254.32 977.37 254.32ZM924.85 139.44L1020.43 139.44Q1020.43 129.06 1017.2 121.45Q1013.97 113.84 1008.37 108.99Q1002.78 104.15 994.81 101.9Q986.85 99.65 976.94 99.65Q960.58 99.65 949.6 103.98Q938.62 108.3 932.81 117.12Q927 125.95 924.85 139.44Z" fill="#FFFFFF"></path><circle cx="642.18" cy="30.5" r="30.5" fill="#8B5CFF"></circle></g></svg>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 4200 1350.0001"
+   width="4200"
+   height="1350"
+   role="img"
+   aria-label="Dark lydite with an inset violet gemstone"
+   version="1.1"
+   id="svg50"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#">
+  <defs
+     id="defs20">
+    <linearGradient
+       id="stone2"
+       x1="110.2571"
+       y1="292.04468"
+       x2="599.22333"
+       y2="683.21771"
+       gradientTransform="scale(0.83441341,1.1984467)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#35383e"
+         id="stop5" />
+      <stop
+         offset="1"
+         stop-color="#151619"
+         id="stop6" />
+    </linearGradient>
+    <linearGradient
+       id="violet"
+       x1="541.20367"
+       y1="552.81073"
+       x2="808.90039"
+       y2="170.38686"
+       gradientTransform="scale(0.94659368,1.0564195)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#32108f"
+         id="stop7" />
+      <stop
+         offset="0.32"
+         stop-color="#6930e8"
+         id="stop8" />
+      <stop
+         offset="0.65"
+         stop-color="#a17aff"
+         id="stop9" />
+      <stop
+         offset="1"
+         stop-color="#4a1bbd"
+         id="stop10" />
+    </linearGradient>
+    <linearGradient
+       id="violetDark"
+       x1="731.11108"
+       y1="262.79999"
+       x2="911.11108"
+       y2="442.79999"
+       gradientTransform="scale(0.9,1.1111111)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#2a0b70"
+         id="stop11" />
+      <stop
+         offset="1"
+         stop-color="#7135df"
+         id="stop12" />
+    </linearGradient>
+    <clipPath
+       id="rockClip-3-0-6">
+      <path
+         d="M 210,72 Q 118,76 92,168 L 72,770 Q 70,908 205,936 H 812 Q 936,910 948,790 L 934,214 Q 930,90 812,72 Z"
+         id="path19-8-6-2" />
+    </clipPath>
+    <linearGradient
+       id="stone-4-9-3"
+       x1="0"
+       y1="0"
+       x2="1024"
+       y2="1024"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#4b4e54"
+         id="stop1-8-3-7" />
+      <stop
+         offset="0.28"
+         stop-color="#24262a"
+         id="stop2-0-8-9" />
+      <stop
+         offset="0.7"
+         stop-color="#101114"
+         id="stop3-4-5-4" />
+      <stop
+         offset="1"
+         stop-color="#292b30"
+         id="stop4-6-8-7" />
+    </linearGradient>
+    <filter
+       id="shadow-2-4-0"
+       x="-0.081553398"
+       y="-0.073684211"
+       width="1.1631068"
+       height="1.1473684">
+      <feGaussianBlur
+         stdDeviation="14"
+         id="feGaussianBlur18-6-3-2" />
+    </filter>
+    <clipPath
+       id="gemClip-9-9-4">
+      <path
+         d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+         id="path20-4-0-2" />
+    </clipPath>
+    <linearGradient
+       id="violetLight-8-9-7"
+       x1="510"
+       y1="496"
+       x2="760"
+       y2="246"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#8d65ed"
+         id="stop13-1-7-4" />
+      <stop
+         offset="0.55"
+         stop-color="#eee8ff"
+         id="stop14-5-5-1" />
+      <stop
+         offset="1"
+         stop-color="#a989ff"
+         id="stop15-3-3-7" />
+    </linearGradient>
+    <radialGradient
+       id="spark-5-55-2"
+       cx="478.87369"
+       cy="275.92245"
+       r="159.62456"
+       gradientTransform="scale(1.1401754,0.87705802)"
+       fx="478.87369"
+       fy="275.92245"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#ffffff"
+         stop-opacity="0.95"
+         id="stop16-4-0-6" />
+      <stop
+         offset="0.25"
+         stop-color="#e8ddff"
+         stop-opacity="0.55"
+         id="stop17-3-65-1" />
+      <stop
+         offset="1"
+         stop-color="#8f63f5"
+         stop-opacity="0"
+         id="stop18-6-5-2" />
+    </radialGradient>
+    <linearGradient
+       xlink:href="#stone2"
+       id="linearGradient130"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.83441341,1.1984467)"
+       x1="110.2571"
+       y1="292.04468"
+       x2="599.22333"
+       y2="683.21771" />
+    <linearGradient
+       xlink:href="#violet"
+       id="linearGradient131"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.94659368,1.0564195)"
+       x1="541.20367"
+       y1="552.81073"
+       x2="808.90039"
+       y2="170.38686" />
+    <linearGradient
+       xlink:href="#violetDark"
+       id="linearGradient132"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.9,1.1111111)"
+       x1="731.11108"
+       y1="262.79999"
+       x2="911.11108"
+       y2="442.79999" />
+  </defs>
+  <!-- LYDITE / dark stone: compact square composition with transparent outer background -->
+  <!-- restrained outer edge -->
+  <metadata
+     id="metadata78">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="" />
+    </rdf:RDF>
+  </metadata>
+  <g
+     id="layer10"
+     transform="translate(-6980.9228,-1634.4614)">
+    <g
+       id="text12-4-56-5-2-3"
+       style="display:inline;fill:#d3d6d8;fill-opacity:1"
+       transform="matrix(1.6026477,0,0,1.7131832,15884.484,3254.5044)">
+      <path
+         id="path28-0-1-6"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -3139.2075,-737.27259 c -52.7975,0 -97.595,18.07617 -128.4038,51.73927 -30.8089,33.6631 -47.196,81.94107 -47.196,140.29701 0,61.57728 14.4221,110.40708 44.9701,143.92505 30.548,33.51798 76.2111,49.9382 133.0661,49.9382 68.1281,0 106.4656,-18.18722 135.0568,-41.58003 5.532,-4.52703 6.8605,-12.4495 3.1088,-18.53405 l -40.182,-65.14193 c -4.9081,-7.95405 -16.0107,-9.12106 -22.4654,-2.36137 -10.5479,11.05028 -32.5541,26.63334 -65.1684,26.63334 -26.7946,0 -42.8759,-6.48222 -53.1332,-17.25814 -8.111,-8.52107 -13.3797,-21.02361 -15.5299,-38.21827 h 189.8136 c 7.1351,-1.4e-4 13.1722,-5.27169 14.1373,-12.34124 3.7336,-27.37973 4.3941,-45.43354 4.3941,-63.41667 0,-44.86763 -13.6922,-83.73105 -40.246,-111.14143 -26.5538,-27.41038 -65.3831,-42.53974 -112.2221,-42.53974 z m -2.4342,83.67043 c 37.1366,0 54.1832,21.3074 54.1832,61.488 v 9.13111 h -121.1505 c 1.2176,-40.18061 25.5691,-70.61911 66.9673,-70.61911 z" />
+      <path
+         id="path26-7-7-6"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -3487.4386,-817.02652 c -5.8753,6.4e-4 -11.1502,3.60178 -13.2895,9.07379 l -29.4362,75.28638 -38.7978,15.94338 c -5.3511,2.20011 -8.8442,7.41353 -8.8438,13.19925 v 57.22756 c 0,7.87915 6.3882,14.26475 14.2673,14.2662 h 29.5641 v 149.4984 c 0,44.13279 11.5255,76.82098 32.9122,98.02724 21.3867,21.20626 51.0981,29.47918 83.0273,29.47918 59.3522,0 89.4939,-13.36929 104.0446,-24.09075 5.0247,-3.70313 7.0594,-10.24084 5.0232,-16.14125 l -23.7424,-68.794 c -3.1853,-9.22759 -14.4864,-12.60438 -22.2117,-6.63661 -9.9756,7.70844 -26.7138,12.24324 -38.1541,12.24324 -8.6918,0 -13.515,-2.14546 -16.4438,-5.00196 -2.9288,-2.85649 -5.2068,-7.46122 -5.2068,-16.64976 v -151.93373 h 71.5717 c 7.8799,-3.5e-4 14.268,-6.38627 14.2694,-14.2662 v -70.0126 c -3e-4,-7.8807 -6.3887,-14.26955 -14.2694,-14.2699 h -71.5717 v -72.1798 c -3e-4,-7.87991 -6.3875,-14.26661 -14.2674,-14.26806 z" />
+      <path
+         id="path25-57-6-0"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#a17aff;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -3659.7275,-874.86244 c -20.0802,0 -38.107,9.09004 -50.3296,23.63401 -10.1485,12.07596 -16.2973,27.91162 -16.2973,45.42627 0,36.30435 29.8739,66.01657 66.6269,66.01657 38.1363,0 68.4506,-29.71219 68.4506,-66.01657 0,-38.60888 -30.3143,-69.06028 -68.4506,-69.06028 z" />
+      <path
+         id="path24-9-8-5"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -3704.1695,-730.57866 c -7.8807,2.9e-4 -14.2691,6.38917 -14.2694,14.2699 v 343.97001 c 0,7.87997 6.3894,14.26777 14.2694,14.26806 h 91.9269 c 7.8799,-3.5e-4 14.2679,-6.38813 14.2693,-14.26806 v -343.97001 c -3e-4,-7.8807 -6.3886,-14.26955 -14.2693,-14.2699 z" />
+      <path
+         id="path23-9-2-0"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -3880.7224,-848.07563 c -7.8799,0.001 -14.2671,6.39 -14.2674,14.26991 v 104.93937 c -10.064,-1.91387 -23.2201,-3.53742 -42.3502,-3.53742 -39.301,0 -81.0896,12.94989 -112.6635,45.95512 -31.5739,33.00523 -51.978,85.07997 -51.978,160.08479 0,58.25819 13.7917,101.82384 38.9979,131.07344 25.2063,29.24961 61.341,42.70062 100.682,42.70062 37.9927,0 65.2263,-14.58655 81.344,-26.68882 l 7.0676,13.5395 c 2.4594,4.71272 7.3341,7.6682 12.65,7.66843 h 71.8379 c 7.8792,-10e-4 14.2659,-6.38891 14.2673,-14.26806 v -461.46697 c -3e-4,-7.87991 -6.3874,-14.26846 -14.2673,-14.26991 z m -43.2229,204.21295 c 17.0463,0 37.1361,5.4799 45.6592,12.17667 v 163.15807 c -12.7847,17.65511 -31.048,29.22215 -56.6175,29.22215 -35.3102,0 -59.6624,-28.00477 -59.6624,-94.97244 0,-93.14594 32.8753,-109.58445 70.6207,-109.58445 z" />
+      <path
+         id="path21-2-5-1"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -4422.5506,-730.57866 c -9.97,10e-4 -16.8654,9.9668 -13.3534,19.29775 l 127.7684,339.31384 c -1.6302,13.23516 -5.8631,22.22556 -11.7856,27.95548 -6.3628,6.15589 -15.2588,9.76167 -28.9658,9.76167 -12.937,0 -23.5555,-3.18334 -30.4222,-6.84556 -8.4314,-4.49627 -18.812,0.40242 -20.7017,9.76907 l -15.2204,75.49163 c -1.2727,6.31532 1.8443,12.70102 7.6061,15.58281 12.8988,6.44937 35.6618,11.85491 62.3917,11.85491 43.2794,0 76.3224,-14.75124 99.7949,-37.79851 23.4726,-23.04727 37.5979,-53.40508 47.7159,-84.70781 0,-7.3e-4 -10e-5,-0.005 0,-0.006 0,-0.0102 0.011,-0.0212 0.012,-0.0314 l 115.6713,-361.01549 c 2.9493,-9.20792 -3.9199,-18.62137 -13.5886,-18.62281 h -94.9718 c -6.418,7.5e-4 -12.0457,4.28698 -13.7536,10.4736 l -32.2686,116.88859 c -5.6129,20.31388 -10.1369,39.65121 -14.0424,57.88955 -5.2244,-19.94367 -11.1542,-40.4538 -17.0895,-58.5423 l -38.3542,-116.8886 c -1.9227,-5.85851 -7.3897,-9.82002 -13.5556,-9.82084 z" />
+      <path
+         id="path17-3-4-3"
+         style="font-weight:bold;font-size:608.797px;font-family:'Kohinoor Telugu';-inkscape-font-specification:'Kohinoor Telugu, Bold';baseline-shift:baseline;display:inline;overflow:visible;vector-effect:none;fill:#d3d6d8;fill-opacity:1;stroke-linecap:square;stroke-linejoin:round;enable-background:accumulate;stop-color:#000000;stop-opacity:1"
+         d="m -4575.3591,-848.07563 c -7.88,0.001 -14.267,6.38996 -14.2673,14.26991 v 376.84423 c 0,31.39636 9.4531,58.13037 27.922,76.59927 18.4689,18.4689 45.0436,27.77242 75.84,27.77242 22.1081,0 37.5456,-5.03785 49.0031,-9.49355 5.4845,-2.13306 9.0972,-7.41436 9.0976,-13.2991 v -72.44793 c 0,-9.00282 -8.2384,-15.75481 -17.0667,-13.99068 -3.0439,0.60879 -4.1548,0.93937 -9.9867,0.93937 -6.145,0 -8.6303,-1.18666 -10.3168,-2.97529 -1.6864,-1.78863 -4.0289,-6.21452 -4.0289,-16.84762 v -353.10112 c -3e-4,-7.8807 -6.3887,-14.26956 -14.2694,-14.26991 z" />
+    </g>
+    <g
+       id="g2-9-2-6"
+       transform="matrix(1.4782453,0,0,1.4291818,6966.5314,1589.1539)"
+       style="display:inline">
+      <g
+         clip-path="url(#rockClip-3-0-6)"
+         id="g49-5-74-5"
+         style="display:inline">
+        <rect
+           width="1024"
+           height="1024"
+           fill="url(#stone)"
+           id="rect20-4-4-0"
+           x="0"
+           y="0"
+           style="display:inline;fill:url(#stone-4-9-3);stroke:none;stroke-opacity:1" />
+        <path
+           d="M 82,160 230,72 420,190 340,410 94,520 Z"
+           fill="#55585e"
+           opacity="0.55"
+           id="path21-9-60-7" />
+        <path
+           d="M 230,72 420,190 610,78 812,72 700,270 500,350 340,410 Z"
+           fill="#181a1e"
+           id="path22-1-3-6" />
+        <path
+           d="M 94,520 340,410 500,350 430,690 210,936 92,770 Z"
+           fill="url(#stone2)"
+           id="path23-7-5-2"
+           style="fill:url(#linearGradient130)" />
+        <path
+           d="M 430,690 604,584 778,492 812,936 H 210 Z"
+           fill="#111216"
+           id="path24-5-8-4" />
+        <path
+           d="M 778,492 934,214 948,790 812,936 Z"
+           fill="#303238"
+           opacity="0.8"
+           id="path25-5-3-3" />
+        <path
+           d="M 610,78 812,72 934,214 700,270 Z"
+           fill="#34373d"
+           opacity="0.7"
+           id="path26-4-3-1" />
+        <!-- shallow cavity behind the gemstone -->
+        <path
+           d="M 490,286 704,164 842,286 792,514 604,620 430,486 Z"
+           fill="#050507"
+           opacity="0.9"
+           filter="url(#shadow)"
+           id="path27-1-2-7"
+           style="filter:url(#shadow-2-4-0)" />
+        <path
+           d="M 494,286 704,176 830,292 784,502 604,598 444,480 Z"
+           fill="#08090c"
+           stroke="#000000"
+           stroke-width="18"
+           id="path28-8-16-3" />
+        <!-- raised/inset rim: makes the jewel clearly embedded rather than painted on -->
+        <path
+           d="M 505,294 704,188 818,296 774,488 604,580 458,474 Z"
+           fill="none"
+           stroke="#5b5e66"
+           stroke-width="13"
+           opacity="0.8"
+           id="path29-8-2-5" />
+        <path
+           d="M 492,282 704,174 830,292"
+           fill="none"
+           stroke="#747780"
+           stroke-width="6"
+           opacity="0.35"
+           id="path30-3-3-5" />
+        <!-- FACETED GEM -->
+        <g
+           clip-path="url(#gemClip-9-9-4)"
+           id="g47-5-6-6">
+          <path
+             d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+             fill="url(#violet)"
+             id="path31-2-7-0"
+             style="fill:url(#linearGradient131)" />
+          <!-- crown facets -->
+          <path
+             d="m 518,236 182,-56 -42,144 -192,2 z"
+             fill="#7d4ae8"
+             id="path32-2-5-9" />
+          <path
+             d="M 700,180 820,292 658,324 Z"
+             fill="#4a20a8"
+             id="path33-6-3-7" />
+          <path
+             d="M 820,292 778,492 658,324 Z"
+             fill="url(#violetDark)"
+             id="path34-6-9-4"
+             style="fill:url(#linearGradient132)" />
+          <path
+             d="M 778,492 604,584 658,324 Z"
+             fill="#32117e"
+             id="path35-7-3-1" />
+          <path
+             d="M 604,584 458,476 466,326 658,324 Z"
+             fill="#5924bd"
+             id="path36-8-1-2" />
+          <path
+             d="m 466,326 52,-90 140,88 z"
+             fill="#b18aff"
+             id="path37-4-0-1" />
+          <!-- central table -->
+          <path
+             d="m 548,286 150,-40 62,58 -36,128 -114,64 -92,-66 -8,-88 z"
+             fill="url(#violetLight)"
+             opacity="0.95"
+             id="path38-1-9-1"
+             style="fill:url(#violetLight-8-9-7)" />
+          <path
+             d="M 548,286 698,246 650,350 510,342 Z"
+             fill="#d7c9ff"
+             opacity="0.9"
+             id="path39-7-9-1" />
+          <path
+             d="m 698,246 62,58 -110,46 z"
+             fill="#7040c9"
+             id="path40-1-8-7" />
+          <path
+             d="M 760,304 724,432 650,350 Z"
+             fill="#8e63ed"
+             id="path41-8-7-3" />
+          <path
+             d="M 724,432 610,496 650,350 Z"
+             fill="#4e20a9"
+             id="path42-7-5-5" />
+          <path
+             d="m 610,496 -92,-66 -8,-88 140,8 z"
+             fill="#7650d6"
+             id="path43-8-6-1" />
+          <path
+             d="m 510,342 38,-56 102,64 z"
+             fill="#f1edff"
+             opacity="0.72"
+             id="path44-7-3-1" />
+          <ellipse
+             cx="585"
+             cy="286"
+             rx="130"
+             ry="100"
+             fill="url(#spark)"
+             opacity="0.8"
+             id="ellipse44-7-9-2"
+             style="fill:url(#spark-5-55-2)" />
+          <!-- crisp facet edges -->
+          <path
+             d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+             fill="none"
+             stroke="#d2c0ff"
+             stroke-width="5"
+             opacity="0.72"
+             id="path45-4-7-6" />
+          <path
+             d="m 466,326 192,-2 162,-32"
+             fill="none"
+             stroke="#efe9ff"
+             stroke-width="4"
+             opacity="0.45"
+             id="path46-4-8-0" />
+          <path
+             d="M 658,324 604,584"
+             fill="none"
+             stroke="#1e084e"
+             stroke-width="5"
+             opacity="0.7"
+             id="path47-9-7-2" />
+        </g>
+        <!-- tiny specular highlight, not a white blob -->
+        <path
+           d="m 544,267 30,-18 28,-2 -22,22 -26,13 z"
+           fill="#ffffff"
+           opacity="0.85"
+           id="path48-1-8-4" />
+        <path
+           d="m 535,288 15,-10"
+           stroke="#ffffff"
+           stroke-width="6"
+           stroke-linecap="round"
+           opacity="0.55"
+           id="path49-5-0-9" />
+      </g>
+      <path
+         d="M 210,72 Q 118,76 92,168 L 72,770 Q 70,908 205,936 H 812 Q 936,910 948,790 L 934,214 Q 930,90 812,72 Z"
+         fill="none"
+         stroke="#000000"
+         stroke-width="12"
+         opacity="0.5"
+         id="path50-5-0-7"
+         style="display:inline;stroke:#fbffff;stroke-opacity:1" />
+    </g>
+  </g>
+</svg>

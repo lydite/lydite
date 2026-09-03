@@ -11,10 +11,11 @@ decoration, and it is the one thing a redesign must not lose.
 
 | Path | Status |
 |---|---|
-| `assets/*.svg` | **Production.** Use as-is. True vector, not traced. |
+| `assets/*.svg` | **Production.** Use as-is. True vector, not traced, type outlined. |
+| `docs/design/source/lydite-brand.svg` | **Source.** Where the brand is authored. Live `<text>`; needs Kohinoor Telugu Bold. |
 | `docs/design/tokens.md` | **Production.** The token values, in one place. |
 | `docs/design/reference/*.dc.html` | **Reference.** Prototypes, not code to copy. Runtime not vendored — see below. |
-| `docs/design/reference/*.svg` | **Reference.** Logo construction proof — never ship these. |
+
 
 The `.dc.html` files are design prototypes authored in HTML. They use a custom
 runtime (`support.js`) with `{{ }}` holes and `<sc-for>`/`<sc-if>` tags, and every
@@ -80,3 +81,7 @@ These are unfinished, not decided:
 3. **Product UI icons are not exported.** They are inline in
    `design-system.dc.html`, section 04 — conventional 20px stroke icons at
    1.5px, carrying no brand geometry. Extract or substitute.
+4. **The prototypes carry the new palette but not new layouts.** Every colour was
+   remapped when the brand went neutral, and every asset reference resolves, but no
+   screen was redrawn — the compositions are still the ones designed around the
+   previous mark. They are reference, not a claim about how a screen should look now.

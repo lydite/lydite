@@ -55,6 +55,7 @@ internal/gitstate/               # the base branch, and lydite branch read/write
 internal/executil/              # shared external-command runner every scanner package uses
 assets/                        # the shipped logo set — the action's PR comment embeds
                                 #   lydite-mark-64.png by raw URL (see below)
+docs/design/source/             # where the brand is authored; the only live <text> in the tree
 docs/design/                    # tokens, surface specs, and the reference prototypes (see Design)
 docs/release-notes/             # _header.md + one <tag>.md per release that needs one (see Release notes)
 .lydite/                       # every file that configures lydite: config.yml, components.yml,
@@ -1644,12 +1645,32 @@ every consumer of them is already in this repository — see
 inside the tree, not across repositories:
 
 - `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png`, whose path is a
-  public API (above).
+  public API (above), and `lydite-avatar-512.png`, which is the organisation avatar.
+- `docs/design/source/` is where the brand is **authored**. `lydite-brand.svg` is the only
+  file in the tree carrying live `<text>`; everything in `assets/` is outlined, so nothing
+  shipped depends on a font being installed. Editing it needs **Kohinoor Telugu Bold**, which
+  ships with macOS and is absent everywhere else — a machine without it silently substitutes
+  and the wordmark redraws wrong.
 - `docs/design/tokens.md` is the token set and the surface specifications.
-- `docs/design/reference/` is **reference only** — the `.dc.html` prototypes and the logo
-  construction proofs. The prototypes use a custom runtime and inline styles, both
-  artefacts of the authoring environment: do not port the runtime, and do not copy the
-  styles into `web/`.
+- `docs/design/reference/` is **reference only** — the `.dc.html` prototypes. They use a
+  custom runtime and inline styles, both artefacts of the authoring environment: do not
+  port the runtime, and do not copy the styles into `web/`. The construction proofs that
+  lived here measured the retired "L" mark against a supplied raster; the current mark is
+  authored as vector, so there is nothing to prove and they are gone rather than restated.
+
+**The mark is a violet gemstone set in dark stone, and it carries no single-colour form.**
+Its legibility is facet shading, so one flat colour renders a hexagon inside a black square.
+`lydite-icon-mono.svg`, `lydite-icon-flat.svg`, `lydite-logo-mono.svg` and
+`lydite-logo-stacked-mono.svg` are therefore **retired rather than redrawn** — a brand kit
+that promises a mono lock-up it cannot honour is worse than one that says it has none. A
+surface needing one flat colour uses the wordmark, which is flat `#181a1d` already.
+
+**The accent is one value per file, and the two differ by theme.** `#6930e8` on light,
+`#a17aff` on dark — both sampled from the gem's own gradient, so the accent cannot drift from
+the mark. Every accented element in a file (the `i` dot, the tagline separators, `QUALITY`)
+carries the same one. The dark value is not a preference: `#6930e8` on GitHub's `#0d1117`
+canvas is 2.87:1, under the 3:1 floor, and the tagline separators shipped that way until they
+were brought in line.
 
 Two things in `tokens.md` are documented but **not implemented**, and neither should be
 mistaken for a description of current behavior:
