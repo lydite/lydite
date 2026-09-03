@@ -175,18 +175,20 @@ func newScanCmd() *cobra.Command {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
 			}
 
-			// A run that produced no row at all ran no check at all — every
-			// declared component's language switched off, and Semgrep too.
-			// Without a row of its own that renders as `verdict: pass` over an
-			// empty document, and a pull-request comment shows the green of a
-			// scan that never happened. Each opt-out is the repository's to
-			// make and none of them is reported on its own; all of them
-			// together is a different fact, and it is this one.
-			if len(rep.Rows()) == 0 && len(results) == 0 {
+			// A run in which no check actually ran reports no pass. Counting
+			// rows is not the test: a raw-command component and a
+			// deduplicated one each add an `unmeasured` row, and unmeasured
+			// does not vote — so a repository whose every component declares a
+			// raw command, with Semgrep off, would produce a document full of
+			// amber rows and `verdict: pass`, having executed nothing. Each
+			// opt-out is the repository's to make and none is reported on its
+			// own; all of them together is a different fact, and it is this
+			// one.
+			if !ranAnyCheck(rep) && len(results) == 0 {
 				rep.Add(ui.Row{
 					Status: ui.StatusUnmeasured,
 					Label:  "scan",
-					Value:  "nothing ran — every declared component's language is disabled in " + config.FileName,
+					Value:  "nothing ran — no declared component has a language lydite checks, or every one of them is disabled",
 				})
 			}
 
@@ -278,10 +280,12 @@ func labelled(results []executil.Result, component string) []executil.Result {
 // unparseable.
 //
 // Outside a git repository there is no question to answer, which is the shape
-// orphanRow already has for that case. Anything else is said out loud —
-// including git listing no source file at all, which is what `--dir` pointed
-// at a gitignored tree looks like and which must not read the same as a
-// repository whose every file is accounted for.
+// orphanRow already has for that case. Every other failure is said out loud,
+// because this is the only thing standing between a scan that narrowed and a
+// scan that narrowed silently — with one exception, stated at the branch that
+// makes it: git listing no source at all is the ordinary state of a repository
+// whose components all declare a raw command, and the notable one where a
+// component implies a language.
 // Any other failure is said out loud: this is the only thing standing between
 // a scan that narrowed and a scan that narrowed silently, so a git that would
 // not run must not switch it off without a word.
@@ -337,6 +341,18 @@ func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (str
 		return "", fmt.Errorf("--diff-base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
 	}
 	return baseSHA, nil
+}
+
+// ranAnyCheck reports whether any row records a check that executed. An
+// unmeasured row is a component saying why it has no check, which is the
+// opposite.
+func ranAnyCheck(rep *ui.Report) bool {
+	for _, row := range rep.Rows() {
+		if row.Status != ui.StatusUnmeasured {
+			return true
+		}
+	}
+	return false
 }
 
 // resultRows turns each check's result into its row. It is the one place a

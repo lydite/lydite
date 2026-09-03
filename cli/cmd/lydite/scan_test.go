@@ -230,11 +230,18 @@ func TestScanReportsAComponentWithNoDerivableLanguage(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 		t.Fatalf("parsing the report: %v", err)
 	}
-	if len(doc.Rows) != 1 {
-		t.Fatalf("rows = %+v, want one row for the one component", doc.Rows)
+	// The component's own row, and — because nothing else ran either — the
+	// run's. Both are unmeasured: one says this component has no language,
+	// the other says no check executed at all.
+	labels := map[string]string{}
+	for _, r := range doc.Rows {
+		labels[r.Label] = r.Status
 	}
-	if doc.Rows[0].Status != string(ui.StatusUnmeasured) || doc.Rows[0].Label != "scan(legacy)" {
-		t.Fatalf("row = %+v, want an unmeasured scan(legacy)", doc.Rows[0])
+	if got, ok := labels["scan(legacy)"]; !ok || got != string(ui.StatusUnmeasured) {
+		t.Fatalf("rows = %+v, want an unmeasured scan(legacy)", doc.Rows)
+	}
+	if got, ok := labels["scan"]; !ok || got != string(ui.StatusUnmeasured) {
+		t.Fatalf("rows = %+v, want the run to say no check ran", doc.Rows)
 	}
 }
 
@@ -613,18 +620,31 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	_ = cmd.ExecuteContext(context.Background())
 
 	var doc struct {
-		Rows []struct{ Label string } `json:"rows"`
+		Rows []struct{ Status, Label string } `json:"rows"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 		t.Fatalf("parsing the report: %v", err)
 	}
+	// One set of checks, run under the first component in declaration order.
+	var checks []string
 	for _, r := range doc.Rows {
-		if strings.Contains(r.Label, "api-integration") {
-			t.Fatalf("rows = %+v, want one set of checks for the shared directory", doc.Rows)
+		if r.Status != string(ui.StatusUnmeasured) {
+			checks = append(checks, r.Label)
 		}
 	}
-	if len(doc.Rows) != 2 {
-		t.Fatalf("rows = %+v, want gosec and govulncheck once each", doc.Rows)
+	if !slices.Equal(checks, []string{"gosec(api)", "govulncheck(api)"}) {
+		t.Fatalf("checks = %v, want gosec and govulncheck once each for the shared directory", checks)
+	}
+	// And the second component says why it has none of its own, rather than
+	// disappearing from a report that is otherwise one row per component.
+	var deduped string
+	for _, r := range doc.Rows {
+		if r.Label == "scan(api-integration)" && r.Status == string(ui.StatusUnmeasured) {
+			deduped = r.Label
+		}
+	}
+	if deduped == "" {
+		t.Fatalf("rows = %+v, want the deduplicated component to say so", doc.Rows)
 	}
 }
 
@@ -749,5 +769,44 @@ func TestLyditesOwnDeclarationLeavesNothingUnscanned(t *testing.T) {
 	for _, g := range gaps {
 		t.Errorf("%d %s file(s) are scanned by no component, e.g. %s — declare one, or exclude them in %s",
 			len(g.Files), g.Lang, g.Files[0], component.FileName)
+	}
+}
+
+// Counting rows is not the test for "did anything run". A raw-command
+// component and a deduplicated one each add an unmeasured row, and unmeasured
+// does not vote — so a repository whose every component declares a raw
+// command, with Semgrep off, would otherwise produce a document full of amber
+// rows and `verdict: pass` having executed nothing at all.
+func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n"+
+			"  - name: legacy\n    dir: .\n    command: [\"make\", \"check\"]\n"+
+			"  - name: tools\n    dir: .\n    command: [\"make\", \"tools\"]\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	var doc struct {
+		Rows []struct{ Status, Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	var sawRunRow bool
+	for _, r := range doc.Rows {
+		if r.Label == "scan" && r.Status == string(ui.StatusUnmeasured) {
+			sawRunRow = true
+		}
+	}
+	if !sawRunRow {
+		t.Fatalf("rows = %+v, want the run to say no check ran rather than reporting a pass over amber rows", doc.Rows)
 	}
 }
