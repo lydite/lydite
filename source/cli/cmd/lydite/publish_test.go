@@ -253,3 +253,22 @@ func TestQuotedOutputIsCappedButNoRowIsLost(t *testing.T) {
 		t.Errorf("the comment does not say how many failures it left out:\n%s", body)
 	}
 }
+
+// A run that measured coverage without gating it renders every coverage row as
+// context. A summary counting only the rows that vote would describe that run
+// and a fully gated one identically, which is the distinction ADR 0019 exists
+// to keep.
+func TestTheSummaryAccountsForRowsThatVoteOnNothing(t *testing.T) {
+	dir := reportDirWith(t, "test",
+		ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"},
+		ui.Row{Status: ui.StatusContext, Label: "coverage(cli)", Value: "81.5%"},
+		ui.Row{Status: ui.StatusContext, Label: "coverage", Value: "81.5%"},
+		ui.Row{Status: ui.StatusNew, Label: "coverage(web)", Value: "no baseline yet"},
+	)
+	got := buildComment([]string{dir}, "").Sections[0].Summary
+	for _, want := range []string{"1 passed", "1 new", "2 not gated"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q is missing %q", got, want)
+		}
+	}
+}

@@ -230,9 +230,13 @@ func worst(rows []ui.Row) ui.Status {
 
 // counts is the one line visible while a section is shut.
 //
-// It names the states that want attention and the passing total, and says
-// nothing about the states that vote on nothing — a reader scanning four shut
-// sections is deciding which to open.
+// Every state is named, including the ones that vote on nothing. Omitting those
+// looked reasonable — a reader scanning shut sections is deciding which to open
+// — and it hides the case the distinction exists for: a run that measured
+// coverage without gating it renders every coverage row as context, so a
+// summary that counted only the voting rows would describe that run and a
+// fully gated one identically. Naming them costs three words and keeps the
+// numbers adding up to the rows behind them.
 func counts(rows []ui.Row) string {
 	tally := map[ui.Status]int{}
 	for _, row := range rows {
@@ -247,6 +251,9 @@ func counts(rows []ui.Row) string {
 		{ui.StatusRefer, "referred"},
 		{ui.StatusUnmeasured, "unmeasured"},
 		{ui.StatusPass, "passed"},
+		{ui.StatusNew, "new"},
+		{ui.StatusContext, "not gated"},
+		{ui.StatusDropped, "dropped"},
 	} {
 		if tally[s.status] > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", tally[s.status], s.word))
