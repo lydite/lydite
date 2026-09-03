@@ -1,0 +1,21 @@
+{
+  "name": "lydite-cloud-services",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Workers lydite operates: the relay that posts a pull-request comment on a consumer's behalf, and the dashboard's OAuth exchange. One npm workspace, because that is what npm treats as a whole and therefore what a lydite component is.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "libs/*",
+    "pr-relay",
+    "oauth-exchange"
+  ],
+  "devDependencies": {
+    "@vitest/coverage-v8": "3.2.7",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7",
+    "wrangler": "4.128.0"
+  }
+}

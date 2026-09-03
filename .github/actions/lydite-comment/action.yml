@@ -1,0 +1,117 @@
+# Posts lydite's standing comment: through the relay, or with the workflow's
+# own token.
+#
+# The relay is preferred because it is the identity half of the design — the
+# comment arrives as `lydite`, and this job holds no credential that could
+# write anywhere. What it presents is the Actions OIDC token GitHub minted for
+# this run, which grants nothing by itself: the relay decides which repository
+# and which pull request may be written to from the claims GitHub signed.
+#
+# The fallback is required rather than a stopgap, and there are two ways into
+# it: no relay configured, and a relay that answers that the app is not
+# installed on this repository. A consumer who has installed nothing still gets
+# a comment, from `github-actions[bot]`, and the only thing they lose is whose
+# name is on it.
+#
+# Nothing here interpolates an expression into a `run:` body. Every value
+# arrives through `env:` and is referenced as a shell variable — Semgrep's
+# yaml.github-actions.security.run-shell-injection rule has caught that exact
+# mistake in a lydite action before, and a comment body is the most
+# attacker-shaped value in this repository: it quotes a pull request's own
+# source.
+name: lydite comment
+description: Post or edit lydite's standing pull-request comment
+
+inputs:
+  body-file:
+    description: file holding the rendered comment
+    required: true
+  pull-request:
+    description: the pull request to comment on
+    required: true
+  relay:
+    description: the relay's origin; empty falls straight back to the workflow's token
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - id: relay
+      if: inputs.relay != ''
+      shell: bash
+      env:
+        BODY_FILE: ${{ inputs.body-file }}
+        NUMBER: ${{ inputs.pull-request }}
+        RELAY: ${{ inputs.relay }}
+      run: |
+        set -euo pipefail
+
+        # The marker is the comment's own first line, read back rather than
+        # restated here. It is `ui.Marker`, and a second copy of it in a
+        # workflow is a copy that can disagree — the run would then post a
+        # fresh comment every time instead of editing the standing one.
+        marker=$(head -n 1 "$BODY_FILE")
+        case "$marker" in
+          '<!-- lydite:'*'-->') ;;
+          *) echo "the rendered comment does not begin with lydite's marker" >&2; exit 1 ;;
+        esac
+
+        # The OIDC token is requested for the relay's own origin as the
+        # audience, so a token minted here cannot be replayed against another
+        # service — and the relay refuses one whose audience is not its own.
+        token=$(curl -fsS \
+          -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${RELAY}" | jq -r '.value')
+
+        jq -n --arg marker "$marker" --arg body "$(cat "$BODY_FILE")" --argjson pr "$NUMBER" \
+          '{marker: $marker, body: $body, pull_request: $pr}' > "${RUNNER_TEMP}/relay.json"
+
+        # The repository is deliberately not sent. The relay takes it from the
+        # verified claim, so there is nothing here that could name another one.
+        status=$(curl -sS -o "${RUNNER_TEMP}/relay-out.json" -w '%{http_code}' \
+          -X POST "${RELAY}/comment" \
+          -H "Authorization: Bearer ${token}" \
+          -H 'content-type: application/json' \
+          --data-binary "@${RUNNER_TEMP}/relay.json") || status=000
+
+        if [ "$status" = "200" ]; then
+          echo "posted=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "posted=false" >> "$GITHUB_OUTPUT"
+        echo "the relay answered ${status}; falling back to this workflow's token" >&2
+        cat "${RUNNER_TEMP}/relay-out.json" >&2 || true
+
+    - if: steps.relay.outputs.posted != 'true'
+      shell: bash
+      env:
+        BODY_FILE: ${{ inputs.body-file }}
+        NUMBER: ${{ inputs.pull-request }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        marker=$(head -n 1 "$BODY_FILE")
+        case "$marker" in
+          '<!-- lydite:'*'-->') ;;
+          *) echo "the rendered comment does not begin with lydite's marker" >&2; exit 1 ;;
+        esac
+
+        # Found by the marker and not by author, which is what lets the relay
+        # later take over a comment this path posted rather than orphaning it
+        # and leaving two standing verdicts on the pull request.
+        existing=$(gh api --paginate \
+          "repos/${REPO}/issues/${NUMBER}/comments" \
+          --jq "map(select(.body | contains(\"${marker}\"))) | .[0].id // empty")
+
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" \
+            -F "body=@${BODY_FILE}" --silent
+          echo "edited comment ${existing}"
+        else
+          gh api -X POST "repos/${REPO}/issues/${NUMBER}/comments" \
+            -F "body=@${BODY_FILE}" --silent
+          echo "created a comment"
+        fi

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -239,10 +238,7 @@ func inDeclarationOrder(decl component.File, ms []measurement, selected bool) []
 // reports.
 func ungatedRows(rep *ui.Report, ms []measurement) {
 	ungatedComponentRows(rep, ms)
-	for _, l := range languages(ms) {
-		rep.Add(ungatedComposedRow(string(l)+" coverage", ms, byLang(l)))
-	}
-	rep.Add(ungatedComposedRow("coverage", ms, everything))
+	rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, everything))
 }
 
 // ungatedComponentRows is the per-component half, shared by the two runs that
@@ -337,17 +333,21 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 		}
 	}
 
-	for _, m := range ms {
-		rep.Add(componentRow(m, baseline, cfg.Coverage.Tolerance))
-	}
-	for _, l := range languages(ms) {
-		rep.Add(composedRow(string(l)+" coverage", current, carried, baseline, byLang(l), cfg.Coverage.Tolerance))
-	}
-	rep.Add(composedRow("coverage", current, carried, baseline, everything, cfg.Coverage.Tolerance))
-
-	if err := patchRows(ctx, cmd, rep, dir, base, ms, baseline, cfg); err != nil {
+	// Patch is computed before any row is added so each component's coverage
+	// and patch land together. A reader asking about one component should not
+	// have to pair two rows separated by every other component's.
+	patch, parts, err := patchRows(ctx, cmd, dir, base, ms, baseline, cfg)
+	if err != nil {
 		return err
 	}
+	for _, m := range ms {
+		rep.Add(componentRow(m, baseline, cfg.Coverage.Tolerance))
+		if row, ok := patch[m.Name]; ok {
+			rep.Add(row)
+		}
+	}
+	rep.Add(composedRow(repoLabel("coverage"), current, carried, baseline, everything, cfg.Coverage.Tolerance))
+	composedPatchRows(rep, parts, cfg.Coverage.Patch.Tolerance)
 	floorRows(rep, ms, cfg.Coverage.Floor)
 	// `record` and not `baseline`: the two are different events in one run —
 	// the baseline read this change is gated against, and the entry this
@@ -611,6 +611,7 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 	}
 	var baseLines coverage.LineCount
 	covered := 0
+	var missing []string
 	for _, m := range current {
 		if !in(m) || !m.Lines.Measured() {
 			continue
@@ -618,15 +619,25 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 		if b, ok := baseline[m.Name]; ok && b.Measured() {
 			baseLines = baseLines.Add(b)
 			covered++
+			continue
 		}
+		missing = append(missing, m.Name)
 	}
 	value := composedValue(lines, measured, carriedN, total)
 	// Compared only when the baseline covers every component this figure is
 	// composed from. A partial comparison is a different quantity, and
 	// rendering one as a comparison is the class of error this file is
-	// arranged around.
+	// arranged around: a newly declared component adds its lines to this side
+	// and nothing to the other, so the figure would move by the size of the
+	// component rather than by anything anyone did to the code.
+	//
+	// Which components are missing is named, because without it the row says
+	// only that something is absent and a reader cannot tell a one-off — a
+	// component declared by this very change — from a baseline that has been
+	// broken for months.
 	if covered != measured+carriedN {
-		return ui.Row{Status: ui.StatusNew, Label: label, Value: value + ", no baseline for every component in it"}
+		return ui.Row{Status: ui.StatusNew, Label: label,
+			Value: fmt.Sprintf("%s, no baseline yet for %s", value, strings.Join(missing, ", "))}
 	}
 	pct, basePct := lines.Percent(), baseLines.Percent()
 	if regressedBeyond(pct, basePct, tolerance) {
@@ -649,7 +660,8 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 // is reported as unmeasured, never skipped in silence. A silent skip reads as
 // "patch coverage passed" in the pull request comment, which is what
 // wardnet/wardnet#957 shipped while Codecov failed the same diff.
-func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, base string, ms []measurement, baseline gitstate.Baseline, cfg config.Config) error {
+func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []measurement, baseline gitstate.Baseline, cfg config.Config) (map[string]ui.Row, []patchPart, error) {
+	byComponent := map[string]ui.Row{}
 	wanted := map[runner.Lang]bool{
 		runner.Go:         cfg.Coverage.Patch.Go.Enabled,
 		runner.Rust:       cfg.Coverage.Patch.Rust.Enabled,
@@ -662,16 +674,17 @@ func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, bas
 		}
 	}
 	if len(exts) == 0 {
-		return nil
+		return byComponent, nil, nil
 	}
 	// One diff for every component, partitioned below. All of them measure
 	// the same range, and asking git once per component would pay for the
 	// same walk N times to get N subsets of one answer.
 	changed, err := coverage.ChangedLines(ctx, dir, base, exts...)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
+	var parts []patchPart
 	for _, m := range ms {
 		if !wanted[m.Lang] {
 			continue
@@ -690,7 +703,7 @@ func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, bas
 			for _, l := range scoped {
 				lines += len(l)
 			}
-			rep.Add(unmeasuredRow(label, fmt.Sprintf("%d changed line(s) across %d file(s), and no per-line coverage: %s", lines, len(scoped), m.Why)))
+			byComponent[m.Name] = unmeasuredRow(label, fmt.Sprintf("%d changed line(s) across %d file(s), and no per-line coverage: %s", lines, len(scoped), m.Why))
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: this change touches component %q and its patch coverage could not be measured — %s\n", m.Name, m.Why)
 			continue
 		}
@@ -700,10 +713,84 @@ func patchRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, bas
 			// report has no entry for. There is no coverable line to gate.
 			continue
 		}
-		rep.Add(patchRow(label, hit, total, baseline[m.Name], cfg.Coverage.Patch.Tolerance))
+		byComponent[m.Name] = patchRow(label, hit, total, baseline[m.Name], cfg.Coverage.Patch.Tolerance)
+		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: baseline[m.Name]})
 	}
-	return nil
+	return byComponent, parts, nil
 }
+
+// composedPatchRows is the patch half of the totals, added after every
+// component's own rows.
+//
+// A change that touched no component's measurable lines emits no row: there is
+// nothing to gate, and a row saying so on every documentation change is the
+// noise that trains readers to skip the rows that matter.
+func composedPatchRows(rep *ui.Report, parts []patchPart, tolerance float64) {
+	if len(parts) > 0 {
+		rep.Add(composedPatchRow(repoLabel("patch"), parts, tolerance))
+	}
+}
+
+// patchPart is one component's contribution to a composed patch figure: the
+// changed lines it had, how many of them the report covers, and the baseline
+// that component is held to.
+type patchPart struct {
+	Name  string
+	Lang  runner.Lang
+	Hit   int
+	Total int
+	Base  coverage.LineCount
+}
+
+// composedPatchRow gates a language's, or the repository's, changed lines.
+//
+// It exists because the per-component rows and the aggregate rows between them
+// still leave a hole. The aggregate says the repository did not get worse
+// overall; the per-component patch rows say each component's new code met that
+// component's own standard. Neither answers the question a reviewer actually
+// has about a change spanning several components — was the new code in this
+// change tested — and a change adding untested code to three components can
+// clear every per-component row on tolerance and still be the change that
+// should not merge.
+//
+// Summed over changed lines rather than averaged over components, for the
+// reason ADR 0007 gives for the aggregate: a mean of percentages lets a
+// two-line component outvote a two-hundred-line one.
+//
+// The baseline side sums exactly the components the current side covers, and a
+// figure whose baseline does not cover all of them is reported rather than
+// compared — the same rule composedRow follows, for the same reason. A
+// component with no baseline contributes its new lines to the numerator and
+// nothing to the comparison, which would read as movement nobody caused.
+func composedPatchRow(label string, parts []patchPart, tolerance float64) ui.Row {
+	var hit, total int
+	var base coverage.LineCount
+	var missing []string
+	for _, p := range parts {
+		hit += p.Hit
+		total += p.Total
+		if p.Base.Measured() {
+			base = base.Add(p.Base)
+			continue
+		}
+		missing = append(missing, p.Name)
+	}
+	pct := float64(hit) / float64(total) * 100
+	counts := fmt.Sprintf("%.1f%% (%d/%d new lines), %d component(s)", pct, hit, total, len(parts))
+	if len(missing) > 0 {
+		return ui.Row{Status: ui.StatusNew, Label: label,
+			Value: fmt.Sprintf("%s, no baseline yet for %s", counts, strings.Join(missing, ", "))}
+	}
+	basePct := base.Percent()
+	if regressedBeyond(pct, basePct, tolerance) {
+		return ui.Row{Status: ui.StatusFail, Label: label,
+			Value: fmt.Sprintf("%s, baseline %.1f%%, below it by %.1f%%", counts, basePct, basePct-pct)}
+	}
+	return ui.Row{Status: ui.StatusPass, Label: label,
+		Value: fmt.Sprintf("%s, baseline %.1f%%", counts, basePct)}
+}
+
+
 
 // patchRow renders one component's patch verdict. The gate is that component's
 // own aggregate baseline: patch coverage has no baseline of its own, and its
@@ -1077,25 +1164,23 @@ func count(ms []measurement, in func(measurement) bool) int {
 
 func everything(measurement) bool { return true }
 
-func byLang(l runner.Lang) func(measurement) bool {
-	return func(m measurement) bool { return m.Lang == l }
-}
+// repoLabel names a figure composed over every component.
+//
+// `coverage(repo)` rather than a bare `coverage`, so every row in the report
+// reads as one metric over one unit and a reader pairs them by eye. A bare
+// label sat between the component rows looking like a heading for them, which
+// is the one thing it is not: it is a peer of theirs measured over a different
+// unit.
+//
+// The unit is the repository, which nothing declares, so a component named
+// `repo` would produce a second row under this label. That is the ambiguity
+// every gate row already carries — nothing forbids a component called
+// `orphans`, `watch` or `schedule` either — and it is the reason a consumer
+// keys on the status rather than parsing the name.
+func repoLabel(metric string) string { return metric + "(repo)" }
 
-// languages returns every language present in the declaration, sorted, so two
-// runs of one declaration produce the same rows in the same order.
-func languages(ms []measurement) []runner.Lang {
-	seen := map[runner.Lang]bool{}
-	var out []runner.Lang
-	for _, m := range ms {
-		if m.Lang == "" || seen[m.Lang] {
-			continue
-		}
-		seen[m.Lang] = true
-		out = append(out, m.Lang)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
+
+
 
 // lineValue renders a measurement the way every row shows it: the percentage,
 // and the counts it came from. The counts are there because they are what the

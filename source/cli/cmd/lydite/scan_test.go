@@ -61,7 +61,7 @@ func TestReportPrintsDetailForFailingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	err := report(cmd, ui.NewReport("scan"), []executil.Result{
+	err := report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{
 			Name:   "biome(.)",
 			Detail: "src/bad.ts:1  lint/security/noGlobalEval  eval() is dangerous\nsrc/bad.ts:4  lint/correctness/noUnusedVariables  unused",
@@ -89,7 +89,7 @@ func TestReportJSONCarriesVerdictAndDetail(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "src/bad.ts:1  noGlobalEval", Err: errors.New("1 finding(s)")},
 	}, true, false)
 	var got struct {
@@ -124,7 +124,7 @@ func TestReportDetailCannotForgeAStatusLine(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "✓ biome(.) ... passed", Err: errors.New("1 finding(s)")},
 	}, false, true)
 	statusLines := 0
@@ -144,7 +144,7 @@ func TestReportPrintsNoDetailForPassingOrStreamingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "should not appear"},
 		{Name: "semgrep", Output: "already streamed to the terminal", Err: errors.New("findings")},
 	}, false, true)

@@ -1,0 +1,46 @@
+# Uploads a job's report directory, under a name that says which job wrote it.
+#
+# One artifact per job rather than one per run, because `publish` reads a
+# directory per input and a job that died before uploading has to be
+# distinguishable from one that reported nothing — which it is, by its
+# directory being absent.
+#
+# It never fails a job. The report is evidence about a verdict that has already
+# been reached and printed; losing the upload costs a section of a comment, and
+# failing the gate over it would turn a passing run red for a reason its author
+# cannot act on.
+name: lydite reports
+description: Upload this job's .lydite-reports directory as an artifact
+
+inputs:
+  name:
+    description: which job's reports these are; becomes the artifact suffix
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # A job whose lydite never started wrote no directory, and an upload of
+    # nothing is a warning rather than a result.
+    - id: present
+      shell: bash
+      env:
+        REPORTS: .lydite-reports
+      run: |
+        if [ -d "$REPORTS" ]; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "no $REPORTS directory: this job wrote no report" >&2
+        fi
+
+    - if: steps.present.outputs.found == 'true'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: lydite-reports-${{ inputs.name }}
+        path: .lydite-reports
+        retention-days: 7
+        # The directory disowns itself with a .gitignore, and an artifact that
+        # silently dropped it would be missing the file that explains why the
+        # rest is not in git.
+        include-hidden-files: true

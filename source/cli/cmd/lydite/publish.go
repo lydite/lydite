@@ -1,204 +1,347 @@
 package main
 
 import (
-	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
-	"lydite/lydite/internal/clearance"
-	"lydite/lydite/internal/forge"
-	"lydite/lydite/internal/referral"
+	"github.com/spf13/cobra"
+
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
-// publishTarget is where a verdict is published: which repository, which
-// revision, and which conversation.
-type publishTarget struct {
-	Client *forge.Client
-	Repo   forge.Repo
-	SHA    string
-	Number int
+// concerns is the order sections appear in, and what each command is called
+// where a reader sees it.
+//
+// Declared rather than derived from what the run happens to have produced, so
+// two pull requests never present the same four concerns in a different order.
+// A document naming a command that is not here still renders — under its own
+// name, after these — because dropping it would hide a result.
+var concerns = []struct {
+	command string
+	title   string
+}{
+	{"review", "referral"},
+	{"scan", "scan"},
+	{"test", "test"},
 }
 
-// resolvePublishTarget reads the platform's environment.
+// newPublishCmd renders the standing pull-request comment from the documents
+// one or more runs wrote.
 //
-// Every missing piece is an error rather than a quiet skip. A publishing
-// step that silently does nothing is indistinguishable from one that worked,
-// and the failure it hides — no token, no permission, the wrong event — is
-// exactly the failure that leaves a pull request with no verdict on it
-// while the job reports success.
-func resolvePublishTarget(eventPath string) (publishTarget, error) {
-	token := firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
-	if token == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)")
-	}
-	slug := os.Getenv("GITHUB_REPOSITORY")
-	if slug == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_REPOSITORY, which the platform sets for every job")
-	}
-	repo, err := forge.ParseRepo(slug)
-	if err != nil {
-		return publishTarget{}, fmt.Errorf("GITHUB_REPOSITORY: %w", err)
-	}
-	if eventPath == "" {
-		eventPath = os.Getenv("GITHUB_EVENT_PATH")
-	}
-	if eventPath == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout")
-	}
-	event, err := forge.LoadPullRequestEvent(eventPath)
-	if err != nil {
-		return publishTarget{}, err
-	}
-	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
-		return publishTarget{}, fmt.Errorf("the event at %s names no pull request: --publish belongs on a pull_request trigger", eventPath)
-	}
-	return publishTarget{
-		Client: forge.New(token),
-		Repo:   repo,
-		SHA:    event.PullRequest.Head.SHA,
-		Number: event.Number,
-	}, nil
-}
-
-// stateFor maps a run's verdict onto a commit status state.
-//
-// The three are distinct on purpose. A referral is `pending` because it is
-// pending: a person has not answered yet. It blocks a required check exactly
-// as hard as a failure does, so nothing is softened by saying so accurately
-// — and calling a referral a failure is the one word CONTEXT.md rules out,
-// because a gate fails and a referral does not.
-func stateFor(verdict ui.Verdict) clearance.State {
-	switch verdict {
-	case ui.VerdictFail:
-		return clearance.StateFailure
-	case ui.VerdictRefer:
-		return clearance.StatePending
-	default:
-		return clearance.StateSuccess
-	}
-}
-
-// describe is the one line shown beside the status.
-//
-// A pending status renders as a yellow dot, which is what a job still
-// running looks like. The description is the only thing that distinguishes
-// them, so it names what is being waited for rather than restating the
-// state.
-func describe(d referral.Decision, verdict ui.Verdict) string {
-	switch {
-	case verdict == ui.VerdictFail:
-		return "exemption change not isolated — split it into its own pull request"
-	case verdict == ui.VerdictRefer && d.Exemption != "":
-		return fmt.Sprintf("%s matched, then disqualified — comment /lydite clear", d.Exemption)
-	case verdict == ui.VerdictRefer:
-		return "referred — comment /lydite clear"
-	case d.Empty:
-		return "no changes against the base"
-	default:
-		return "exempt: " + d.Exemption
-	}
-}
-
-// headline is the comment's one sentence under the badge.
-//
-// It is not the status description: the badge above it already says
-// "Referred", so repeating the word there spends the only sentence a reader
-// is given on something they can see. The status has no badge and must
-// therefore carry the verdict itself, which is why the two differ.
-func headline(d referral.Decision, verdict ui.Verdict, declared int) string {
-	switch {
-	case verdict == ui.VerdictFail:
-		return "the exemption set may be changed by a pull request that changes nothing else"
-	case verdict == ui.VerdictRefer:
-		return referralReason(d, declared) + " — comment `/lydite clear` to resolve"
-	case d.Empty:
-		return "no changes against the base"
-	default:
-		return "exempt: " + d.Exemption
-	}
-}
-
-// buildComment renders the standing verdict for the pull request.
-//
-// The table's columns follow the design: what was checked, what the head
-// says, what the base says. A referral has no measurements to compare, so
-// the head column carries what the change contains and the base column what
-// was read out of the merge-base — which is the only place the exemption set
-// is ever read from, and the reason a change cannot exempt itself.
-func buildComment(d referral.Decision, ch referral.Change, declared int, verdict ui.Verdict, base string) ui.Comment {
-	comment := ui.Comment{
-		Verdict:  verdict,
-		Headline: headline(d, verdict, declared),
-		Version:  version,
-		Base:     shortSHA(base),
-		Rows: []ui.CommentRow{
-			{Check: "Changed paths", Head: fmt.Sprintf("%d", len(ch.Paths))},
-			{Check: "Disqualifiers", Head: fmt.Sprintf("%d", len(d.Disqualifications))},
-			{Check: "Exemptions", Base: fmt.Sprintf("%d declared", declared)},
+// It is pure: no network, no token, and nothing about a hosting platform. What
+// it emits is markdown on stdout or in a file, and posting that is a separate
+// step with a separate identity. Two things follow, and both are the point. A
+// developer can run it locally and read exactly what a reviewer would see. And
+// refining the comment never needs a release of whatever posts it, which is
+// the coupling that made every change to the human surface a two-repository
+// release the last time.
+func newPublishCmd() *cobra.Command {
+	var (
+		reports []string
+		out     string
+		base    string
+	)
+	cmd := &cobra.Command{
+		Use:   "publish",
+		Short: "Render the standing pull-request comment from one or more report directories",
+		Long: "Render the standing pull-request comment from the report documents lydite wrote.\n\n" +
+			"Each --reports directory is a " + runner.ReportDir + " directory: one per job that ran a\n" +
+			"lydite command, or one for every command when they shared a scan root. Nothing is\n" +
+			"posted — the markdown goes to --out, and posting it is a separate step.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if len(reports) == 0 {
+				return errors.New("no report directories: pass --reports <dir>, once per directory")
+			}
+			comment := buildComment(reports, base)
+			return writeComment(cmd.OutOrStdout(), out, comment.Render())
 		},
 	}
-	if len(d.Bundled) > 0 {
+	cmd.Flags().StringSliceVar(&reports, "reports", nil,
+		"a "+runner.ReportDir+" directory to read; repeatable")
+	cmd.Flags().StringVar(&out, "out", "-", `file to write the comment to ("-" is stdout)`)
+	cmd.Flags().StringVar(&base, "base", "", "commit the change was measured against, for the footer")
+	return cmd
+}
+
+// buildComment folds every named directory into one comment.
+//
+// A directory that is absent, unreadable, or holds no document is rendered as
+// an unmeasured section naming what was missing — never omitted. A section
+// that quietly disappears is indistinguishable from a concern that passed,
+// which is the wardnet#957 failure: a pull request read green while the gate
+// that would have failed it had never run.
+func buildComment(dirs []string, base string) ui.Comment {
+	found := map[string][]section{}
+	var missing []string
+	for _, dir := range dirs {
+		docs, err := readDocuments(dir)
+		if err != nil {
+			missing = append(missing, fmt.Sprintf("`%s` — %s", dir, reason(err)))
+			continue
+		}
+		if len(docs) == 0 {
+			missing = append(missing, fmt.Sprintf("`%s` — holds no report document", dir))
+			continue
+		}
+		for _, doc := range docs {
+			found[doc.Command] = append(found[doc.Command], section{dir: dir, doc: doc})
+		}
+	}
+
+	comment := ui.Comment{Standing: true, Version: version, Base: shortSHA(base)}
+	for _, concern := range concerns {
+		for _, s := range found[concern.command] {
+			comment.Sections = append(comment.Sections, s.render(concern.title))
+		}
+		delete(found, concern.command)
+	}
+	for _, command := range sortedKeys(found) {
+		for _, s := range found[command] {
+			comment.Sections = append(comment.Sections, s.render(command))
+		}
+	}
+	if len(missing) > 0 {
 		comment.Sections = append(comment.Sections, ui.CommentSection{
-			Title: "Bundled with the exemption change",
-			Items: capped(code(d.Bundled)),
+			Status:  ui.StatusUnmeasured,
+			Title:   "missing reports",
+			Summary: fmt.Sprintf("%d input(s) produced nothing to read", len(missing)),
+			Items:   missing,
 		})
 	}
-	if vetoes := capped(kinds(d.Disqualifications)); len(vetoes) > 0 {
-		comment.Sections = append(comment.Sections, ui.CommentSection{Title: "Disqualifiers", Items: vetoes})
-	}
-	if len(d.Uncovered) > 0 {
-		comment.Sections = append(comment.Sections, ui.CommentSection{
-			Title: "Covered by no exemption",
-			Items: capped(code(d.Uncovered)),
-		})
-	}
+	comment.Verdict = verdictOf(comment.Sections)
+	comment.Headline = headline(comment.Sections, comment.Verdict)
 	return comment
 }
 
-func kinds(ds []referral.Disqualification) []string {
-	out := make([]string, 0, len(ds))
-	for _, d := range ds {
-		out = append(out, fmt.Sprintf("**%s** — %s", d.Kind, d.Evidence))
-	}
-	return out
+// section is one document, and where it was read from — which is what a row's
+// log has to be resolved against.
+type section struct {
+	dir string
+	doc ui.Document
 }
 
-// code wraps each path so a name containing markdown renders as itself. It
-// runs before the list is capped, so the "and N more" line capping adds is
-// not itself formatted as a path.
-func code(items []string) []string {
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		out = append(out, "`"+item+"`")
-	}
-	return out
-}
-
-// publish records the verdict as a status and as the standing comment.
+// render turns one document into one collapsible section.
 //
-// The status is written first and its failure is returned: the status is the
-// record a clearance acts on, and losing it means a referral nothing can
-// resolve. The comment is an explanation of that record, so failing to
-// update it is reported and does not fail the run.
-func publish(ctx context.Context, target publishTarget, d referral.Decision, ch referral.Change, declared int, verdict ui.Verdict, base string) error {
-	state := stateFor(verdict)
-	if err := target.Client.PublishStatus(ctx, target.Repo, target.SHA, state, describe(d, verdict), runURL()); err != nil {
+// The mapping is deliberately generic: a row's label is what was checked and
+// its value is what that answered, whichever command produced it. So a
+// referral's rows, a scan's and a suite's all render through one path, and a
+// command lydite grows later needs nothing here. It is also why `review` has
+// no comment-rendering code of its own any more.
+func (s section) render(title string) ui.CommentSection {
+	out := ui.CommentSection{Status: worst(s.doc.Rows), Title: title, Summary: counts(s.doc.Rows)}
+	for _, row := range s.doc.Rows {
+		out.Rows = append(out.Rows, ui.CommentRow{Status: row.Status, Check: row.Label, Result: row.Value})
+	}
+	// Only a failing row's output. A clean run has a log per check and
+	// pasting all of them would bury the verdict under the thing that went
+	// right; the row still names its log, and the artifact still holds it.
+	var failed int
+	for _, row := range s.doc.Rows {
+		if row.Status != ui.StatusFail {
+			continue
+		}
+		failed++
+		if failed > detailCap {
+			continue
+		}
+		out.Details = append(out.Details, ui.CommentDetail{
+			Title: row.Label,
+			Lines: failureLines(s.dir, row),
+			Log:   row.Log,
+		})
+	}
+	if rest := failed - detailCap; rest > 0 {
+		out.Items = append(out.Items,
+			fmt.Sprintf("%d further failure(s) are in the run's artifact rather than here", rest))
+	}
+	return out
+}
+
+// detailCap is how many failing rows get their output quoted in one section.
+//
+// A hosting platform refuses a comment over a size limit — GitHub's is 65536
+// bytes — and a refused comment is no surface at all, which is the outcome
+// this whole feature exists to prevent. Forty lines each is generous for the
+// handful of failures a change usually has and ruinous for a repository where
+// twenty components fail at once, so the tail is capped and the remainder is
+// counted. Every failing row is still in the table, and its log is still in
+// the artifact.
+const detailCap = 5
+
+// failureLines is what a failing row shows: the detail it already carries, or the
+// tail of its log when it carries none.
+//
+// Detail first, because it is the reason the row's author chose to put next to
+// the verdict — Biome's findings reach a reader no other way. The log is the
+// fallback for every check that streamed its findings instead, where the row
+// holds a status and the output holds the reason.
+func failureLines(dir string, row ui.Row) []string {
+	if len(row.Detail) > 0 {
+		return row.Detail
+	}
+	if row.Log == "" {
+		return nil
+	}
+	return readLog(dir, row.Log)
+}
+
+// worst is the section's status: the state the reader has to act on.
+//
+// A failure outranks a referral, which is the report's own precedence asked of
+// one concern, so a section's mark and the run's verdict cannot disagree about
+// which concern is the problem.
+//
+// Unmeasured is the section's status only when nothing in it was decided at
+// all — no row passed, failed or referred. It is deliberately not promoted by
+// a single unmeasured row among decided ones, because that state is ordinary
+// and expected: `--affected` reports every component it did not select as
+// unmeasured, and `review` reports a dirty working tree the same way. A rule
+// that promoted on any of them would mark a normal run as ungated and put
+// "reported nothing" in the headline of a run that measured everything it was
+// asked to.
+//
+// What that rule must not cost is a concern that went ungated reading as one
+// that passed. It does not: a partly measured section says so in the counts on
+// its own summary line, which is visible without opening it, and a concern
+// whose report never arrived has no decided row at all and so lands here as
+// unmeasured.
+func worst(rows []ui.Row) ui.Status {
+	status := ui.StatusUnmeasured
+	for _, row := range rows {
+		switch row.Status {
+		case ui.StatusFail:
+			return ui.StatusFail
+		case ui.StatusRefer:
+			status = ui.StatusRefer
+		case ui.StatusPass:
+			if status == ui.StatusUnmeasured {
+				status = ui.StatusPass
+			}
+		}
+	}
+	return status
+}
+
+// counts is the one line visible while a section is shut.
+//
+// Every state is named, including the ones that vote on nothing. Omitting those
+// looked reasonable — a reader scanning shut sections is deciding which to open
+// — and it hides the case the distinction exists for: a run that measured
+// coverage without gating it renders every coverage row as context, so a
+// summary that counted only the voting rows would describe that run and a
+// fully gated one identically. Naming them costs three words and keeps the
+// numbers adding up to the rows behind them.
+func counts(rows []ui.Row) string {
+	tally := map[ui.Status]int{}
+	for _, row := range rows {
+		tally[row.Status]++
+	}
+	var parts []string
+	for _, s := range []struct {
+		status ui.Status
+		word   string
+	}{
+		{ui.StatusFail, "failed"},
+		{ui.StatusRefer, "referred"},
+		{ui.StatusUnmeasured, "unmeasured"},
+		{ui.StatusPass, "passed"},
+		{ui.StatusNew, "new"},
+		{ui.StatusContext, "not gated"},
+		{ui.StatusDropped, "dropped"},
+	} {
+		if tally[s.status] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", tally[s.status], s.word))
+		}
+	}
+	if len(parts) == 0 {
+		return "nothing reported"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// verdictOf is the comment's badge, from the sections rather than from any one
+// document.
+//
+// It repeats ui.Report.Verdict's precedence over a different collection
+// because that is the same question asked of a whole run: a comment covering a
+// failed suite and a passing scan says failed.
+func verdictOf(sections []ui.CommentSection) ui.Verdict {
+	verdict := ui.VerdictPass
+	for _, s := range sections {
+		switch s.Status {
+		case ui.StatusFail:
+			return ui.VerdictFail
+		case ui.StatusRefer:
+			verdict = ui.VerdictRefer
+		}
+	}
+	return verdict
+}
+
+// headline is the one sentence under the badge.
+//
+// It names the concern the reader has to act on rather than restating the
+// badge, which is directly above it and already says the word. An unmeasured
+// section is called out even when nothing failed: a run that gated less than
+// it was asked to must not read as a clean one.
+func headline(sections []ui.CommentSection, verdict ui.Verdict) string {
+	var failed, referred, unmeasured []string
+	for _, s := range sections {
+		switch s.Status {
+		case ui.StatusFail:
+			failed = append(failed, s.Title)
+		case ui.StatusRefer:
+			referred = append(referred, s.Title)
+		case ui.StatusUnmeasured:
+			unmeasured = append(unmeasured, s.Title)
+		}
+	}
+	switch {
+	case len(failed) > 0:
+		return strings.Join(failed, " and ") + " did not pass"
+	case len(referred) > 0:
+		return strings.Join(referred, " and ") + " needs a human — comment `/lydite clear` to resolve"
+	case len(unmeasured) > 0 && verdict == ui.VerdictPass:
+		return "everything that ran passed, but no verdict came from " + strings.Join(unmeasured, " or ")
+	default:
+		return "every check passed"
+	}
+}
+
+// reason turns a directory that could not be read into something a reader can
+// act on, rather than a Go error string with a path repeated in it.
+func reason(err error) string {
+	if errors.Is(err, os.ErrNotExist) {
+		return "no such directory, so nothing from it is in this comment"
+	}
+	return err.Error()
+}
+
+func sortedKeys(m map[string][]section) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// writeComment puts the comment where the caller asked for it.
+func writeComment(stdout io.Writer, out, body string) error {
+	if out == "-" {
+		_, err := io.WriteString(stdout, body)
 		return err
 	}
-	body := buildComment(d, ch, declared, verdict, base).Render()
-	if err := target.Client.UpsertComment(ctx, target.Repo, target.Number, ui.Marker, body); err != nil {
-		fmt.Fprintf(os.Stderr, "lydite: the verdict was published but its comment was not: %v\n", err)
+	if dir := filepath.Dir(out); dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
 	}
-	return nil
-}
-
-// runURL points the status at the job that produced it, so a reader can
-// reach the reasoning behind a one-line description.
-func runURL() string {
-	server, repo, id := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
-	if server == "" || repo == "" || id == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s/%s/actions/runs/%s", server, repo, id)
+	return os.WriteFile(out, []byte(body), 0o600)
 }

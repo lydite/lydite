@@ -50,6 +50,11 @@ func (r *Report) Add(row Row) { r.rows = append(r.rows, row) }
 // Rows returns what has been added so far.
 func (r *Report) Rows() []Row { return r.rows }
 
+// Command names the run. It is what the document is keyed by on disk, so a
+// caller saving one does not have to restate a name the report already holds
+// and could disagree with.
+func (r *Report) Command() string { return r.command }
+
 // Verdict is the worst state any row reached. A failure outranks a referral
 // because it is actionable by the author: telling someone to fetch a human
 // for a change that does not yet build wastes the human.
@@ -145,6 +150,54 @@ type jsonReport struct {
 	Exit       int       `json:"exit"`
 	DurationMS int64     `json:"duration_ms"`
 	Rows       []jsonRow `json:"rows"`
+}
+
+// Document is a report read back — the published shape of WriteJSON, and the
+// only supported way into one.
+//
+// It exists because a run and the thing that renders its pull-request comment
+// are different processes, on different machines: the comment is assembled
+// from the documents several runs wrote, so the document has to be readable
+// and not only writable. Reading the text grammar instead is what couples a
+// consumer to a rendering that is free to change.
+type Document struct {
+	Command    string
+	Verdict    Verdict
+	Exit       int
+	DurationMS int64
+	Rows       []Row
+}
+
+// ReadDocument decodes one report document.
+//
+// Unknown keys are accepted, unlike everywhere else lydite parses input. A
+// document is lydite's own output rather than something an author wrote, so
+// there is no one to tell that a key is stale — and the reader is routinely an
+// older binary than the writer, since a workflow pins the version that renders
+// the comment separately from the one that ran the suite. Rejecting a key a
+// newer lydite added would fail the comment for a run that succeeded.
+//
+// A missing command or verdict is still an error: that is not a newer shape,
+// it is not a report.
+func ReadDocument(r io.Reader) (Document, error) {
+	var doc jsonReport
+	if err := json.NewDecoder(r).Decode(&doc); err != nil {
+		return Document{}, fmt.Errorf("read report document: %w", err)
+	}
+	if doc.Command == "" || doc.Verdict == "" {
+		return Document{}, fmt.Errorf("read report document: no command or verdict, so this is not a lydite report")
+	}
+	rows := make([]Row, 0, len(doc.Rows))
+	for _, row := range doc.Rows {
+		rows = append(rows, Row(row))
+	}
+	return Document{
+		Command:    doc.Command,
+		Verdict:    doc.Verdict,
+		Exit:       doc.Exit,
+		DurationMS: doc.DurationMS,
+		Rows:       rows,
+	}, nil
 }
 
 // WriteJSON renders the machine grammar. It carries the same rows as the

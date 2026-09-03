@@ -85,6 +85,23 @@ dependabot:
     directory: /source/cli/internal/semgrep
     note: |
       Semgrep (internal/semgrep).
+  - ecosystem: npm
+    directory: /source/cloud-services
+    note: |
+      The Workers lydite operates (source/cloud-services), as one npm
+      workspace and therefore one component.
+
+      Not a tool pin: this is a real workspace that is built, tested and
+      scanned, so a bump here changes what lydite ships rather than what it
+      runs. Nothing it depends on at runtime — WebCrypto covers the whole of
+      the cryptography — so every dependency below is a development one.
+
+      @cloudflare/workers-types is deliberately absent, and must stay absent.
+      wrangler declares a peer range on it, which is the coupling that removed
+      ESLint from lydite: a bump to either side crossing the other's range
+      makes `npm ci` fail with ERESOLVE, and the failure lands on whoever runs
+      it next rather than on the bump. Nothing here uses a Cloudflare-specific
+      type.
 bulwark:
   enabled: false
 pipeline:

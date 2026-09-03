@@ -1,5 +1,12 @@
 # Coverage is per component, gated by `lydite test`, and stored as counts
 
+> **The language altitude is removed by
+> [ADR 0024](0024-coverage-gates-the-component-and-the-repository.md).** Coverage
+> and patch coverage are reported and gated per component and over the
+> repository; a language is a grouping lydite derived rather than a unit anybody
+> declared. Everything else here stands, including counts-not-percentages, which
+> is what lets any subset be composed at all.
+
 [ADR 0016](0016-components-and-lydite-run-tests.md) makes the component the unit
 lydite builds, tests, schedules and selects, and removes `coverage.source`. It
 does not say what coverage becomes once the component is the unit. This does.

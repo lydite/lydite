@@ -77,6 +77,13 @@ EXPECTED_VIA = {"sdk": "depends on api", "web": "depends on api"}
 # the failure this exists to catch — so the count is pinned and any row naming
 # a crate or package is a failure.
 EXPECTED_COVERAGE_UNITS = ["tally", "api", "sdk", "web"]
+# The figure over every component. It shares the metric(unit) shape so that
+# every row in a report is one metric over one named thing, which means it turns
+# up in a scan for coverage(...) rows and has to be named to be told apart from
+# a component. Nothing declares it, so a component of this name would collide —
+# the same ambiguity every gate row carries, and the reason a consumer keys on
+# the status rather than parsing the label.
+REPO_UNIT = "repo"
 # What `lydite scan` must run for each declared component, keyed by the language
 # its runner implies. The row labels are `<tool>(<component>)`, so this asserts
 # both that the check ran and that it ran for the right unit.
@@ -294,9 +301,16 @@ def main(path: str, checkout: str) -> int:
     # asserting only that each component has a row would pass on a report
     # carrying five more beside them.
     units = sorted(
-        label[len("coverage(") : -1]
+        unit
         for label in rows
         if label.startswith("coverage(") and label.endswith(")")
+        # The repository is a figure over every component rather than a
+        # component, so it is not a unit this assertion is about. It shares the
+        # metric(unit) shape deliberately — every row is one metric over one
+        # named thing — which is why it has to be named here rather than
+        # excluded by the parse.
+        for unit in [label[len("coverage(") : -1]]
+        if unit != REPO_UNIT
     )
     if units != sorted(EXPECTED_COVERAGE_UNITS):
         failures.append(
@@ -315,7 +329,9 @@ def main(path: str, checkout: str) -> int:
     # This job passes no --gate-coverage, so every coverage row here has to
     # carry the status that says nothing was compared — a workflow that forgot
     # the flag otherwise reports exactly the green a gated run reports.
-    for label in ("coverage",) + tuple(f"coverage({n})" for n in EXPECTED_COVERAGE_UNITS):
+    for label in (f"coverage({REPO_UNIT})",) + tuple(
+        f"coverage({n})" for n in EXPECTED_COVERAGE_UNITS
+    ):
         row = rows.get(label)
         if row is None:
             failures.append(f"no {label} row")

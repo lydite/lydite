@@ -29,6 +29,7 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 source/cli/                       # the Go module (module path lydite/lydite); every go command runs here
 source/cli/cmd/lydite/            # the lydite CLI (scan, test, review, version, update)
 source/cli/internal/ui/           # the output grammar every command renders through, plus --json
+                                  #   and the standing PR comment (see Surface below)
 source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see Referral below)
 source/cli/internal/clearance/    # the comment surface and the clearance decision (see Clearance below)
 source/cli/internal/forge/        # the hosting platform: commit statuses, permission, comments
@@ -54,8 +55,10 @@ source/cli/internal/gitstate/     # the base branch, and lydite branch read/writ
 source/cli/internal/executil/     # shared external-command runner every scanner package uses
 source/cli/.golangci.yml          # lint config (v2 schema)
 source/web/                       # the React dashboard (see ADR 0021 for the source/ root)
-assets/                           # the shipped logo set — the action's PR comment embeds
-                                  #   lydite-mark-64.png by raw URL (see below)
+source/cloud-services/            # the Workers lydite operates, as one npm workspace and so one
+                                  #   component: pr-relay posts the PR comment on a consumer's
+                                  #   behalf, oauth-exchange is the dashboard's (see Surface below)
+assets/                           # the shipped logo set, plus the org avatar (see Design)
 docs/design/source/               # where the brand is authored; the only live <text> in the tree
 docs/design/                      # tokens, surface specs, and the reference prototypes (see Design)
 docs/release-notes/               # _header.md + one <tag>.md per release that needs one (see Release notes)
@@ -64,8 +67,10 @@ docs/adr/                         # the decision record
                                   #   exemptions.yml
 .goreleaser.yml                   # build/release config (v2 schema)
 .gt-repo.yaml                     # repo governance; renders .github/dependabot.yml and the gt workflows
-.github/workflows/                # CI stages, the release, and lydite's own referral/baseline jobs
-                                  # (the composite action lives in lydite/actions, not here)
+.github/workflows/                # CI stages, the release, the Workers' deploy, and lydite-pr.yml —
+                                  #   everything lydite says about a PR, as one run (see Surface)
+.github/actions/                  # the local composites lydite-pr.yml uses, which are the shapes
+                                  #   lydite/actions packages (the published action is not here)
 scripts/install.sh                # curl|sh installer shipped with every release
 ```
 
@@ -76,7 +81,8 @@ scripts/install.sh                # curl|sh installer shipped with every release
 
 ## Status
 
-All five subcommands (`scan`, `test`, `review`, `version`, `update`) are fully implemented — every check
+All seven subcommands (`scan`, `test`, `review`, `publish`, `clearance`, `version`, `update`) are
+fully implemented — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
@@ -88,6 +94,12 @@ base tree measured in a throwaway worktree, a regression failed, a patch failure
 on the next run — has been exercised end to end against a real git repository, not only a
 hand-written report fixture.
 
+`lydite publish` renders the standing pull-request comment from the documents those runs wrote,
+and `source/cloud-services/pr-relay` posts it under lydite's own App with no credential in the
+CI job (see Surface below). The relay is written and tested and **not yet deployed**: until
+`vars.LYDITE_RELAY_URL` is set, every comment goes through the `github-token` fallback, which is
+a supported path rather than a temporary one.
+
 `lydite coverage` is **removed**, and so are `coverage.source`, `coverage.{go,rust}.report`,
 `coverage.rust.lcov`, `--source`, `--tests`, `--go-report`, `--rust-report` and
 `--rust-lcov-report`. Each is rejected by name rather than ignored — including the command itself,
@@ -96,27 +108,38 @@ which answers with what replaced it rather than cobra's unknown-command message.
 
 ## CI
 
-`.github/workflows/ci.yml` runs three jobs on every push/PR to `main`: `lint` (golangci-lint),
-`build & test` (`go build`/`go test -race`), and `self-scan` — lydite builds itself and runs
-`lydite scan --dir .` against its own repo. `self-scan` is dogfooding, not a formality: it's the
-only job that exercises the actual scan/report path end-to-end against a real repo, and it already
-caught a real bug once (see the git history around the `go-version: "1.26.5"` pin below).
+gt renders `ci-orchestration.yml`, which calls one workflow per stage: `ci-preflight`,
+`ci-build` (golangci-lint), `ci-test` (`go build`, `go test -race`) and `ci-end2end` (the
+proving ground). `ci-gate` is the single check branch protection requires, and it waits on all
+of them — so **what runs in a gt stage is what blocks a merge.**
+
+**Everything lydite says about a pull request is `lydite-pr.yml`, and it is not a gt stage.**
+The referral, the scan and the gated suites run in parallel and a `publish` job renders one
+standing comment from all three (see Surface below). It cannot be a stage: `gt repo config`
+accepts exactly `preflight, build, test, end2end`, so there is no stage a publish could be, and
+`statuses: write` cannot be granted to a called stage. The consequence is stated rather than
+hidden — lydite's own coverage gate does not block a merge, which is the state `lydite/referral`
+is already in and for the same reason ([#34](https://github.com/lydite/lydite/issues/34)).
+
+`lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
+exercises the scan/report path end to end against a real repository, and it caught a real bug
+once (see the git history around the `go-version: "1.26.5"` pin below).
 
 **Pin the exact Go patch version in workflows (currently `"1.26.6"`), never a bare minor (`"1.26"`).**
 `actions/setup-go`'s `go-version: "1.26"` resolves to whatever `1.26.x` patch it has
 cached/available, which is not necessarily the version this repo's `go.mod` `toolchain` directive
 pins — and critically, `go install`-ing an *external* tool (gosec, govulncheck) does **not** consult
 the current module's `go.mod` toolchain directive the way building the module itself does. This bit
-us for real: `self-scan`'s `govulncheck` step passed locally (toolchain directive respected) but
+us for real: the self-scan's `govulncheck` step passed locally (toolchain directive respected) but
 failed in CI (setup-go had installed an older, vulnerable patch) until `go-version` was pinned to the
-exact `1.26.5`. If `go.mod`'s `toolchain` line is ever bumped, update every `go-version:` in
-`ci.yml`/`release.yml` to match in the same change.
+exact `1.26.5`. If `go.mod`'s `toolchain` line is ever bumped, update every `go-version-file:` reference
+and any literal `go-version:` to match in the same change.
 
 `internal/toolchain` (see Toolchains below) now also sets `GOTOOLCHAIN` from the scanned repo's own
 `go.mod` before running any Go tooling, which fixes this class of drift for **consumers** — they no
 longer need to pin `go-version` on lydite's account. Keep the pins here regardless: this repo's
-`lint` and `build & test` jobs invoke `go` directly rather than through lydite, so nothing in that
-mechanism covers them, and `self-scan` benefits from the pin holding independently of the feature
+`ci-build` and `ci-test` jobs invoke `go` directly rather than through lydite, so nothing in that
+mechanism covers them, and the self-scan benefits from the pin holding independently of the feature
 it is dogfooding.
 
 
@@ -306,9 +329,11 @@ produces.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
-a foreign toolchain tests the machine it runs on. **Two of the three languages therefore have no
-repository here to run against** — `source/web/` is empty and the only `Cargo.toml` files are pin
-manifests, deliberately not components. `ci-end2end.yml`'s `proving ground` job closes that,
+a foreign toolchain tests the machine it runs on. **Rust therefore has no repository here to run
+against** — the only `Cargo.toml` files are pin manifests, deliberately not components, and
+`source/web/` is still empty. `source/cloud-services/` closes that half for TypeScript: it is a
+real npm workspace under a `vitest` component, so Biome, `internal/nodedeps` and Node toolchain
+resolution all run here. `ci-end2end.yml`'s `proving ground` job closes the rest,
 running `lydite test` against every component of
 [`lydite/proving-ground`](https://github.com/lydite/proving-ground) on a bare checkout — no
 `node_modules`, no services started, nothing prepared by the workflow, because a step doing either
@@ -926,9 +951,11 @@ inside that window, and the window moves only when upstream ships support for a 
 `internal/typescript`'s package doc had recorded exactly this hazard — and a Dependabot PR
 bumped `typescript` across the ceiling anyway and merged, after which `npm ci` on the
 committed lockfile failed with `ERESOLVE` and every consumer with TypeScript got an install
-error instead of a lint result. CI stayed green throughout, because lydite's own repo has no
-TypeScript to scan: its only `package.json` files are the pin manifests, which `.lydite/config.yml`
-are not components, so `self-scan` cannot reach that code path. Biome parses TypeScript with its
+error instead of a lint result. CI stayed green throughout, because at the time lydite's own
+repository had no TypeScript to scan: its only `package.json` files were the pin manifests, which
+are not components, so the self-scan could not reach that code path. `source/cloud-services/`
+now can, which is why that workspace declares no `@cloudflare/workers-types` — wrangler puts a
+peer range on it and the failure class would be identical. Biome parses TypeScript with its
 own Rust parser and depends on no compiler package, so `biome-pin` has no peer range to cross
 and the failure class does not exist for it.
 
@@ -1192,9 +1219,17 @@ never pollutes main's history). See
 [ADR 0019](docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
 
 **The component is the unit.** Nothing decides what a coverage unit is except the
-declaration. Three altitudes are reported and all three are gated: per component, per
-language, and globally. All three are `Σ covered / Σ total` over subsets of the same stored
-per-component entries, so they cannot disagree or drift apart.
+declaration. Two altitudes are reported and both are gated: per component, and over the
+repository — `coverage(cli)` and `coverage(repo)`. Both are `Σ covered / Σ total` over subsets of
+the same stored per-component entries, so they cannot disagree or drift apart.
+
+**A language is not an altitude**, and was one until
+[ADR 0024](docs/adr/0024-coverage-gates-the-component-and-the-repository.md). It is a grouping
+derived from each component's runner rather than a unit anybody declared, so gating one holds a
+repository to a number it never stated — and where a language holds one component, which is the
+common shape, the figure restates that component's own row exactly. Skipping it only in that case
+was rejected too: a gate whose presence depends on how many components a language happens to have
+is gated differently before and after an unrelated component is declared.
 
 **A gating job holds a writable token and runs the repository's own code, and that is a real
 tension** ([#49](https://github.com/lydite/lydite/issues/49)). Recording the baseline is a push to
@@ -1415,6 +1450,21 @@ coverage:
     go:
       enabled: false   # defaults to true
 ```
+
+**Patch is composed at both altitudes the aggregate is** — per component and over the repository —
+and both gate. The per-component rows and the aggregate between them still leave a hole: the aggregate says the repository did not get worse overall, and each per-component
+row says that component's new code met that component's own standard, so a change adding untested
+code to three components can clear every row on tolerance and still be the change that should not
+merge. `patch(repo): 89.3% (740/829 new lines), 2 component(s), baseline 80.9%` is the row that answers
+the question a reviewer actually has about a change spanning components.
+
+Composed by **summing changed lines**, never by averaging the components' percentages — the same
+weighting [ADR 0007](docs/adr/0007-line-weighted-coverage-aggregation.md) requires of the
+aggregate, and for the same reason: a mean lets a two-line component outvote a two-hundred-line
+one. The baseline side sums exactly the components the current side covers, and a figure whose
+baseline does not cover all of them is reported `new` rather than compared — a component with no
+baseline contributes its new lines to the numerator and nothing to the comparison, which would
+render as movement nobody caused. A change touching no measurable line emits no row at all.
 
 **A diff is scoped to the files a component's report could speak for**: under its directory, in a
 language its runner implies. Both halves are needed — a repository declaring a Go and a TypeScript
@@ -1692,6 +1742,91 @@ reader's local run; **nothing can establish that yet** (see #27), so it is absen
 than asserted. `ui.Marker` identifies the standing comment for editing, by a marker in the
 body rather than by author, because the author is whoever's token posted it.
 
+## Surface: `lydite publish`, and the identity that posts it
+
+Every gate lydite has reports to a job log; the **Surface** is where the verdict reaches the
+person whose change it is about. There is exactly one: a standing pull-request comment carrying
+the referral, the scan and the suites as one collapsible section each. See
+[ADR 0023](docs/adr/0023-one-standing-comment-rendered-by-the-cli.md) for the surface and
+[ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) for the identity.
+
+**`lydite publish` renders and posts nothing.** `--reports <dir>` (repeatable), `--out
+<file|->`. No network, no token, no knowledge of a hosting platform. A developer runs it locally
+and reads exactly what a reviewer will see; and the posting step is content-agnostic, so
+refining the comment never needs a release of whatever posts it. That coupling is not
+hypothetical — `lydite/actions` greps for a `^\[(PASS|FAIL)\] <name>$` shape `internal/ui` has
+never produced, so it matches nothing and reports nothing.
+
+**Every command writes its report document into `.lydite-reports/`, on every run.**
+`scan.json`, `test.json`, `review.json` — unconditionally, not only under `--json`, because a
+run whose results reach a later step only when somebody remembered a shell redirection
+publishes nothing when they forget. `ui.Document` and `ui.ReadDocument` are that shape read
+back, and they **accept unknown keys**, which is the opposite of lydite's stance everywhere
+else: the document is lydite's own output rather than something an author wrote, and the reader
+is routinely an older binary than the writer. A missing command or verdict is still refused —
+that is not a newer shape, it is not a report.
+
+**`--reports` takes N directories, and that shape is load-bearing.** A local run produces every
+command's document at one scan root; a CI run produces one per job. It is also what makes
+[ADR 0017](docs/adr/0017-shards-the-scheduler-and-the-planner.md)'s shard matrix additive: more
+`test` jobs is more directories and nothing about the comment changes.
+
+**A missing input is a section, never an omission.** A named directory that is absent,
+unreadable or holds no document renders `unmeasured`, naming what was missing. A section that
+quietly disappears is indistinguishable from a concern that passed — the wardnet#957 failure.
+
+**A section is `unmeasured` only when nothing in it was decided.** Promoting on any single
+unmeasured row would mark ordinary runs as ungated: `--affected` reports every unselected
+component as unmeasured, and `review` reports a dirty working tree the same way. A partly
+measured section says so in the counts on its own summary line, which is visible without
+opening it.
+
+**`scan` writes a log per check**, under `.lydite-reports/scan/<slug>.log`, and sets `Row.Log`.
+`test` has written one per component since it had rows; a scan check that failed left its
+findings only in a job log, which is unreachable from a comment. The output is already captured
+by `executil.Run` — a scanner's findings *are* the result, so they still stream live — so this
+is an extra sink rather than a redirection. A failing row shows its `Detail` if it has one
+(Biome's findings reach a reader no other way) and the tail of its log otherwise.
+
+**Quoted output is capped per section.** A platform refuses a comment over a size limit, and a
+refused comment is no surface at all — which is what this exists to prevent.
+
+**`review --publish` writes the commit status and no comment.** The status is the record a
+clearance acts on and has to land early, so `lydite-pr.yml`'s `referral` job has no `needs` and
+publishes within seconds of a push (ADR 0015). Its verdict reaches the comment by the route
+every other command's results take — the document it wrote — because rendering it twice would be
+two derivations of one answer. `ui.Marker` is `<!-- lydite:results -->`: one comment per change,
+upserted by the marker rather than by author, which is what lets the relay and the fallback hand
+over instead of leaving two standing verdicts.
+
+### The relay, and the fallback
+
+`source/cloud-services/pr-relay` posts on a consumer's behalf so that **no CI job holds a
+credential**. The job presents the GitHub Actions OIDC token; the relay verifies signature (JWKS),
+`iss`, a declared `aud` and `exp`, takes the repository from the `repository` claim and never
+from the body, reads the pull-request number out of `ref`, mints an installation token narrowed
+to that one repository and to `pull_requests: write`, posts, and discards it. It stores nothing.
+
+That is what dissolves [#49](https://github.com/lydite/lydite/issues/49): a job with no writable
+token cannot write anywhere, whatever code it runs, so the worst a pull request's own suite can
+provoke is a wrong comment on its own pull request.
+
+- **RS256 is fixed, not read from the token.** Honouring a token's own `alg` is how a verifier
+  accepts `alg: none`.
+- **A rejection carries no detail.** One that says which check failed is an oracle.
+- **`ref` is the only claim a run cannot choose**, so a push build can comment on nothing.
+- **The private key is PKCS#8.** GitHub issues an App key as PKCS#1 and WebCrypto imports only
+  PKCS#8; the conversion happens once out of band
+  (`openssl pkcs8 -topk8 -nocrypt`) and a PKCS#1 key is refused with that command rather than
+  failing later as an opaque import error.
+- **Each Worker holds only its own App's credential**, as a per-Worker secret rather than an
+  account-level store. `pr-relay` cannot read the dashboard's, which is the whole reason the
+  read half is a separate App.
+- **The `github-token` fallback is required, not a stopgap.** No relay configured, or a relay
+  answering that the App is not installed, posts as `github-actions[bot]`. A consumer who
+  installed nothing still gets the surface. That is why "not installed" is an *answer* and not
+  an error.
+
 ## Semgrep: token-bearing vs token-less runs
 
 `internal/semgrep.Check` picks its subcommand from whether `SEMGREP_APP_TOKEN` is set: `semgrep ci`
@@ -1730,15 +1865,27 @@ per-repo judgment call.
 
 ## The `action.yml` composite action
 
-**It still invokes the removed `lydite coverage`, and its output parser does not match lydite's
-output.** Both are changes in `lydite/actions`: the coverage gate is now `lydite test
+**It still invokes the removed `lydite coverage`, and its output parser matches nothing lydite
+prints.** Both are changes in `lydite/actions`
+([#47](https://github.com/lydite/lydite/issues/47)): the coverage gate is now `lydite test
 --gate-coverage`, and the action should pass `--base-branch` from `GITHUB_BASE_REF` on
-`pull_request` events, which is what actually fixes stacked pull requests.
+`pull_request` events, which is what actually fixes stacked pull requests. `tool_result()`
+matches `^\[(PASS|FAIL)\] <name>$`, a shape `internal/ui` does not produce — see "Output
+grammar and `--json`" above. It has to read `--json` instead. Reintroducing a bracketed text
+mode here is the wrong direction: it is what couples the human surface to a parser in another
+repository.
 
-**Its output parser does not match lydite's output.** `tool_result()` matches
-`^\[(PASS|FAIL)\] <name>$`, a shape `internal/ui` does not produce — see "Output grammar and
-`--json`" above. It has to read `--json` instead. Reintroducing a bracketed text mode here is
-the wrong direction: it is what couples the human surface to a parser in another repository.
+**The shape it should take is already dogfooded here.** `.github/workflows/lydite-pr.yml` runs
+the referral, the scan and the gated suites in parallel and renders one comment from all three,
+using the local composites in `.github/actions/` — `lydite-binary`, `lydite-reports`,
+`lydite-comment`. Those are the shapes `lydite/actions` packages as `setup`, `scan`, `test` and
+`publish` plus a reusable workflow; the only difference is that the local `lydite-binary` uses
+the binary the pull request built, because a dogfood against the last release tests the last
+release. **A consumer's comment is rendered by `lydite publish` and nothing else** — the posting
+step takes a file and a marker and knows nothing about coverage, components or verdicts, which
+is what stops a refinement to the comment becoming a two-repository release. It also means the
+sticky-comment action earns nothing here: the marker upsert is `lydite-comment`, in twenty
+lines of `gh api`, and the relay does the same thing on the authenticated path.
 
 Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
 lydite's usage is uniform enough (`.lydite/config.yml` already carries all the config) that the action
@@ -1755,12 +1902,14 @@ why a consumer's CI only needs to hand lydite a token: lydite owns the whole Cod
 relationship (coverage *and* JUnit test-results), so the calling workflow never has to install a
 Codecov CLI or push to Codecov directly itself.
 
-The PR comment's header embeds `assets/lydite-mark-64.png` by **absolute raw URL**
-(`raw.githubusercontent.com/lydite/lydite/main/...`), never a repo-relative path — the comment is
-posted into the *consuming* repo's PR, where a relative `assets/...` would resolve against that repo
-and 404. It's pinned to lydite's default branch, not a release tag, so the image keeps resolving for
-consumers pinned to an older lydite version. Renaming or moving that file therefore breaks the logo
-in every consumer's PR comment retroactively — treat its path as a public API.
+**The pull-request comment carries no logo.** It identified whose verdict it was while the
+comment arrived under a consumer's own `github-actions[bot]`; the App is that identity now, so a
+mark above the verdict restates the byline and spends a row of a reader's screen doing it. Any
+image a comment did carry would have to be an **absolute raw URL** against this repository's
+default branch — the comment is posted into the *consuming* repo's pull request, where a relative
+`assets/...` resolves against that repo and 404s, and a release tag stops resolving for consumers
+pinned to an older version. That constraint is why `assets/lydite-mark-64.png` was treated as a
+public API, and it is the constraint to honour if a comment ever embeds an image again.
 
 **Never interpolate `${{ inputs.* }}` or `${{ steps.*.outputs.* }}` directly into a `run:` script
 body** — pass it via that step's `env:` block instead, and reference the env var name (`"$DIR"`,
@@ -1778,8 +1927,11 @@ every consumer of them is already in this repository — see
 [ADR 0012](docs/adr/0012-design-system-in-the-monorepo.md). The split that matters is
 inside the tree, not across repositories:
 
-- `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png`, whose path is a
-  public API (above), and `lydite-avatar-512.png`, which is the organisation avatar.
+- `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png` and
+  `lydite-avatar-512.png`, which is the organisation avatar. Nothing lydite renders embeds the
+  raster mark today — the pull-request comment dropped it when the App became the identity — so
+  its path is no longer load-bearing for a consumer, and the rule that made it so is recorded
+  with the comment above.
 - `docs/design/source/` is where the brand is **authored**. `lydite-brand.svg` is the only
   file in the tree carrying live `<text>`; everything in `assets/` is outlined, so nothing
   shipped depends on a font being installed. Editing it needs **Kohinoor Telugu Bold**, which

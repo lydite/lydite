@@ -4,7 +4,8 @@ lydite unifies SAST/SCA/lint/coverage gating for Rust, TypeScript, and Go projec
 ## Language
 
 **Aggregate coverage**:
-Coverage as a ratio of covered to coverable lines, reported at three altitudes and gated at all of them: per **Component**, per language, and globally. All three are the same quantity — `Σ covered / Σ total` — derived from one stored measurement per component, so they cannot drift apart or disagree. It catches regressions in code the current change never touches, which is the class **Patch coverage** cannot see at all.
+Coverage as a ratio of covered to coverable lines, reported at two altitudes and gated at both: per **Component**, and over the repository. Both are the same quantity — `Σ covered / Σ total` — derived from one stored measurement per component, so they cannot drift apart or disagree. It catches regressions in code the current change never touches, which is the class **Patch coverage** cannot see at all.
+_Note_: a language is not an altitude. It is a grouping derived from each component's runner rather than a unit anybody declared, so gating one holds a repository to a number it never stated — and where a language holds a single component the figure restates that component's own. See [ADR 0024](docs/adr/0024-coverage-gates-the-component-and-the-repository.md).
 _Note_: the language and global figures blend units that are not quite identical — a Go profile counts statements where lcov counts lines — and the global figure blends across languages. This is accepted and stated rather than hidden: the alternative is a mean of percentages, which ADR 0007 rejected for giving a 230-line unit the same vote as a 4,494-line one.
 _Note_: under **Affected** selection a run measures only some components, so the language and global figures compose fresh counts with counts carried forward for components that did not run. A composed figure must say how many components it measured, because a gate that reports a number it mostly inherited is otherwise indistinguishable from one that measured everything.
 _Avoid_: "total coverage", "overall coverage" for the global figure specifically — it is the global **Aggregate coverage**, and the other two altitudes are equally aggregate.
@@ -113,6 +114,18 @@ _Avoid_: "veto rule", "blocker", and using it for a **Gate** failure — a faili
 A human's resolution of a **Referral**, bound to the exact revision it was given for. The revision is one commit, not the tree it produces and not the shape of the verdict: a clearance carries no notion of two revisions being "the same change", so any further change to the branch — a rebase that alters nothing, included — voids it. A clearance is never standing permission for a pull request.
 The human is someone with write access to the repository, established from the hosting platform rather than from anything the commenter says about themselves. That is a floor and not the whole of the trust: whoever holds the repository's credentials can give a clearance, which is what makes it conventional today.
 _Avoid_: "approval" — GitHub's review approval is a different mechanism, with different rules about who may give one.
+
+**Surface**:
+Where lydite's verdict is put in front of the person whose change it is about. There is exactly one: a standing comment on the pull request, carrying every concern lydite has — the **Referral**, the scan, the suites and coverage — as one collapsible section each, replaced in place on every push rather than appended to. It is rendered from the report documents the runs wrote, so it can never disagree with what the terminal printed.
+_Note_: a concern the surface could not read renders as a section saying so. A section that quietly disappears is indistinguishable from a concern that passed, which is the one way a surface lies — the same rule a **Gate** that could not run follows.
+_Note_: the **Clearance** status is not part of the surface and does not wait for it. A commit status is published as soon as the referral is decided, so a human can begin resolving one while the suites are still running.
+_Avoid_: "report" for the surface — a report is what a run prints, and `lydite report` is separately claimed by the dashboard. Also "the surface" for `docs/design/`'s surface *specifications*, which are the drawings rather than the thing.
+
+**Relay**:
+The vendor-operated service that posts the **Surface** on a consumer's behalf, so a CI job needs no credential of its own. The job presents the identity token its platform minted for that run; the relay establishes from that token alone which repository and which pull request may be written to, borrows the narrowest possible permission for exactly that, writes, and discards it. It stores nothing.
+_Note_: what makes it worth having is what a job does not hold. Running a suite and writing a verdict in one job otherwise needs a token that can push, in a job executing the change's own code; a job holding no such token cannot write anywhere, whatever it runs.
+_Note_: it is optional, and a consumer who has not installed lydite's app still gets the surface — posted by their own workflow, under their platform's generic identity. What they lose is whose name is on it.
+_Avoid_: "server", "backend", or "the lydite service" — each suggests something that holds your data, and holding none of it is the point. See [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md).
 
 ## Flagged ambiguities
 **"Threshold"** for referral — there is none, deliberately. Because **Exemption**s are an allowlist and the default is to refer, lydite computes no riskiness score and has nothing to tune. `coverage.tolerance` and `coverage.patch.tolerance` are **Gate** knobs and say nothing about whether a change is referred.

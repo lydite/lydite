@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 		newScanCmd(),
 		newTestCmd(),
 		newReviewCmd(),
+		newPublishCmd(),
 		newClearanceCmd(),
 		newRemovedCoverageCmd(),
 		newVersionCmd(),

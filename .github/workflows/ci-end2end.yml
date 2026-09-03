@@ -19,34 +19,12 @@ permissions:
   contents: read
 
 jobs:
-  self-scan:
-    name: self-scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          # From go.mod's toolchain line. It was restated in five places, which
-          # is how one of them goes stale without anyone noticing.
-          go-version-file: source/cli/go.mod
-          cache: true
-
-      # Built from source/cli/ (the module root); the scan below deliberately runs
-      # from the repository root, which is the scan root .lydite/ sits at — the
-      # cli component is declared at source/cli/, and scan reads that declaration.
-      - name: build lydite
-        working-directory: source/cli
-        run: go build -o /tmp/lydite ./cmd/lydite
-
-      - name: lydite scan (self)
-        run: /tmp/lydite scan --dir .
-
-  # lydite's own repository can exercise one runner. `source/web/` is empty and the
-  # only Cargo.toml files are pin manifests, which are deliberately not
-  # components — so without a foreign repository the cargo and vitest runners
-  # would merge with their argv asserted and never once executed, which is a
-  # check reporting a pass having never run.
+  # lydite's own repository cannot exercise the cargo runners. `source/web/` is
+  # empty and the only Cargo.toml files are pin manifests, which are
+  # deliberately not components — so without a foreign repository they would
+  # merge with their argv asserted and never once executed, which is a check
+  # reporting a pass having never run. `source/cloud-services` closes that for
+  # vitest and leaves cargo open.
   #
   # proving-ground is that repository. It is checked out rather than vendored
   # because lydite has to run against it as a foreign repo: a fixture inside
@@ -203,7 +181,6 @@ jobs:
   # The single job the branch-protection ruleset actually requires. Individual
   # job names (lint, build & test, ...) are an implementation detail that
   # changes as CI evolves — pointing the ruleset at each one means every job
-  # rename/add/remove is also a ruleset edit, and a job that's silently never
-  # required (as self-scan was here) goes unnoticed. Add a job to `needs:`
-  # below and the gate covers it automatically; the ruleset itself never
-  # needs to change again.
+  # rename/add/remove is also a ruleset edit, and a job nothing requires goes
+  # unnoticed. Add a job to `needs:` below and the gate covers it
+  # automatically; the ruleset itself never needs to change again.

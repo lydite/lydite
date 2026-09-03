@@ -1,0 +1,12 @@
+{
+  "name": "@lydite/github-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "App JWT signing, installation tokens, and GitHub Actions OIDC verification. Shared between the Workers so the security-relevant part has one implementation rather than two that agree today.",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  }
+}

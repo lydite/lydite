@@ -220,12 +220,12 @@ the component's to declare.`,
 						Value:  "no components declared in " + component.FileName,
 					})
 				}
-				return renderTestReport(cmd, rep, asJSON, noColor)
+				return renderTestReport(cmd, rep, dir, asJSON, noColor)
 			}
 
 			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep)
 			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
-			return renderTestReport(cmd, rep, asJSON, noColor)
+			return renderTestReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
@@ -662,36 +662,6 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
 	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, tc, instrument)
-}
-
-// ignoreReports keeps lydite's own output out of git, by writing a `.gitignore`
-// ignoring everything into the report directory itself.
-//
-// lydite writes into the repository it is measuring, and what it writes must
-// never become part of what it measures. A committed `.lydite-reports/` lands
-// in the diff, where it matches no component and therefore widens affected
-// selection to everything on every change — observed on a fixture whose select
-// row named a coverage profile and a test log as the reason two components
-// ran. An uncommitted one is offered to the author by every `git status` and
-// `git add -A` until someone commits it.
-//
-// Inside the directory rather than in the repository's own `.gitignore`,
-// because that file is the repository's to write and lydite's output is
-// lydite's to disown. A repository that has already ignored the directory
-// loses nothing: this file is inside what it ignored.
-//
-// Best-effort. A report directory that cannot hold a `.gitignore` is not a
-// reason to fail a run, and the failure it prevents is a slow run rather than
-// a wrong answer.
-func ignoreReports(dir string) {
-	path := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(path); err == nil {
-		return
-	}
-	// "*" and not "**": a .gitignore ignores paths relative to itself, and a
-	// single star at the top of a directory covers everything under it,
-	// including this file.
-	_ = os.WriteFile(path, []byte("*\n"), 0o600)
 }
 
 // clearReport makes the component's report path ready to be written to: its
@@ -1253,7 +1223,8 @@ func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
 }
 
 // renderTestReport renders and returns the verdict as an exit code.
-func renderTestReport(cmd *cobra.Command, rep *ui.Report, asJSON, noColor bool) error {
+func renderTestReport(cmd *cobra.Command, rep *ui.Report, root string, asJSON, noColor bool) error {
+	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {
 		return err

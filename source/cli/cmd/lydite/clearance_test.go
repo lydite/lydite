@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -275,51 +274,5 @@ func TestPublishedDescriptionsFitThePlatformsLimit(t *testing.T) {
 		if n := len([]rune(got)); n == 0 || n > 140 {
 			t.Errorf("%s description is %d characters: %q", verdict, n, got)
 		}
-	}
-}
-
-// The comment and the status are rendered from one verdict rather than
-// derived twice, so they cannot disagree about what happened.
-func TestCommentReportsTheSameVerdictAsTheStatus(t *testing.T) {
-	d := referral.Decision{Referred: true, Uncovered: []string{"cli/main.go"}}
-	change := referral.Change{Paths: []string{"cli/main.go"}}
-	body := buildComment(d, change, 2, ui.VerdictRefer, head).Render()
-
-	for _, want := range []string{"Referred", "2 declared", "`cli/main.go`"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the comment is missing %q:\n%s", want, body)
-		}
-	}
-}
-
-// The badge above the headline already says "Referred", so the headline must
-// spend its one sentence on something the reader cannot already see. The
-// status carries no badge and must state the verdict itself, which is why
-// the two differ rather than sharing one string.
-func TestTheCommentHeadlineDoesNotRepeatTheBadge(t *testing.T) {
-	d := referral.Decision{Referred: true}
-	got := headline(d, ui.VerdictRefer, 0)
-	if strings.Contains(strings.ToLower(got), "referred") {
-		t.Fatalf("headline %q repeats the badge", got)
-	}
-	if !strings.Contains(got, "/lydite clear") {
-		t.Errorf("headline %q does not say what resolves it", got)
-	}
-}
-
-// Capping adds an "and N more" line, which is prose about the list rather
-// than a member of it.
-func TestTheOverflowLineIsNotFormattedAsAPath(t *testing.T) {
-	var many []string
-	for i := range 20 {
-		many = append(many, fmt.Sprintf("cli/file%02d.go", i))
-	}
-	d := referral.Decision{Referred: true, Uncovered: many}
-	body := buildComment(d, referral.Change{Paths: many}, 0, ui.VerdictRefer, head).Render()
-	if strings.Contains(body, "`…and") {
-		t.Fatalf("the overflow line is rendered as a path:\n%s", body)
-	}
-	if !strings.Contains(body, "…and") {
-		t.Error("the comment does not say the list was truncated")
 	}
 }
