@@ -50,13 +50,15 @@ const production: Deps = {
  * verified claims which repository and which pull request may be written to,
  * mints an installation token narrowed to exactly that, posts, and discards it.
  *
- * That is what dissolves the standing tension between gating and writing. The
- * coverage gate runs the repository's own tests and its `setup`/`teardown`
- * shell, and on
- * a pull request that code is the pull request's. With no writable token in
- * the job, the worst that code can do is provoke a wrong comment on its own
- * pull request — where the change's author is already the person being
- * addressed.
+ * That covers the comment and nothing else. The coverage gate runs the
+ * repository's own tests and its `setup`/`teardown` shell, and on a pull
+ * request that code is the pull request's; with no writable token in the job,
+ * the worst that code can do through the relay is provoke a wrong comment on
+ * its own pull request — where the change's author is already the person being
+ * addressed. Recording a coverage baseline is a different write: it pushes to
+ * the `lydite` branch and needs `contents: write`, which this relay never mints
+ * and has no endpoint for, so a job that records still holds a pushing token of
+ * its own.
  *
  * It stores nothing. No database, no cache, no log of a request body: a body is
  * a rendered comment about somebody's private repository, and the argument for

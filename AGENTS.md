@@ -120,6 +120,10 @@ accepts exactly `preflight, build, test, end2end`, so there is no stage a publis
 `statuses: write` cannot be granted to a called stage. The consequence is stated rather than
 hidden — lydite's own coverage gate does not block a merge, which is the state `lydite/referral`
 is already in and for the same reason ([#34](https://github.com/lydite/lydite/issues/34)).
+A coverage regression and a scan finding are advisory here for the same reason; what that
+costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `ci-test.yml`
+keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
+merge gate still covers.
 
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
@@ -1807,9 +1811,14 @@ credential**. The job presents the GitHub Actions OIDC token; the relay verifies
 from the body, reads the pull-request number out of `ref`, mints an installation token narrowed
 to that one repository and to `pull_requests: write`, posts, and discards it. It stores nothing.
 
-That is what dissolves [#49](https://github.com/lydite/lydite/issues/49): a job with no writable
-token cannot write anywhere, whatever code it runs, so the worst a pull request's own suite can
-provoke is a wrong comment on its own pull request.
+That takes the comment write out of the job that runs the repository's code: with no writable
+token there, the worst a pull request's own suite can provoke through the relay is a wrong comment
+on its own pull request. It **narrows [#49](https://github.com/lydite/lydite/issues/49) rather than
+closing it.** Recording a coverage baseline is a push to the `lydite` branch and needs
+`contents: write`; the relay mints `pull_requests: write` and has no endpoint that commits
+anything. A gating job that also records still holds a pushing token, and what fixes that is the
+record split #49 describes or a relay endpoint that does not exist — which is why this repository
+runs the gate read-only.
 
 - **RS256 is fixed, not read from the token.** Honouring a token's own `alg` is how a verifier
   accepts `alg: none`.

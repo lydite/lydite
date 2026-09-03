@@ -77,7 +77,7 @@ The distinction is worth stating precisely because it is easy to erode. Adding a
 cache "for rate limits", or a log line "for debugging", is the step that turns
 this into the thing ADR 0009 deferred.
 
-## A token instead of a credential is what dissolves the gating tension
+## A token instead of a credential takes the comment write out of the gating job
 
 `lydite test --gate-coverage` runs each component's suite and any `setup` and
 `teardown` shell the declaration carries, through `sh -c`. On a pull request that
@@ -87,13 +87,24 @@ for anyone who can open a pull request — which this repository worked around b
 running the gate read-only and paying an instrumented measurement of the base
 tree on every change.
 
-The OIDC token removes the tension rather than relocating it. A job that holds
-no writable credential cannot write anywhere, whatever code it runs. The relay
+The OIDC token removes one of the two writes from that job, and leaves the other
+exactly where it was. Posting the comment needs no credential in CI: the relay
 takes the repository from the `repository` claim and never from the request body,
 cross-checks the submitted pull-request number against `ref`, and mints a token
 narrowed to that one repository and to `pull_requests: write`. So the worst a
-pull request's own code can achieve is a wrong comment on its own pull request —
-addressed to the person who wrote it.
+pull request's own code can achieve through the relay is a wrong comment on its
+own pull request — addressed to the person who wrote it.
+
+**Recording a baseline is untouched, and this ADR closes nothing about it.** That
+write is a push to the `lydite` branch, which needs `contents: write`; the relay
+mints `pull_requests: write` and has no endpoint that commits anything, so it
+cannot record a baseline on a job's behalf. A gating job that both runs the
+repository's code and records still holds a pushing token. What resolves that is
+either the split [#49](https://github.com/lydite/lydite/issues/49) describes — a
+second command that writes what a first measured, executing nothing from the
+repository — or a relay endpoint that does not exist. Until one of the two lands,
+this repository keeps running the gate read-only and paying for the base tree on
+every change.
 
 Four checks, each closing a distinct hole: the signature, so the token is
 GitHub's; `iss`, so it is Actions' and not another issuer's; a declared `aud`, so
