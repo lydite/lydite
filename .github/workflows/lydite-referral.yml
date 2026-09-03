@@ -47,11 +47,11 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: cli/go.mod
+          go-version-file: source/cli/go.mod
           cache: true
 
       - name: build lydite
-        working-directory: cli
+        working-directory: source/cli
         run: go build -o /tmp/lydite ./cmd/lydite
 
       # Runs from the repository root: --dir locates the exemptions file, and

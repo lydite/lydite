@@ -18,11 +18,11 @@
 gt_version: 1.6.0
 dependabot:
   - ecosystem: gomod
-    directory: /cli
+    directory: /source/cli
   - ecosystem: github-actions
     directory: /
   - ecosystem: npm
-    directory: /cli/internal/typescript/biome-pin
+    directory: /source/cli/internal/typescript/biome-pin
     note: |
       Biome (internal/typescript), the only TypeScript linter.
 
@@ -38,30 +38,30 @@ dependabot:
       exclude. Nothing enforces this entry, though, so a pin added without one is
       a pin no bot ever bumps.
   - ecosystem: cargo
-    directory: /cli/internal/rust/cargo-audit-pin
+    directory: /source/cli/internal/rust/cargo-audit-pin
     note: |
       cargo-audit (internal/rust). One manifest per tool: cargo-audit and
       cargo-deny cannot resolve in a shared dependency graph.
   - ecosystem: cargo
-    directory: /cli/internal/rust/cargo-deny-pin
+    directory: /source/cli/internal/rust/cargo-deny-pin
     note: |
       cargo-deny (internal/rust).
   - ecosystem: cargo
-    directory: /cli/internal/runner/cargo-nextest-pin
+    directory: /source/cli/internal/runner/cargo-nextest-pin
     note: |
       cargo-nextest (internal/runner), the test runner a component declaring
       the cargo-nextest runner is run with. Pinned for the reason the scanners
       are: whatever version a machine carries decides which tests run and what
       a failure looks like.
   - ecosystem: cargo
-    directory: /cli/internal/runner/cargo-llvm-cov-pin
+    directory: /source/cli/internal/runner/cargo-llvm-cov-pin
     note: |
       cargo-llvm-cov (internal/runner), the instrumentation a Rust component's
       coverage is measured through. Installed rather than assumed on PATH: a
       runner without it measures nothing, and an empty baseline cached as real
       makes every later pull request a cache hit that gates on nothing.
   - ecosystem: gomod
-    directory: /cli/internal/golang/go-pin
+    directory: /source/cli/internal/golang/go-pin
     note: |
       gosec / govulncheck (internal/golang). A bump here must be mirrored into
       golang.go's constants; internal/golang/pins_test.go fails if it is not.
@@ -82,7 +82,7 @@ dependabot:
       - dependency_name: golang.org/x/vuln
         dependency_type: all
   - ecosystem: pip
-    directory: /cli/internal/semgrep
+    directory: /source/cli/internal/semgrep
     note: |
       Semgrep (internal/semgrep).
 bulwark:

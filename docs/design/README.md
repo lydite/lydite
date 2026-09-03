@@ -1,7 +1,7 @@
 # lydite design system
 
 The visual foundation for every surface lydite renders: the CLI's own output, the
-pull-request comment, the dashboard in `web/`, and the marketing site.
+pull-request comment, the dashboard in `source/web/`, and the marketing site.
 
 The organising idea is the product's: **parity between local and CI**. Wherever a
 scan result appears, the surface also answers "does this match CI?". That is not
@@ -20,7 +20,7 @@ decoration, and it is the one thing a redesign must not lose.
 The `.dc.html` files are design prototypes authored in HTML. They use a custom
 runtime (`support.js`) with `{{ }}` holes and `<sc-for>`/`<sc-if>` tags, and every
 style is inline. Both are artefacts of the authoring environment. **Do not port the
-runtime, and do not copy the inline styles** — rebuild in `web/`'s own idiom against
+runtime, and do not copy the inline styles** — rebuild in `source/web/`'s own idiom against
 the tokens.
 
 Read `design-system.dc.html` before building any component; it carries
@@ -55,14 +55,14 @@ open /tmp/lydite-design/design-system.dc.html
 
 **CLI output** — the canonical surface. Everything else quotes it; nothing rephrases
 it. Its grammar is specified in `tokens.md` under "CLI output grammar" and
-implemented in `cli/internal/ui`, which every command renders through. Anything
+implemented in `source/cli/internal/ui`, which every command renders through. Anything
 automated reads `--json` and never the text, which is what keeps the human
 surface free to change.
 
 **Pull-request comment** — drawn in the *host's* light chrome, not lydite's dark
 theme, because GitHub owns that page. Use the light token ramp there.
 
-**Dashboard** — the primary application screen, two columns, dark. `web/` builds it;
+**Dashboard** — the primary application screen, two columns, dark. `source/web/` builds it;
 see ADR 0009 for where its data comes from and ADR 0010 for why the bundle is
 committed.
 
