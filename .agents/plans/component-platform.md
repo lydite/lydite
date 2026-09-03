@@ -5,6 +5,22 @@ Rolling plan for the work specified in
 the specification and wins on any disagreement; this file tracks how it is being
 built and what is left. The `pr*.md` files beside it are session prompts.
 
+This plan is the component platform, which is the *foundation* of
+[#60](https://github.com/lydite/lydite/issues/60) — the Platform epic, whose
+scope is larger: every check a repository declares, and the pull request as
+where the answer appears. This file stays the specification of record for the
+component work — it carries the reasoning, what each step left open, and the
+prompt each step was built from.
+
+**The next slice is not a step of this plan.**
+[#62](https://github.com/lydite/lydite/issues/62) and
+[#64](https://github.com/lydite/lydite/issues/64), taken together: nothing
+lydite scans, measures or gates reaches a pull request at all, and there is no
+recorded decision about the identity that would post it. The results go to the
+job log and stop there, so every gate built here is invisible to the person
+whose change it is about. Both come before step 8, and both designs are
+undecided and get agreed on their issues before anything is written.
+
 ## Order
 
 | # | Issue | Deliverable | Prompt | State |
@@ -16,9 +32,13 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
-| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done |
-| 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | `pr8-plan-and-merge.md` | next |
+| 7 | #58 | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done — #54 |
+| 8 | #61 | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | `pr8-plan-and-merge.md` | deferred behind #62, #64 |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
+
+Steps 1–5 were built before the epic existed and have no issue of their own; the
+PR that delivered each is named above, and backfilling them would be a record
+written after the fact rather than one that scoped anything.
 
 Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
 until step 0 existed, because two of its three runners had nothing to run
