@@ -33,6 +33,10 @@ const Marker = "<!-- lydite:results -->"
 // out of the merge-base. A report row carries a label and a value, so a third
 // column could only be filled by inventing a fact or left empty on every row.
 type CommentRow struct {
+	// Status decides the mark the row opens with. A reader scanning an open
+	// section is looking for the line to act on, and in a table with no colour
+	// of its own the mark is the only thing that finds it for them.
+	Status Status
 	Check  string
 	Result string
 }
@@ -78,6 +82,14 @@ type CommentSection struct {
 // re-derived, so the two cannot disagree about what happened — the property
 // the JSON document already provides against the text output.
 type Comment struct {
+	// Standing marks this as the one comment a later run edits in place.
+	//
+	// Only the standing verdict carries the marker. A reply to somebody's
+	// comment is a new comment answering a question they asked, and one
+	// carrying the marker would be found and overwritten by the next run's
+	// verdict — or worse, would be the comment that run edits instead of the
+	// standing one, since a marker search takes the first body that matches.
+	Standing bool
 	// Verdict decides the badge, and is the worst of the sections'.
 	Verdict Verdict
 	// Headline is the one sentence under the badge. It says what is true
@@ -123,7 +135,9 @@ func title(v Verdict) string {
 // source on the platforms that strip it.
 func (c Comment) Render() string {
 	var b strings.Builder
-	b.WriteString(Marker + "\n")
+	if c.Standing {
+		b.WriteString(Marker + "\n")
+	}
 	b.WriteString(title(c.Verdict))
 	b.WriteString("\n\n")
 	if c.Headline != "" {
@@ -187,9 +201,9 @@ func (s CommentSection) render(b *strings.Builder) {
 	fmt.Fprintf(b, "\n<details%s>\n<summary>%s</summary>\n\n", open, summary)
 
 	if len(s.Rows) > 0 {
-		b.WriteString("| Check | Result |\n| --- | --- |\n")
+		b.WriteString("| | Check | Result |\n| :-: | --- | --- |\n")
 		for _, row := range s.Rows {
-			fmt.Fprintf(b, "| %s | %s |\n", cell(row.Check), cell(row.Result))
+			fmt.Fprintf(b, "| %s | %s | %s |\n", mark(row.Status), cell(row.Check), emphasise(row.Status, row.Result))
 		}
 		b.WriteString("\n")
 	}
@@ -225,6 +239,24 @@ func (d CommentDetail) render(b *strings.Builder) {
 		fmt.Fprintf(b, "\n<sub>full output: <code>%s</code></sub>\n", escapeCell(d.Log))
 	}
 	b.WriteString("\n")
+}
+
+// emphasise makes the one row a reader has to act on findable in a table that
+// has no colour of its own.
+//
+// Bold on the states that want attention and nothing on the rest. Emphasising
+// every row emphasises none, and a passing run of twelve rows in bold is a wall
+// rather than a report.
+func emphasise(status Status, value string) string {
+	if value == "" {
+		return "—"
+	}
+	switch status {
+	case StatusFail, StatusRefer:
+		return "**" + escapeCell(value) + "**"
+	default:
+		return escapeCell(value)
+	}
 }
 
 // cell renders a table cell, and an empty one as an em dash so a row never

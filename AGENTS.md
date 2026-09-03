@@ -1219,9 +1219,17 @@ never pollutes main's history). See
 [ADR 0019](docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
 
 **The component is the unit.** Nothing decides what a coverage unit is except the
-declaration. Three altitudes are reported and all three are gated: per component, per
-language, and globally. All three are `Σ covered / Σ total` over subsets of the same stored
-per-component entries, so they cannot disagree or drift apart.
+declaration. Two altitudes are reported and both are gated: per component, and over the
+repository — `coverage(cli)` and `coverage(repo)`. Both are `Σ covered / Σ total` over subsets of
+the same stored per-component entries, so they cannot disagree or drift apart.
+
+**A language is not an altitude**, and was one until
+[ADR 0024](docs/adr/0024-coverage-gates-the-component-and-the-repository.md). It is a grouping
+derived from each component's runner rather than a unit anybody declared, so gating one holds a
+repository to a number it never stated — and where a language holds one component, which is the
+common shape, the figure restates that component's own row exactly. Skipping it only in that case
+was rejected too: a gate whose presence depends on how many components a language happens to have
+is gated differently before and after an unrelated component is declared.
 
 **A gating job holds a writable token and runs the repository's own code, and that is a real
 tension** ([#49](https://github.com/lydite/lydite/issues/49)). Recording the baseline is a push to
@@ -1443,13 +1451,12 @@ coverage:
       enabled: false   # defaults to true
 ```
 
-**Patch is composed at the same three altitudes the aggregate is** — per component, per language,
-and globally — and all three gate. The per-component rows and the aggregate between them still
-leave a hole: the aggregate says the repository did not get worse overall, and each per-component
+**Patch is composed at both altitudes the aggregate is** — per component and over the repository —
+and both gate. The per-component rows and the aggregate between them still leave a hole: the aggregate says the repository did not get worse overall, and each per-component
 row says that component's new code met that component's own standard, so a change adding untested
 code to three components can clear every row on tolerance and still be the change that should not
-merge. `go patch: 83.9% (366/436 new lines), baseline 80.9%` is the row that answers the question a
-reviewer actually has about a change spanning components.
+merge. `patch(repo): 89.3% (740/829 new lines), 2 component(s), baseline 80.9%` is the row that answers
+the question a reviewer actually has about a change spanning components.
 
 Composed by **summing changed lines**, never by averaging the components' percentages — the same
 weighting [ADR 0007](docs/adr/0007-line-weighted-coverage-aggregation.md) requires of the
@@ -1457,7 +1464,7 @@ aggregate, and for the same reason: a mean lets a two-line component outvote a t
 one. The baseline side sums exactly the components the current side covers, and a figure whose
 baseline does not cover all of them is reported `new` rather than compared — a component with no
 baseline contributes its new lines to the numerator and nothing to the comparison, which would
-render as movement nobody caused. A language nothing changed emits no row at all.
+render as movement nobody caused. A change touching no measurable line emits no row at all.
 
 **A diff is scoped to the files a component's report could speak for**: under its directory, in a
 language its runner implies. Both halves are needed — a repository declaring a Go and a TypeScript

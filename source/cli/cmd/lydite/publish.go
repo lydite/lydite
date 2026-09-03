@@ -94,7 +94,7 @@ func buildComment(dirs []string, base string) ui.Comment {
 		}
 	}
 
-	comment := ui.Comment{Version: version, Base: shortSHA(base)}
+	comment := ui.Comment{Standing: true, Version: version, Base: shortSHA(base)}
 	for _, concern := range concerns {
 		for _, s := range found[concern.command] {
 			comment.Sections = append(comment.Sections, s.render(concern.title))
@@ -136,7 +136,7 @@ type section struct {
 func (s section) render(title string) ui.CommentSection {
 	out := ui.CommentSection{Status: worst(s.doc.Rows), Title: title, Summary: counts(s.doc.Rows)}
 	for _, row := range s.doc.Rows {
-		out.Rows = append(out.Rows, ui.CommentRow{Check: row.Label, Result: row.Value})
+		out.Rows = append(out.Rows, ui.CommentRow{Status: row.Status, Check: row.Label, Result: row.Value})
 	}
 	// Only a failing row's output. A clean run has a log per check and
 	// pasting all of them would bury the verdict under the thing that went

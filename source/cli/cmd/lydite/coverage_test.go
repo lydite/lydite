@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,14 +44,21 @@ func rowsOf(rep *ui.Report) map[string]ui.Row {
 // that never ran, indistinguishable from one that passed.
 func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
 	rep := ui.NewReport("test")
+	// Two Go components, so the language altitude composes something its
+	// components do not and is rendered. At one component it would restate
+	// that component's row verbatim, and is skipped.
 	decl := component.File{Components: []component.Component{
 		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
 	}}
-	ms := []measurement{measured("api", runner.Go, 9, 10)}
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		measured("sdk", runner.Go, 8, 10),
+	}
 	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
 		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
-	for _, label := range []string{"coverage(api)", "go coverage", "coverage"} {
+	for _, label := range []string{"coverage(api)", "coverage(sdk)", "coverage(repo)"} {
 		row, ok := rows[label]
 		if !ok {
 			t.Fatalf("no %q row; got %v", label, rep.Rows())
@@ -116,7 +122,7 @@ func TestACarriedComponentIsCountedAndNamed(t *testing.T) {
 		{Name: "sdk", Dir: "sdk", Lang: runner.Go, Lines: lines(80, 100)},
 	}
 	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(80, 100)}
-	row := composedRow("go coverage", current, map[string]bool{"sdk": true}, baseline, byLang(runner.Go), 0.1)
+	row := composedRow("go coverage", current, map[string]bool{"sdk": true}, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v, want a pass", row)
 	}
@@ -137,7 +143,7 @@ func TestAComposedComparisonOnlyCoversWhatItMeasured(t *testing.T) {
 		unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest}, "not affected"),
 	}
 	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(5, 1000)}
-	row := composedRow("go coverage", current, nil, baseline, byLang(runner.Go), 0.1)
+	row := composedRow("go coverage", current, nil, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status == ui.StatusFail {
 		t.Fatalf("row = %+v — the unrun component's baseline must not drag the comparison", row)
 	}
@@ -155,7 +161,7 @@ func TestAComposedFigureWithAnIncompleteBaselineIsNotCompared(t *testing.T) {
 		measured("api", runner.Go, 50, 100),
 		measured("sdk", runner.Go, 90, 100),
 	}
-	row := composedRow("go coverage", current, nil, gitstate.Baseline{"api": lines(50, 100)}, byLang(runner.Go), 0.1)
+	row := composedRow("go coverage", current, nil, gitstate.Baseline{"api": lines(50, 100)}, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusNew {
 		t.Errorf("row = %+v, want new — the baseline covers one of the two components", row)
 	}
@@ -244,7 +250,7 @@ func TestOnlyAnUnselectedComponentCarriesForward(t *testing.T) {
 				current = []measurement{{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: baseline["web"]}}
 				carried["web"] = true
 			}
-			row := composedRow("typescript coverage", current, carried, baseline, byLang(runner.TypeScript), 0.1)
+			row := composedRow("typescript coverage", current, carried, baseline, onlyLang(runner.TypeScript), 0.1)
 			if row.Status != tc.want {
 				t.Errorf("row = %+v, want %q", row, tc.want)
 			}
@@ -554,65 +560,47 @@ func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
 	}
 }
 
-// A language figure covers only its own components, so a repository's Rust
-// coverage is never diluted by its Go.
-func TestALanguageFigureCoversOnlyItsOwnComponents(t *testing.T) {
-	ms := []measurement{
-		measured("api", runner.Go, 90, 100),
-		measured("tally", runner.Rust, 10, 100),
-	}
-	goLines, _, _ := composed(ms, nil, byLang(runner.Go))
-	rustLines, _, _ := composed(ms, nil, byLang(runner.Rust))
-	if goLines != lines(90, 100) || rustLines != lines(10, 100) {
-		t.Fatalf("go = %+v, rust = %+v", goLines, rustLines)
-	}
-	all, _, _ := composed(ms, nil, everything)
-	if all != lines(100, 200) {
-		t.Errorf("global = %+v, want the sum of both", all)
-	}
-	if got := fmt.Sprint(languages(ms)); got != "[go rust]" {
-		t.Errorf("languages = %s, want a stable sorted order", got)
-	}
-}
-
-// A figure no component contributed to is unmeasured, never a 0.0% row. 0/0
-// renders as 0.0%, which reads as a real measurement of no coverage at all: a
-// language whose only component failed would report the worst possible number
-// as though it had been measured, and a reader acting on it would go looking
-// for missing tests rather than for the failing suite.
+// A component that measured nothing contributes nothing to the figure over
+// every component, and the figure says how many it actually covered.
+//
+// Without the count, a repository whose components mostly failed would report
+// the coverage of the one that worked as though it were the repository's — a
+// number that is true of a subset and read as true of the whole.
 //
 // Found on the proving ground, where the `web` component fails for want of a
-// coverage provider and its language reported `0.0% (0/0 lines)`.
-func TestALanguageThatMeasuredNothingIsUnmeasured(t *testing.T) {
+// coverage provider.
+func TestAFigureOverEveryComponentSaysHowManyItCovered(t *testing.T) {
 	rep := ui.NewReport("test")
 	decl := component.File{Components: []component.Component{
 		{Name: "api", Dir: "api", Runner: runner.GoTest},
 		{Name: "web", Dir: "web", Runner: runner.Vitest},
+		{Name: "admin", Dir: "admin", Runner: runner.Vitest},
 	}}
 	ms := []measurement{
 		measured("api", runner.Go, 9, 10),
 		unmeasuredComponent(decl.Components[1], "test(web) did not pass: failed"),
+		unmeasuredComponent(decl.Components[2], "test(admin) did not pass: failed"),
 	}
 	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
 		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
-	ts, ok := rows["typescript coverage"]
+
+	repo, ok := rows["coverage(repo)"]
 	if !ok {
-		t.Fatalf("no typescript row; got %v", rep.Rows())
+		t.Fatalf("no repository row; got %v", rep.Rows())
 	}
-	if ts.Status != ui.StatusUnmeasured {
-		t.Errorf("typescript coverage = %+v, want unmeasured rather than a figure", ts)
+	if !strings.Contains(repo.Value, "1 of 3 component(s)") {
+		t.Errorf("coverage(repo) = %q, want it to say it covered 1 of 3", repo.Value)
 	}
-	if strings.Contains(ts.Value, "0.0%") {
-		t.Errorf("typescript coverage value = %q, want no percentage at all", ts.Value)
-	}
-	// The language that did measure is unaffected, and so is the global
-	// figure — which still has something in it.
-	if rows["go coverage"].Status != ui.StatusContext {
-		t.Errorf("go coverage = %+v, want a measured-but-ungated row", rows["go coverage"])
-	}
-	if rows["coverage"].Status != ui.StatusContext {
-		t.Errorf("global coverage = %+v, want a measured-but-ungated row", rows["coverage"])
+	// The components that measured nothing say so themselves, each at the
+	// altitude anybody can act on.
+	for _, name := range []string{"coverage(web)", "coverage(admin)"} {
+		if rows[name].Status != ui.StatusUnmeasured {
+			t.Errorf("%s = %+v, want unmeasured rather than a figure", name, rows[name])
+		}
+		if strings.Contains(rows[name].Value, "0.0%") {
+			t.Errorf("%s = %q, want no percentage at all", name, rows[name].Value)
+		}
 	}
 }
 
@@ -624,7 +612,7 @@ func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "test(api) did not pass: failed")}
 	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
 		coverageOptions{Instrument: true})
-	if got := rowsOf(rep)["coverage"]; got.Status != ui.StatusUnmeasured {
+	if got := rowsOf(rep)["coverage(repo)"]; got.Status != ui.StatusUnmeasured {
 		t.Errorf("coverage = %+v, want unmeasured", got)
 	}
 }
@@ -1347,7 +1335,7 @@ func TestTheGatePassesAChangeThatRaisesCoverage(t *testing.T) {
 	if got := rows["coverage(svc)"]; got.Status != "pass" {
 		t.Errorf("coverage(svc) = %+v, want a pass", got)
 	}
-	if got := rows["coverage"]; got.Status != "pass" {
+	if got := rows["coverage(repo)"]; got.Status != "pass" {
 		t.Errorf("coverage = %+v, want a pass", got)
 	}
 }
@@ -1559,4 +1547,14 @@ func TestComposedPatchWillNotCompareAgainstAPartialBaseline(t *testing.T) {
 	if !strings.Contains(got.Value, "fresh") {
 		t.Errorf("the row does not name the component missing a baseline: %q", got.Value)
 	}
+}
+
+// onlyLang filters a composed figure to one language.
+//
+// A test helper rather than production code: coverage composes at the
+// component and the repository, and a language is neither, so nothing in a run
+// builds a figure this way. The composition itself is still what these tests
+// are about.
+func onlyLang(l runner.Lang) func(measurement) bool {
+	return func(m measurement) bool { return m.Lang == l }
 }

@@ -5,10 +5,21 @@ import (
 	"testing"
 )
 
-func TestCommentCarriesTheMarkerSoItCanBeFoundAgain(t *testing.T) {
-	body := Comment{Verdict: VerdictRefer, Version: "v0.3.0"}.Render()
+func TestTheStandingCommentCarriesTheMarkerSoItCanBeFoundAgain(t *testing.T) {
+	body := Comment{Standing: true, Verdict: VerdictRefer, Version: "v0.3.0"}.Render()
 	if !strings.Contains(body, Marker) {
 		t.Fatal("the comment carries no marker, so the next run cannot find it to edit")
+	}
+}
+
+// A reply answers a question somebody asked and is a new comment, not the
+// standing verdict. One carrying the marker would be found by a later run's
+// marker search — which takes the first body that matches — and edited in
+// place of the verdict it is answering about.
+func TestAReplyDoesNotCarryTheStandingMarker(t *testing.T) {
+	body := Comment{Verdict: VerdictPass, Headline: "cleared by @someone"}.Render()
+	if strings.Contains(body, Marker) {
+		t.Fatalf("a reply carries the standing marker, so a later run would edit it:\n%s", body)
 	}
 }
 
@@ -156,13 +167,13 @@ func TestCommentCellsCannotBreakTheTable(t *testing.T) {
 		}},
 	}.Render()
 	for _, line := range strings.Split(body, "\n") {
-		if !strings.HasPrefix(line, "| ") {
+		if !strings.HasPrefix(line, "|") {
 			continue
 		}
 		// An escaped pipe is content, not a column boundary, so only
 		// unescaped ones are counted.
-		if n := strings.Count(strings.ReplaceAll(line, "\\|", ""), "|"); n != 3 {
-			t.Fatalf("row has %d column boundaries, want 3: %q", n, line)
+		if n := strings.Count(strings.ReplaceAll(line, "\\|", ""), "|"); n != 4 {
+			t.Fatalf("row has %d column boundaries, want 4: %q", n, line)
 		}
 	}
 	if strings.Contains(body, "one\ntwo") {
@@ -202,5 +213,26 @@ func TestEachVerdictHasItsOwnTitle(t *testing.T) {
 			t.Fatalf("%s and %s share the title %q", prior, v, got)
 		}
 		seen[got] = v
+	}
+}
+
+// A table has no colour of its own, so a reader scanning an open section needs
+// the row that wants acting on to find them.
+func TestARowThatWantsAttentionIsMarkedAndEmphasised(t *testing.T) {
+	body := Comment{Sections: []CommentSection{{
+		Status: StatusFail,
+		Title:  "test",
+		Rows: []CommentRow{
+			{Status: StatusPass, Check: "test(cli)", Result: "passed"},
+			{Status: StatusFail, Check: "test(web)", Result: "failed"},
+		},
+	}}}.Render()
+
+	if !strings.Contains(body, "| "+mark(StatusFail)+" | test(web) | **failed** |") {
+		t.Errorf("the failing row is neither marked nor emphasised:\n%s", body)
+	}
+	// Emphasising every row emphasises none.
+	if !strings.Contains(body, "| "+mark(StatusPass)+" | test(cli) | passed |") {
+		t.Errorf("the passing row was emphasised too:\n%s", body)
 	}
 }
