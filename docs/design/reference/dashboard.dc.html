@@ -12,14 +12,14 @@
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   body {
-    margin: 0; background: #07091E;
-    --bg:#07091E; --surface:#0E1230; --raised:#151A3D; --border:#1E2450; --strong:#2A3168;
-    --text:#EDEEF5; --muted:#9AA0B5; --faint:#6E7594;
-    --crit:#F2426E; --high:#FF7A45; --med:#F0B429; --low:#35C4E8; --info:#9AA0B5; --pass:#16C79A;
-    --violet:#6B2CFF; --violet-soft:#A98BFF; --track:#151A3D;
+    margin: 0; background: #0D0E10;
+    --bg:#0D0E10; --surface:#151619; --raised:#1C1E21; --border:#24262A; --strong:#35383E;
+    --text:#D3D6D8; --muted:#9A9DA3; --faint:#767980;
+    --crit:#F2426E; --high:#FF7A45; --med:#F0B429; --low:#35C4E8; --info:#9A9DA3; --pass:#16C79A;
+    --violet:#6930E8; --violet-soft:#A17AFF; --track:#1C1E21;
   }
-  a { color: #A98BFF; text-decoration: none; }
-  a:hover { color: #C9B6FF; }
+  a { color: #A17AFF; text-decoration: none; }
+  a:hover { color: #D2C0FF; }
   @keyframes lyd-spin { to { transform: rotate(360deg); } }
 </style>
 </helmet>
@@ -53,7 +53,7 @@
     <nav style="display:flex;flex-direction:column;gap:4px">
       <sc-for list="{{ nav }}" as="item" hint-placeholder-count="4">
         <span onClick="{{ item.onClick }}" style="position:relative;display:flex;align-items:center;height:40px;border-radius:8px;font-size:13.5px;cursor:pointer;transition:background .12s ease" style-hover="background:var(--raised)">
-          <sc-if value="{{ item.active }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;inset:0;border-radius:8px;background:#6B2CFF"></span></sc-if>
+          <sc-if value="{{ item.active }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;inset:0;border-radius:8px;background:#6930E8"></span></sc-if>
           <span style="{{ item.style }}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="{{ item.icon }}"></use></svg><span style="font-weight:500">{{ item.label }}</span></span>
         </span>
       </sc-for>
@@ -88,7 +88,7 @@
         <svg width="17" height="17" viewBox="0 0 24 24"><use href="#d-bell"></use></svg>
         <span style="position:absolute;top:7px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--crit)"></span>
       </span>
-      <button type="button" onClick="{{ runScan }}" style="border:0;cursor:pointer;font-family:inherit;font-size:13.5px;font-weight:500;color:#fff;height:34px;padding:0 16px;border-radius:8px;background:linear-gradient(135deg,#6E21F3,#251FF7);display:flex;align-items:center;gap:8px;transition:filter .16s ease" style-hover="filter:brightness(1.12)">
+      <button type="button" onClick="{{ runScan }}" style="border:0;cursor:pointer;font-family:inherit;font-size:13.5px;font-weight:500;color:#fff;height:34px;padding:0 16px;border-radius:8px;background:linear-gradient(135deg,#6930E8,#32108F);display:flex;align-items:center;gap:8px;transition:filter .16s ease" style-hover="filter:brightness(1.12)">
         <span style="{{ scanIconStyle }}"><svg width="15" height="15" viewBox="0 0 24 24"><use href="#d-scan"></use></svg></span>{{ scanLabel }}
       </button>
     </header>
@@ -161,7 +161,7 @@
             <span style="display:flex;gap:16px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:var(--faint)"><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:2px;background:var(--violet)"></span>coverage</span><span style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:2px;background:var(--strong)"></span>gate 80%</span></span>
           </div>
           <svg width="100%" height="180" viewBox="0 0 640 180" preserveAspectRatio="none" style="display:block">
-            <defs><linearGradient id="dashFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6B2CFF" stop-opacity="0.4"></stop><stop offset="1" stop-color="#6B2CFF" stop-opacity="0"></stop></linearGradient></defs>
+            <defs><linearGradient id="dashFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6930E8" stop-opacity="0.4"></stop><stop offset="1" stop-color="#6930E8" stop-opacity="0"></stop></linearGradient></defs>
             <line x1="0" y1="72" x2="640" y2="72" stroke="var(--strong)" stroke-width="1" stroke-dasharray="5 5"></line>
             <path d="M8 148 L56 138 L104 142 L152 118 L200 124 L248 100 L296 104 L344 84 L392 90 L440 66 L488 58 L536 52 L584 44 L632 40 L632 180 L8 180Z" fill="url(#dashFill)"></path>
             <path d="M8 148 L56 138 L104 142 L152 118 L200 124 L248 100 L296 104 L344 84 L392 90 L440 66 L488 58 L536 52 L584 44 L632 40" fill="none" stroke="var(--violet)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -254,18 +254,18 @@
         </div>
 
         <div style="background:#04061A;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.9">
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0B0E2B;border-bottom:1px solid #1E2450">
-            <span style="font-size:11.5px;color:#9AA0B5">last local run</span>
-            <span style="font-size:11px;color:#6E7594">4m ago · identical to CI #4821</span>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#0D0E10;border-bottom:1px solid #24262A">
+            <span style="font-size:11.5px;color:#9A9DA3">last local run</span>
+            <span style="font-size:11px;color:#767980">4m ago · identical to CI #4821</span>
           </div>
           <div style="padding:16px 18px;display:flex;flex-direction:column">
-            <span><span style="color:#16C79A">$</span> <span style="color:#A98BFF">lydite</span> <span style="color:#EDEEF5">scan --gate 80</span></span>
-            <span style="color:#6E7594">→ rust · typescript · go &nbsp;|&nbsp; ruleset 7f2ac9</span>
-            <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">coverage</span> <span style="color:#6E7594">……………………</span> <span style="color:#16C79A">87%</span></span>
-            <span><span style="color:#16C79A">✓</span> <span style="color:#EDEEF5">static analysis</span> <span style="color:#6E7594">………</span> <span style="color:#16C79A">0</span></span>
-            <span><span style="color:#F0B429">!</span> <span style="color:#EDEEF5">crap score</span> <span style="color:#6E7594">……………</span> <span style="color:#F0B429">3</span></span>
-            <span style="color:#6E7594">&nbsp;</span>
-            <span><span style="color:#16C79A">gate passed</span><span style="color:#6E7594"> in 12.4s</span></span>
+            <span><span style="color:#16C79A">$</span> <span style="color:#A17AFF">lydite</span> <span style="color:#D3D6D8">scan --gate 80</span></span>
+            <span style="color:#767980">→ rust · typescript · go &nbsp;|&nbsp; ruleset 7f2ac9</span>
+            <span><span style="color:#16C79A">✓</span> <span style="color:#D3D6D8">coverage</span> <span style="color:#767980">……………………</span> <span style="color:#16C79A">87%</span></span>
+            <span><span style="color:#16C79A">✓</span> <span style="color:#D3D6D8">static analysis</span> <span style="color:#767980">………</span> <span style="color:#16C79A">0</span></span>
+            <span><span style="color:#F0B429">!</span> <span style="color:#D3D6D8">crap score</span> <span style="color:#767980">……………</span> <span style="color:#F0B429">3</span></span>
+            <span style="color:#767980">&nbsp;</span>
+            <span><span style="color:#16C79A">gate passed</span><span style="color:#767980"> in 12.4s</span></span>
           </div>
         </div>
       </div>
@@ -282,10 +282,10 @@ class Component extends DCLogic {
   renderVals() {
     const dark = this.state.theme === 'dark';
     const T = dark ? {} : {
-      '--bg':'#F5F6FA','--surface':'#FFFFFF','--raised':'#F5F6FA','--border':'#E1E4EF','--strong':'#C3C9DE',
-      '--text':'#10133F','--muted':'#545B7A','--faint':'#8A90A8',
-      '--crit':'#D62254','--high':'#D2571C','--med':'#A87A0C','--low':'#0E7C99','--info':'#8A90A8','--pass':'#0F9E7A',
-      '--violet':'#6B2CFF','--violet-soft':'#5B21D6','--track':'#EAECF4'
+      '--bg':'#F6F7F8','--surface':'#FFFFFF','--raised':'#F6F7F8','--border':'#E0E2E4','--strong':'#D3D6D8',
+      '--text':'#181A1D','--muted':'#5A5E63','--faint':'#787B82',
+      '--crit':'#D62254','--high':'#D2571C','--med':'#A87A0C','--low':'#0E7C99','--info':'#787B82','--pass':'#0F9E7A',
+      '--violet':'#6930E8','--violet-soft':'#5924BD','--track':'#EAECF4'
     };
 
     const navItems = [['Overview','#d-overview'],['Projects','#d-projects'],['Reports','#d-reports'],['Settings','#d-settings']];
@@ -340,8 +340,8 @@ class Component extends DCLogic {
           fontFamily: "'JetBrains Mono',ui-monospace,monospace", fontSize: '11px', letterSpacing: '0.04em',
           padding: '5px 10px', borderRadius: '999px', cursor: 'pointer',
           color: active ? '#FFFFFF' : 'var(--muted)',
-          background: active ? '#6B2CFF' : 'var(--raised)',
-          border: '1px solid ' + (active ? '#6B2CFF' : 'var(--border)'),
+          background: active ? '#6930E8' : 'var(--raised)',
+          border: '1px solid ' + (active ? '#6930E8' : 'var(--border)'),
           transition: 'background .14s ease, color .14s ease'
         }
       };

@@ -1,1 +1,395 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none"><defs><linearGradient id="ls" gradientUnits="userSpaceOnUse" x1="59.9" y1="683.1" x2="-159.5" y2="215.1"><stop offset="0" stop-color="#1A1EF9"></stop><stop offset="1" stop-color="#7222F4"></stop></linearGradient><linearGradient id="lb" gradientUnits="userSpaceOnUse" x1="168" y1="596.5" x2="568" y2="571.5"><stop offset="0" stop-color="#0A0C38"></stop><stop offset="1" stop-color="#191A5E"></stop></linearGradient></defs><rect width="512" height="512" rx="256" fill="#0B0E2B"></rect><g transform="translate(96 104.11) scale(0.46)"><path d="M234.51 53.36A95.5 95.5 0 0 1 320.21 0L464.95 0L464.95 0L134.17 641.61A16.5 16.5 0 0 1 119.7 650.54L94.3 650.85A94.91 94.91 0 0 1 7.98 514.06Z" fill="url(#ls)"></path><path d="M213.97 550.73A79 79 0 0 1 282.81 510.13L686.59 509.12A2.25 2.25 0 0 1 688.5 512.56L624.89 614.72A86.11 86.11 0 0 1 551.79 655.31L158.36 655.31A1.5 1.5 0 0 1 157.05 653.08Z" fill="url(#lb)"></path><path d="M343.3 365L491.5 365" stroke="#8B89B0" stroke-width="22.6" stroke-linecap="round"></path><path d="M316.7 417L460.8 417" stroke="#8B89B0" stroke-width="22.6" stroke-linecap="round"></path><path d="M289.4 468.9L428.7 468.8" stroke="#8B89B0" stroke-width="22.3" stroke-linecap="round"></path><path d="M476.4 314.7L524.3 194.8" stroke="#581CF3" stroke-width="19.9" stroke-linecap="round"></path><path d="M448 219.3L401.5 253.3L443.5 286.2" stroke="#581CF3" stroke-width="20.8" stroke-linecap="round" stroke-linejoin="round"></path><path d="M557.3 219.4L600.6 253.3L556.5 286.4" stroke="#581CF3" stroke-width="20.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M681 340.6L569.4 449L529.2 409.5" stroke="#00D397" stroke-width="22.5" stroke-linecap="round" stroke-linejoin="round"></path></g></svg>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="lydite">
+  <defs><clipPath id="avatarClip"><circle cx="256" cy="256" r="256"/></clipPath></defs>
+  <g clip-path="url(#avatarClip)">
+    <circle cx="256" cy="256" r="256" fill="#101114"/>
+    <g transform="translate(-48.2579 -48.2466) scale(0.450739)">
+
+  <defs
+     id="defs20">
+    <linearGradient
+       id="stone2"
+       x1="110.2571"
+       y1="292.04468"
+       x2="599.22333"
+       y2="683.21771"
+       gradientTransform="scale(0.83441341,1.1984467)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#35383e"
+         id="stop5" />
+      <stop
+         offset="1"
+         stop-color="#151619"
+         id="stop6" />
+    </linearGradient>
+    <linearGradient
+       id="violet"
+       x1="541.20367"
+       y1="552.81073"
+       x2="808.90039"
+       y2="170.38686"
+       gradientTransform="scale(0.94659368,1.0564195)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#32108f"
+         id="stop7" />
+      <stop
+         offset="0.32"
+         stop-color="#6930e8"
+         id="stop8" />
+      <stop
+         offset="0.65"
+         stop-color="#a17aff"
+         id="stop9" />
+      <stop
+         offset="1"
+         stop-color="#4a1bbd"
+         id="stop10" />
+    </linearGradient>
+    <linearGradient
+       id="violetDark"
+       x1="731.11108"
+       y1="262.79999"
+       x2="911.11108"
+       y2="442.79999"
+       gradientTransform="scale(0.9,1.1111111)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#2a0b70"
+         id="stop11" />
+      <stop
+         offset="1"
+         stop-color="#7135df"
+         id="stop12" />
+    </linearGradient>
+    <clipPath
+       id="rockClip-3-1">
+      <path
+         d="M 210,72 Q 118,76 92,168 L 72,770 Q 70,908 205,936 H 812 Q 936,910 948,790 L 934,214 Q 930,90 812,72 Z"
+         id="path19-8-2" />
+    </clipPath>
+    <linearGradient
+       id="stone-4-6"
+       x1="0"
+       y1="0"
+       x2="1024"
+       y2="1024"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#4b4e54"
+         id="stop1-8-6" />
+      <stop
+         offset="0.28"
+         stop-color="#24262a"
+         id="stop2-0-5" />
+      <stop
+         offset="0.7"
+         stop-color="#101114"
+         id="stop3-4-4" />
+      <stop
+         offset="1"
+         stop-color="#292b30"
+         id="stop4-6-1" />
+    </linearGradient>
+    <filter
+       id="shadow-2-3"
+       x="-0.081553398"
+       y="-0.073684211"
+       width="1.1631068"
+       height="1.1473684">
+      <feGaussianBlur
+         stdDeviation="14"
+         id="feGaussianBlur18-6-4" />
+    </filter>
+    <clipPath
+       id="gemClip-9-8">
+      <path
+         d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+         id="path20-4-6" />
+    </clipPath>
+    <linearGradient
+       id="violetLight-8-1"
+       x1="510"
+       y1="496"
+       x2="760"
+       y2="246"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#8d65ed"
+         id="stop13-1-0" />
+      <stop
+         offset="0.55"
+         stop-color="#eee8ff"
+         id="stop14-5-1" />
+      <stop
+         offset="1"
+         stop-color="#a989ff"
+         id="stop15-3-9" />
+    </linearGradient>
+    <radialGradient
+       id="spark-5-5"
+       cx="478.87369"
+       cy="275.92245"
+       r="159.62456"
+       gradientTransform="scale(1.1401754,0.87705802)"
+       fx="478.87369"
+       fy="275.92245"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0"
+         stop-color="#ffffff"
+         stop-opacity="0.95"
+         id="stop16-4-7" />
+      <stop
+         offset="0.25"
+         stop-color="#e8ddff"
+         stop-opacity="0.55"
+         id="stop17-3-6" />
+      <stop
+         offset="1"
+         stop-color="#8f63f5"
+         stop-opacity="0"
+         id="stop18-6-8" />
+    </radialGradient>
+    <linearGradient
+       xlink:href="#stone2"
+       id="linearGradient10"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.83441341,1.1984467)"
+       x1="110.2571"
+       y1="292.04468"
+       x2="599.22333"
+       y2="683.21771" />
+    <linearGradient
+       xlink:href="#violet"
+       id="linearGradient11"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.94659368,1.0564195)"
+       x1="541.20367"
+       y1="552.81073"
+       x2="808.90039"
+       y2="170.38686" />
+    <linearGradient
+       xlink:href="#violetDark"
+       id="linearGradient12"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="scale(0.9,1.1111111)"
+       x1="731.11108"
+       y1="262.79999"
+       x2="911.11108"
+       y2="442.79999" />
+  </defs>
+  <!-- LYDITE / dark stone: compact square composition with transparent outer background -->
+  <!-- restrained outer edge -->
+  
+  <g
+     id="layer1"
+     transform="translate(1244.4142,1077.042)"
+     style="display:inline">
+    <g
+       id="g2-9-4"
+       transform="matrix(1.4782453,0,0,1.4291818,-1323.3032,-1122.3496)"
+       style="display:inline">
+      <g
+         clip-path="url(#rockClip-3-1)"
+         id="g49-5-7"
+         style="display:inline">
+        <rect
+           width="1024"
+           height="1024"
+           fill="url(#stone)"
+           id="rect20-4-9"
+           x="0"
+           y="0"
+           style="display:inline;fill:url(#stone-4-6);stroke:none;stroke-opacity:1" />
+        <path
+           d="M 82,160 230,72 420,190 340,410 94,520 Z"
+           fill="#55585e"
+           opacity="0.55"
+           id="path21-9-6" />
+        <path
+           d="M 230,72 420,190 610,78 812,72 700,270 500,350 340,410 Z"
+           fill="#181a1e"
+           id="path22-1-6" />
+        <path
+           d="M 94,520 340,410 500,350 430,690 210,936 92,770 Z"
+           fill="url(#stone2)"
+           id="path23-7-6"
+           style="fill:url(#linearGradient10)" />
+        <path
+           d="M 430,690 604,584 778,492 812,936 H 210 Z"
+           fill="#111216"
+           id="path24-5-6" />
+        <path
+           d="M 778,492 934,214 948,790 812,936 Z"
+           fill="#303238"
+           opacity="0.8"
+           id="path25-5-7" />
+        <path
+           d="M 610,78 812,72 934,214 700,270 Z"
+           fill="#34373d"
+           opacity="0.7"
+           id="path26-4-0" />
+        <!-- shallow cavity behind the gemstone -->
+        <path
+           d="M 490,286 704,164 842,286 792,514 604,620 430,486 Z"
+           fill="#050507"
+           opacity="0.9"
+           filter="url(#shadow)"
+           id="path27-1-4"
+           style="filter:url(#shadow-2-3)" />
+        <path
+           d="M 494,286 704,176 830,292 784,502 604,598 444,480 Z"
+           fill="#08090c"
+           stroke="#000000"
+           stroke-width="18"
+           id="path28-8-1" />
+        <!-- raised/inset rim: makes the jewel clearly embedded rather than painted on -->
+        <path
+           d="M 505,294 704,188 818,296 774,488 604,580 458,474 Z"
+           fill="none"
+           stroke="#5b5e66"
+           stroke-width="13"
+           opacity="0.8"
+           id="path29-8-0" />
+        <path
+           d="M 492,282 704,174 830,292"
+           fill="none"
+           stroke="#747780"
+           stroke-width="6"
+           opacity="0.35"
+           id="path30-3-8" />
+        <!-- FACETED GEM -->
+        <g
+           clip-path="url(#gemClip-9-8)"
+           id="g47-5-1">
+          <path
+             d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+             fill="url(#violet)"
+             id="path31-2-4"
+             style="fill:url(#linearGradient11)" />
+          <!-- crown facets -->
+          <path
+             d="m 518,236 182,-56 -42,144 -192,2 z"
+             fill="#7d4ae8"
+             id="path32-2-8" />
+          <path
+             d="M 700,180 820,292 658,324 Z"
+             fill="#4a20a8"
+             id="path33-6-8" />
+          <path
+             d="M 820,292 778,492 658,324 Z"
+             fill="url(#violetDark)"
+             id="path34-6-4"
+             style="fill:url(#linearGradient12)" />
+          <path
+             d="M 778,492 604,584 658,324 Z"
+             fill="#32117e"
+             id="path35-7-5" />
+          <path
+             d="M 604,584 458,476 466,326 658,324 Z"
+             fill="#5924bd"
+             id="path36-8-7" />
+          <path
+             d="m 466,326 52,-90 140,88 z"
+             fill="#b18aff"
+             id="path37-4-9" />
+          <!-- central table -->
+          <path
+             d="m 548,286 150,-40 62,58 -36,128 -114,64 -92,-66 -8,-88 z"
+             fill="url(#violetLight)"
+             opacity="0.95"
+             id="path38-1-8"
+             style="fill:url(#violetLight-8-1)" />
+          <path
+             d="M 548,286 698,246 650,350 510,342 Z"
+             fill="#d7c9ff"
+             opacity="0.9"
+             id="path39-7-4" />
+          <path
+             d="m 698,246 62,58 -110,46 z"
+             fill="#7040c9"
+             id="path40-1-5" />
+          <path
+             d="M 760,304 724,432 650,350 Z"
+             fill="#8e63ed"
+             id="path41-8-8" />
+          <path
+             d="M 724,432 610,496 650,350 Z"
+             fill="#4e20a9"
+             id="path42-7-8" />
+          <path
+             d="m 610,496 -92,-66 -8,-88 140,8 z"
+             fill="#7650d6"
+             id="path43-8-9" />
+          <path
+             d="m 510,342 38,-56 102,64 z"
+             fill="#f1edff"
+             opacity="0.72"
+             id="path44-7-4" />
+          <ellipse
+             cx="585"
+             cy="286"
+             rx="130"
+             ry="100"
+             fill="url(#spark)"
+             opacity="0.8"
+             id="ellipse44-7-7"
+             style="fill:url(#spark-5-5)" />
+          <!-- crisp facet edges -->
+          <path
+             d="M 518,236 700,180 820,292 778,492 604,584 458,476 466,326 Z"
+             fill="none"
+             stroke="#d2c0ff"
+             stroke-width="5"
+             opacity="0.72"
+             id="path45-4-0" />
+          <path
+             d="m 466,326 192,-2 162,-32"
+             fill="none"
+             stroke="#efe9ff"
+             stroke-width="4"
+             opacity="0.45"
+             id="path46-4-4" />
+          <path
+             d="M 658,324 604,584"
+             fill="none"
+             stroke="#1e084e"
+             stroke-width="5"
+             opacity="0.7"
+             id="path47-9-0" />
+        </g>
+        <!-- tiny specular highlight, not a white blob -->
+        <path
+           d="m 544,267 30,-18 28,-2 -22,22 -26,13 z"
+           fill="#ffffff"
+           opacity="0.85"
+           id="path48-1-6" />
+        <path
+           d="m 535,288 15,-10"
+           stroke="#ffffff"
+           stroke-width="6"
+           stroke-linecap="round"
+           opacity="0.55"
+           id="path49-5-5" />
+      </g>
+      <path
+         d="M 210,72 Q 118,76 92,168 L 72,770 Q 70,908 205,936 H 812 Q 936,910 948,790 L 934,214 Q 930,90 812,72 Z"
+         fill="none"
+         stroke="#000000"
+         stroke-width="12"
+         opacity="0.5"
+         id="path50-5-3"
+         style="display:inline;stroke:#fbffff;stroke-opacity:1" />
+    </g>
+  </g>
+
+    </g>
+  </g>
+</svg>

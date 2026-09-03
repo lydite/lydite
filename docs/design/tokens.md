@@ -13,29 +13,38 @@ Two conventions run through everything:
 
 ## Brand
 
+Every violet here is sampled from the gem in the mark, so the interface and the
+logo cannot drift apart. The greys are the stone's.
+
 | Token | Value | Use |
 |---|---|---|
-| gradient | `linear-gradient(135deg, #6E21F3 0%, #251FF7 100%)` | Logo mark, marketing accents |
-| `violet-500` | `#6B2CFF` | Primary action, active state, focus ring |
-| `indigo-600` | `#3F2BEA` | Pressed |
-| `violet-300` | `#A98BFF` | Links on dark |
-| `navy-900` | `#10133F` | Ink, logo on light |
+| gradient | `linear-gradient(135deg, #32108F 0%, #6930E8 55%, #A17AFF 100%)` | The gem's own gradient. Marketing accents |
+| `violet-500` | `#6930E8` | Primary action, active state, focus ring — **on light** |
+| `violet-300` | `#A17AFF` | The same roles **on dark**, and links on dark |
+| `violet-700` | `#5924BD` | Pressed |
+| `ink` | `#181A1D` | Type on light |
+| `ink-dark` | `#D3D6D8` | Type on dark |
 
-Links on dark: `#A98BFF`, hover `#C9B6FF`. Selection: `rgba(107,44,255,0.4)`.
+**The accent is one value per background, not one value.** No violet clears 4.5:1
+on both white and a dark canvas — `#6930E8` is 6.14 on light and 2.87 on `#0d1117`,
+`#A17AFF` is the reverse. So a surface picks by its own background, and the two are
+the same pair the wordmark uses.
+
+Links on dark: `#A17AFF`, hover `#D2C0FF`. Selection: `rgba(105,48,232,0.4)`.
 
 ## Dark surfaces (primary)
 
 | Token | Value |
 |---|---|
-| `--bg` | `#07091E` |
-| `--surface` | `#0E1230` |
-| `--raised` | `#151A3D` |
-| `--border` | `#1E2450` |
-| `--strong` | `#2A3168` |
-| `--text` | `#EDEEF5` |
-| `--muted` | `#9AA0B5` |
-| `--faint` | `#6E7594` |
-| `--track` | `#151A3D` |
+| `--bg` | `#0D0E10` |
+| `--surface` | `#151619` |
+| `--raised` | `#1C1E21` |
+| `--border` | `#24262A` |
+| `--strong` | `#35383E` |
+| `--text` | `#D3D6D8` |
+| `--muted` | `#9A9DA3` |
+| `--faint` | `#767980` |
+| `--track` | `#1C1E21` |
 
 ## Light surfaces
 
@@ -44,13 +53,13 @@ light** — see the gaps in `README.md`.
 
 | Token | Value |
 |---|---|
-| canvas | `#F5F6FA` |
+| canvas | `#F6F7F8` |
 | surface | `#FFFFFF` |
-| surface-sunken | `#EEF0F6` |
-| border | `#E1E4EF` |
-| text | `#10133F` |
-| text-muted | `#545B7A` |
-| text-faint | `#8A90A8` |
+| surface-sunken | `#EEF0F1` |
+| border | `#E0E2E4` |
+| text | `#181A1D` |
+| text-muted | `#5A5E63` |
+| text-faint | `#787B82` |
 
 ## Status and severity
 
@@ -61,7 +70,7 @@ light** — see the gaps in `README.md`.
 | `--high` | `#FF7A45` |
 | `--med` | `#F0B429` |
 | `--low` | `#35C4E8` |
-| `--info` | `#9AA0B5` |
+| `--info` | `#9A9DA3` |
 
 ## Typography
 
@@ -105,8 +114,8 @@ decoration and delays the answer.
 
 ## Focus
 
-2px `#6B2CFF` outline at 2px offset on every interactive element. Never removed —
-this is a keyboard-heavy developer tool.
+2px outline at 2px offset on every interactive element — `#6930E8` on light,
+`#A17AFF` on dark. Never removed — this is a keyboard-heavy developer tool.
 
 ## CLI output grammar
 
@@ -117,8 +126,8 @@ The canonical surface. This is a specification.
 | `✓` | pass | `#16C79A` | 0 |
 | `!` | referral, unmeasured, or dropped | `#F0B429` | 2 |
 | `✗` | fail | `#F2426E` | 1 |
-| `→` | context line | `#6E7594` | never a verdict |
-| `$` | a command the reader can run | `#A98BFF` | — |
+| `→` | context line | `#767980` | never a verdict |
+| `$` | a command the reader can run | `#A17AFF` | — |
 
 `$` is specified and unbuilt: no status in `internal/ui` renders it.
 
@@ -167,19 +176,50 @@ findings table becomes a card list.
 
 ## Logo
 
-Clear space on all four sides equals the height of the lowercase `i` stem — roughly
-40% of the mark's height. Approved backgrounds: white, `#F5F6FA`, `#10133F`,
-`#07091E`. Never stretch, recolour, rotate, or add shadows or glows.
+The mark is a faceted violet gem set into a rounded tile of dark stone — lydite is
+a stone, and the gem is what a test suite finds in it.
 
-Mark colours, measured from the artwork: slab gradient `#7222F4 → #1A1EF9`, base
-gradient `#0A0C38 → #191A5E`, glyphs `#581CF3`, check `#00D397`, lines `#8B89B0`.
+Clear space on all four sides equals one quarter of the tile's height. Approved
+backgrounds: white, `#F6F7F8`, `#0D0E10`, `#0d1117` (GitHub's dark canvas). Never
+stretch, recolour, rotate, or add shadows or glows — the mark carries its own
+lighting, and a second light source reads as a mistake.
+
+**There is no single-colour form, and this is a property of the mark rather than a
+gap.** The gem is legible because of facet shading; flattened to one colour it is a
+hexagon inside a black square. A surface with one colour to spend uses the wordmark,
+which is flat `#181A1D` on light and `#D3D6D8` on dark. Do not commission a mono
+lock-up — a brand kit that promises one it cannot honour is worse than one that
+states it has none.
+
+| Asset | File |
+|---|---|
+| Mark | `assets/lydite-mark.svg` — also the app icon and the favicon |
+| Mark, circular | `assets/lydite-avatar.svg`, `assets/lydite-avatar-512.png` (organisation avatar) |
+| Mark, 64px raster | `assets/lydite-mark-64.png` — **path is a public API**, see AGENTS.md |
+| Wordmark | `assets/lydite-wordmark{,-dark}.svg` |
+| Wordmark + tagline | `assets/lydite-tagline{,-dark}.svg` |
+| Mark + wordmark | `assets/lydite-logo-horizontal{,-dark}.svg` |
+| Mark + wordmark + tagline | `assets/lydite-logo-horizontal-tagline{,-dark}.svg` — the README header |
+| Stacked | `assets/lydite-logo-stacked{,-dark}.svg` |
+
+Mark colours, measured from the artwork: stone `#050507` → `#5B5E66` across the
+facets, gem `#32108F` → `#6930E8` → `#A17AFF`, crown highlight `#B18AFF`, table
+`#7650D6`, seat shadow `#1E084E`. The stone's ramp is where the dark surface tokens
+above come from.
 
 ### Wordmark construction
 
-Archivo Bold (700), scaled to a 182-unit x-height and stretched **1.244×
-horizontally** — the stretch is part of the brand. The `l` has a rounded bottom-left
-terminal, radius 48 units, a custom stem rather than an Archivo glyph; its right edge
-stays square to the baseline. The `i` tittle is a true circle, radius 30.5 units, and
-is the one element allowed in violet (`#661DF2`) while the rest of the wordmark is
-ink. Tagline: Archivo caps, tracking 9.31 units, scaled so total ink including the `Q`
-descender is 35.8 units; `QUALITY.` violet, `COVERAGE.` and `CONFIDENCE.` muted ink.
+Kohinoor Telugu Bold, outlined. Lowercase `lydite` always — the wordmark, the binary
+and the prose all agree, so nothing downstream has to decide. The `i` tittle is a
+true circle and is the one element in the accent while the rest is ink. Tagline:
+the same face in caps, `COVERAGE · QUALITY · CONFIDENCE`, with `QUALITY` and both
+separators in the accent and the outer two words in ink.
+
+**Every accented element in one file carries one accent**, and the value differs by
+background: `#6930E8` on light, `#A17AFF` on dark. Mixing two violets inside a single
+lock-up reads as two brands that nearly agree.
+
+**Everything in `assets/` is outlined**, so no shipped file depends on a font being
+installed. The type stays editable in `docs/design/source/lydite-brand.svg`, which is
+the only file in the tree carrying live `<text>` — editing it needs Kohinoor Telugu
+Bold, which ships with macOS and is absent everywhere else.
