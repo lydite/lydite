@@ -18,8 +18,9 @@ prompt each step was built from.
 lydite scans, measures or gates reaches a pull request at all, and there is no
 recorded decision about the identity that would post it. The results go to the
 job log and stop there, so every gate built here is invisible to the person
-whose change it is about. Both come before step 8, and both designs are
-undecided and get agreed on their issues before anything is written.
+whose change it is about. Both come before step 8, and the design for both is
+settled — `pr-surface-and-identity.md` is its prompt and carries the decisions
+with the reasoning that produced them.
 
 ## Order
 
