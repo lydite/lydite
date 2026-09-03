@@ -39,10 +39,12 @@ const Dir = ".lydite"
 // FileName is the config file lydite looks for, relative to the scan root.
 const FileName = Dir + "/config.yml"
 
-// Language is the opt-out surface for one of the three supported ecosystems.
+// Language is the opt-out surface for one of the three languages lydite
+// checks. `enabled: false` says lydite runs no check over that language's
+// code; it does not say that no component tests it, which is the component
+// declaration's to state.
 type Language struct {
-	Enabled bool     `yaml:"enabled"`
-	Exclude []string `yaml:"exclude"`
+	Enabled bool `yaml:"enabled"`
 }
 
 // Linter names which engine backs the TypeScript check. Biome is the only
@@ -282,20 +284,45 @@ func LoadHistorical(root string) (Config, error) {
 // removedKeys names the keys lydite once read and no longer does, so a
 // repository carrying one is told rather than quietly measured differently.
 //
-// Every one of them existed to locate a coverage report some other job
-// produced. lydite now writes every report itself, to a path it chose, from
-// the instrumented variant the component's own runner derives — so there is
-// nothing left for any of them to say.
+// Each of them described a pipeline lydite no longer has: where some other job
+// left a coverage report, and which directories a walk for manifests should
+// skip. lydite writes every report itself and reads its units from the
+// component declaration, so there is nothing left for any of them to say.
 var removedKeys = []struct {
 	Key string
 	Why string
+	Doc string
 }{
 	{"coverage.source",
-		"lydite measures coverage from each component's own instrumented run, so there is no longer a pipeline half that owns producing it"},
-	{"coverage.go.report", reportKeyRemoved},
-	{"coverage.rust.report", reportKeyRemoved},
-	{"coverage.rust.lcov", reportKeyRemoved},
+		"lydite measures coverage from each component's own instrumented run, so there is no longer a pipeline half that owns producing it",
+		coverageADR},
+	{"coverage.go.report", reportKeyRemoved, coverageADR},
+	{"coverage.rust.report", reportKeyRemoved, coverageADR},
+	{"coverage.rust.lcov", reportKeyRemoved, coverageADR},
+	{"rust.exclude", excludeKeyRemoved, scanADR},
+	{"typescript.exclude", excludeKeyRemoved, scanADR},
+	{"go.exclude", excludeKeyRemoved, scanADR},
 }
+
+const (
+	coverageADR = "docs/adr/0019-coverage-per-component-gated-by-lydite-test.md"
+	scanADR     = "docs/adr/0020-scan-on-components.md"
+)
+
+// excludeKeyRemoved is the one sentence all three exclude keys want, said once
+// so they cannot drift.
+//
+// Each of them narrowed a walk for manifests, and the walk is gone: what
+// lydite scans is what the component declaration names, so a directory no
+// component declares is already out of scope and one it does declare is in
+// scope because a repository said so.
+//
+// A subdirectory inside a component that should not be linted is stated to
+// that language's own tooling — and for TypeScript that means a biome.json in
+// the subdirectory carrying `"root": false`, not the project's root config:
+// lydite always passes --config-path, which beats a root biome.json outright,
+// and only a nested non-root config is merged into lydite's own.
+const excludeKeyRemoved = "lydite scans what .lydite/components.yml declares rather than walking for manifests, so there is no detection left to narrow"
 
 // rejectRemoved refuses a config file that still carries a key lydite has
 // stopped reading.
@@ -320,7 +347,7 @@ func rejectRemoved(data []byte) error {
 	}
 	for _, k := range removedKeys {
 		if nodeAt(&doc, strings.Split(k.Key, ".")) != nil {
-			return fmt.Errorf("%s is no longer supported: %s. Remove the key; see docs/adr/0019-coverage-per-component-gated-by-lydite-test.md", k.Key, k.Why)
+			return fmt.Errorf("%s is no longer supported: %s. Remove the key; see %s", k.Key, k.Why, k.Doc)
 		}
 	}
 	return nil
@@ -407,15 +434,4 @@ func validateFloor(cfg Config) error {
 		return fmt.Errorf("coverage.floor must be a percentage between 0 and 100 (0 disables it), got %v", floor)
 	}
 	return nil
-}
-
-// AllExcludes merges every language's exclude list — used by callers (scan,
-// coverage) whose initial ecosystem-detection pass doesn't yet know which
-// language a given excluded directory belongs to.
-func (c Config) AllExcludes() []string {
-	var out []string
-	out = append(out, c.Rust.Exclude...)
-	out = append(out, c.TypeScript.Exclude...)
-	out = append(out, c.Go.Exclude...)
-	return out
 }

@@ -1,5 +1,5 @@
-// Package typescript runs Biome against every detected TypeScript package
-// using a toolchain lydite bundles and pins itself, independent of the target
+// Package typescript runs Biome against one component's directory using a
+// toolchain lydite bundles and pins itself, independent of the target
 // package's own devDependencies. This avoids the failure mode where a
 // package's lint script references a linter it never declares as a dependency.
 //
@@ -22,37 +22,37 @@ import (
 	"context"
 	"path/filepath"
 
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 )
 
-// Check lints every package directory under root, skipping any directory
-// named in exclude.
-func Check(ctx context.Context, root string, exclude []string) ([]executil.Result, error) {
-	pkgDirs, err := detect.TSPackageDirs(root, exclude)
+// Check lints dir, with env on top of the caller's own environment — the
+// component's resolved Node toolchain.
+//
+// One invocation for the component and not one per package.json inside it:
+// Biome walks the tree from where it is pointed, so a workspace's own
+// packages are covered by the run at its root, and a second run inside one of
+// them would report the same findings twice.
+//
+// The result is named for the tool alone. Which component it belongs to is
+// the caller's to say.
+//
+// A toolchain that cannot be installed is reported as this component's failing
+// result rather than returned as an error, matching how internal/rust reports
+// a cargo-audit that would not install. Under the component model the
+// difference is what the reader gets: an error aborts the run and discards
+// every row already collected, so one component's broken install would take
+// the other components' findings and Semgrep's with it.
+func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
+	toolchainDir, err := ensureBiome(ctx, env.Install)
 	if err != nil {
-		return nil, err
-	}
-	// Nothing to lint: don't pay for a toolchain install to discover that.
-	if len(pkgDirs) == 0 {
-		return nil, nil
-	}
-
-	// One toolchain install for the whole run, then one lint per package.
-	toolchainDir, err := ensureBiome(ctx)
-	if err != nil {
-		return nil, err
+		// Detail and not the error alone: report() prints Detail under a
+		// failing row and nothing else, so a bare Err renders as `✗ biome`
+		// with the cause in neither the terminal nor --json — a toolchain
+		// that would not install, indistinguishable from lint findings.
+		return []executil.Result{{Name: "biome", Err: err, Detail: err.Error()}}
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")
 
-	var results []executil.Result
-	for _, dir := range pkgDirs {
-		res, err := lintDirBiome(ctx, dir, biomeBin, configPath)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, res)
-	}
-	return results, nil
+	return []executil.Result{lintDirBiome(ctx, dir, env.Check, biomeBin, configPath)}
 }

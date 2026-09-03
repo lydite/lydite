@@ -10,14 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -330,7 +333,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg, false)
+	}), cfg, nil, false)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -362,7 +365,7 @@ func TestTeardownRunsWhenSetupFails(t *testing.T) {
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -379,7 +382,7 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -395,7 +398,7 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -409,7 +412,7 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -424,7 +427,7 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -461,7 +464,7 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -491,7 +494,7 @@ func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), false)
+	}), config.Default(), nil, false)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -590,7 +593,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, nil, nil, config.Default(), 3, false, false, rep)
+	runComponents(context.Background(), root, declared, nil, nil, config.Default(), nil, 3, false, false, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -645,7 +648,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
+	runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -873,7 +876,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 1, false, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 1, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -923,7 +926,7 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), 2, false, false, rep)
+		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -963,5 +966,122 @@ func TestDiagnosticsStayOffStdout(t *testing.T) {
 	// printed nothing anywhere, proving nothing about where output goes.
 	if !strings.Contains(errOut, "go:") {
 		t.Errorf("stderr = %q, want the toolchain note this run produces", errOut)
+	}
+}
+
+// A component's declared PATH has to reach the child. Composed as a variable
+// beside lydite's own, it would always be the earlier of two PATH entries and
+// the child would drop it — with nothing in argv or the log to show for it,
+// which is the same invisible duplicate-key failure the composition exists to
+// prevent.
+func TestAComponentsDeclaredPathReachesTheChild(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{
+		"PATH": "/declared/bin",
+		"FOO":  "bar",
+	}}
+	tc := &toolchain.Env{PathDirs: []string{"/resolved/bin"}}
+	inv := runner.Invocation{PathDirs: []string{"/pinned/bin"}}
+
+	got := childEnv(tc, c, inv)
+
+	var paths []string
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			paths = append(paths, v)
+		}
+	}
+	if len(paths) != 1 {
+		t.Fatalf("env = %q, want exactly one PATH entry", got)
+	}
+	sep := string(os.PathListSeparator)
+	// The pinned runner first, then what lydite resolved, then the inherited
+	// path, and only then what the component declared. A component may extend
+	// the path its suite runs with; it may not choose which `go` or `cargo`
+	// lydite itself launches, which is what a declared directory ahead of the
+	// inherited one would do now that the program is resolved against the
+	// environment the child is given.
+	want := "/pinned/bin" + sep + "/resolved/bin" + sep + "/usr/bin" + sep + "/declared/bin"
+	if paths[0] != want {
+		t.Errorf("PATH = %q, want %q", paths[0], want)
+	}
+	if !slices.Contains(got, "FOO=bar") {
+		t.Errorf("env = %q, want the component's other variables untouched", got)
+	}
+}
+
+// The boundary the ordering exists to hold. lydite resolves a program against
+// the environment it hands the child, so a declared directory placed ahead of
+// the inherited PATH would let a scanned repository choose which `go` lydite
+// runs — it ships `ci-bin/go`, declares `env: {PATH: ci-bin}`, and lydite
+// installs gosec with it on a runner whose own toolchain was just verified.
+func TestAComponentCannotShadowTheToolchainLyditeResolved(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{"PATH": "ci-bin"}}
+
+	got := childEnv(nil, c, runner.Invocation{})
+	var path string
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	entries := filepath.SplitList(path)
+	if len(entries) != 2 || entries[0] != "/usr/bin" || entries[1] != "ci-bin" {
+		t.Fatalf("PATH = %q, want the declared directory behind the inherited one", path)
+	}
+}
+
+// Two different people's software is installed in prepare, and each gets its
+// own environment. The repository's dependencies are installed with what the
+// repository declared — its registry, its token. lydite's pinned runners are
+// not: `cargo install` reads CARGO_HOME, CARGO_REGISTRIES_*, CARGO_NET_* and
+// RUSTC_WRAPPER, so a declared environment reaching it would choose where
+// lydite's own cargo-nextest comes from, and the result is cached beyond the
+// run.
+func TestPrepareInstallsLyditesRunnersWithoutTheRepositorysEnvironment(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{
+		"CARGO_REGISTRIES_CRATES_IO_INDEX": "http://127.0.0.1:1",
+		"SQLX_OFFLINE":                     "true",
+	}}
+	tc := &toolchain.Env{Vars: []string{"RUSTUP_TOOLCHAIN=1.96"}}
+
+	env := executil.Env{Check: childEnv(tc, c, runner.Invocation{}), Install: tc.Environ()}
+
+	if !slices.Contains(env.Check, "SQLX_OFFLINE=true") {
+		t.Errorf("check env = %q, want what the repository declared", env.Check)
+	}
+	for _, kv := range env.Install {
+		if strings.HasPrefix(kv, "CARGO_REGISTRIES_") || strings.HasPrefix(kv, "SQLX_OFFLINE=") {
+			t.Fatalf("install env carries %q from the scanned repository", kv)
+		}
+	}
+	if !slices.Contains(env.Install, "RUSTUP_TOOLCHAIN=1.96") {
+		t.Errorf("install env = %q, want lydite's own resolved toolchain", env.Install)
+	}
+}
+
+// lydite states which toolchain builds a component's code; the repository
+// states how its own code builds. A component declaring GOTOOLCHAIN: auto
+// would otherwise cancel the GOTOOLCHAIN=local pinAmbientGo exists to set,
+// reinstating the `go install` downgrade that made govulncheck reject the
+// source it was pointed at.
+func TestAComponentCannotCancelTheResolvedToolchain(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	c := component.Component{Name: "svc", Env: map[string]string{"GOTOOLCHAIN": "auto"}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+
+	got := childEnv(tc, c, runner.Invocation{})
+
+	// Last wins, so lydite's has to be the last one present.
+	last := ""
+	for _, kv := range got {
+		if v, ok := strings.CutPrefix(kv, "GOTOOLCHAIN="); ok {
+			last = v
+		}
+	}
+	if last != "local" {
+		t.Fatalf("GOTOOLCHAIN = %q, want lydite's resolved value to win", last)
 	}
 }

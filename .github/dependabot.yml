@@ -47,9 +47,11 @@ updates:
   # years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
   # pins".
   #
-  # Each pin directory is also excluded in .lydite/config.yml: they are real
-  # manifests, so detection would otherwise treat them as packages to lint or
-  # modules to scan.
+  # A pin directory is deliberately not a component, so nothing scans or tests
+  # it. A cargo pin is the exception: cargo refuses a [package] manifest with
+  # no src/lib.rs, so it carries real Rust that .lydite/components.yml has to
+  # exclude. Nothing enforces this entry, though, so a pin added without one is
+  # a pin no bot ever bumps.
   - package-ecosystem: "npm"
     directory: "/cli/internal/typescript/biome-pin"
     schedule:

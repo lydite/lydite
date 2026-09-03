@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"lydite/lydite/internal/detect"
+	"lydite/lydite/internal/runner"
 )
 
 // probe is how one ecosystem's already-installed language toolchain is found
@@ -24,8 +24,8 @@ type probe struct {
 	parse func(output string) string
 }
 
-var probes = map[detect.Ecosystem]probe{
-	detect.Go: {
+var probes = map[runner.Lang]probe{
+	runner.Go: {
 		bin:         "go",
 		versionArgs: []string{"version"},
 		// GOTOOLCHAIN=local is load-bearing, not tidiness. `go version` run
@@ -42,7 +42,7 @@ var probes = map[detect.Ecosystem]probe{
 		// "go version go1.26.5 linux/amd64"
 		parse: func(out string) string { return fieldAfter(out, "version") },
 	},
-	detect.Rust: {
+	runner.Rust: {
 		// cargo, not rustc: every Rust check and the coverage path invoke
 		// cargo, and a rustup install can in principle have one without the
 		// other. Asking the binary lydite actually runs is the honest probe.
@@ -51,7 +51,7 @@ var probes = map[detect.Ecosystem]probe{
 		// "cargo 1.96.0 (abcdef123 2025-01-01)"
 		parse: func(out string) string { return nthField(out, 1) },
 	},
-	detect.TypeScript: {
+	runner.TypeScript: {
 		bin:         "node",
 		versionArgs: []string{"--version"},
 		// "v22.21.1"

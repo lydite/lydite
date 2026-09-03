@@ -91,7 +91,7 @@ type Report struct {
 // failed to find are different states, and only one of them is the
 // repository's to fix — collapsing them is how a gate that could not run comes
 // to read as one that passed.
-func Measure(ctx context.Context, root, dir, report string, lang runner.Lang) (Report, error) {
+func Measure(ctx context.Context, root, dir, report string, lang runner.Lang, env []string) (Report, error) {
 	unitDir := filepath.Join(root, filepath.FromSlash(dir))
 	reportPath := filepath.Join(unitDir, filepath.FromSlash(report))
 	data, err := os.ReadFile(reportPath) // #nosec G304 -- the path is where lydite's own runner invocation was told to write, under the scan root
@@ -100,7 +100,7 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang) (R
 	}
 	switch lang {
 	case runner.Go:
-		return measureGo(ctx, root, unitDir, dir, reportPath)
+		return measureGo(ctx, root, unitDir, dir, reportPath, env)
 	case runner.Rust, runner.TypeScript:
 		return measureLCOV(data, unitDir, dir)
 	default:
@@ -115,8 +115,8 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang) (R
 // where the module sits — `wardnet.network/go` lives under `sdk/wardnet-go`.
 // It is asked of the component's own directory, which is where a module-scoped
 // go command is the only place it works.
-func measureGo(ctx context.Context, root, unitDir, dir, reportPath string) (Report, error) {
-	name, err := moduleName(ctx, unitDir)
+func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env []string) (Report, error) {
+	name, err := moduleName(ctx, unitDir, env)
 	if err != nil {
 		// A probe that could not run says nothing about the declaration. An
 		// interrupted run kills it, and a machine without go on PATH never
@@ -204,7 +204,7 @@ func relDir(dir string) string {
 // different thing from an answer lydite cannot use: an interrupted run and a
 // machine with no go on PATH both land here, and neither says anything about
 // the directory.
-func moduleName(ctx context.Context, moduleDir string) (string, error) {
+func moduleName(ctx context.Context, moduleDir string, env []string) (string, error) {
 	// The module's own directory is asked for alongside its path, because the
 	// path alone cannot say whether this directory is the module root. `go
 	// list -m` run *inside* a module answers with the enclosing module — a
@@ -227,7 +227,12 @@ func moduleName(ctx context.Context, moduleDir string) (string, error) {
 	// Off rather than honoured, because the question here is which module
 	// this component's own profile is qualified by, and that is the module
 	// rooted at this directory whatever else the workspace joins to it.
-	r := executil.RunQuietEnv(ctx, moduleDir, []string{"GOWORK=off"}, "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
+	// The component's own toolchain environment, and not just GOWORK: this
+	// probe runs `go`, so on a runner where lydite provisioned the Go
+	// toolchain it is the only thing that makes one findable — and it carries
+	// the GOTOOLCHAIN pin, without which `go list -m` inside a module with a
+	// toolchain directive can go and fetch one.
+	r := executil.RunQuietEnv(ctx, moduleDir, append(append([]string{}, env...), "GOWORK=off"), "go", "list", "-m", "-f", "{{.Path}}\t{{.Dir}}")
 	if !r.Ok() {
 		// `go list -m` outside a module exits non-zero with a message saying
 		// so, which is an answer about the directory rather than a failure to

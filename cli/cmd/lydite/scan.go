@@ -2,19 +2,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/golang"
+	"lydite/lydite/internal/orphan"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
 )
@@ -30,7 +36,7 @@ func newScanCmd() *cobra.Command {
 		// list every time a gate failed. main owns error reporting.
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short:         "Run code-quality and security checks for every detected ecosystem",
+		Short:         "Run code-quality and security checks for every declared component",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			// Started here rather than in report(), so the duration on the
@@ -43,69 +49,158 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 
-			ecosystems, err := detect.Ecosystems(dir, cfg.AllExcludes())
+			file, err := component.Load(dir)
 			if err != nil {
 				return err
 			}
-			if len(ecosystems) == 0 {
-				// Through the report, not around it: --json promises stdout
-				// carries a document and nothing else, and a bare sentence
-				// printed here is unparseable output on a path no scan of
-				// this repository ever reaches.
-				rep.Add(ui.Row{
-					Status: ui.StatusUnmeasured,
-					Label:  "scan",
-					Value:  "no supported ecosystem detected under " + dir,
-				})
-				return report(cmd, rep, nil, asJSON, noColor)
+			// An error rather than a row, because there is nothing to report
+			// on: scan runs the checks each component's language implies, so
+			// a repository that declares none would be scanned by nothing at
+			// all while the job stayed green — a security scan that silently
+			// stopped. Declaring a component is work the author can do, and
+			// naming the file is what makes it one step.
+			if len(file.Components) == 0 {
+				return fmt.Errorf("no components declared in %s: scan runs the checks each component's language implies, so declare what this repository builds",
+					filepath.Join(dir, filepath.FromSlash(component.FileName)))
 			}
 
-			// Before anything shells out to cargo/go/npx: make sure each
-			// enabled ecosystem's language toolchain is present at the
-			// version the repo declares. lydite pins every tool it runs but
-			// used to assume the toolchain it runs them with.
-			if err := ensureToolchains(ctx, cmd, dir, cfg, enabledEcosystems(ecosystems, cfg)); err != nil {
-				return err
-			}
-
-			var results []executil.Result
-			for _, e := range ecosystems {
-				switch e {
-				case detect.Rust:
-					if !cfg.Rust.Enabled {
-						continue
-					}
-					rustResults, err := rust.Check(ctx, dir, cfg.Rust.Exclude)
-					if err != nil {
-						return err
-					}
-					results = append(results, rustResults...)
-				case detect.TypeScript:
-					if !cfg.TypeScript.Enabled {
-						continue
-					}
-					tsResults, err := typescript.Check(ctx, dir, cfg.TypeScript.Exclude)
-					if err != nil {
-						return err
-					}
-					results = append(results, tsResults...)
-				case detect.Go:
-					if !cfg.Go.Enabled {
-						continue
-					}
-					goResults, err := golang.Check(ctx, dir, cfg.Go.Exclude)
-					if err != nil {
-						return err
-					}
-					results = append(results, goResults...)
-				}
-			}
+			// Before anything runs, not after every check has. Its failure is
+			// an error rather than a row, so resolving it late would discard
+			// every finding already collected — minutes of clippy and gosec
+			// traded for one sentence about a shallow checkout, which is the
+			// reason typescript.Check stopped returning an error too.
+			baseSHA := ""
 			if cfg.Semgrep.Enabled {
-				baseSHA, err := resolveDiffBase(ctx, dir, diffBase, baseBranch)
+				baseSHA, err = resolveDiffBase(ctx, dir, diffBase, baseBranch)
 				if err != nil {
 					return err
 				}
+			}
+
+			// Before anything shells out to cargo/go/biome: make sure each
+			// component's language toolchain is present at the version its
+			// own directory declares. lydite pins every tool it runs, and
+			// this is the toolchain it runs them with.
+			envs, err := ensureToolchains(ctx, cmd, dir, cfg, scanUnits(file, cfg))
+			if err != nil {
+				return err
+			}
+
+			warnUnscanned(ctx, cmd.ErrOrStderr(), dir, file, cfg)
+
+			// A component's checks are keyed by what they actually look at:
+			// the directory they run in and the language they run for.
+			// component.validate enforces unique names and not unique
+			// directories, so two components over one root are legitimate —
+			// `lydite test` runs both suites and its scheduler serialises
+			// them. Their scanners would read the identical tree twice and
+			// report every finding twice, under two labels, which is time
+			// spent to make a report harder to read.
+			scanned := map[string]string{}
+			for _, c := range file.Components {
+				lang := langOf(c)
+				if lang == "" {
+					// Said out loud rather than skipped. A component lydite
+					// cannot derive a language for is one nothing scans, and
+					// dropping it in silence reads exactly like a component
+					// that was scanned and found clean.
+					rep.Add(ui.Row{
+						Status: ui.StatusUnmeasured,
+						Label:  "scan(" + c.Name + ")",
+						Value:  "not scanned — a component declaring its own command implies no language",
+					})
+					continue
+				}
+				// A language turned off in .lydite/config.yml is one whose
+				// checks never run, so its components produce no rows at all
+				// — a row per opted-out component trains readers to skip the
+				// tag that exists to be noticed.
+				if !langEnabled(lang, cfg) {
+					continue
+				}
+				cdir := filepath.Join(dir, filepath.FromSlash(c.Dir))
+				// The component's declared environment as well as its
+				// toolchain, composed exactly as `lydite test` composes it: a
+				// Rust component declaring SQLX_OFFLINE or a Go one declaring
+				// CGO_ENABLED needs it to build at all. Install carries none
+				// of it — see executil.Env. No invocation directories, since
+				// scan runs lydite's own pinned tools by absolute path.
+				tc := envs.For(c.Name)
+				env := executil.Env{
+					Check:   childEnv(tc, c, runner.Invocation{}),
+					Install: tc.Environ(),
+				}
+				// Keyed on the environment as well as the directory and the
+				// language, because that is the rest of what decides what a
+				// check sees. Two components over one root declaring the same
+				// environment are one scan, and the first in declaration order
+				// carries the rows — either name is honest, and declaration
+				// order does not vary between runs. Two declaring *different*
+				// environments are two builds: dropping one would scan the
+				// other's tree with an environment it never asked for, and a
+				// component declaring the CGO_ENABLED or SQLX_OFFLINE its
+				// language needs would fail on a build its declaration exists
+				// to make work — under the other component's name.
+				key := string(lang) + "\x00" + filepath.Clean(cdir) + "\x00" + strings.Join(env.Check, "\x00")
+				if by, done := scanned[key]; done {
+					// Said, not dropped. A consumer keying rows by component
+					// name would otherwise lose this one with nothing to
+					// separate "already covered" from "never declared" — the
+					// same reason a raw-command component gets a row.
+					rep.Add(ui.Row{
+						Status: ui.StatusUnmeasured,
+						Label:  "scan(" + c.Name + ")",
+						Value:  "not scanned separately — same directory and environment as " + by,
+					})
+					continue
+				}
+				scanned[key] = c.Name
+
+				var results []executil.Result
+				switch lang {
+				case runner.Rust:
+					results = rust.Check(ctx, cdir, env)
+				case runner.TypeScript:
+					results = typescript.Check(ctx, cdir, env)
+				case runner.Go:
+					results = golang.Check(ctx, cdir, env, tc.Key())
+				}
+				for _, row := range resultRows(labelled(results, c.Name)) {
+					rep.Add(row)
+				}
+			}
+
+			var results []executil.Result
+			if cfg.Semgrep.Enabled {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
+			}
+
+			// A run in which no check ran says so, in a row of its own.
+			//
+			// Counting rows is not the test for that: a raw-command component
+			// and a deduplicated one each add an `unmeasured` row, so a
+			// repository whose every component declares a raw command, with
+			// Semgrep off, produces a document of amber rows and has executed
+			// nothing. Each opt-out is the repository's to make and none is
+			// reported on its own; all of them together is a different fact.
+			//
+			// The row is `unmeasured`, so the verdict stays `pass` and the
+			// exit code 0. That is the grammar's rule and not an oversight
+			// here: refer, unmeasured and dropped all render amber and only
+			// refer votes, which is what lets a check that did not run be
+			// visibly distinct from one that passed without turning every
+			// opt-out into a failing build. Every state reached here is one
+			// the repository asked for in its own configuration — a language
+			// switched off, a component declaring its own command — so failing
+			// it would be lydite refusing a configuration it was handed. What
+			// must not happen is silence, and the row and its `--json` status
+			// are what remove it.
+			if !ranAnyCheck(rep) && len(results) == 0 {
+				rep.Add(ui.Row{
+					Status: ui.StatusUnmeasured,
+					Label:  "scan",
+					Value:  "nothing ran — no declared component has a language lydite checks, or every one of them is disabled",
+				})
 			}
 
 			return report(cmd, rep, results, asJSON, noColor)
@@ -119,27 +214,115 @@ func newScanCmd() *cobra.Command {
 	return cmd
 }
 
-// enabledEcosystems drops languages disabled in .lydite/config.yml from the
-// detected set. `enabled: false` says lydite runs no check over that
-// language's code, so provisioning its toolchain would download a compiler
-// nothing is going to invoke.
-func enabledEcosystems(detected []detect.Ecosystem, cfg config.Config) []detect.Ecosystem {
-	var out []detect.Ecosystem
-	for _, e := range detected {
-		enabled := true
-		switch e {
-		case detect.Rust:
-			enabled = cfg.Rust.Enabled
-		case detect.TypeScript:
-			enabled = cfg.TypeScript.Enabled
-		case detect.Go:
-			enabled = cfg.Go.Enabled
+// scanUnits is what each declared component needs a toolchain for, in
+// declaration order.
+//
+// Only components whose language is enabled: `enabled: false` says lydite
+// runs no check over that language's code, so provisioning its toolchain
+// would download a compiler nothing is going to invoke. A component that
+// declares its own command implies no language and needs nothing.
+func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
+	var out []toolchain.Unit
+	for _, c := range file.Components {
+		lang := langOf(c)
+		if lang == "" || !langEnabled(lang, cfg) {
+			continue
 		}
-		if enabled {
-			out = append(out, e)
-		}
+		out = append(out, toolchain.Unit{Name: c.Name, Lang: lang, Dir: c.Dir})
 	}
 	return out
+}
+
+// anyLanguageDeclared reports whether some component names a runner, and so
+// implies source in a language lydite knows.
+func anyLanguageDeclared(file component.File) bool {
+	for _, c := range file.Components {
+		if langOf(c) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// langEnabled reports whether .lydite/config.yml leaves one language's checks
+// switched on.
+func langEnabled(l runner.Lang, cfg config.Config) bool {
+	switch l {
+	case runner.Rust:
+		return cfg.Rust.Enabled
+	case runner.TypeScript:
+		return cfg.TypeScript.Enabled
+	case runner.Go:
+		return cfg.Go.Enabled
+	}
+	return false
+}
+
+// labelled names each of a component's results for the component that
+// produced them — `gosec(cli)`, `cargo clippy(api)`.
+//
+// The name and never the directory: component.validate enforces unique names
+// and not unique directories, so the name is the only one of the two unique
+// by construction. It also matches how `lydite test` labels its own rows, so
+// a scan row and a test row about one component carry the same token.
+func labelled(results []executil.Result, component string) []executil.Result {
+	out := make([]executil.Result, 0, len(results))
+	for _, r := range results {
+		r.Name += "(" + component + ")"
+		out = append(out, r)
+	}
+	return out
+}
+
+// warnUnscanned names the source no component's checks reach, so a narrowing
+// scan is not a silent one.
+//
+// The orphan gate is what normally makes a declared list safe to rely on, and
+// it cannot answer this: it asks whether any component *contains* a file, and
+// a scanner is per language — a component rooted at `.` contains every path in
+// the repository, so a Go component at the root leaves TypeScript beside it
+// orphaning nothing while gosec never looks at it. The gate also belongs to
+// `lydite test`, which a consumer can run scan without.
+//
+// A warning and not a row. What a repository should do about it is declare a
+// component or write the exclude, which is `lydite test`'s gate to demand;
+// scan's job is only to stop the narrowing being invisible. Stderr, because
+// stdout carries the report and under --json a document a sentence would make
+// unparseable.
+//
+// Outside a git repository there is no question to answer, which is the shape
+// orphanRow already has for that case. Every other failure is said out loud,
+// because this is the only thing standing between a scan that narrowed and a
+// scan that narrowed silently — with one exception, stated at the branch that
+// makes it: git listing no source at all is the ordinary state of a repository
+// whose components all declare a raw command, and the notable one where a
+// component implies a language.
+// Any other failure is said out loud: this is the only thing standing between
+// a scan that narrowed and a scan that narrowed silently, so a git that would
+// not run must not switch it off without a word.
+func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.File, cfg config.Config) []orphan.Gap {
+	gaps, err := orphan.Unscanned(ctx, dir, file, func(l runner.Lang) bool { return langEnabled(l, cfg) })
+	if err != nil {
+		// git listing no source at all is worth saying only where some
+		// component implies a language — `--dir` pointed at a gitignored tree
+		// looks exactly like that. A repository whose every component declares
+		// a raw command has no source in a language lydite knows by
+		// construction, and telling it so on every run is a warning about its
+		// ordinary state.
+		if errors.Is(err, orphan.ErrNoRepository) || (errors.Is(err, orphan.ErrNoFiles) && !anyLanguageDeclared(file)) {
+			return nil
+		}
+		_, _ = fmt.Fprintf(w, "warning: could not check what no component scans (%v)\n", err)
+		return nil
+	}
+	for _, g := range gaps {
+		// One example and a count, not the list: the reader needs to know
+		// which declaration is missing, and a repository mid-migration would
+		// otherwise print hundreds of paths ahead of its own report.
+		_, _ = fmt.Fprintf(w, "warning: %d %s file(s) are under no component that checks them, so nothing scans them (e.g. %s) — declare a component for them, or exclude them in %s\n",
+			len(g.Files), g.Lang, g.Files[0], component.FileName)
+	}
+	return gaps
 }
 
 // resolveDiffBase turns the --diff-base flag into a commit SHA for Semgrep's
@@ -171,6 +354,39 @@ func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (str
 	return baseSHA, nil
 }
 
+// ranAnyCheck reports whether any row records a check that executed. An
+// unmeasured row is a component saying why it has no check, which is the
+// opposite.
+func ranAnyCheck(rep *ui.Report) bool {
+	for _, row := range rep.Rows() {
+		if row.Status != ui.StatusUnmeasured {
+			return true
+		}
+	}
+	return false
+}
+
+// resultRows turns each check's result into its row. It is the one place a
+// Result becomes a Row, so rows a command adds as it goes and rows added at
+// the end cannot render differently.
+func resultRows(results []executil.Result) []ui.Row {
+	rows := make([]ui.Row, 0, len(results))
+	for _, r := range results {
+		status := ui.StatusPass
+		value := "passed"
+		var detail []string
+		if !r.Ok() {
+			status, value = ui.StatusFail, "failed"
+			detail = strings.Split(strings.TrimRight(r.Detail, "\n"), "\n")
+			if len(detail) == 1 && strings.TrimSpace(detail[0]) == "" {
+				detail = nil
+			}
+		}
+		rows = append(rows, ui.Row{Status: status, Label: r.Name, Value: value, Detail: detail})
+	}
+	return rows
+}
+
 // report renders one row per check in the grammar docs/design/tokens.md
 // specifies, and returns the run's exit code as an error so the process
 // reflects the verdict.
@@ -183,18 +399,8 @@ func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (str
 // line left the developer to re-run the pinned toolchain by hand to find out
 // what was wrong, and put nothing in the PR comment either.
 func report(cmd *cobra.Command, rep *ui.Report, results []executil.Result, asJSON, noColor bool) error {
-	for _, r := range results {
-		status := ui.StatusPass
-		value := "passed"
-		var detail []string
-		if !r.Ok() {
-			status, value = ui.StatusFail, "failed"
-			detail = strings.Split(strings.TrimRight(r.Detail, "\n"), "\n")
-			if len(detail) == 1 && strings.TrimSpace(detail[0]) == "" {
-				detail = nil
-			}
-		}
-		rep.Add(ui.Row{Status: status, Label: r.Name, Value: value, Detail: detail})
+	for _, row := range resultRows(results) {
+		rep.Add(row)
 	}
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {

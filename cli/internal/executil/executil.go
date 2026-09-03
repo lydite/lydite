@@ -8,8 +8,31 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 )
+
+// Env is the two environments a language check runs with, which are
+// deliberately not the same one.
+//
+// Check is what the tool is invoked with: the component's resolved toolchain
+// and the environment its declaration asks for, because a repository's own
+// build needs what its declaration says — SQLX_OFFLINE, CGO_ENABLED, PROTOC.
+//
+// Install is what lydite provisions its *own* pinned tools with, and carries
+// nothing the scanned repository supplied. `go install`, `cargo install` and
+// `npm ci` read GOPROXY, GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry,
+// so a declaration that reached them would choose where lydite fetches the
+// security scanner it is about to run — and the result is cached under a key
+// naming the tool's version, so one poisoned build would be reused by every
+// later run and, on a runner sharing ~/.cache/lydite, by other repositories.
+// A repository may say how its own code builds; it may not say where lydite's
+// scanners come from.
+type Env struct {
+	Check   []string
+	Install []string
+}
 
 // Result is the outcome of running one external command.
 type Result struct {
@@ -96,7 +119,7 @@ func RunQuiet(ctx context.Context, dir, name string, args ...string) Result {
 // made, which is data nobody asked for in the middle of a report — and, under
 // --json, in the middle of the document.
 func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
+	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -108,12 +131,72 @@ func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string
 	return Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
 }
 
+// resolve finds name on the PATH the child is being given, rather than on the
+// one this process happens to have.
+//
+// os/exec resolves a bare program name when the command is constructed, using
+// this process's own PATH — cmd.Env is applied afterwards and has no bearing
+// on it. So a toolchain lydite provisioned and put on the child's PATH is one
+// the child can use and the lookup cannot find: `npm ci` fails with
+// "executable file not found in $PATH" moments after lydite reported
+// installing the Node that holds it. Resolving here is what makes the
+// environment lydite composes and the binary it launches the same answer.
+//
+// A name that is already a path is returned untouched, and so is one no PATH
+// entry holds — the second case so the failure stays os/exec's own message,
+// which names the program the caller asked for.
+func resolve(dir, name string, extraEnv []string) string {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return name
+	}
+	path := ""
+	// Last wins, matching how a process reads duplicate keys out of its own
+	// environment.
+	for _, kv := range extraEnv {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	if path == "" {
+		return name
+	}
+	for _, entry := range filepath.SplitList(path) {
+		if entry == "" {
+			continue
+		}
+		// A relative PATH entry is relative to the child's working directory,
+		// not to lydite's — a JavaScript component declaring
+		// `PATH: node_modules/.bin` means its own node_modules. Stat-ing it
+		// from here would find the wrong binary in a monorepo, or none, and
+		// then hand os/exec a bare name it would look up on a PATH the entry
+		// was never part of.
+		if !filepath.IsAbs(entry) {
+			entry = filepath.Join(dir, entry)
+		}
+		candidate := filepath.Join(entry, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		// Absolute, because exec.Cmd evaluates a relative Path against Dir —
+		// so returning the path this stat'ed would apply dir twice and look
+		// for `web/web/tools/x`. The stat is from lydite's working
+		// directory and the child's Path must not be.
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			return candidate
+		}
+		return abs
+	}
+	return name
+}
+
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
 	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, name, args...)
 }
 
 func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, name string, args ...string) Result {
-	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
+	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)

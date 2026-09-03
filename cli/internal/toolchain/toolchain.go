@@ -41,12 +41,15 @@ package toolchain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"lydite/lydite/internal/detect"
+	"lydite/lydite/internal/runner"
 )
 
 // Overrides is the .lydite/config.yml-supplied part of toolchain resolution, passed
@@ -60,154 +63,331 @@ type Overrides struct {
 	// Go, Rust and Node override the version read from the manifests. Empty
 	// means "use what the repo declares", which is the intended state.
 	Go, Rust, Node string
-	// Per-language detection excludes, mirroring how scan and coverage
-	// already scope excludes per language.
-	GoExclude, RustExclude, TSExclude []string
 }
 
-// For returns the override for one ecosystem, or "" if none is set.
-func (o Overrides) For(e detect.Ecosystem) string {
+// For returns the override for one language, or "" if none is set.
+func (o Overrides) For(e runner.Lang) string {
 	switch e {
-	case detect.Go:
+	case runner.Go:
 		return o.Go
-	case detect.Rust:
+	case runner.Rust:
 		return o.Rust
-	case detect.TypeScript:
+	case runner.TypeScript:
 		return o.Node
 	default:
 		return ""
 	}
 }
 
-// Env is the environment change needed to make the resolved toolchains
-// usable: directories to prepend to PATH, and variables to set.
+// Env is the environment change needed to make one component's resolved
+// toolchains usable: directories to prepend to PATH, and variables to set.
 type Env struct {
 	PathDirs []string
 	Vars     []string
+	// Resolved names the toolchain this environment selects, for Key alone —
+	// it changes nothing in the child. An ambient toolchain that already
+	// satisfies the declaration contributes no directory and only
+	// GOTOOLCHAIN=local, so without it every such component on every machine
+	// hashes to one value: a CI image whose Go is bumped 1.25 to 1.26 keeps
+	// reusing a tool built by 1.25, which rejects 1.26 source outright.
+	Resolved string
 }
 
-// Activate applies the environment to the current process, so every
-// subsequent executil.Run — which inherits os.Environ() and resolves binaries
-// through PATH — picks up the resolved toolchains.
-//
-// Mutating the process environment is deliberate rather than threading an Env
-// through every scanner's signature. lydite is a single-shot CLI that runs
-// one scan and exits; this is precisely what a shell `export PATH=...` ahead
-// of it would do, and it keeps the change to one call site instead of every
-// Check and Compute function. Ensure returns the Env rather than applying it
-// itself so the decision stays visible at the call site and tests can inspect
-// what would happen without touching global state.
-func (e *Env) Activate() error {
+// Environ is the environment a child process running under this toolchain
+// gets, ready to hand to executil.
+func (e *Env) Environ() []string {
 	if e == nil {
 		return nil
 	}
-	for _, kv := range e.Vars {
-		key, value, found := strings.Cut(kv, "=")
-		if !found {
-			continue
-		}
-		if err := os.Setenv(key, value); err != nil {
-			return err
-		}
+	return Compose(e.PathDirs, nil, e.Vars)
+}
+
+// Compose builds a child process environment: the variables in order, and
+// exactly one PATH entry holding leading ahead of the current PATH and
+// trailing behind it.
+//
+// One PATH entry, and therefore one place that builds it, because a child's
+// environment is a flat list where the last occurrence of a key wins. Two
+// callers each prepending their own directories produce two PATH entries, of
+// which one is silently discarded — so a run would provision a toolchain,
+// prepend it, and then execute against the ambient one because a pinned
+// tool's own entry came later. Nothing about that is visible in argv.
+//
+// Leading dirs are in final PATH order: the caller nearest the invocation goes
+// first. Trailing is for directories that must not shadow anything already
+// present — a path a scanned repository asked for, which may add a binary and
+// may not replace one lydite resolved.
+func Compose(leading, trailing []string, vars ...[]string) []string {
+	var out []string
+	for _, v := range vars {
+		out = append(out, v...)
 	}
-	if len(e.PathDirs) == 0 {
-		return nil
+	leading, trailing = nonEmpty(leading), nonEmpty(trailing)
+	if len(leading) == 0 && len(trailing) == 0 {
+		return out
 	}
 	// Prepended, not appended: a provisioned toolchain exists precisely
 	// because the ambient one was missing or too old, so it has to win.
-	parts := append(append([]string{}, e.PathDirs...), os.Getenv("PATH"))
-	return os.Setenv("PATH", strings.Join(parts, string(os.PathListSeparator)))
+	//
+	// The inherited PATH is filtered the same way the supplied directories
+	// are. An empty one — a minimal container, an `env -i` invocation — would
+	// otherwise leave a trailing separator, and an empty PATH element means
+	// the current directory to a shell and to an exec lookup. Since a
+	// component's commands run with their working directory set to a
+	// directory of the repository being scanned, that puts the scanned
+	// repository on the child's PATH.
+	parts := append([]string{}, leading...)
+	// Every element of the inherited PATH, not the variable as a whole: a
+	// PATH of "/usr/bin::/bin" carries an empty element, and an empty element
+	// means the current directory — which for a component's commands is a
+	// directory of the repository being scanned.
+	parts = append(parts, nonEmpty(filepath.SplitList(os.Getenv("PATH")))...)
+	parts = append(parts, trailing...)
+	return append(out, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 }
 
-// Ensure resolves, and where necessary provisions, a language toolchain for
-// every detected ecosystem, returning the environment that makes them usable.
+func nonEmpty(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Key identifies what this environment changes, for a caller that caches
+// something built under it.
 //
-// Provisioning failures are reported to w and do not fail the scan. That is a
+// Both halves matter, and the variables alone are not enough: a downloaded Go
+// toolchain sets GOTOOLCHAIN=local — the same value an ambient one that
+// already satisfies the declaration gets — and says which toolchain by putting
+// a version-keyed directory on PATH. Two components that each downloaded a
+// different Go would otherwise share a key, and a tool built under the first
+// would be reused by the second, which is the failure the pin exists to
+// prevent wearing a cache key.
+func (e *Env) Key() string {
+	if e == nil || (len(e.PathDirs) == 0 && len(e.Vars) == 0 && e.Resolved == "") {
+		return "ambient"
+	}
+	h := sha256.New()
+	_, _ = io.WriteString(h, e.Resolved+"\x00")
+	for _, d := range e.PathDirs {
+		_, _ = io.WriteString(h, d+"\x00")
+	}
+	_, _ = io.WriteString(h, "\x00")
+	for _, v := range e.Vars {
+		_, _ = io.WriteString(h, v+"\x00")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// Envs is one Env per component, keyed by component name. A component with
+// nothing to apply has no entry, and For returns nil for it.
+type Envs map[string]*Env
+
+// For returns the environment for one component.
+func (e Envs) For(component string) *Env {
+	if e == nil {
+		return nil
+	}
+	return e[component]
+}
+
+// Ensure resolves, and where necessary provisions, the language toolchain
+// each unit needs, returning one environment per component.
+//
+// Per component rather than per repository, because that is the only unit at
+// which the question has one answer: a workspace requiring Node 22 and a tools
+// package pinning 18 are two components, and a single process environment can
+// hold one of them. The environment is returned rather than applied for the
+// same reason — components run concurrently in one process, so a toolchain
+// written into that process is one every other component inherits.
+//
+// Units resolving to the same requirement are probed and provisioned once and
+// share the result, so two Go components on one version cost one diagnostic
+// line rather than two identical ones.
+//
+// Provisioning failures are reported to w and do not fail the run. That is a
 // deliberate asymmetry with the rest of lydite's gates: this step is
-// preparation, not a check, and today's behavior — trust whatever is on PATH
-// — is exactly what falling through to leaves. Turning a working scan on a
+// preparation, not a check, and falling through to "whatever is on PATH" is
+// exactly what a run without it does. Turning a working scan on a
 // GitHub-hosted runner into a hard failure because a toolchain download hit a
 // network blip would be a regression, and if the toolchain really is absent
 // the very next step fails loudly and specifically ("cargo: executable file
 // not found"). What must not happen is failing silently, so every skip,
 // substitution and failure is named on w.
-func Ensure(ctx context.Context, root string, ecosystems []detect.Ecosystem, ov Overrides, w io.Writer) (*Env, error) {
-	reqs, err := Requirements(root, ecosystems, ov)
+func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.Writer) (Envs, error) {
+	reqs, err := Requirements(root, units, ov)
 	if err != nil {
 		return nil, err
 	}
 
-	env := &Env{}
+	envs := Envs{}
+	// The work is shared and the diagnostic is not. Keyed by what decides the
+	// answer — the language and the version asked for — so a second component
+	// wanting the same toolchain reuses the first one's result rather than
+	// probing the machine again; but the line it prints is written per
+	// component, because "component api declares no version" is a statement
+	// about one directory. Logging inside the shared step named whichever
+	// component came first and left the rest unpinned in silence.
+	shared := map[string]*resolution{}
 	for _, req := range reqs {
-		p, ok := probes[req.Ecosystem]
-		if !ok {
-			continue
-		}
-		ambient, present := installed(ctx, p)
-
-		if satisfied(req, ambient, present) {
-			if err := logf(w, "%s: using ambient %s %s (%s)\n",
-				req.Ecosystem, p.bin, display(ambient), declaredBy(req)); err != nil {
+		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
+		got, seen := shared[key]
+		if !seen {
+			resolved, err := resolveOne(ctx, req, ov)
+			if err != nil {
 				return nil, err
 			}
-			// Satisfied is not the same as nothing to do. Go still needs its
-			// toolchain pinned so that installing an external tool cannot
-			// silently switch away from the version just verified — see
-			// pinAmbientGo. This costs no download and is why the branch
-			// doesn't simply `continue`.
-			if req.Ecosystem == detect.Go {
-				if st := pinAmbientGo(req); st != nil {
-					env.Vars = append(env.Vars, st.vars...)
-					if err := logf(w, "%s\n", st.note); err != nil {
-						return nil, err
-					}
-				}
-			}
-			continue
+			got = &resolved
+			shared[key] = got
 		}
-		if ov.Disabled {
-			if err := logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
-				req.Ecosystem, shortfall(req, ambient, present)); err != nil {
-				return nil, err
-			}
-			continue
+		if err := got.log(w, req); err != nil {
+			return nil, err
 		}
-
-		st, err := provision(ctx, req, ambient, present)
-		if err != nil {
-			if logErr := logf(w, "warning: could not provision the %s toolchain (%s): %v — continuing with what is on PATH\n",
-				req.Ecosystem, shortfall(req, ambient, present), err); logErr != nil {
-				return nil, logErr
-			}
-			continue
-		}
-		if st == nil {
-			continue
-		}
-		for _, dir := range st.pathDirs {
-			ensureExecutable(dir)
-		}
-		env.PathDirs = append(env.PathDirs, st.pathDirs...)
-		env.Vars = append(env.Vars, st.vars...)
-		if st.note != "" {
-			if err := logf(w, "%s\n", st.note); err != nil {
-				return nil, err
-			}
+		env := got.env
+		// Only when there is something to apply, so a component with nothing
+		// to add has no entry rather than a nil one — For answers the same
+		// either way, and two shapes for one state is one more than the map
+		// needs.
+		if env != nil {
+			envs[req.Unit.Name] = env
 		}
 	}
-	return env, nil
+	return envs, nil
 }
 
-// provision dispatches to the per-ecosystem provisioner. Each one differs in
+// resolution is what one requirement resolved to: the environment to apply,
+// and enough of how it got there to write the line each component that shares
+// it needs. The message is not stored, because it names the component and the
+// manifest, and those differ between the components sharing this.
+type resolution struct {
+	env *Env
+	// kind is which branch was taken.
+	kind resolutionKind
+	// bin is the probed command's name, ambient its version, present whether
+	// it was there at all.
+	bin, ambient string
+	present      bool
+	// note is the provisioning step's own sentence, which is about the
+	// machine rather than about any component, so it is shared verbatim.
+	note string
+	// noted guards the shared note, so a step that installed something says
+	// so once rather than once per component that reuses it.
+	noted bool
+}
+
+type resolutionKind int
+
+const (
+	// resolutionNone is a language with no probe, so nothing to say.
+	resolutionNone resolutionKind = iota
+	resolutionAmbient
+	resolutionDisabled
+	resolutionFailed
+	resolutionProvisioned
+)
+
+// log writes the line one component needs about this resolution.
+func (r *resolution) log(w io.Writer, req Requirement) error {
+	switch r.kind {
+	case resolutionNone:
+		return nil
+	case resolutionAmbient:
+		if err := logf(w, "%s: using ambient %s %s (%s)\n",
+			req.Lang, r.bin, display(r.ambient), declaredBy(req)); err != nil {
+			return err
+		}
+		// The pin is about the machine rather than any one component, so it
+		// is said once however many components share this toolchain.
+		if r.note == "" || r.noted {
+			return nil
+		}
+		r.noted = true
+		return logf(w, "%s\n", r.note)
+	case resolutionDisabled:
+		return logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
+			req.Lang, shortfall(req, r.ambient, r.present))
+	case resolutionFailed:
+		return logf(w, "warning: could not provision the %s toolchain (%s): %s — continuing with what is on PATH\n",
+			req.Lang, shortfall(req, r.ambient, r.present), r.note)
+	case resolutionProvisioned:
+		// The install happened once, so it is reported once.
+		if r.note == "" || r.noted {
+			return nil
+		}
+		r.noted = true
+		return logf(w, "%s\n", r.note)
+	}
+	return nil
+}
+
+// resolveOne probes for one requirement's toolchain and provisions it if what
+// is present does not satisfy it. It executes and returns what happened; the
+// caller writes the line, because the line names a component and this is
+// shared between every component that wants the same toolchain.
+func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution, error) {
+	p, ok := probes[req.Lang]
+	if !ok {
+		return resolution{}, nil
+	}
+	ambient, present := installed(ctx, p)
+	r := resolution{kind: resolutionAmbient, bin: p.bin, ambient: ambient, present: present}
+
+	if satisfied(req, ambient, present) {
+		// Satisfied is not the same as nothing to do. Go still needs its
+		// toolchain pinned so that installing an external tool cannot
+		// silently switch away from the version just verified — see
+		// pinAmbientGo. This costs no download and is why the branch
+		// doesn't simply return nil.
+		if req.Lang == runner.Go {
+			if st := pinAmbientGo(req); st != nil {
+				// The ambient version is recorded, not applied. It is the only
+				// thing telling two ambient toolchains apart — this branch
+				// contributes no directory and only GOTOOLCHAIN=local, which
+				// names every ambient Go there has ever been — so a caller
+				// caching a tool built under it has nothing else to key on.
+				r.env = &Env{Vars: st.vars, Resolved: display(ambient)}
+				// The pin is about the machine, not about any one component,
+				// so it is said once alongside the per-component line.
+				r.note = st.note
+			}
+		}
+		return r, nil
+	}
+	if ov.Disabled {
+		r.kind = resolutionDisabled
+		return r, nil
+	}
+
+	st, err := provision(ctx, req, ambient, present)
+	if err != nil {
+		r.kind, r.note = resolutionFailed, err.Error()
+		return r, nil
+	}
+	if st == nil {
+		r.kind = resolutionNone
+		return r, nil
+	}
+	for _, dir := range st.pathDirs {
+		ensureExecutable(dir)
+	}
+	r.kind, r.note = resolutionProvisioned, st.note
+	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}
+	return r, nil
+}
+
+// provision dispatches to the per-language provisioner. Each one differs in
 // kind, not just in URL: Go delegates to its own GOTOOLCHAIN mechanism, Rust
 // delegates to rustup, and only Node is downloaded and unpacked by lydite.
 func provision(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
-	switch req.Ecosystem {
-	case detect.Go:
+	switch req.Lang {
+	case runner.Go:
 		return provisionGo(ctx, req, ambient, present)
-	case detect.Rust:
+	case runner.Rust:
 		return provisionRust(ctx, req, ambient, present)
-	case detect.TypeScript:
+	case runner.TypeScript:
 		return provisionNode(ctx, req, ambient, present)
 	default:
 		return nil, nil
@@ -238,6 +418,13 @@ func declaredBy(req Requirement) string {
 	if req.Unpinned() {
 		if req.Raw != "" {
 			return fmt.Sprintf("%s declares the %q channel", req.Source, req.Raw)
+		}
+		// Named, because with one toolchain per component "nothing is
+		// declared" is a statement about one directory rather than about the
+		// repository — and for Go it is also the reason GOTOOLCHAIN goes
+		// unpinned, which is otherwise the quietest thing this package does.
+		if req.Unit.Name != "" {
+			return fmt.Sprintf("component %s declares no version", req.Unit.Name)
 		}
 		return "no version declared by this repo"
 	}

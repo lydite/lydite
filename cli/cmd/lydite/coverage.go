@@ -20,6 +20,7 @@ import (
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -99,7 +100,7 @@ func langOf(c component.Component) runner.Lang {
 // instead would drop it from the language and global figures silently, leaving
 // a gate that covered fewer components than the repository has reading as a
 // complete one.
-func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, instrument bool) measurement {
+func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, tc *toolchain.Env, instrument bool) measurement {
 	switch {
 	case !instrument:
 		return unmeasuredComponent(c, "coverage is off for this run")
@@ -108,7 +109,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	case inv.CoverageReport == "":
 		return unmeasurableComponent(c, "the runner's instrumented variant names no coverage report")
 	}
-	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c))
+	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c), childEnv(tc, c, runner.Invocation{}))
 	if err != nil {
 		return unmeasuredComponent(c, err.Error())
 	}
@@ -508,7 +509,28 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// asked for, and adding them to this run's report would put a second set
 	// of component rows beside the ones the reader is looking at.
 	scratch := ui.NewReport("baseline")
-	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, opts.Concurrency, false, true, scratch)
+	// The base tree's own toolchains, from its own declaration and its own
+	// config. A component this change adds did not exist there, and one whose
+	// engines.node this change raises needs the version the base tree asked
+	// for — measuring it under the branch's would be measuring a tree that
+	// never existed.
+	//
+	// A failure here warns and measures with what is on PATH rather than
+	// ending the run. The only thing that can fail is a `toolchain.go` or
+	// `toolchain.node` override the base tree wrote and lydite cannot parse,
+	// and the author of a historical tree is not being addressed and cannot
+	// act — the argument config.LoadHistorical is built on, which erroring
+	// here would undo one layer up. The branch's own override is still
+	// checked, by the resolution this run did for itself, so a repository
+	// carrying a bad value is told about it exactly once and on the tree
+	// whose author can fix it.
+	envs, err := ensureToolchains(ctx, cmd, root, baseCfg, componentUnits(decl))
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: could not resolve the base tree's toolchains (%v) — measuring it with what is on PATH\n", err)
+		envs = nil
+	}
+	ms := runComponents(ctx, root, decl.Components, nil, nil, baseCfg, envs, opts.Concurrency, false, true, scratch)
 
 	// The worktree — and every log written into it — is removed on the way
 	// out, so the tail under a failing row is the only account of what went

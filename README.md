@@ -46,7 +46,7 @@ version with `LYDITE_VERSION=1.2.3 curl ... | sh`. Update in place any time with
 ## Usage
 
 ```sh
-lydite scan --dir .          # run every check for every ecosystem detected under --dir (default ".")
+lydite scan --dir .          # run every check over every declared component (default ".")
 lydite test --dir .          # run each declared component's test suite, services and all
 lydite version
 lydite update                 # self-update to the latest release
@@ -121,22 +121,25 @@ Components are declared rather than discovered, because the declaration is the r
 statement of what gets tested and its history is the record of every change to that. See
 [ADR 0016](docs/adr/0016-components-and-lydite-run-tests.md).
 
+**The declaration is what `lydite scan` reads too.** A component names a runner, the runner
+implies a language, and its `dir` is where that language's checks run — nothing walks the tree
+for manifests. A repository that declares no components is one `lydite scan` refuses to run over
+rather than one it reports as clean; source no component's checks reach is named on stderr. See
+[ADR 0020](docs/adr/0020-scan-on-components.md).
+
 ## Configuration
 
-`.lydite/config.yml` at the repo root is optional — the default (no file) is to scan everything
-detected with every check enabled. Use it to disable a language entirely, exclude a path from
-detection, point Semgrep at a custom ruleset, or set the coverage gates' knobs:
+`.lydite/config.yml` at the repo root is optional — the default (no file) is to run every check
+over every declared component. Use it to disable a language entirely, point Semgrep at a custom
+ruleset, or set the coverage gates' knobs:
 
 ```yaml
 rust:
-  enabled: true
-  exclude: []
+  enabled: true       # false runs no Rust check over any Rust component
 typescript:
   enabled: true
-  exclude: ["legacy-app"]
 go:
   enabled: true
-  exclude: []
 semgrep:
   enabled: true
   config: auto

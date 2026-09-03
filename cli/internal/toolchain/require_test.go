@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"lydite/lydite/internal/detect"
+	"lydite/lydite/internal/runner"
 )
 
 func write(t *testing.T, dir, rel, contents string) {
@@ -20,9 +20,15 @@ func write(t *testing.T, dir, rel, contents string) {
 	}
 }
 
-func requireOne(t *testing.T, root string, e detect.Ecosystem, ov Overrides) Requirement {
+func requireOne(t *testing.T, root string, e runner.Lang, ov Overrides) Requirement {
 	t.Helper()
-	reqs, err := Requirements(root, []detect.Ecosystem{e}, ov)
+	return requireAt(t, root, ".", e, ov)
+}
+
+// requireAt resolves the requirement for one component rooted at dir.
+func requireAt(t *testing.T, root, dir string, e runner.Lang, ov Overrides) Requirement {
+	t.Helper()
+	reqs, err := Requirements(root, []Unit{{Name: "c", Lang: e, Dir: dir}}, ov)
 	if err != nil {
 		t.Fatalf("Requirements: %v", err)
 	}
@@ -36,7 +42,7 @@ func TestGoRequirementReadsGoDirective(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
 
-	got := requireOne(t, dir, detect.Go, Overrides{})
+	got := requireOne(t, dir, runner.Go, Overrides{})
 	if got.Version != "v1.26.4" {
 		t.Errorf("Version = %q, want v1.26.4", got.Version)
 	}
@@ -52,28 +58,47 @@ func TestGoRequirementPrefersHigherToolchainDirective(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n\ntoolchain go1.26.5\n")
 
-	if got := requireOne(t, dir, detect.Go, Overrides{}).Version; got != "v1.26.5" {
+	if got := requireOne(t, dir, runner.Go, Overrides{}).Version; got != "v1.26.5" {
 		t.Errorf("Version = %q, want v1.26.5 (the toolchain directive)", got)
 	}
 }
 
-// The regression gt's reverted setup-go step would have shipped: looking for
-// go.mod at exactly one path finds nothing in a monorepo whose modules live in
-// subdirectories, and the toolchain silently stays whatever the image had.
-// Every module is read, and the highest version wins — the newer toolchain can
-// build the older module, never the reverse.
-func TestGoRequirementSpansEveryModuleAndTakesTheHighest(t *testing.T) {
+// A module in a subdirectory is read at that subdirectory: the scan root of a
+// monorepo holds no go.mod at all, and looking for one there would leave the
+// toolchain as whatever the image happened to ship.
+func TestGoRequirementReadsTheComponentsOwnModule(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "README.md", "no go.mod at the scan root")
-	write(t, filepath.Join(dir, "wctl"), "go.mod", "module a\n\ngo 1.25.0\n")
 	write(t, filepath.Join(dir, "sdk", "wardnet-go"), "go.mod", "module b\n\ngo 1.26.4\n")
 
-	got := requireOne(t, dir, detect.Go, Overrides{})
+	got := requireAt(t, dir, "sdk/wardnet-go", runner.Go, Overrides{})
 	if got.Version != "v1.26.4" {
-		t.Errorf("Version = %q, want v1.26.4 (the newer of the two modules)", got.Version)
+		t.Errorf("Version = %q, want v1.26.4", got.Version)
 	}
-	if got.Source != filepath.Join("sdk", "wardnet-go")+"/go.mod" {
+	if got.Source != "sdk/wardnet-go/go.mod" {
 		t.Errorf("Source = %q, want it to name the module the version came from", got.Source)
+	}
+}
+
+// Two components, two answers. A single pass over every go.mod has to reduce
+// them to one, and the rule it reduces by is one neither module stated.
+func TestEachComponentGetsItsOwnGoVersion(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "wctl"), "go.mod", "module a\n\ngo 1.25.0\n")
+	write(t, filepath.Join(dir, "sdk"), "go.mod", "module b\n\ngo 1.26.4\n")
+
+	reqs, err := Requirements(dir, []Unit{
+		{Name: "wctl", Lang: runner.Go, Dir: "wctl"},
+		{Name: "sdk", Lang: runner.Go, Dir: "sdk"},
+	}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requirements, want one per component", len(reqs))
+	}
+	if reqs[0].Version != "v1.25.0" || reqs[1].Version != "v1.26.4" {
+		t.Fatalf("versions = %q, %q; want each component its own module's", reqs[0].Version, reqs[1].Version)
 	}
 }
 
@@ -81,7 +106,7 @@ func TestGoRequirementUnpinnedWithoutDirective(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n")
 
-	if got := requireOne(t, dir, detect.Go, Overrides{}); !got.Unpinned() {
+	if got := requireOne(t, dir, runner.Go, Overrides{}); !got.Unpinned() {
 		t.Errorf("a go.mod with no go directive should be unpinned, got %+v", got)
 	}
 }
@@ -93,7 +118,7 @@ func TestGoRequirementToleratesUnparseableGoMod(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "this is not a go.mod at all {{{\n")
 
-	got := requireOne(t, dir, detect.Go, Overrides{})
+	got := requireOne(t, dir, runner.Go, Overrides{})
 	if !got.Unpinned() {
 		t.Errorf("an unparseable go.mod should be unpinned, got %+v", got)
 	}
@@ -104,7 +129,7 @@ func TestRustRequirementReadsToml(t *testing.T) {
 	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
 	write(t, dir, "rust-toolchain.toml", "[toolchain]\nchannel = \"1.96\"\ncomponents = [\"clippy\"]\n")
 
-	got := requireOne(t, dir, detect.Rust, Overrides{})
+	got := requireOne(t, dir, runner.Rust, Overrides{})
 	if got.Version != "v1.96" {
 		t.Errorf("Version = %q, want v1.96", got.Version)
 	}
@@ -118,7 +143,7 @@ func TestRustRequirementReadsLegacyBareFile(t *testing.T) {
 	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
 	write(t, dir, "rust-toolchain", "1.94.0\n")
 
-	if got := requireOne(t, dir, detect.Rust, Overrides{}).Version; got != "v1.94.0" {
+	if got := requireOne(t, dir, runner.Rust, Overrides{}).Version; got != "v1.94.0" {
 		t.Errorf("Version = %q, want v1.94.0", got)
 	}
 }
@@ -131,7 +156,7 @@ func TestRustRequirementTomlWinsOverLegacyFile(t *testing.T) {
 	write(t, dir, "rust-toolchain.toml", "[toolchain]\nchannel = \"1.96\"\n")
 	write(t, dir, "rust-toolchain", "1.80.0\n")
 
-	if got := requireOne(t, dir, detect.Rust, Overrides{}).Version; got != "v1.96" {
+	if got := requireOne(t, dir, runner.Rust, Overrides{}).Version; got != "v1.96" {
 		t.Errorf("Version = %q, want v1.96 from rust-toolchain.toml", got)
 	}
 }
@@ -144,7 +169,7 @@ func TestRustRequirementNamedChannelIsUnpinnedButRemembered(t *testing.T) {
 	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
 	write(t, dir, "rust-toolchain.toml", "[toolchain]\nchannel = \"stable\"\n")
 
-	got := requireOne(t, dir, detect.Rust, Overrides{})
+	got := requireOne(t, dir, runner.Rust, Overrides{})
 	if !got.Unpinned() {
 		t.Errorf("a stable channel should be unpinned, got %+v", got)
 	}
@@ -171,7 +196,7 @@ func TestNodeRequirementReadsEngines(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "package.json", `{"name":"x","engines":{"node":">=22.11.0"}}`)
 
-	got := requireOne(t, dir, detect.TypeScript, Overrides{})
+	got := requireOne(t, dir, runner.TypeScript, Overrides{})
 	if got.Version != "v22.11.0" {
 		t.Errorf("Version = %q, want v22.11.0", got.Version)
 	}
@@ -185,33 +210,51 @@ func TestNodeRequirementFallsBackToNvmrc(t *testing.T) {
 	write(t, dir, "package.json", `{"name":"x"}`)
 	write(t, dir, ".nvmrc", "22.11.0\n")
 
-	if got := requireOne(t, dir, detect.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+	if got := requireOne(t, dir, runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
 		t.Errorf("Version = %q, want v22.11.0 from .nvmrc", got)
 	}
 }
 
 // A monorepo conventionally keeps one .nvmrc at the top rather than one per
-// package, so the scan root is consulted even when no package declares
-// anything.
-func TestNodeRequirementUsesRootNvmrcForNestedPackages(t *testing.T) {
+// package, so the scan root is consulted when the component declares nothing.
+func TestNodeRequirementFallsBackToTheRootNvmrc(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, ".nvmrc", "v22.11.0\n")
 	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web"}`)
 
-	if got := requireOne(t, dir, detect.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
 		t.Errorf("Version = %q, want v22.11.0 from the root .nvmrc", got)
 	}
 }
 
-// One Node runtime has to serve every package, so the highest floor any of
-// them declares is the one that must be installed.
-func TestNodeRequirementTakesHighestAcrossPackages(t *testing.T) {
+// A component that states its own version is never overruled by the root's.
+func TestComponentsOwnEnginesBeatsTheRootNvmrc(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "a"), "package.json", `{"name":"a","engines":{"node":">=20"}}`)
-	write(t, filepath.Join(dir, "b"), "package.json", `{"name":"b","engines":{"node":">=22"}}`)
+	write(t, dir, ".nvmrc", "v18.0.0\n")
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":">=22.11.0"}}`)
 
-	if got := requireOne(t, dir, detect.TypeScript, Overrides{}).Version; got != "v22" {
-		t.Errorf("Version = %q, want v22 (the highest floor)", got)
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want the component's own v22.11.0", got)
+	}
+}
+
+// The gap this unit closes. Read across every package.json, a workspace
+// needing Node 22 and a tools package pinning 18 collapse to one runtime,
+// chosen by a rule neither of them stated. Per component they keep their own.
+func TestEachComponentGetsItsOwnNodeVersion(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "tools"), "package.json", `{"name":"a","engines":{"node":">=18"}}`)
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"b","engines":{"node":">=22"}}`)
+
+	reqs, err := Requirements(dir, []Unit{
+		{Name: "tools", Lang: runner.TypeScript, Dir: "tools"},
+		{Name: "web", Lang: runner.TypeScript, Dir: "web"},
+	}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 2 || reqs[0].Version != "v18" || reqs[1].Version != "v22" {
+		t.Fatalf("versions = %+v, want v18 for tools and v22 for web", reqs)
 	}
 }
 
@@ -219,7 +262,7 @@ func TestOverrideBeatsManifest(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
 
-	got := requireOne(t, dir, detect.Go, Overrides{Go: "1.27.0"})
+	got := requireOne(t, dir, runner.Go, Overrides{Go: "1.27.0"})
 	if got.Version != "v1.27.0" {
 		t.Errorf("Version = %q, want the override v1.27.0", got.Version)
 	}
@@ -237,7 +280,7 @@ func TestBadOverrideIsAnErrorNotASilentDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
 
-	_, err := Requirements(dir, []detect.Ecosystem{detect.Go}, Overrides{Go: "1.26.x"})
+	_, err := Requirements(dir, []Unit{{Name: "c", Lang: runner.Go, Dir: "."}}, Overrides{Go: "1.26.x"})
 	if err == nil {
 		t.Fatal("an unparseable toolchain.go override was accepted")
 	}
@@ -253,7 +296,7 @@ func TestBadNodeOverrideNamesTheNodeKey(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "package.json", `{"name":"x"}`)
 
-	_, err := Requirements(dir, []detect.Ecosystem{detect.TypeScript}, Overrides{Node: "lts/*"})
+	_, err := Requirements(dir, []Unit{{Name: "c", Lang: runner.TypeScript, Dir: "."}}, Overrides{Node: "lts/*"})
 	if err == nil {
 		t.Fatal("an unparseable toolchain.node override was accepted")
 	}
@@ -269,7 +312,7 @@ func TestRustOverrideAcceptsANamedChannel(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
 
-	got := requireOne(t, dir, detect.Rust, Overrides{Rust: "nightly"})
+	got := requireOne(t, dir, runner.Rust, Overrides{Rust: "nightly"})
 	if !got.Unpinned() {
 		t.Errorf("a nightly override should be unpinned, got %+v", got)
 	}
@@ -289,23 +332,113 @@ func TestManifestSourcedRequirementIsNotMarkedOverridden(t *testing.T) {
 	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
 	write(t, dir, "rust-toolchain.toml", "[toolchain]\nchannel = \"1.96\"\n")
 
-	if got := requireOne(t, dir, detect.Rust, Overrides{}); got.Overridden {
+	if got := requireOne(t, dir, runner.Rust, Overrides{}); got.Overridden {
 		t.Error("a manifest-sourced requirement must not be marked Overridden")
 	}
 }
 
-// Requirements is scoped to what the caller detected: a Go-only repo must
-// never read a package.json or provision Node.
-func TestRequirementsOnlyCoversRequestedEcosystems(t *testing.T) {
+// Requirements is scoped to what the declaration names: a repository whose
+// only component is Go must never read a package.json or provision Node,
+// however many package.json files happen to sit in the tree.
+func TestRequirementsOnlyCoversDeclaredComponents(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
 	write(t, dir, "package.json", `{"name":"x","engines":{"node":">=22"}}`)
 
-	reqs, err := Requirements(dir, []detect.Ecosystem{detect.Go}, Overrides{})
+	reqs, err := Requirements(dir, []Unit{{Name: "c", Lang: runner.Go, Dir: "."}}, Overrides{})
 	if err != nil {
 		t.Fatalf("Requirements: %v", err)
 	}
-	if len(reqs) != 1 || reqs[0].Ecosystem != detect.Go {
+	if len(reqs) != 1 || reqs[0].Lang != runner.Go {
 		t.Fatalf("got %+v, want only the go requirement", reqs)
+	}
+}
+
+// engines.node and a .nvmrc beside it are different statements, not a
+// precedence order: ">=18" is the floor the package supports and a .nvmrc of
+// 22 is the version it is developed on. Taking the first one found would run
+// the suite on 18 in a repository that pins 22, silently.
+func TestNodeRequirementTakesTheHigherOfEnginesAndNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":">=18"}}`)
+	write(t, filepath.Join(dir, "web"), ".nvmrc", "22.11.0\n")
+
+	got := requireAt(t, dir, "web", runner.TypeScript, Overrides{})
+	if got.Version != "v22.11.0" {
+		t.Errorf("Version = %q, want v22.11.0 — the higher of the two the component states", got.Version)
+	}
+}
+
+// An engines.node that pins nothing ("*", "latest") must not swallow the
+// .nvmrc beside it: it states no floor, so it cannot be the answer when
+// something next to it does.
+func TestAnUnpinnedEnginesDoesNotHideTheNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":"*"}}`)
+	write(t, filepath.Join(dir, "web"), ".nvmrc", "22.11.0\n")
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want the .nvmrc's v22.11.0", got)
+	}
+}
+
+// An engines.node that pins nothing must not suppress the scan root's .nvmrc
+// either. Keying the early return on having said *something* rather than on
+// having said something comparable leaves the component unpinned in a
+// repository that names a version one directory up.
+func TestAnUnpinnedEnginesDoesNotHideTheRootNvmrc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22.11.0\n")
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":"*"}}`)
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want the root .nvmrc's v22.11.0", got)
+	}
+}
+
+// The shape most monorepos have: a package states the floor it supports and
+// the repository states the version it is developed on. Returning the
+// component's floor resolves to 18, which an ambient Node 18 then satisfies —
+// so 22 is never provisioned in a repository that pins it.
+func TestARootNvmrcRaisesAComponentsFloor(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22.11.0\n")
+	write(t, filepath.Join(dir, "web"), "package.json", `{"name":"web","engines":{"node":">=18"}}`)
+
+	if got := requireAt(t, dir, "web", runner.TypeScript, Overrides{}).Version; got != "v22.11.0" {
+		t.Errorf("Version = %q, want v22.11.0: the highest floor anything states", got)
+	}
+}
+
+// A Go component declared below its module root is an ordinary shape for
+// scanning: gosec and govulncheck run there perfectly well, being inside that
+// module. Reading only the component's own directory left it unpinned, so
+// GOTOOLCHAIN stayed at `auto` and `go install` could switch to an older
+// toolchain — under a scan that reported a pass.
+func TestGoRequirementReadsTheNearestEnclosingModule(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.26.4\n")
+	write(t, filepath.Join(dir, "services", "api"), "main.go", "package main\n")
+
+	got := requireAt(t, dir, "services/api", runner.Go, Overrides{})
+	if got.Version != "v1.26.4" {
+		t.Errorf("Version = %q, want the enclosing module's v1.26.4", got.Version)
+	}
+	if got.Source != "go.mod" {
+		t.Errorf("Source = %q, want the module the version came from", got.Source)
+	}
+}
+
+// The search stops at the scan root. A go.mod above the tree lydite was
+// pointed at belongs to something else, and reading it would pin a run by a
+// declaration outside its own repository.
+func TestGoRequirementDoesNotClimbAboveTheScanRoot(t *testing.T) {
+	outer := t.TempDir()
+	write(t, outer, "go.mod", "module outer\n\ngo 1.28.0\n")
+	root := filepath.Join(outer, "inner")
+	write(t, filepath.Join(root, "svc"), "main.go", "package main\n")
+
+	if got := requireAt(t, root, "svc", runner.Go, Overrides{}); !got.Unpinned() {
+		t.Errorf("requirement = %+v, want unpinned: the only go.mod is outside the scan root", got)
 	}
 }

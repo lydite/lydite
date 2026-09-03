@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,109 @@ func TestRunQuietKeepsStderrOutOfOutput(t *testing.T) {
 	}
 	if strings.TrimSpace(r.Stderr) != "noise" {
 		t.Errorf("Stderr = %q, want the stderr text kept separately", r.Stderr)
+	}
+}
+
+// os/exec resolves a bare program name against *this* process's PATH when the
+// command is constructed; cmd.Env is applied afterwards and has no say in it.
+// Without resolving here, a toolchain lydite provisioned and put on the
+// child's PATH is one the child could use and the lookup cannot find — `npm
+// ci: executable file not found in $PATH`, moments after lydite reported
+// installing the Node that holds it.
+func TestRunFindsABinaryOnlyOnTheChildsPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "lydite-only-here")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { //nolint:gosec // a test fixture that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+
+	res := RunQuietEnv(context.Background(), "", []string{"PATH=" + dir}, "lydite-only-here")
+	if !res.Ok() {
+		t.Fatalf("a binary on the child's PATH was not found: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "found") {
+		t.Errorf("output = %q, want the child's own", res.Output)
+	}
+}
+
+// A name no PATH entry holds is handed to os/exec untouched, so the failure
+// stays its own message naming the program the caller asked for rather than a
+// path lydite invented.
+func TestResolveLeavesAnUnfoundNameAlone(t *testing.T) {
+	if got := resolve("", "definitely-not-a-program", []string{"PATH=/nonexistent"}); got != "definitely-not-a-program" {
+		t.Errorf("resolve = %q, want the name unchanged", got)
+	}
+}
+
+// An absolute path is what every pinned scanner is invoked by, and rewriting
+// one against PATH could only find a different binary of the same name.
+func TestResolveLeavesAPathAlone(t *testing.T) {
+	want := filepath.Join(string(os.PathSeparator), "usr", "bin", "env")
+	if got := resolve("", want, []string{"PATH=/nonexistent"}); got != want {
+		t.Errorf("resolve = %q, want %q", got, want)
+	}
+}
+
+// A relative PATH entry is relative to the child's working directory, not to
+// lydite's. A JavaScript component declaring `PATH: node_modules/.bin` means
+// its own node_modules, and resolving from here would find the wrong binary in
+// a monorepo — or none, and then hand os/exec a bare name it looks up on a
+// PATH the entry was never part of.
+func TestResolveReadsARelativePathEntryFromTheChildsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "tools", "lydite-relative")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { //nolint:gosec // a test fixture that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+
+	if got := resolve(dir, "lydite-relative", []string{"PATH=tools"}); got != bin {
+		t.Errorf("resolve = %q, want %q", got, bin)
+	}
+	// Absolute, and this is the half an absolute `dir` cannot show: exec.Cmd
+	// evaluates a relative Path against Dir, so returning the joined relative
+	// path would apply dir twice and look for `web/web/tools/x`.
+	if !filepath.IsAbs(resolve(dir, "lydite-relative", []string{"PATH=tools"})) {
+		t.Error("resolve returned a relative path, which exec would resolve against Dir a second time")
+	}
+	// From anywhere else the same entry names nothing, and the bare name is
+	// what os/exec should report on.
+	if got := resolve(t.TempDir(), "lydite-relative", []string{"PATH=tools"}); got != "lydite-relative" {
+		t.Errorf("resolve = %q, want the name unchanged where the entry holds nothing", got)
+	}
+}
+
+// The failure a test passing an absolute directory cannot see: with a relative
+// `dir` — which is what `--dir .` and the documented `--dir ..` give — a
+// relative PATH entry has to be joined once, not applied twice by exec.
+func TestARelativeWorkingDirectoryResolvesARelativePathEntryOnce(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "web", "tools"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(base, "web", "tools", "lydite-rel-run")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { //nolint:gosec // a test fixture that has to be executable
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(base); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+
+	res := RunQuietEnv(context.Background(), "web", []string{"PATH=tools"}, "lydite-rel-run")
+	if !res.Ok() {
+		t.Fatalf("a binary on the child's relative PATH was not found: %v", res.Err)
+	}
+	if !strings.Contains(res.Output, "found") {
+		t.Errorf("output = %q, want the child's own", res.Output)
 	}
 }

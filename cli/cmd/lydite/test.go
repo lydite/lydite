@@ -24,13 +24,13 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -137,10 +137,11 @@ the component's to declare.`,
 			// pinned, which is the whole reason internal/toolchain touches Go
 			// at all.
 			//
-			// It cannot be inherited from a `lydite scan` earlier in the same
-			// job: the result is applied with process-local os.Setenv, so it
-			// leaves with that process.
-			if err := ensureToolchains(ctx, cmd, dir, cfg, componentEcosystems(file)); err != nil {
+			// It is resolved here rather than inherited from a `lydite scan`
+			// earlier in the same job: the result is a value handed to each
+			// component's own commands, not a change to this process.
+			envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(file))
+			if err != nil {
 				return err
 			}
 			// Empty unless selection ran: with no skipped components the
@@ -222,7 +223,7 @@ the component's to declare.`,
 				return renderTestReport(cmd, rep, asJSON, noColor)
 			}
 
-			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, limit, stream, cov.Instrument, rep)
+			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep)
 			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
 			return renderTestReport(cmd, rep, asJSON, noColor)
 		},
@@ -341,7 +342,7 @@ type componentPlan struct {
 // a truncation visible only in the process exit code is a truncation the PR
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
-func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, limit int, stream, instrument bool, rep *ui.Report) []measurement {
+func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report) []measurement {
 	plans := planComponents(ctx, root, selected, stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -375,7 +376,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 
 	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
 		i := index[k]
-		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, instrument)
+		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, envs.For(plans[i].c.Name), instrument)
 	})
 
 	// A cancelled run kills every suite it had started, so each one exits
@@ -601,7 +602,7 @@ func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, lim
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, instrument bool) (row ui.Row, m measurement) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, tc *toolchain.Env, instrument bool) (row ui.Row, m measurement) {
 	c, log := p.c, p.log
 	label := "test(" + c.Name + ")"
 	m = unmeasuredComponent(c, "the component did not run")
@@ -623,7 +624,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 			return failure(label, log, err.Error(), "not runnable", ""), m
 		}
 	}
-	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, log); !ok {
+	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, tc, log); !ok {
 		return prepared, m
 	}
 
@@ -638,7 +639,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	defer func() {
 		// Teardown gets a context of its own, because the run's may already
 		// be cancelled and a cancelled teardown is the leak this prevents.
-		failed, ok := runCommands(context.WithoutCancel(ctx), dir, label, c, "teardown", c.Teardown, log)
+		failed, ok := runCommands(context.WithoutCancel(ctx), dir, label, c, tc, "teardown", c.Teardown, log)
 		// A failing teardown turns a passing component into a failing one —
 		// it has left state behind that the next run will inherit — but it
 		// never masks a failure that already happened, because the earlier
@@ -648,11 +649,11 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		}
 	}()
 
-	if failed, ok := runCommands(ctx, dir, label, c, "setup", c.Setup, log); !ok {
+	if failed, ok := runCommands(ctx, dir, label, c, tc, "setup", c.Setup, log); !ok {
 		return failed, m
 	}
 
-	if res := executil.RunOutput(ctx, dir, append(env(c), inv.Env...), log.out, inv.Name, inv.Args...); !res.Ok() {
+	if res := executil.RunOutput(ctx, dir, childEnv(tc, c, inv), log.out, inv.Name, inv.Args...); !res.Ok() {
 		// No measurement from a suite that failed. A report written by a run
 		// that did not finish describes the tests that got as far as running,
 		// and gating on it would let a broken suite record a baseline nothing
@@ -660,7 +661,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output),
 			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
 	}
-	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, instrument)
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, tc, instrument)
 }
 
 // ignoreReports keeps lydite's own output out of git, by writing a `.gitignore`
@@ -1038,10 +1039,15 @@ func startServices(ctx context.Context, p componentPlan, label string) (func(), 
 //
 // Through a shell, because these are free-form and repository-authored: a
 // migration is `make migrate && ./seed.sh`, which argv cannot express.
-func runCommands(ctx context.Context, dir, label string, c component.Component, kind string, cmds []string, log *componentLog) (ui.Row, bool) {
+func runCommands(ctx context.Context, dir, label string, c component.Component, tc *toolchain.Env, kind string, cmds []string, log *componentLog) (ui.Row, bool) {
 	for _, cmd := range cmds {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- the command comes from the scanned repository's own component declaration, authored by whoever configured lydite for that repo, not from remote input
-		if res := executil.RunOutput(ctx, dir, env(c), log.out, "sh", "-c", cmd); !res.Ok() {
+		// An empty invocation: a setup command gets the component's toolchain
+		// and its declared environment, and not the pinned runner's directory.
+		// It is the repository's own shell, not lydite's runner — a migration
+		// or a seed script has no business finding `cargo nextest` on PATH
+		// because lydite is about to run one.
+		if res := executil.RunOutput(ctx, dir, childEnv(tc, c, runner.Invocation{}), log.out, "sh", "-c", cmd); !res.Ok() {
 			return failure(label, log, cmd+" failed in "+c.Dir, kind+" failed", res.Output), false
 		}
 	}
@@ -1055,12 +1061,16 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 // tests rather than the absent dependencies, and a Rust one without its pinned
 // runner fails with `no such command` — the same misattribution a suite run
 // without its database produces, and the same reason to stop first.
-func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c component.Component, cfg config.Config, log *componentLog) (ui.Row, bool) {
+func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c component.Component, cfg config.Config, tc *toolchain.Env, log *componentLog) (ui.Row, bool) {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
 	}
-	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, log.out); err != nil {
+	// Two environments, because two different people's software gets
+	// installed here: the repository's dependencies with what the repository
+	// declared, and lydite's pinned runners with lydite's toolchain alone.
+	env := executil.Env{Check: childEnv(tc, c, inv), Install: tc.Environ()}
+	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, env, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
 			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
@@ -1088,12 +1098,75 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 	return inv, nil
 }
 
+// childEnv is the environment one of a component's commands runs with: the
+// invocation's own pinned-tool directories ahead of the component's resolved
+// toolchain on PATH, then the component's declared variables, and the
+// toolchain's last of all.
+//
+// One function, and one PATH entry, because a child's environment is a flat
+// list where the last occurrence of a key wins — two callers each prepending
+// their own directories produce two PATH entries and one of them is silently
+// dropped, which is invisible in argv and in every log. The pinned tool goes
+// first on PATH because it is the more specific of the two.
+//
+// **The toolchain's variables go last, so they win**, and the ordering is the
+// whole of the rule: a component declaring `GOTOOLCHAIN: auto` would otherwise
+// cancel the `GOTOOLCHAIN=local` pinAmbientGo exists to set, reinstating the
+// `go install` downgrade that made govulncheck reject the source it was
+// pointed at — with every run still green. A repository states how its own
+// code builds; lydite states which toolchain builds it. Reordering these
+// arguments is that regression, so the inline comment at the return says it
+// again where the change would be made.
+//
+// A PATH the component declares is folded into that one entry rather than set
+// as a variable of its own — it is the single key a component cannot simply
+// state, because the composed entry would always be the later of the two and
+// would win outright.
+//
+// It is appended **after** the inherited PATH, and that is the security
+// boundary rather than a preference. lydite resolves a program against the
+// environment it hands the child, so a declared directory placed ahead of the
+// inherited one would let `.lydite/components.yml` decide which `go`, `cargo`,
+// `npm` or `sh` lydite itself launches: a repository shipping `ci-bin/go` and
+// declaring `env: {PATH: ci-bin}` would have `lydite scan` run that binary to
+// install gosec, on a runner where the ambient toolchain was already verified.
+// A component may extend the path its suite runs with; it may not choose the
+// toolchain lydite runs. Ordering keeps the useful case — a helper that exists
+// nowhere else is still found — and removes the shadowing one.
+func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) []string {
+	dirs := append([]string{}, inv.PathDirs...)
+	if tc != nil {
+		dirs = append(dirs, tc.PathDirs...)
+	}
+	declared, vars := splitPath(env(c))
+	if tc == nil {
+		return toolchain.Compose(dirs, declared, vars)
+	}
+	// tc.Vars last, so they win: see the ordering rule above. Swapping these
+	// two lets a declared GOTOOLCHAIN cancel the pin, and nothing goes red.
+	return toolchain.Compose(dirs, declared, vars, tc.Vars)
+}
+
+// splitPath separates a PATH a component declared into its directories,
+// returning the remaining variables untouched. The last PATH wins, matching
+// how a process reads duplicate keys out of its own environment.
+func splitPath(declared []string) (dirs, vars []string) {
+	path := ""
+	for _, kv := range declared {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+			continue
+		}
+		vars = append(vars, kv)
+	}
+	if path == "" {
+		return nil, vars
+	}
+	return filepath.SplitList(path), vars
+}
+
 // env renders a component's declared environment as the "KEY=value" entries
 // executil appends to the child's own.
-//
-// An invocation's own Env is appended after this, so a pinned tool's PATH wins
-// over a component's: the component says what its suite needs, and lydite says
-// which build of the runner runs it.
 func env(c component.Component) []string {
 	if len(c.Env) == 0 {
 		return nil
@@ -1109,34 +1182,22 @@ func env(c component.Component) []string {
 	return out
 }
 
-// componentEcosystems is the set of language toolchains this declaration needs,
-// read from the components rather than from a walk of the tree.
+// componentUnits is what each declared component needs a toolchain for, in
+// declaration order.
 //
-// The declaration is the better source and is the direction the rest of this
-// change goes: a repository with a vendored Cargo.toml no component builds
-// needs no Rust toolchain, and detection would provision one. It is also every
-// declared component and not only the selected ones — narrowing here would make
-// which toolchains a run provisions depend on which components it happened to
-// choose, so two runs of one repository would prepare differently.
-func componentEcosystems(file component.File) []detect.Ecosystem {
-	byLang := map[runner.Lang]detect.Ecosystem{
-		runner.Go:         detect.Go,
-		runner.Rust:       detect.Rust,
-		runner.TypeScript: detect.TypeScript,
-	}
-	seen := map[detect.Ecosystem]bool{}
-	var out []detect.Ecosystem
-	// In detect.Ecosystems' own order, so two runs of one declaration
-	// provision in the same order and say so in the same order.
-	for _, e := range []detect.Ecosystem{detect.Rust, detect.TypeScript, detect.Go} {
-		for _, c := range file.Components {
-			r, ok := runner.Lookup(c.Runner)
-			if !ok || byLang[r.Lang] != e || seen[e] {
-				continue
-			}
-			seen[e] = true
-			out = append(out, e)
+// Every declared component and not only the selected ones: narrowing here
+// would make which toolchains a run provisions depend on which components it
+// happened to choose, so two runs of one repository would prepare
+// differently. A component declaring its own command implies no language and
+// needs nothing.
+func componentUnits(file component.File) []toolchain.Unit {
+	var out []toolchain.Unit
+	for _, c := range file.Components {
+		lang := langOf(c)
+		if lang == "" {
+			continue
 		}
+		out = append(out, toolchain.Unit{Name: c.Name, Lang: lang, Dir: c.Dir})
 	}
 	return out
 }

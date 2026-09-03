@@ -6,37 +6,29 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/toolchain"
 )
 
-// ensureToolchains makes each detected ecosystem's language toolchain
-// available at the version the repo declares, and applies the result to this
-// process so every scanner and coverage command launched afterwards sees it.
+// ensureToolchains makes each unit's language toolchain available at the
+// version its own directory declares, and returns the environment every
+// command run for that component needs.
 //
-// Called by both `scan` and `coverage`, and in both cases before any tool
-// runs: `scan` shells out to cargo/go/npx, and `coverage` shells out to `go
-// test`, `cargo llvm-cov` and a package's `test:coverage`. Wiring it into the
-// two command entry points rather than into each internal package keeps it to
-// one call site per command and means the resolution happens exactly once per
-// invocation, not once per discovered module.
+// Called by both `scan` and `test`, and in both cases before any tool runs.
+// Wiring it into the two command entry points rather than into each internal
+// package keeps it to one call site per command, and means the resolution
+// happens once per invocation rather than once per component that shares a
+// requirement.
 //
-// Only *enabled* ecosystems are passed. A language turned off in .lydite/config.yml
-// is one whose tools will never run, so provisioning a toolchain for it would
-// be a download in service of nothing — and on a repo that disabled Rust
-// precisely because its runner has no Rust, an actively unhelpful one.
+// The environment is returned rather than applied to this process. Components
+// run concurrently, so a toolchain written into the process environment is one
+// every other component inherits — which is the whole of what "one Node
+// version per repository" was.
 //
-// Diagnostics go to stderr. They are preparation notes, not gate results:
-// stdout carries the `[PASS]`/`[FAIL]` and `[TAG]` lines that action.yml's PR
-// comment scrapes, and that scraper matches any bracketed uppercase tag
-// anywhere on a line rather than anchoring to the start, so keeping unrelated
-// chatter off stdout is what stops it appearing in the comment.
-func ensureToolchains(ctx context.Context, cmd *cobra.Command, dir string, cfg config.Config, ecosystems []detect.Ecosystem) error {
-	env, err := toolchain.Ensure(ctx, dir, ecosystems, toolchainOverrides(cfg), cmd.ErrOrStderr())
-	if err != nil {
-		return err
-	}
-	return env.Activate()
+// Diagnostics go to stderr. They are preparation notes, not gate results, and
+// stdout carries the report — under --json, a document a stray line would make
+// unparseable.
+func ensureToolchains(ctx context.Context, cmd *cobra.Command, dir string, cfg config.Config, units []toolchain.Unit) (toolchain.Envs, error) {
+	return toolchain.Ensure(ctx, dir, units, toolchainOverrides(cfg), cmd.ErrOrStderr())
 }
 
 // toolchainOverrides maps .lydite/config.yml onto the toolchain package's input.
@@ -49,11 +41,5 @@ func toolchainOverrides(cfg config.Config) toolchain.Overrides {
 		Go:       cfg.Toolchain.Go,
 		Rust:     cfg.Toolchain.Rust,
 		Node:     cfg.Toolchain.Node,
-		// Per-language excludes, matching how scan and coverage already scope
-		// detection: a Rust-only exclude must not narrow which package.json
-		// files the Node requirement is read from.
-		GoExclude:   cfg.Go.Exclude,
-		RustExclude: cfg.Rust.Exclude,
-		TSExclude:   cfg.TypeScript.Exclude,
 	}
 }

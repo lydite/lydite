@@ -1,12 +1,23 @@
-# What lydite builds, tests and gates in its own repository.
+# What lydite builds, tests, scans and gates in its own repository.
 #
 # One component, because the Go module at cli/ is what `go test` treats as a
 # whole. The *-pin directories under it hold real manifests — a go.mod, a
 # package.json, a Cargo.toml — and are deliberately not components: they exist
 # so Dependabot can see the tool versions lydite pins, and nothing in them is
-# ever built or tested.
+# ever built or tested. Being undeclared is the whole of what keeps them out of
+# scope: lydite reads this file rather than walking for manifests. A cargo pin
+# is the exception — see the exclude below. Adding one still means adding a
+# matching entry to .github/dependabot.yml, which nothing enforces — a pin no
+# bot bumps is a scanner that quietly goes stale.
 components:
   - name: cli
     dir: cli
     runner: go-test
     args: ["-race", "./..."]
+
+# The pin manifests' own source. cargo refuses a [package] manifest with no
+# src/lib.rs, so cargo-audit-pin and cargo-deny-pin each carry an empty one —
+# real Rust that no component builds, tests or scans, and this is where a
+# repository says that out loud. Without it `lydite scan` reports Rust source
+# that nothing checks, which is true and is not something anyone should fix.
+excludes: ["cli/internal/**/*-pin/**"]

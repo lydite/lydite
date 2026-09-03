@@ -77,6 +77,20 @@ EXPECTED_VIA = {"sdk": "depends on api", "web": "depends on api"}
 # the failure this exists to catch — so the count is pinned and any row naming
 # a crate or package is a failure.
 EXPECTED_COVERAGE_UNITS = ["tally", "api", "sdk", "web"]
+# What `lydite scan` must run for each declared component, keyed by the language
+# its runner implies. The row labels are `<tool>(<component>)`, so this asserts
+# both that the check ran and that it ran for the right unit.
+#
+# The verdict is deliberately not asserted. The proving ground carries real
+# findings on purpose — unlicensed crates, a WriteFile at 0644 — and a job that
+# demanded green would have somebody tidy away the evidence a scanner works.
+EXPECTED_SCAN_CHECKS = {
+    "tally": ["cargo fmt", "cargo clippy", "cargo-audit", "cargo-deny"],
+    "api": ["gosec", "govulncheck"],
+    "sdk": ["gosec", "govulncheck"],
+    "web": ["biome"],
+}
+
 # Names that appear in the tree as crates or packages and must never appear as
 # coverage units: they are parts of a component, not components.
 FORBIDDEN_COVERAGE_UNITS = [
@@ -335,7 +349,50 @@ def main(path: str, checkout: str) -> int:
     return 0
 
 
+def main_scan(path: str) -> int:
+    """Assert `lydite scan` covered every declared component's language.
+
+    Deliberately not the verdict. The proving ground is awkward on purpose —
+    unlicensed crates, a WriteFile at 0644 — so real findings are the expected
+    state, and asserting green would make somebody tidy the evidence away. What
+    must hold is that every declared component was actually scanned by the
+    checks its language implies: a run that scanned nothing exits 0 too.
+
+    The row labels carry the component name, so this is also where a scan that
+    silently narrowed to one component would show up.
+    """
+    with open(path, encoding="utf-8") as f:
+        report = json.load(f)
+    labels = [row.get("label", "") for row in report.get("rows", [])]
+
+    failures = []
+    for name, tools in EXPECTED_SCAN_CHECKS.items():
+        for tool in tools:
+            if f"{tool}({name})" not in labels:
+                failures.append(f"no {tool} row for component {name}; rows were {labels}")
+    if "semgrep" not in labels:
+        failures.append(f"semgrep did not run; rows were {labels}")
+    # A Cargo workspace is one component and one cargo invocation. A run that
+    # had gone back to walking for manifests would report a row per member
+    # crate, which is a name no component has.
+    for forbidden in FORBIDDEN_COVERAGE_UNITS:
+        if any(label.endswith(f"({forbidden})") for label in labels):
+            failures.append(f"{forbidden} was scanned as a unit; it is part of a component, not one")
+
+    for failure in failures:
+        print(f"proving ground scan: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        f"proving ground scan: every check ran for {sorted(EXPECTED_SCAN_CHECKS)} "
+        "and semgrep ran once over the root"
+    )
+    return 0
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--affected":
         sys.exit(main_affected(sys.argv[2], sys.argv[3]))
+    if sys.argv[1] == "--scan":
+        sys.exit(main_scan(sys.argv[2]))
     sys.exit(main(sys.argv[1], sys.argv[2]))

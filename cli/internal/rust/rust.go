@@ -1,8 +1,9 @@
 // Package rust runs Rust checks: fmt, clippy, cargo-audit, cargo-deny,
-// against every independent Cargo crate/workspace root discovered under a
-// scan directory (see detect.RustCrateDirs) — not assuming the scan
-// directory itself is the crate/workspace root, since a Cargo workspace may
-// be nested under an arbitrary --dir in a polyglot monorepo.
+// against one component's directory. A component is the unit cargo treats as
+// a whole — a workspace root, or a standalone crate — so the directory it
+// declares is the directory every one of these commands runs in, and a
+// workspace's member crates are covered by the one invocation cargo already
+// resolves from that root.
 //
 // clippy's lint groups (pedantic/restriction) are configured by the target
 // project's own Cargo.toml ([workspace.lints.clippy]), not by lydite — this
@@ -19,69 +20,45 @@ package rust
 
 import (
 	"context"
+	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 
 	"lydite/lydite/internal/cargotool"
-	"lydite/lydite/internal/detect"
 	"lydite/lydite/internal/executil"
 )
 
-// Check runs every Rust check against every independent Cargo crate/workspace
-// root discovered under root, skipping any directory named in exclude. A
-// nested crate already covered by an ancestor workspace's Cargo.toml is not
-// re-checked independently — see detect.RustCrateDirs.
-func Check(ctx context.Context, root string, exclude []string) ([]executil.Result, error) {
-	crateDirs, err := detect.RustCrateDirs(root, exclude)
-	if err != nil {
-		return nil, err
-	}
-	if len(crateDirs) == 0 {
-		return nil, nil
-	}
-
-	multi := len(crateDirs) > 1
-	var results []executil.Result
-	for _, dir := range crateDirs {
-		label := crateLabel(root, dir, multi)
-
-		results = append(results,
-			named(label+"cargo fmt", executil.Run(ctx, dir, "cargo", "fmt", "--check")),
-			named(label+"cargo clippy", executil.Run(ctx, dir, "cargo", "clippy", "--all-targets", "--", "-D", "warnings")),
-		)
-
-		if bin, err := ensure(ctx, "cargo-audit", cargoAuditVersion); err != nil {
-			results = append(results, executil.Result{Name: label + "cargo-audit", Err: err})
-		} else {
-			results = append(results, named(label+"cargo-audit", executil.Run(ctx, dir, bin, "audit")))
-		}
-
-		if bin, err := ensure(ctx, "cargo-deny", cargoDenyVersion); err != nil {
-			results = append(results, executil.Result{Name: label + "cargo-deny", Err: err})
-		} else {
-			// advisories is intentionally excluded here: cargo-audit already
-			// covers RustSec CVEs, and running both would double-report them.
-			results = append(results, named(label+"cargo-deny", executil.Run(ctx, dir, bin, "deny", "check", "licenses", "bans")))
-		}
+// Check runs every Rust check in dir, with env on top of the caller's own
+// environment — the component's resolved toolchain, which is what decides
+// which cargo these commands find.
+//
+// Results are named for the tool alone. Which component they belong to is the
+// caller's to say, so one labelling rule covers all three languages instead of
+// three that agree until one is changed.
+func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
+	results := []executil.Result{
+		named("cargo fmt", executil.RunEnv(ctx, dir, env.Check, "cargo", "fmt", "--check")),
+		named("cargo clippy", executil.RunEnv(ctx, dir, env.Check, "cargo", "clippy", "--all-targets", "--", "-D", "warnings")),
 	}
 
-	return results, nil
-}
+	if bin, err := ensure(ctx, env.Install, "cargo-audit", cargoAuditVersion); err != nil {
+		// Detail as well as Err: report() prints Detail under a failing row
+		// and nothing else, so a tool that would not install renders as a
+		// bare `✗ cargo-audit` with the cause nowhere in the report.
+		results = append(results, executil.Result{Name: "cargo-audit", Err: err, Detail: err.Error()})
+	} else {
+		results = append(results, named("cargo-audit", executil.RunEnv(ctx, dir, env.Check, bin, "audit")))
+	}
 
-// crateLabel returns a prefix distinguishing dir's checks from other crates'
-// when multi is true (more than one crate was discovered), so scan output
-// remains attributable. When multi is false, it returns "" — preserving
-// today's exact single-crate check names ("cargo fmt", "cargo clippy", etc.)
-// for the common case.
-func crateLabel(root, dir string, multi bool) string {
-	if !multi {
-		return ""
+	if bin, err := ensure(ctx, env.Install, "cargo-deny", cargoDenyVersion); err != nil {
+		results = append(results, executil.Result{Name: "cargo-deny", Err: err, Detail: err.Error()})
+	} else {
+		// advisories is intentionally excluded here: cargo-audit already
+		// covers RustSec CVEs, and running both would double-report them.
+		results = append(results, named("cargo-deny", executil.RunEnv(ctx, dir, env.Check, bin, "deny", "check", "licenses", "bans")))
 	}
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || rel == "." {
-		return ""
-	}
-	return rel + ": "
+
+	return results
 }
 
 // named returns r with Name overridden, so scan's report distinguishes each
@@ -99,7 +76,7 @@ func named(name string, r executil.Result) executil.Result {
 // invoked as `cargo <name> ...`, but a `--root`-installed binary is named
 // plainly `cargo-<name>` and must be run directly (not via `cargo <name>`,
 // which only finds cargo-* binaries already on PATH).
-func ensure(ctx context.Context, name, version string) (string, error) {
+func ensure(ctx context.Context, env []string, name, version string) (string, error) {
 	tool := cargotool.Tool{Name: name, Version: version}
 	bin, err := tool.Binary()
 	if err != nil {
@@ -119,8 +96,11 @@ func ensure(ctx context.Context, name, version string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if r := executil.Run(ctx, "", "cargo", argv...); !r.Ok() {
-		return "", r.Err
+	if r := executil.RunEnv(ctx, "", env, "cargo", argv...); !r.Ok() {
+		// The command's own output, not just its exit status: `exit status
+		// 101` is what a failing row would otherwise carry into --json, which
+		// is the document the pull-request comment renders.
+		return "", fmt.Errorf("installing cargo-%s: %w\n%s", name, r.Err, strings.TrimSpace(r.Output))
 	}
 	return bin, nil
 }

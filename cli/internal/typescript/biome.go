@@ -101,8 +101,8 @@ func reportableBiome(category string) bool {
 
 // ensureBiome installs the pinned Biome from biome-pin/ and writes the bundled
 // config alongside it.
-func ensureBiome(ctx context.Context) (string, error) {
-	dir, err := ensureNPMToolchain(ctx, "biome", "biome", biomePackageJSON, biomePackageLock)
+func ensureBiome(ctx context.Context, env []string) (string, error) {
+	dir, err := ensureNPMToolchain(ctx, env, "biome", "biome", biomePackageJSON, biomePackageLock)
 	if err != nil {
 		return "", err
 	}
@@ -119,10 +119,14 @@ const biomeNestedRootConfig = "Found a nested root configuration"
 
 // lintDirBiome runs Biome over one package and reports only lydite's own
 // findings.
-func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (executil.Result, error) {
+func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, configPath string) executil.Result {
 	out, err := os.CreateTemp("", "lydite-biome-*.json")
 	if err != nil {
-		return executil.Result{}, err
+		// Detail as well as Err, for the reason the install failure carries
+		// one: report() prints Detail under a failing row and nothing else,
+		// so a bare Err renders as `✗ biome` with the cause in neither the
+		// terminal nor --json.
+		return executil.Result{Name: "biome", Err: err, Detail: err.Error()}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -131,9 +135,9 @@ func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (execut
 	// --reporter-file keeps the machine-readable report out of the combined
 	// stdout/stderr stream: Biome writes its own diagnostics there, including
 	// an "experimental reporter" notice, which JSON parsing must not trip over.
-	r := executil.Run(ctx, dir, biomeBin, "lint",
+	r := executil.RunEnv(ctx, dir, env, biomeBin, "lint",
 		"--config-path", configPath, "--reporter", "json", "--reporter-file", outPath, ".")
-	r.Name = "biome(" + dir + ")"
+	r.Name = "biome"
 
 	// A nested biome.json aborting the run before anything is linted must not
 	// read as a pass, and must not read as a findings failure either — it is a
@@ -149,20 +153,21 @@ func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (execut
 	if !r.Ok() && strings.Contains(r.Output, biomeNestedRootConfig) {
 		r.Err = fmt.Errorf("nested biome.json conflicts with lydite's bundled config")
 		r.Detail = "Biome refused to run: a biome.json below this package is treated as a second root config.\n" +
-			"Add \"root\": false to it (Biome's own requirement for nested configs), or exclude that\n" +
-			"directory via typescript.exclude in .lydite/config.yml."
-		return r, nil
+			"Add \"root\": false to it (Biome's own requirement for nested configs), which is also\n" +
+			"how a subdirectory states its own ignores: lydite passes --config-path, which beats a\n" +
+			"root biome.json, and only a nested non-root config is merged into lydite's."
+		return r
 	}
 
 	data, readErr := os.ReadFile(outPath) // #nosec G304 -- outPath is our own CreateTemp result, not user input
 	if readErr != nil {
 		// No report to read: leave Biome's own exit status and output as-is
 		// rather than inventing a verdict.
-		return r, nil
+		return r
 	}
 	var report biomeReport
 	if jsonErr := json.Unmarshal(data, &report); jsonErr != nil {
-		return r, nil
+		return r
 	}
 
 	var b strings.Builder
@@ -177,7 +182,7 @@ func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (execut
 
 	if count == 0 {
 		r.Err = nil
-		return r, nil
+		return r
 	}
 	// Detail, not Output: Output is Biome's own stream, which already reached
 	// the terminal and holds no findings, and overwriting it would discard the
@@ -185,5 +190,5 @@ func lintDirBiome(ctx context.Context, dir, biomeBin, configPath string) (execut
 	// they are what report() has to print.
 	r.Detail = b.String()
 	r.Err = fmt.Errorf("%d finding(s)", count)
-	return r, nil
+	return r
 }

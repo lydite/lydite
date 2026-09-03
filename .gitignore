@@ -18,3 +18,6 @@ dist/
 /.claude/
 /CLAUDE.md
 /.mcp.json
+
+# Python bytecode from the CI assertion scripts.
+__pycache__/

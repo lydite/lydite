@@ -33,7 +33,8 @@ jobs:
           cache: true
 
       # Built from cli/ (the module root); the scan below deliberately runs
-      # from the repository root, which is the scan root .lydite/config.yml sits at.
+      # from the repository root, which is the scan root .lydite/ sits at — the
+      # cli component is declared at cli/, and scan reads that declaration.
       - name: build lydite
         working-directory: cli
         run: go build -o /tmp/lydite ./cmd/lydite
@@ -108,6 +109,34 @@ jobs:
           echo "lydite test exited $status"
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
+
+      # The only place component-driven scanning of Rust and TypeScript
+      # executes at all. lydite's own repository has neither — web/ is empty
+      # and its only Cargo.toml files are pin manifests — so `lydite scan
+      # (self)` above exercises the Go path and nothing else.
+      #
+      # The verdict is deliberately not asserted, unlike the test step. The
+      # proving ground carries real findings on purpose (unlicensed crates, a
+      # WriteFile at 0644), so demanding green would have somebody tidy away
+      # the evidence that a scanner works. What is asserted is that every
+      # declared component was scanned by the checks its language implies — a
+      # run that scanned nothing exits 0 too — and that no member crate or
+      # workspace package appears as a unit of its own, which is what a
+      # regression back to walking for manifests would look like.
+      - name: lydite scan (proving ground)
+        run: |
+          status=0
+          /tmp/lydite scan --dir proving-ground --json > scan.json || status=$?
+          echo "lydite scan exited $status"
+          cat scan.json
+          # An error rather than a verdict writes no document at all, and the
+          # assertion would then die parsing an empty file instead of showing
+          # what lydite said. The message is on stderr, already in this log.
+          if [ ! -s scan.json ]; then
+            echo "lydite scan produced no report; see its error above" >&2
+            exit 1
+          fi
+          python3 .github/assert-proving-ground.py --scan scan.json
 
       # Selection has to be shown to have selected. A run that narrowed
       # wrongly and a run that narrowed correctly are both green and both

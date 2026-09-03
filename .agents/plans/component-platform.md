@@ -16,8 +16,8 @@ built and what is left. The `pr*.md` files beside it are session prompts.
 | 4 | — | Scheduler: port locks and the in-shard concurrency bound | `pr4-scheduler.md` | done — #44 |
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
-| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | next |
-| 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | — | not started |
+| 7 | — | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done |
+| 8 | — | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | `pr8-plan-and-merge.md` | next |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
 Steps 0 and 1 ran in parallel, in separate worktrees. Step 1 could not merge
@@ -77,6 +77,39 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
 - A component rooted at `.` no longer suppresses affected selection's widening.
   `dir: .` says where a component is rooted, not that it tests every file.
+- The declaration is the only source of what a repository contains. `lydite scan`
+  reads it too and `internal/detect` is deleted, along with the three `exclude`
+  keys that narrowed its walks; a repository declaring nothing is one scan
+  refuses to run over. Toolchains resolve per component. See
+  [ADR 0020](../../docs/adr/0020-scan-on-components.md).
+
+## Left open by step 7
+
+- **`lydite scan` has no `--component` or `--affected`.** Selection is `lydite
+  test`'s surface; a scan that narrowed itself would need ADR 0018's
+  widening-on-ignorance argument made again, for a different consequence, and
+  nothing has asked for it. Step 8's planner is where the question naturally
+  returns, because a shard already names a component set.
+- **A Go component whose `dir` is not its module root is not rejected at
+  parse time.** `internal/coverage` reports it unmeasurable and `govulncheck`
+  fails visibly with `no go.mod file`, so it is loud in two places. Moving the
+  check into `component.validate` would make it a declaration error — but
+  validation also runs over historical trees during base-tree measurement,
+  where a new rule fires on a tree its author cannot fix. That is the step-6
+  defect, and the reason this stayed where it is.
+- **A language no component declares is a warning, not a gate.** `lydite scan`
+  names it on stderr; making it fail would be a second orphan gate, in the
+  command that has no baseline for one. The orphan gate cannot cover it because
+  a component rooted at `.` covers every path, which is the same property
+  affected selection already had to special-case.
+- **The Rust toolchain probe asks cargo its version, not rustup what is
+  installed**, so a component pinning a channel older than the machine's
+  default is never materialised with its components. Pre-existing rather than
+  introduced — taking the highest channel across crates left the same hole —
+  and narrowed by this step. [#55](https://github.com/lydite/lydite/issues/55).
+- **`typescript.install` is still repository-wide.** See below; the half that
+  could produce a wrong answer — which Node runs the install — is per component
+  now.
 
 ## Left open by step 6
 
@@ -104,14 +137,12 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   And nothing names a JavaScript package manager or workspace filter, so whether
   `vitest` runs at the workspace root or per package can only be said in `args`.
 
-## Toolchains are resolved per ecosystem, not per component
+## Toolchains were resolved per language, not per component
 
-`internal/toolchain.Requirements` reads every manifest under the scan root and
-returns **one requirement per language**. A component is a build unit that
-states its own versions, so the component model makes per-component resolution
-the natural shape — and `lydite test` provisions nothing at all today.
-
-What that costs right now, measured against the code rather than assumed:
+*Closed at step 7.* `internal/toolchain.Requirements` read every manifest under
+the scan root and returned **one requirement per language**. It now takes one
+unit per component and answers per unit. This is what that arrangement cost,
+recorded because the reasoning is what the fix was shaped by:
 
 - **Go and Rust are fine.** Go's directive is a minimum and the toolchain is
   backward-compatible, so the highest directive across modules builds all of
@@ -123,13 +154,16 @@ What that costs right now, measured against the code rather than assumed:
   which is what pre-materialising exists to avoid.
 - **Node is the real gap.** One runtime is installed, at the highest
   `engines.node` found. Two workspaces needing Node 20 and Node 24 both get 24.
+  *Closed at step 7: a toolchain is resolved per component, and the environment
+  is a value handed to each child rather than a change to lydite's process.*
 - **TypeScript's own version is not a toolchain and needs nothing.** The
   compiler is a devDependency of each workspace, Biome parses TypeScript with
   its own parser and depends on no compiler package, and both the test runner
   and `tsc --noEmit` resolve out of the component directory. A repository
   mixing TypeScript 5 and 7 across components already works.
 
-Belongs with step 7, where scan learns its units from the component.
+Closed at step 7, where scan learned its units from the component and the
+toolchain came with them.
 
 ## The package manager is not a configuration key
 
@@ -146,10 +180,11 @@ the coverage gate and the test run cannot disagree about it.
 
 Open: `typescript.install` is a repository-wide key while a component's
 `setup` is per component, and a JavaScript component can express its install
-either way. Step 6 left it as it was: there is now one install path rather than
-two, so the key no longer means different things in different places, and
-deciding whether it should be per component belongs with step 7's per-component
-toolchain resolution.
+either way. Step 6 left it as it was, and step 7 left it too: making it per
+component is a new key on the declaration, and the case for one is a repository
+that genuinely installs two ways — which nothing has yet asked for. The
+toolchain that runs the install *is* per component now, which was the half that
+could produce a wrong answer.
 
 ## What step 1 left for later
 
@@ -175,9 +210,9 @@ toolchain resolution.
   the only thing that knows its ports, and the scheduler needs every
   component's before it decides what may run together.
 - **`internal/detect` is untouched.** Scan and coverage still discover their own
-  units; step 7 is where they learn it from the component instead. *Coverage
-  stopped using it at step 6; scan and `internal/toolchain` still do, which is
-  what step 7 closes.*
+  units; step 7 is where they learn it from the component instead. *Closed at
+  step 7: the package is deleted, scan reads the declaration, and
+  `internal/toolchain` resolves per component.*
 
 ## A component's output is captured, not streamed
 

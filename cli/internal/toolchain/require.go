@@ -9,11 +9,11 @@ import (
 
 	"golang.org/x/mod/modfile"
 
-	"lydite/lydite/internal/detect"
+	"lydite/lydite/internal/runner"
 )
 
-// Requirement is the language toolchain one detected ecosystem needs, read
-// from what the repository already declares.
+// Requirement is the language toolchain one component needs, read from what
+// the repository already declares.
 //
 // Version is deliberately not sourced from .lydite/config.yml. Every one of these
 // files is already the authoritative, tool-enforced statement of the version
@@ -24,7 +24,13 @@ import (
 // config.Toolchain), which is a different thing — an explicit, local
 // exception rather than a parallel source of truth.
 type Requirement struct {
-	Ecosystem detect.Ecosystem
+	// Unit is the component this was resolved for.
+	Unit Unit
+	// Lang is the language the toolchain is for, derived from the unit's
+	// runner. It is carried here as well because every decision below is
+	// taken per language, and reaching back through Unit for it reads as
+	// though the two could differ.
+	Lang runner.Lang
 	// Version is canonical() output ("v1.26.4"), or "" when the repo pins no
 	// comparable version — a `stable` rust channel, an `lts/*` .nvmrc, or no
 	// manifest statement at all.
@@ -50,34 +56,56 @@ type Requirement struct {
 // only if none is present at all.
 func (r Requirement) Unpinned() bool { return r.Version == "" }
 
-// Requirements resolves what each detected ecosystem needs. Ecosystems the
-// caller didn't detect are skipped entirely, so a Go-only repo never reads a
-// package.json and never provisions Node.
+// Unit is one component as toolchain resolution sees it: a language, rooted
+// at a directory. It is what the declaration already states — a component
+// names a runner, the runner implies the language, and `dir` says where that
+// language's code is — so nothing here infers anything from the tree.
+type Unit struct {
+	// Name is the component's name, carried so a diagnostic can say which
+	// component asked for a toolchain.
+	Name string
+	// Lang is derived from the component's runner, never declared.
+	Lang runner.Lang
+	// Dir is the component's directory, relative to the scan root.
+	Dir string
+}
+
+// Requirements resolves what each unit needs, one Requirement per unit in the
+// same order. A unit naming a language lydite provisions no toolchain for is
+// skipped rather than given an unpinned requirement, so nothing probes the
+// machine on its behalf.
+//
+// Resolution is per unit and not per repository, which is what makes a
+// monorepo answerable: a workspace declaring `engines.node: >=22` and a tools
+// package pinning 18 are two components with two answers, where a single pass
+// over every package.json has to pick one of them by a rule neither package
+// stated.
 //
 // A manifest that can't be read or parsed yields an unpinned requirement
 // rather than an error: lydite's job here is to make the toolchain more
 // likely to be right, and refusing to scan a repo because its .nvmrc is
 // malformed would be a worse outcome than scanning it with whatever is on
-// PATH — exactly today's behavior.
-func Requirements(root string, ecosystems []detect.Ecosystem, cfg Overrides) ([]Requirement, error) {
+// PATH.
+func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, error) {
 	var out []Requirement
-	for _, e := range ecosystems {
+	for _, u := range units {
+		dir := filepath.Join(root, filepath.FromSlash(u.Dir))
 		var req Requirement
 		var err error
-		switch e {
-		case detect.Go:
-			req, err = goRequirement(root, cfg.GoExclude)
-		case detect.Rust:
-			req, err = rustRequirement(root, cfg.RustExclude)
-		case detect.TypeScript:
-			req, err = nodeRequirement(root, cfg.TSExclude)
+		switch u.Lang {
+		case runner.Go:
+			req, err = goRequirement(root, dir)
+		case runner.Rust:
+			req, err = rustRequirement(root, dir)
+		case runner.TypeScript:
+			req, err = nodeRequirement(root, dir)
 		default:
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if override := cfg.For(e); override != "" {
+		if override := cfg.For(u.Lang); override != "" {
 			v := canonical(override)
 			// A version lydite cannot parse is a hard config error, not a
 			// silent downgrade. Assigning it unconditionally would set
@@ -92,79 +120,111 @@ func Requirements(root string, ecosystems []detect.Ecosystem, cfg Overrides) ([]
 			// rustup is the authority on which of those are real, not
 			// lydite. Such an override stays unpinned and is handed through
 			// verbatim.
-			if v == "" && e != detect.Rust {
+			if v == "" && u.Lang != runner.Rust {
 				return nil, fmt.Errorf(
 					"toolchain.%s in .lydite/config.yml: %q is not a version lydite can compare against an installed toolchain",
-					overrideKey(e), override)
+					overrideKey(u.Lang), override)
 			}
 			req.Version = v
 			req.Raw = override
-			req.Source = "toolchain." + overrideKey(e) + " in .lydite/config.yml"
+			req.Source = "toolchain." + overrideKey(u.Lang) + " in .lydite/config.yml"
 			req.Overridden = true
 		}
+		req.Unit = u
 		out = append(out, req)
 	}
 	return out, nil
 }
 
-// overrideKey names an ecosystem as it is spelled under `toolchain:` in
+// overrideKey names a language as it is spelled under `toolchain:` in
 // .lydite/config.yml. TypeScript's key is `node`, because what is being overridden
-// is the Node runtime, not the TypeScript compiler — the ecosystem's name and
+// is the Node runtime, not the TypeScript compiler — the language's name and
 // its toolchain's name are the one place these diverge.
-func overrideKey(e detect.Ecosystem) string {
-	if e == detect.TypeScript {
+func overrideKey(e runner.Lang) string {
+	if e == runner.TypeScript {
 		return "node"
 	}
 	return string(e)
 }
 
-// goRequirement reads the `go` and `toolchain` directives from every module
-// under root and returns the highest.
+// goRequirement reads the `go` and `toolchain` directives from the module at
+// the component's own directory, and returns the higher of the two.
 //
 // Both directives matter and they mean different things: `go` is the minimum
 // language version the module's source requires, `toolchain` names a specific
-// toolchain to run. Taking the max of the two across all modules gives the one
-// toolchain that can build every module in the tree.
+// toolchain to run. Taking the max of the two gives the one toolchain that can
+// build the module.
 //
-// Reading every module rather than a single go.mod at the root is the whole
-// point. gt's reverted `setup-go` step looked in exactly one location, which
-// would have found nothing at all in wardnet, whose modules live under
-// `wctl/` and `sdk/wardnet-go/` rather than at the scan root.
-func goRequirement(root string, exclude []string) (Requirement, error) {
-	req := Requirement{Ecosystem: detect.Go}
-	dirs, err := detect.GoModuleDirs(root, exclude)
-	if err != nil {
-		return req, err
+// The go.mod read is the nearest one at or above the component's directory,
+// bounded by the scan root, because that is the module the go command uses
+// when it runs there. A component declared at `services/api` in a repository
+// with one root go.mod is an ordinary shape: gosec and govulncheck run there
+// perfectly well, being inside that module, and internal/orphan answers the
+// same question the same way. Reading only the component's own directory left
+// such a component with no version, so GOTOOLCHAIN went unpinned and
+// `go install` could switch to an older toolchain — the failure this package
+// exists to prevent, in a scan that reported a pass.
+//
+// (internal/coverage is stricter, and separately: `go list -m` answers with
+// the enclosing module, so a component declared below its module root is
+// reported unmeasurable there. That is a coverage constraint, not a reason to
+// leave this one unpinned.)
+//
+// No go.mod at or above the directory yields an unpinned requirement: the
+// repository named no floor, so anything present will do.
+func goRequirement(root, dir string) (Requirement, error) {
+	req := Requirement{Lang: runner.Go}
+	moduleDir, ok := nearestGoModule(root, dir)
+	if !ok {
+		return req, nil
 	}
-	for _, dir := range dirs {
-		path := filepath.Join(dir, "go.mod")
-		data, err := os.ReadFile(path) // #nosec G304 -- path comes from lydite's own module-discovery walk, not user input
-		if err != nil {
-			continue
-		}
-		// modfile is golang.org/x/mod's own parser, already a direct
-		// dependency (cmd/lydite/update.go uses x/mod/semver). Hand-rolling
-		// a line sniff here — as detect.isWorkspaceRoot does for Cargo.toml —
-		// would be reimplementing a parser that ships in the module graph and
-		// that Go itself uses.
-		f, err := modfile.Parse(path, data, nil)
-		if err != nil {
-			continue
-		}
-		for _, raw := range []string{goDirective(f), toolchainDirective(f)} {
-			if v := canonical(raw); maxVersion(req.Version, v) != req.Version {
-				req.Version, req.Raw = v, strings.TrimPrefix(raw, "go")
-				rel, relErr := filepath.Rel(root, dir)
-				if relErr != nil || rel == "." {
-					rel = ""
-				} else {
-					rel += "/"
-				}
-				req.Source = rel + "go.mod"
-			}
+	path := filepath.Join(moduleDir, "go.mod")
+	data, err := os.ReadFile(path) // #nosec G304 -- path is at or above a declared component directory, not user input
+	if err != nil {
+		return req, nil
+	}
+	// modfile is golang.org/x/mod's own parser, already a direct dependency
+	// (cmd/lydite/update.go uses x/mod/semver). Hand-rolling a line sniff
+	// would be reimplementing a parser that ships in the module graph and
+	// that Go itself uses.
+	f, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		return req, nil
+	}
+	for _, raw := range []string{goDirective(f), toolchainDirective(f)} {
+		if v := canonical(raw); maxVersion(req.Version, v) != req.Version {
+			req.Version, req.Raw = v, strings.TrimPrefix(raw, "go")
+			req.Source = relSource(root, moduleDir, "go.mod")
 		}
 	}
 	return req, nil
+}
+
+// nearestGoModule is the closest directory at or above dir holding a go.mod,
+// searched no further up than the scan root. Beyond it is not this
+// repository's, and a go.mod outside the tree lydite was pointed at is not one
+// this run has any business reading.
+func nearestGoModule(root, dir string) (string, bool) {
+	cleanRoot := filepath.Clean(root)
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d, true
+		}
+		if d == cleanRoot || d == filepath.Dir(d) {
+			return "", false
+		}
+	}
+}
+
+// relSource names a manifest the way a reader will go looking for it: its
+// path relative to the scan root, so a diagnostic points at a file rather
+// than at a machine-specific absolute path.
+func relSource(root, dir, name string) string {
+	rel, err := filepath.Rel(root, filepath.Join(dir, name))
+	if err != nil {
+		return name
+	}
+	return filepath.ToSlash(rel)
 }
 
 func goDirective(f *modfile.File) string {
@@ -181,37 +241,29 @@ func toolchainDirective(f *modfile.File) string {
 	return f.Toolchain.Name
 }
 
-// rustRequirement reads the channel from each discovered crate/workspace
-// root's rust-toolchain.toml (or the legacy bare rust-toolchain file) and
-// returns the highest pinned one.
+// rustRequirement reads the channel from the component directory's
+// rust-toolchain.toml, or the legacy bare rust-toolchain file beside it.
 //
-// This extends, rather than contradicts, internal/rust's existing stance that
-// "clippy/fmt's own toolchain version is the target repo's responsibility via
-// its own rust-toolchain.toml". It still is — lydite reads that file rather
-// than overriding it, and only makes sure the channel it names is actually
-// installed instead of assuming rustup will lazily fetch it mid-check.
-func rustRequirement(root string, exclude []string) (Requirement, error) {
-	req := Requirement{Ecosystem: detect.Rust}
-	dirs, err := detect.RustCrateDirs(root, exclude)
-	if err != nil {
-		return req, err
+// This extends, rather than contradicts, internal/rust's stance that the
+// toolchain version is the target repo's responsibility via its own
+// rust-toolchain.toml. It still is — lydite reads that file rather than
+// overriding it, and only makes sure the channel it names is installed
+// instead of leaving rustup to fetch it lazily in the middle of a check.
+//
+// Reading it at the component's directory is what makes lydite's answer and
+// rustup's the same answer: rustup selects a toolchain from the directory
+// cargo runs in, and that is this directory.
+func rustRequirement(root, dir string) (Requirement, error) {
+	req := Requirement{Lang: runner.Rust}
+	raw, source := rustChannel(root, dir)
+	if raw == "" {
+		return req, nil
 	}
-	for _, dir := range dirs {
-		raw, source := rustChannel(root, dir)
-		if raw == "" {
-			continue
-		}
-		v := canonical(raw)
-		// A named channel ("stable", "nightly") canonicalises to "" — record
-		// it as the raw requirement so messages can name it, but leave
-		// Version empty so it compares as unpinned.
-		if req.Version == "" && req.Raw == "" {
-			req.Raw, req.Source = raw, source
-		}
-		if maxVersion(req.Version, v) != req.Version {
-			req.Version, req.Raw, req.Source = v, raw, source
-		}
-	}
+	// A named channel ("stable", "nightly") canonicalises to "" — record it
+	// as the raw requirement so messages can name it, but leave Version
+	// empty so it compares as unpinned.
+	req.Raw, req.Source = raw, source
+	req.Version = canonical(raw)
 	return req, nil
 }
 
@@ -219,22 +271,15 @@ func rustRequirement(root string, exclude []string) (Requirement, error) {
 // rust-toolchain.toml wins over the legacy bare rust-toolchain file, matching
 // rustup's own precedence.
 func rustChannel(root, dir string) (channel, source string) {
-	rel := func(name string) string {
-		r, err := filepath.Rel(root, filepath.Join(dir, name))
-		if err != nil {
-			return name
-		}
-		return r
-	}
-	if data, err := os.ReadFile(filepath.Join(dir, "rust-toolchain.toml")); err == nil { // #nosec G304 -- dir comes from lydite's own crate-discovery walk, not user input
+	if data, err := os.ReadFile(filepath.Join(dir, "rust-toolchain.toml")); err == nil { // #nosec G304 -- dir is a declared component directory, not user input
 		if c := tomlChannel(string(data)); c != "" {
-			return c, rel("rust-toolchain.toml")
+			return c, relSource(root, dir, "rust-toolchain.toml")
 		}
 	}
 	// The legacy form is the whole file: a bare channel string, no TOML.
-	if data, err := os.ReadFile(filepath.Join(dir, "rust-toolchain")); err == nil { // #nosec G304 -- dir comes from lydite's own crate-discovery walk, not user input
+	if data, err := os.ReadFile(filepath.Join(dir, "rust-toolchain")); err == nil { // #nosec G304 -- dir is a declared component directory, not user input
 		if c := strings.TrimSpace(string(data)); c != "" && !strings.Contains(c, "\n") {
-			return c, rel("rust-toolchain")
+			return c, relSource(root, dir, "rust-toolchain")
 		}
 	}
 	return "", ""
@@ -242,12 +287,11 @@ func rustChannel(root, dir string) (channel, source string) {
 
 // tomlChannel pulls `channel = "1.96"` out of a rust-toolchain.toml.
 //
-// A line-level sniff, not a TOML parse, and deliberately so — this mirrors
-// detect.isWorkspaceRoot's treatment of Cargo.toml. The file's entire schema
-// is a single [toolchain] table, `channel` is the only key lydite reads, and
-// adding a TOML dependency to read one string would be the larger cost. A
-// file too exotic for this yields no channel, which degrades to unpinned
-// rather than to a wrong answer.
+// A line-level sniff, not a TOML parse, and deliberately so. The file's
+// entire schema is a single [toolchain] table, `channel` is the only key
+// lydite reads, and adding a TOML dependency to read one string would be the
+// larger cost. A file too exotic for this yields no channel, which degrades
+// to unpinned rather than to a wrong answer.
 func tomlChannel(s string) string {
 	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
@@ -270,56 +314,58 @@ type packageJSONEngines struct {
 	} `json:"engines"`
 }
 
-// nodeRequirement reads the Node version from each detected TypeScript
-// package's `engines.node`, falling back to a .nvmrc, and returns the highest
-// floor any of them asks for.
+// nodeRequirement reads the Node version a component needs from its own
+// `engines.node`, the .nvmrc beside it, and the scan root's .nvmrc, and
+// returns the highest floor any of them states.
 //
 // engines.node is a range rather than a version, so only its lower bound is
 // meaningful here — see minimumOfRange for why a floor is all this needs.
-// .nvmrc is checked at both the package directory and the scan root, since a
-// monorepo conventionally keeps one .nvmrc at the top rather than one per
-// package.
-func nodeRequirement(root string, exclude []string) (Requirement, error) {
-	req := Requirement{Ecosystem: detect.TypeScript}
-	dirs, err := detect.TSPackageDirs(root, exclude)
-	if err != nil {
-		return req, err
-	}
+//
+// All three are candidates rather than a precedence order, because they are
+// different statements: `">=18"` is the floor a package supports, and a .nvmrc
+// of `22` — beside it or at the scan root, where a monorepo conventionally
+// keeps one — is the version it is developed on. Taking the first found would
+// resolve to 18 in a repository that pins 22, and an ambient Node 18 would
+// then read as satisfying it.
+func nodeRequirement(root, dir string) (Requirement, error) {
+	req := Requirement{Lang: runner.TypeScript}
 	consider := func(raw, source string) {
 		if raw == "" {
 			return
 		}
 		v := minimumOfRange(raw)
+		// The first statement found is recorded even when it carries no
+		// comparable version, so a message can name what the component
+		// actually wrote; a later one that does compare higher replaces it.
 		if req.Raw == "" {
-			req.Raw, req.Source = raw, source
+			req.Raw, req.Source, req.Version = raw, source, v
+			return
 		}
 		if maxVersion(req.Version, v) != req.Version {
-			req.Version, req.Raw, req.Source = v, raw, source
+			req.Raw, req.Source, req.Version = raw, source, v
 		}
 	}
-	relTo := func(dir, name string) string {
-		r, err := filepath.Rel(root, filepath.Join(dir, name))
-		if err != nil {
-			return name
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil { // #nosec G304 -- dir is a declared component directory, not user input
+		var pkg packageJSONEngines
+		if json.Unmarshal(data, &pkg) == nil {
+			consider(pkg.Engines.Node, relSource(root, dir, "package.json")+" (engines.node)")
 		}
-		return r
 	}
-	for _, dir := range dirs {
-		if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil { // #nosec G304 -- dir comes from lydite's own package-discovery walk, not user input
-			var pkg packageJSONEngines
-			if json.Unmarshal(data, &pkg) == nil {
-				consider(pkg.Engines.Node, relTo(dir, "package.json")+" (engines.node)")
-			}
-		}
-		consider(nvmrc(dir), relTo(dir, ".nvmrc"))
-	}
+	consider(nvmrc(dir), relSource(root, dir, ".nvmrc"))
+	// The scan root's .nvmrc is a candidate like the others, not a fallback
+	// for a component that said nothing. `engines.node: ">=18"` is the floor a
+	// package supports and a root .nvmrc of 22 is the version the repository
+	// is developed on — the shape most monorepos actually have — and returning
+	// the component's floor there resolves to 18, which an ambient Node 18
+	// then satisfies. The highest floor anything states is the one runtime
+	// that satisfies them all.
 	consider(nvmrc(root), ".nvmrc")
 	return req, nil
 }
 
 // nvmrc reads a .nvmrc, whose entire content is the version or alias.
 func nvmrc(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, ".nvmrc")) // #nosec G304 -- dir comes from lydite's own package-discovery walk, not user input
+	data, err := os.ReadFile(filepath.Join(dir, ".nvmrc")) // #nosec G304 -- dir is a declared component directory, not user input
 	if err != nil {
 		return ""
 	}

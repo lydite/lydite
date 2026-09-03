@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"os"
 	"path"
 	"runtime"
 	"slices"
@@ -300,10 +299,11 @@ func TestCargoNextestIsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Prepended, so an older cargo-nextest already on the machine cannot win.
-	env := cargoEnv()
-	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+dir+string(os.PathListSeparator)) {
-		t.Fatalf("cargoEnv = %v, want the pinned bin dir first on PATH", env)
+	// First, so an older cargo-nextest already on the machine cannot win once
+	// the caller composes PATH.
+	dirs := cargoBinDirs()
+	if len(dirs) == 0 || dirs[0] != dir {
+		t.Fatalf("cargoBinDirs = %v, want the pinned bin dir first", dirs)
 	}
 	for _, name := range []Name{CargoNextest, CargoLLVMCovNextest} {
 		r, _ := Lookup(name)
@@ -311,8 +311,8 @@ func TestCargoNextestIsPinned(t *testing.T) {
 			t.Errorf("%s installs nothing, so it runs whatever is on the machine", name)
 		}
 		inv := argv(t, name, Plain)
-		if !slices.Equal(inv.Env, env) {
-			t.Errorf("%s's plain variant env = %v, want the pinned PATH", name, inv.Env)
+		if !slices.Equal(inv.PathDirs, dirs) {
+			t.Errorf("%s's plain variant PathDirs = %v, want the pinned bin dirs", name, inv.PathDirs)
 		}
 	}
 }
@@ -392,16 +392,15 @@ func TestCargoLLVMCovIsPinnedAndOnPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := cargoEnv()
-	if len(env) != 1 || !strings.Contains(env[0], dir) {
-		t.Fatalf("cargoEnv = %v, want the pinned cargo-llvm-cov bin dir on PATH", env)
+	if !slices.Contains(cargoBinDirs(), dir) {
+		t.Fatalf("cargoBinDirs = %v, want the pinned cargo-llvm-cov bin dir", cargoBinDirs())
 	}
 	// The instrumented invocation runs `cargo llvm-cov`, so the directory
 	// holding it has to be on that invocation's own PATH — the registry
 	// entry alone proves nothing about what the suite runs with.
 	inv := argv(t, CargoNextest, Instrumented)
-	if len(inv.Env) != 1 || !strings.Contains(inv.Env[0], dir) {
-		t.Errorf("instrumented env = %v, want the pinned cargo-llvm-cov bin dir on PATH", inv.Env)
+	if !slices.Contains(inv.PathDirs, dir) {
+		t.Errorf("instrumented PathDirs = %v, want the pinned cargo-llvm-cov bin dir", inv.PathDirs)
 	}
 }
 
@@ -431,6 +430,22 @@ func TestInstrumentationIsInstalledForWhatActuallyRunsIt(t *testing.T) {
 		if got := runsLLVMCov(inv); got != tc.want {
 			t.Errorf("runsLLVMCov(%s/%s) = %v, want %v — the command is %q",
 				tc.name, tc.variant, got, tc.want, line(inv))
+		}
+	}
+}
+
+// No extension may belong to two languages. LangForExt returns the first
+// match from a map, so a shared extension would make the answer depend on map
+// iteration order — and orphan.Unscanned groups its warning by language, so
+// the same tree would report a different language run to run.
+func TestNoExtensionBelongsToTwoLanguages(t *testing.T) {
+	owner := map[string]Lang{}
+	for lang, exts := range sourceExts {
+		for _, e := range exts {
+			if other, seen := owner[e]; seen {
+				t.Errorf("%q belongs to both %s and %s, so LangForExt answers by map order", e, other, lang)
+			}
+			owner[e] = lang
 		}
 	}
 }
