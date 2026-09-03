@@ -11,8 +11,18 @@ go.work.sum
 # goreleaser build artifacts
 dist/
 
-# Reports a component's runner is asked to write
+# Reports a command writes: the log per check, the coverage report, and the
+# document `lydite publish` renders the pull-request comment from. lydite writes
+# into the repository it is measuring, and what it writes must never become part
+# of what it measures — a committed report directory matches no component and so
+# widens affected selection to everything on every change. The directory also
+# disowns itself with a .gitignore of its own, for a consumer whose repository
+# has not written this line.
 .lydite-reports/
+
+# Installed dependencies. A JavaScript component's are installed by lydite from
+# the committed lockfile, which is the declaration; the tree they produce is not.
+node_modules/
 
 # Agentic toolkit generated config
 /.claude/

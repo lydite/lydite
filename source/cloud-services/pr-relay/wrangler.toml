@@ -1,0 +1,24 @@
+name = "lydite-pr-relay"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+# A Custom Domain rather than a route on a zone-wide pattern: it creates the
+# DNS record itself and terminates on the Worker, so there is no origin behind
+# it to misconfigure. The API token deploying this needs Zone → DNS → Edit for
+# the record, and Workers Scripts → Edit for the script and its secrets — there
+# is no separate permission for secrets.
+[[routes]]
+pattern = "pr.lydite.org"
+custom_domain = true
+
+# LYDITE_APP_ID is not a credential: it is the `iss` claim of the App JWT, and
+# is public in the same sense a username is.
+[vars]
+LYDITE_APP_ID = ""
+AUDIENCE = "https://pr.lydite.org"
+
+# LYDITE_APP_PRIVATE_KEY is a per-Worker secret, set by workers-secrets-sync.yml
+# and never declared here. Per-Worker and deliberately not an account-level
+# store: this Worker must not be able to read the dashboard App's key, which is
+# the whole reason there are two Apps.

@@ -1,0 +1,10 @@
+{
+  "name": "@lydite/pr-relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Posts lydite's standing comment on a consumer's pull request, authenticated by the CI job's GitHub Actions OIDC token rather than by any credential the job holds.",
+  "dependencies": {
+    "@lydite/github-app": "*"
+  }
+}

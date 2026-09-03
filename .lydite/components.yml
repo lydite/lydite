@@ -1,7 +1,13 @@
 # What lydite builds, tests, scans and gates in its own repository.
 #
-# One component, because the Go module at source/cli/ is what `go test` treats as
-# a whole. The *-pin directories under it hold real manifests — a go.mod, a
+# Two components, because a component is the unit its build tool treats as a
+# whole: the Go module at source/cli/ is what `go test` treats as one, and
+# source/cloud-services/ is one npm workspace. The Workers and the library they
+# share are three packages in that workspace and deliberately not three
+# components — declared separately, npm would install and build the workspace
+# three times, and each copy would provision everything the suite needs again.
+#
+# The *-pin directories under it hold real manifests — a go.mod, a
 # package.json, a Cargo.toml — and are deliberately not components: they exist
 # so Dependabot can see the tool versions lydite pins, and nothing in them is
 # ever built or tested. Being undeclared is the whole of what keeps them out of
@@ -14,6 +20,15 @@ components:
     dir: source/cli
     runner: go-test
     args: ["-race", "./..."]
+
+  - name: cloud-services
+    dir: source/cloud-services
+    runner: vitest
+    # No args. The vitest runner supplies `run` itself, because a bare `vitest`
+    # starts watch mode and must never be a CI default — and a second `run`
+    # here is not ignored: vitest reads a positional argument as a filename
+    # filter, so it would select no test file and the component would fail with
+    # "No test files found".
 
 # The pin manifests' own source. cargo refuses a [package] manifest with no
 # src/lib.rs, so cargo-audit-pin and cargo-deny-pin each carry an empty one —

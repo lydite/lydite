@@ -1,0 +1,17 @@
+name = "lydite-oauth-exchange"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+[[routes]]
+pattern = "app.lydite.org"
+custom_domain = true
+
+# The app and its callback share this one origin, so the exchange never crosses
+# origins — see ADR 0009.
+[vars]
+LYDITE_DASHBOARD_CLIENT_ID = ""
+
+# LYDITE_DASHBOARD_CLIENT_SECRET is this Worker's own secret. The dashboard App
+# has no private key at all: the user-to-server flow needs a client id and
+# secret, and a key it never uses would be liability rather than capability.

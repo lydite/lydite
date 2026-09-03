@@ -1,0 +1,10 @@
+{
+  "name": "@lydite/oauth-exchange",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Exchanges a dashboard login's authorization code for a user-to-server token, and refreshes it. Holds no key and reads no repository: the viewer's own credentials do that.",
+  "dependencies": {
+    "@lydite/github-app": "*"
+  }
+}
