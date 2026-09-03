@@ -1023,9 +1023,15 @@ install` never shares a graph between two tools, so the conflict is invisible in
 **Adding a new pin means two edits, and a cargo pin three:** the manifest, a
 `.github/dependabot.yml` entry, and — for cargo only — an exclude in `.lydite/components.yml`.
 A pin directory is deliberately not a component, so nothing scans or tests it; but cargo refuses
-a `[package]` manifest without a `src/lib.rs`, so every cargo pin carries real Rust under the
-`cli` component that no component builds, and `lydite scan` says so unless the declaration
-excludes it. The current glob is `cli/internal/**/*-pin/**`.
+a `[package]` manifest with no target, so every cargo pin has to carry an (empty) `src/lib.rs` —
+real Rust under the `cli` component that nothing builds — and `lydite scan` says so unless the
+declaration excludes it. The current glob is `cli/internal/**/*-pin/**`.
+
+**A cargo pin with no `src/lib.rs` is not merely untidy: Dependabot cannot read it.**
+`cargo metadata` fails with `no targets specified in the manifest`, the updater errors in a job
+log nobody reads, and that pin silently stops being bumped — the "pin nothing ages out" failure
+ADR 0006 exists to prevent, arriving through the mechanism meant to prevent it. Both
+`internal/runner` pins were in that state until this was noticed.
 `cmd/lydite`'s `TestLyditesOwnDeclarationLeavesNothingUnscanned` fails when a pin falls outside
 it — the replacement for `internal/config`'s deleted `TestPinDirectoriesAreExcluded`, asserting
 the property rather than the pin case. Nothing enforces the Dependabot entry, and a pin no bot
