@@ -17,15 +17,13 @@ import (
 // surface nobody reads.
 const Marker = "<!-- lydite:results -->"
 
-// markURL is the badge the comment opens with.
+// The comment carries no logo.
 //
-// Absolute and pinned to the default branch: the comment is posted into the
-// pull request of whatever repository is being scanned, where a repository
-// relative path resolves against that repository and resolves to nothing. A
-// tag rather than a branch would stop resolving for consumers pinned to an
-// older release. This path is a published interface — moving the file breaks
-// the badge in every consumer's comment, retroactively.
-const markURL = "https://raw.githubusercontent.com/lydite/lydite/main/assets/lydite-mark-64.png"
+// It identified whose verdict this was, back when the comment arrived under a
+// consumer's own `github-actions[bot]` and nothing else distinguished it from
+// every other workflow in the repository. The App is that identity now — the
+// author of the comment is `lydite` — so a 64px mark above the verdict is one
+// row of vertical space spent restating the byline.
 
 // CommentRow is one line of a section's table: what was checked, and what it
 // answered.
@@ -93,41 +91,45 @@ type Comment struct {
 	Base    string
 }
 
-// badge is the verdict as the pull-request surface shows it.
+// title is the comment's first line: the status, said plainly.
 //
-// The three read differently on purpose. A referral is not a failure — it
-// names no defect, and most referrals mean only that no exemption matched —
-// so it must not borrow the failure's mark, and the words say what is wanted
-// rather than what is wrong.
-func badge(v Verdict) string {
+// A heading rather than a bold run, because it is the one thing a reader must
+// take from the comment without reading it. The three read differently on
+// purpose — a referral names no defect and most referrals mean only that no
+// exemption matched, so it must not borrow the failure's word or its colour.
+func title(v Verdict) string {
 	switch v {
 	case VerdictPass:
-		return "✅ **Looks good**"
+		return "### " + mark(StatusPass) + " Success"
 	case VerdictFail:
-		return "❌ **Failed**"
+		return "### " + mark(StatusFail) + " Failure"
 	case VerdictRefer:
-		return "⏸ **Needs attention**"
+		return "### " + mark(StatusRefer) + " Needs attention"
 	default:
-		return "**" + string(v) + "**"
+		return "### " + string(v)
 	}
 }
 
 // Render returns the comment body as markdown.
+//
+// Three parts, in the order a reader needs them: the status as a heading, one
+// sentence saying what it means, then a section per concern. Nothing above the
+// status, because a reader who takes only the first line must still have taken
+// the answer.
+//
+// There is deliberately no styling beyond this. A hosting platform sanitises
+// `style` and `class` out of a comment body, so colour comes from the marks and
+// hierarchy comes from the heading — anything more elaborate renders as its own
+// source on the platforms that strip it.
 func (c Comment) Render() string {
 	var b strings.Builder
 	b.WriteString(Marker + "\n")
-	// Rendered at the asset's own 64px rather than scaled down: the mark is
-	// the first thing identifying whose verdict this is, and both dimensions
-	// are given so the row's height is known before the image loads and the
-	// comment does not reflow under the reader.
-	fmt.Fprintf(&b, "<img src=%q width=\"64\" height=\"64\" align=\"left\" alt=\"lydite\">\n\n", markURL)
-
-	b.WriteString(badge(c.Verdict))
+	b.WriteString(title(c.Verdict))
+	b.WriteString("\n\n")
 	if c.Headline != "" {
-		b.WriteString(" — ")
 		b.WriteString(c.Headline)
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 
 	for _, section := range c.Sections {
 		section.render(&b)
@@ -142,14 +144,18 @@ func (c Comment) Render() string {
 	return b.String()
 }
 
-// mark is a section's status as the pull-request surface shows it.
+// mark is a status as the pull-request surface shows it.
 //
 // Not the terminal's glyph. The text grammar has four marks for seven statuses
 // because a terminal is monochrome and aligned to a column; a comment is
-// neither, and a reader scanning four shut sections is picking which to open,
-// which is what colour does for them here. The three that vote share their
-// vocabulary with the badge deliberately, so a section and the headline above
-// it read as one sentence.
+// neither, and a reader scanning shut sections is picking which to open, which
+// is what colour does for them here.
+//
+// A referral is amber and not the failure's red: it names no defect, and it is
+// resolved by a person rather than by the author doing more work. Unmeasured is
+// grey and deliberately not amber either — "nobody looked" is a different thing
+// from "somebody must", and rendering them alike is what lets a gate that never
+// ran hide among the ones asking for attention.
 func mark(s Status) string {
 	switch s {
 	case StatusPass:
@@ -157,9 +163,11 @@ func mark(s Status) string {
 	case StatusFail:
 		return "❌"
 	case StatusRefer:
-		return "⏸"
+		return "🟡"
+	case StatusUnmeasured:
+		return "⚪"
 	default:
-		return "⚠️"
+		return "◽"
 	}
 }
 

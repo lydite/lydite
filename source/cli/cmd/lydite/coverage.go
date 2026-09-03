@@ -611,6 +611,7 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 	}
 	var baseLines coverage.LineCount
 	covered := 0
+	var missing []string
 	for _, m := range current {
 		if !in(m) || !m.Lines.Measured() {
 			continue
@@ -618,15 +619,25 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 		if b, ok := baseline[m.Name]; ok && b.Measured() {
 			baseLines = baseLines.Add(b)
 			covered++
+			continue
 		}
+		missing = append(missing, m.Name)
 	}
 	value := composedValue(lines, measured, carriedN, total)
 	// Compared only when the baseline covers every component this figure is
 	// composed from. A partial comparison is a different quantity, and
 	// rendering one as a comparison is the class of error this file is
-	// arranged around.
+	// arranged around: a newly declared component adds its lines to this side
+	// and nothing to the other, so the figure would move by the size of the
+	// component rather than by anything anyone did to the code.
+	//
+	// Which components are missing is named, because without it the row says
+	// only that something is absent and a reader cannot tell a one-off — a
+	// component declared by this very change — from a baseline that has been
+	// broken for months.
 	if covered != measured+carriedN {
-		return ui.Row{Status: ui.StatusNew, Label: label, Value: value + ", no baseline for every component in it"}
+		return ui.Row{Status: ui.StatusNew, Label: label,
+			Value: fmt.Sprintf("%s, no baseline yet for %s", value, strings.Join(missing, ", "))}
 	}
 	pct, basePct := lines.Percent(), baseLines.Percent()
 	if regressedBeyond(pct, basePct, tolerance) {

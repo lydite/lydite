@@ -131,9 +131,31 @@ enforce nothing and add a row to every pull request's check list for it.
 
 ## What the comment shows, and what it deliberately does not
 
-A verdict badge, a headline naming the concern to act on, and one collapsible
-section per concern — the shape Copilot's review comment uses, for the reason it
-uses it: four concerns at one line each, and the one that failed already open.
+The status as a heading, one sentence saying what it means for this change, then
+one collapsible section per concern — the shape Copilot's review comment uses,
+for the reason it uses it: four concerns at one line each, and the one that
+failed already open. A reader who takes only the first line has still taken the
+answer, which is why nothing sits above it.
+
+**No logo.** The mark identified whose verdict this was while the comment
+arrived under a consumer's own `github-actions[bot]` and nothing else
+distinguished it from every other workflow in the repository.
+[ADR 0022](0022-a-vendor-operated-app-and-an-oidc-relay.md) makes the App that
+identity, so an image above the verdict restates the byline and spends a row of
+the reader's screen doing it.
+
+**A referral is amber, not red, and an unmeasured gate is neither.** The
+terminal grammar renders `refer`, `unmeasured` and `dropped` with one amber `!`,
+because a terminal is monochrome and aligned to a column and the glyph only says
+how much attention a row wants. A comment is neither, and its marks are the only
+colour it has: a referral names no defect and is resolved by a person, while an
+unmeasured gate means nobody looked. Rendering those alike is what lets a gate
+that never ran hide among the ones asking for attention.
+
+**There is no styling beyond that.** A hosting platform sanitises `style` and
+`class` out of a comment body, so colour comes from the marks and hierarchy from
+the heading. Anything more elaborate renders as its own source on a platform
+that strips it, which is worse than the plain version.
 
 Each section carries a two-column table of what was checked and what it
 answered. The reference prototype in `docs/design/reference/` specifies three
@@ -153,7 +175,7 @@ stated. A hosting platform refuses a comment over a size limit, and a refused
 comment is no surface at all — which is the outcome this whole decision exists
 to prevent.
 
-The footer carries the version and the base commit. The design's footer also
-claims parity with the reader's local run; nothing can establish that yet
+The footer carries the version and the base commit. The reference design's
+footer also claims parity with the reader's local run; nothing can establish that yet
 ([#27](https://github.com/lydite/lydite/issues/27)), so it is absent rather than
 asserted.

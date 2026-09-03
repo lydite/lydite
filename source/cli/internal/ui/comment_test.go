@@ -12,13 +12,61 @@ func TestCommentCarriesTheMarkerSoItCanBeFoundAgain(t *testing.T) {
 	}
 }
 
-// The comment is posted into the pull request of whatever repository is
-// being scanned, where a repository-relative path resolves against that
-// repository and finds nothing.
-func TestCommentReferencesTheMarkByAbsoluteURL(t *testing.T) {
+// The App is the identity now, so a mark above the verdict restates the
+// byline and spends a row doing it.
+func TestCommentCarriesNoLogo(t *testing.T) {
 	body := Comment{Verdict: VerdictPass}.Render()
-	if !strings.Contains(body, "https://raw.githubusercontent.com/") {
-		t.Fatal("the mark is not referenced absolutely")
+	for _, unwanted := range []string{"<img", "raw.githubusercontent.com"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("the comment still carries a logo (%s):\n%s", unwanted, body)
+		}
+	}
+}
+
+// A reader who takes only the first line must still have taken the answer.
+func TestTheStatusIsTheFirstThingRendered(t *testing.T) {
+	for verdict, want := range map[Verdict]string{
+		VerdictPass:  "Success",
+		VerdictFail:  "Failure",
+		VerdictRefer: "Needs attention",
+	} {
+		body := Comment{Verdict: verdict, Headline: "something happened"}.Render()
+		lines := strings.Split(strings.TrimPrefix(body, Marker+"\n"), "\n")
+		if !strings.HasPrefix(lines[0], "### ") {
+			t.Errorf("%s: the first line is not a heading: %q", verdict, lines[0])
+		}
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("%s: the heading does not say %q: %q", verdict, want, lines[0])
+		}
+	}
+}
+
+// The explanation sits under the status, not beside it: one line saying what
+// the heading means for this change.
+func TestTheHeadlineFollowsTheStatusOnItsOwnLine(t *testing.T) {
+	body := Comment{Verdict: VerdictRefer, Headline: "referral needs a human"}.Render()
+	if !strings.Contains(body, "Needs attention\n\nreferral needs a human\n") {
+		t.Fatalf("the headline is not on its own line under the status:\n%s", body)
+	}
+}
+
+// A referral names no defect and is resolved by a person, so it must not
+// borrow the failure's colour. Unmeasured must not borrow the referral's
+// either: "nobody looked" is not "somebody must".
+func TestEveryStatusThatReadsDifferentlyLooksDifferent(t *testing.T) {
+	seen := map[string]Status{}
+	for _, s := range []Status{StatusPass, StatusFail, StatusRefer, StatusUnmeasured, StatusContext} {
+		got := mark(s)
+		if prior, ok := seen[got]; ok && prior != s {
+			t.Errorf("%s and %s share the mark %q", prior, s, got)
+		}
+		seen[got] = s
+	}
+	if mark(StatusRefer) == mark(StatusFail) {
+		t.Error("a referral borrows the failure's mark")
+	}
+	if mark(StatusUnmeasured) == mark(StatusRefer) {
+		t.Error("an unmeasured gate borrows the referral's mark")
 	}
 }
 
@@ -45,7 +93,7 @@ func TestCommentRendersTheVerdictAndEachSection(t *testing.T) {
 	}.Render()
 
 	for _, want := range []string{
-		"Failed", "test did not pass",
+		"### ", "Failure", "test did not pass",
 		"<b>test</b>", "1 failed, 2 passed",
 		"| Check | Result |",
 		"| test(cli) | passed |",
@@ -145,25 +193,13 @@ func TestCommentDoesNotClaimParityItCannotEstablish(t *testing.T) {
 	}
 }
 
-// The mark is rendered at the asset's own size rather than scaled down, and
-// carries both dimensions so the comment does not reflow once it loads.
-func TestCommentRendersTheMarkAtItsNativeSize(t *testing.T) {
-	body := Comment{Verdict: VerdictPass}.Render()
-	for _, want := range []string{`width="64"`, `height="64"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the mark is missing %s:\n%s", want, body)
-		}
-	}
-}
-
-// The three verdicts read differently on purpose: a referral names no defect
-// and must not borrow the failure's mark.
-func TestEachVerdictHasItsOwnBadge(t *testing.T) {
+// The three verdicts read differently on purpose.
+func TestEachVerdictHasItsOwnTitle(t *testing.T) {
 	seen := map[string]Verdict{}
 	for _, v := range []Verdict{VerdictPass, VerdictFail, VerdictRefer} {
-		got := badge(v)
+		got := title(v)
 		if prior, ok := seen[got]; ok {
-			t.Fatalf("%s and %s share the badge %q", prior, v, got)
+			t.Fatalf("%s and %s share the title %q", prior, v, got)
 		}
 		seen[got] = v
 	}

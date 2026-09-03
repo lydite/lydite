@@ -58,8 +58,7 @@ source/web/                       # the React dashboard (see ADR 0021 for the so
 source/cloud-services/            # the Workers lydite operates, as one npm workspace and so one
                                   #   component: pr-relay posts the PR comment on a consumer's
                                   #   behalf, oauth-exchange is the dashboard's (see Surface below)
-assets/                           # the shipped logo set — the action's PR comment embeds
-                                  #   lydite-mark-64.png by raw URL (see below)
+assets/                           # the shipped logo set, plus the org avatar (see Design)
 docs/design/source/               # where the brand is authored; the only live <text> in the tree
 docs/design/                      # tokens, surface specs, and the reference prototypes (see Design)
 docs/release-notes/               # _header.md + one <tag>.md per release that needs one (see Release notes)
@@ -1880,12 +1879,14 @@ why a consumer's CI only needs to hand lydite a token: lydite owns the whole Cod
 relationship (coverage *and* JUnit test-results), so the calling workflow never has to install a
 Codecov CLI or push to Codecov directly itself.
 
-The PR comment's header embeds `assets/lydite-mark-64.png` by **absolute raw URL**
-(`raw.githubusercontent.com/lydite/lydite/main/...`), never a repo-relative path — the comment is
-posted into the *consuming* repo's PR, where a relative `assets/...` would resolve against that repo
-and 404. It's pinned to lydite's default branch, not a release tag, so the image keeps resolving for
-consumers pinned to an older lydite version. Renaming or moving that file therefore breaks the logo
-in every consumer's PR comment retroactively — treat its path as a public API.
+**The pull-request comment carries no logo.** It identified whose verdict it was while the
+comment arrived under a consumer's own `github-actions[bot]`; the App is that identity now, so a
+mark above the verdict restates the byline and spends a row of a reader's screen doing it. Any
+image a comment did carry would have to be an **absolute raw URL** against this repository's
+default branch — the comment is posted into the *consuming* repo's pull request, where a relative
+`assets/...` resolves against that repo and 404s, and a release tag stops resolving for consumers
+pinned to an older version. That constraint is why `assets/lydite-mark-64.png` was treated as a
+public API, and it is the constraint to honour if a comment ever embeds an image again.
 
 **Never interpolate `${{ inputs.* }}` or `${{ steps.*.outputs.* }}` directly into a `run:` script
 body** — pass it via that step's `env:` block instead, and reference the env var name (`"$DIR"`,
@@ -1903,8 +1904,11 @@ every consumer of them is already in this repository — see
 [ADR 0012](docs/adr/0012-design-system-in-the-monorepo.md). The split that matters is
 inside the tree, not across repositories:
 
-- `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png`, whose path is a
-  public API (above), and `lydite-avatar-512.png`, which is the organisation avatar.
+- `assets/` is **what ships**. Production SVGs, plus `lydite-mark-64.png` and
+  `lydite-avatar-512.png`, which is the organisation avatar. Nothing lydite renders embeds the
+  raster mark today — the pull-request comment dropped it when the App became the identity — so
+  its path is no longer load-bearing for a consumer, and the rule that made it so is recorded
+  with the comment above.
 - `docs/design/source/` is where the brand is **authored**. `lydite-brand.svg` is the only
   file in the tree carrying live `<text>`; everything in `assets/` is outlined, so nothing
   shipped depends on a font being installed. Editing it needs **Kohinoor Telugu Bold**, which

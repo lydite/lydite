@@ -195,7 +195,7 @@ states it has none.
 |---|---|
 | Mark | `assets/lydite-mark.svg` — also the app icon and the favicon |
 | Mark, circular | `assets/lydite-avatar.svg`, `assets/lydite-avatar-512.png` (organisation avatar) |
-| Mark, 64px raster | `assets/lydite-mark-64.png` — **path is a public API**, see AGENTS.md |
+| Mark, 64px raster | `assets/lydite-mark-64.png` — nothing lydite renders embeds it; the pull-request comment carries no logo |
 | Wordmark | `assets/lydite-wordmark{,-dark}.svg` |
 | Wordmark + tagline | `assets/lydite-tagline{,-dark}.svg` |
 | Mark + wordmark | `assets/lydite-logo-horizontal{,-dark}.svg` |
