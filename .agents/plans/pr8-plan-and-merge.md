@@ -1,5 +1,12 @@
 # Session prompt — step 8: `lydite test plan`, `lydite test merge`, and the reusable workflow
 
+> **Not the next session.** Step 8 is deferred behind
+> [#62](https://github.com/lydite/lydite/issues/62): nothing lydite scans or
+> measures reaches a pull request, so every gate built so far is invisible where
+> it matters. Read this when that one has landed — and check what it changed,
+> since a surface that publishes results is one the planner and the merge step
+> both have to feed.
+
 Every component now runs, is measured, is gated and is scanned through one
 declaration. What is still hand-maintained is the *distribution*: a consumer's
 CI has to know how to fan components out across matrix jobs and how to put the
