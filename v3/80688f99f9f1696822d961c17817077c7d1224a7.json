@@ -1,0 +1,10 @@
+{
+  "cli": {
+    "covered": 3205,
+    "total": 3933
+  },
+  "cloud-services": {
+    "covered": 327,
+    "total": 345
+  }
+}
