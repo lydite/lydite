@@ -24,6 +24,12 @@ dist/
 # the committed lockfile, which is the declaration; the tree they produce is not.
 node_modules/
 
+# `wrangler dev`'s local state — a miniflare cache and a trace store, written
+# beside the Worker it is running. Committed, it lands in the diff, matches no
+# component, and so widens affected selection to everything on every change:
+# the same failure .lydite-reports/ disowns itself to avoid.
+.wrangler/
+
 # Agentic toolkit generated config
 /.claude/
 /CLAUDE.md
