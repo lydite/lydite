@@ -754,9 +754,9 @@ func TestAComponentInsideASingleModuleRepositoryIsNotAGap(t *testing.T) {
 // It asserts the whole property rather than the pin case, so a future
 // directory of any language nothing claims fails here too.
 func TestLyditesOwnDeclarationLeavesNothingUnscanned(t *testing.T) {
-	// Three levels up: the module is at cli/, and the scan root is the
-	// repository root where .lydite/ lives.
-	const repoRoot = "../../.."
+	// Four levels up: the module is at source/cli/, and the scan root is
+	// the repository root where .lydite/ lives.
+	const repoRoot = "../../../.."
 
 	file, err := component.Load(repoRoot)
 	if err != nil {

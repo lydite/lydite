@@ -8,16 +8,16 @@ version: 2
 
 before:
   hooks:
-    # `-C cli` is load-bearing. The Go module lives in cli/, not at the
-    # repository root, and a before-hook runs at the root with no shell, so
-    # neither a bare `go mod tidy` nor a `cd` in front of it works: the hook
+    # `-C source/cli` is load-bearing. The Go module lives in source/cli/, not
+    # at the repository root, and a before-hook runs at the root with no shell,
+    # so neither a bare `go mod tidy` nor a `cd` in front of it works: the hook
     # fails with "go.mod file not found" and the release ends before a single
     # binary is built.
-    - go -C cli mod tidy
+    - go -C source/cli mod tidy
 
 builds:
   - id: lydite
-    dir: cli
+    dir: source/cli
     main: ./cmd/lydite
     binary: lydite
     env:

@@ -17,7 +17,7 @@ go run ./cmd/lydite review     # referral verdict for the current branch (exit 2
 go run ./cmd/lydite test --dir ..  # run each declared component's suite and measure its coverage
 go run ./cmd/lydite test --dir .. --no-coverage   # the fast path: no instrumentation, no coverage rows
 
-# The Go module is rooted at cli/, so every command above runs from there.
+# The Go module is rooted at source/cli/, so every command above runs from there.
 
 # Release build dry-run (produces dist/):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
@@ -26,45 +26,47 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 ## Layout
 
 ```
-cli/                           # the Go module (module path lydite/lydite); every go command runs here
-cli/cmd/lydite/                # the lydite CLI (scan, test, review, version, update)
-cli/internal/ui/               # the output grammar every command renders through, plus --json
-cli/internal/referral/         # exemptions, disqualifiers, the referral decision (see Referral below)
-cli/internal/clearance/        # the comment surface and the clearance decision (see Clearance below)
-cli/internal/forge/            # the hosting platform: commit statuses, permission, comments
-internal/component/             # .lydite/components.yml: what a repo builds and tests (see Components below)
-internal/orphan/                # source files under no component and no exclude (see The orphan gate)
-internal/pathmatch/             # the anchored path-pattern syntax both declarations are written in
-internal/runner/                # a runner name to its plain/instrumented/build-only invocations
-internal/nodedeps/              # how a JavaScript workspace's dependencies get installed
-internal/cargotool/             # pinned cargo subcommands: version parsing and the install
-internal/download/              # fetch, checksum-verify and unpack an archive safely
-internal/compose/               # the services a component's suite needs (see Services below)
-internal/scheduler/             # port locks and the concurrency bound (see The scheduler below)
-internal/affected/              # which components a change could have broken (see Affected selection)
-internal/gitdiff/               # the changed paths, and the tracked-file listing both gates read
-internal/config/                # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
-internal/toolchain/             # ensures the Go/Rust/Node runtime each component needs (see Toolchains below)
-internal/rust/                  # clippy, cargo-audit, cargo-deny
-internal/typescript/            # pinned Biome, the only TS linter (see Linters)
-internal/golang/                # gosec, govulncheck (installed into a version-keyed GOBIN dir)
-internal/semgrep/                # pinned Semgrep, installed via pipx
-internal/coverage/               # reads a component's coverage report (see Coverage below)
-internal/gitstate/               # the base branch, and lydite branch read/write (see Coverage below)
-internal/executil/              # shared external-command runner every scanner package uses
-assets/                        # the shipped logo set — the action's PR comment embeds
-                                #   lydite-mark-64.png by raw URL (see below)
-docs/design/source/             # where the brand is authored; the only live <text> in the tree
-docs/design/                    # tokens, surface specs, and the reference prototypes (see Design)
-docs/release-notes/             # _header.md + one <tag>.md per release that needs one (see Release notes)
-.lydite/                       # every file that configures lydite: config.yml, components.yml,
-                                #   exemptions.yml
-.goreleaser.yml                 # build/release config (v2 schema)
-.golangci.yml                   # lint config (v2 schema)
-.github/workflows/{ci,release}.yml
-.github/dependabot.yml
-                                # (the composite action lives in lydite/actions, not here)
-scripts/install.sh              # curl|sh installer shipped with every release
+source/cli/                       # the Go module (module path lydite/lydite); every go command runs here
+source/cli/cmd/lydite/            # the lydite CLI (scan, test, review, version, update)
+source/cli/internal/ui/           # the output grammar every command renders through, plus --json
+source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see Referral below)
+source/cli/internal/clearance/    # the comment surface and the clearance decision (see Clearance below)
+source/cli/internal/forge/        # the hosting platform: commit statuses, permission, comments
+source/cli/internal/component/    # .lydite/components.yml: what a repo builds and tests (see Components below)
+source/cli/internal/orphan/       # source files under no component and no exclude (see The orphan gate)
+source/cli/internal/pathmatch/    # the anchored path-pattern syntax both declarations are written in
+source/cli/internal/runner/       # a runner name to its plain/instrumented/build-only invocations
+source/cli/internal/nodedeps/     # how a JavaScript workspace's dependencies get installed
+source/cli/internal/cargotool/    # pinned cargo subcommands: version parsing and the install
+source/cli/internal/download/     # fetch, checksum-verify and unpack an archive safely
+source/cli/internal/compose/      # the services a component's suite needs (see Services below)
+source/cli/internal/scheduler/    # port locks and the concurrency bound (see The scheduler below)
+source/cli/internal/affected/     # which components a change could have broken (see Affected selection)
+source/cli/internal/gitdiff/      # the changed paths, and the tracked-file listing both gates read
+source/cli/internal/config/       # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
+source/cli/internal/toolchain/    # ensures the Go/Rust/Node runtime each component needs (see Toolchains below)
+source/cli/internal/rust/         # clippy, cargo-audit, cargo-deny
+source/cli/internal/typescript/   # pinned Biome, the only TS linter (see Linters)
+source/cli/internal/golang/       # gosec, govulncheck (installed into a version-keyed GOBIN dir)
+source/cli/internal/semgrep/      # pinned Semgrep, installed via pipx
+source/cli/internal/coverage/     # reads a component's coverage report (see Coverage below)
+source/cli/internal/gitstate/     # the base branch, and lydite branch read/write (see Coverage below)
+source/cli/internal/executil/     # shared external-command runner every scanner package uses
+source/cli/.golangci.yml          # lint config (v2 schema)
+source/web/                       # the React dashboard (see ADR 0021 for the source/ root)
+assets/                           # the shipped logo set — the action's PR comment embeds
+                                  #   lydite-mark-64.png by raw URL (see below)
+docs/design/source/               # where the brand is authored; the only live <text> in the tree
+docs/design/                      # tokens, surface specs, and the reference prototypes (see Design)
+docs/release-notes/               # _header.md + one <tag>.md per release that needs one (see Release notes)
+docs/adr/                         # the decision record
+.lydite/                          # every file that configures lydite: config.yml, components.yml,
+                                  #   exemptions.yml
+.goreleaser.yml                   # build/release config (v2 schema)
+.gt-repo.yaml                     # repo governance; renders .github/dependabot.yml and the gt workflows
+.github/workflows/                # CI stages, the release, and lydite's own referral/baseline jobs
+                                  # (the composite action lives in lydite/actions, not here)
+scripts/install.sh                # curl|sh installer shipped with every release
 ```
 
 - Module path: `lydite/lydite` (not `github.com/lydite/lydite` — a deliberate deviation from
@@ -305,7 +307,7 @@ produces.
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
 a foreign toolchain tests the machine it runs on. **Two of the three languages therefore have no
-repository here to run against** — `web/` is empty and the only `Cargo.toml` files are pin
+repository here to run against** — `source/web/` is empty and the only `Cargo.toml` files are pin
 manifests, deliberately not components. `ci-end2end.yml`'s `proving ground` job closes that,
 running `lydite test` against every component of
 [`lydite/proving-ground`](https://github.com/lydite/proving-ground) on a bare checkout — no
@@ -1026,7 +1028,7 @@ install` never shares a graph between two tools, so the conflict is invisible in
 A pin directory is deliberately not a component, so nothing scans or tests it; but cargo refuses
 a `[package]` manifest with no target, so every cargo pin has to carry an (empty) `src/lib.rs` —
 real Rust under the `cli` component that nothing builds — and `lydite scan` says so unless the
-declaration excludes it. The current glob is `cli/internal/**/*-pin/**`.
+declaration excludes it. The current glob is `source/cli/internal/**/*-pin/**`.
 
 **A cargo pin with no `src/lib.rs` is not merely untidy: Dependabot cannot read it.**
 `cargo metadata` fails with `no targets specified in the manifest`, the updater errors in a job
@@ -1786,7 +1788,7 @@ inside the tree, not across repositories:
 - `docs/design/tokens.md` is the token set and the surface specifications.
 - `docs/design/reference/` is **reference only** — the `.dc.html` prototypes. They use a
   custom runtime and inline styles, both artefacts of the authoring environment: do not
-  port the runtime, and do not copy the styles into `web/`. The construction proofs that
+  port the runtime, and do not copy the styles into `source/web/`. The construction proofs that
   lived here measured the retired "L" mark against a supplied raster; the current mark is
   authored as vector, so there is nothing to prove and they are gone rather than restated.
 

@@ -10,7 +10,7 @@
 version: 2
 updates:
   - package-ecosystem: "gomod"
-    directory: "/cli"
+    directory: "/source/cli"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -53,7 +53,7 @@ updates:
   # exclude. Nothing enforces this entry, though, so a pin added without one is
   # a pin no bot ever bumps.
   - package-ecosystem: "npm"
-    directory: "/cli/internal/typescript/biome-pin"
+    directory: "/source/cli/internal/typescript/biome-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -70,7 +70,7 @@ updates:
   # cargo-audit (internal/rust). One manifest per tool: cargo-audit and
   # cargo-deny cannot resolve in a shared dependency graph.
   - package-ecosystem: "cargo"
-    directory: "/cli/internal/rust/cargo-audit-pin"
+    directory: "/source/cli/internal/rust/cargo-audit-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -86,7 +86,7 @@ updates:
 
   # cargo-deny (internal/rust).
   - package-ecosystem: "cargo"
-    directory: "/cli/internal/rust/cargo-deny-pin"
+    directory: "/source/cli/internal/rust/cargo-deny-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -105,7 +105,7 @@ updates:
   # are: whatever version a machine carries decides which tests run and what
   # a failure looks like.
   - package-ecosystem: "cargo"
-    directory: "/cli/internal/runner/cargo-nextest-pin"
+    directory: "/source/cli/internal/runner/cargo-nextest-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -124,7 +124,7 @@ updates:
   # runner without it measures nothing, and an empty baseline cached as real
   # makes every later pull request a cache hit that gates on nothing.
   - package-ecosystem: "cargo"
-    directory: "/cli/internal/runner/cargo-llvm-cov-pin"
+    directory: "/source/cli/internal/runner/cargo-llvm-cov-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -152,7 +152,7 @@ updates:
   # all of them would reintroduce the PR flood that keeping go-pin out of
   # lydite's own go.mod exists to avoid.
   - package-ecosystem: "gomod"
-    directory: "/cli/internal/golang/go-pin"
+    directory: "/source/cli/internal/golang/go-pin"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
@@ -176,7 +176,7 @@ updates:
 
   # Semgrep (internal/semgrep).
   - package-ecosystem: "pip"
-    directory: "/cli/internal/semgrep"
+    directory: "/source/cli/internal/semgrep"
     schedule:
       interval: "weekly"
     # Dependabot's commit message is also its PR title, and PRs are
