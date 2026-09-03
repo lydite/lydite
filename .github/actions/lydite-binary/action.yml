@@ -1,0 +1,22 @@
+# Puts the lydite the `setup` job built onto PATH.
+#
+# The binary under test rather than an installed release. This repository is
+# where lydite is changed, so a job running the last release would report on
+# code that is not in the pull request — which is the one thing a dogfood must
+# not do. `lydite/actions`' own `setup` installs a release instead, because
+# that is what a consumer wants.
+name: lydite binary
+description: Download the lydite built for this run and put it on PATH
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: lydite-binary
+        path: ${{ runner.temp }}/lydite-bin
+
+    - shell: bash
+      run: |
+        chmod +x "${RUNNER_TEMP}/lydite-bin/lydite"
+        echo "${RUNNER_TEMP}/lydite-bin" >> "$GITHUB_PATH"

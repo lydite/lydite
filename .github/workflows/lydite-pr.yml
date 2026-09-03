@@ -1,0 +1,252 @@
+# Everything lydite says about a pull request, as one workflow run.
+#
+# This is the shape a consumer gets, dogfooded here: `lydite/actions` packages
+# the same four steps as a reusable workflow, and this file is what that
+# workflow has to be able to express. Running it from source rather than from a
+# release is the point — a dogfood against the last release tests the last
+# release.
+#
+#   referral ─┐   no needs, so the status lands in seconds
+#   scan ─────┤   each job uploads its .lydite-reports/
+#   test ─────┘
+#             └─► publish   needs all, if: always()
+#
+# One run, so every report is an artifact of it. That is the whole reason the
+# four are here together: the comment is assembled from all of them, and a
+# publish triggered by a different workflow's completion could not see the
+# referral's report without either recomputing the verdict or looking a run up
+# by head SHA and racing it.
+#
+# Deliberately outside the gt pipeline, and it cannot be inside it: gt's CI
+# accepts exactly the stages preflight, build, test and end2end, so there is no
+# stage a publish could be, and `statuses: write` is not something a called
+# stage can be granted. `ci-test.yml` therefore keeps the plain `go build` and
+# `go test -race` that ci-gate blocks on, and the gated, instrumented run lives
+# here. lydite's own coverage gate consequently does not block a merge — the
+# state `lydite/referral` is already in, for the same reason (#34).
+name: lydite
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# One verdict per revision. A superseded push is about to be re-decided, and
+# two runs racing to write the same status and the same comment would leave
+# whichever finished last standing rather than whichever is current.
+concurrency:
+  group: lydite-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Built once. Four jobs each compiling the same binary is three minutes of
+  # runner time spent proving the compiler is deterministic.
+  setup:
+    name: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # From go.mod's toolchain line. It was restated in five places, which
+          # is how one of them goes stale without anyone noticing.
+          go-version-file: source/cli/go.mod
+          cache: true
+
+      - name: build lydite
+        working-directory: source/cli
+        run: go build -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-binary
+          path: ${{ runner.temp }}/lydite
+          retention-days: 1
+
+  referral:
+    name: referral
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The verdict is the record a clearance acts on, and this job publishing
+      # it without waiting on scan or test is what lets a person start clearing
+      # a referral while the matrix is still running (ADR 0015).
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The referral is computed from <merge-base>..HEAD, so the history
+          # reaching that merge-base has to be present. A shallow checkout
+          # resolves no merge-base and the run fails rather than deciding from
+          # a diff that describes something else.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/lydite-binary
+
+      # Runs from the repository root: --dir locates the exemptions file, and
+      # the diff a referral reads covers the whole repository regardless.
+      #
+      # `review` exits 2 on a referral and 1 on the isolation gate, and both
+      # are answers rather than malfunctions — the verdict is carried by the
+      # status this step just published and by the report it wrote, so the step
+      # must not fail the job over one. Anything above 2 is lydite failing to
+      # reach an answer, which must still fail the job.
+      #
+      # The exit code is captured with `|| verdict=$?` rather than read from
+      # `$?` on the next line, because the runner invokes this with `bash -e`:
+      # a bare command exiting non-zero ends the step before any line after it
+      # runs, and `set +e` here would also disarm the failure this step does
+      # want to report.
+      - name: publish the referral verdict
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          verdict=0
+          lydite review --dir . --publish || verdict=$?
+          if [ "$verdict" -gt 2 ]; then
+            exit "$verdict"
+          fi
+
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: referral
+
+  scan:
+    name: scan
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # --diff-base auto resolves the merge-base, which scopes Semgrep's
+          # token-less fallback to what this change introduces rather than to
+          # the repository's pre-existing findings.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/lydite-binary
+
+      # From the repository root, which is the scan root .lydite/ sits at. This
+      # is lydite scanning itself, and it is the only job that exercises the
+      # scan path end to end against a real repository.
+      - name: lydite scan
+        run: lydite scan --dir . --diff-base auto
+
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: scan
+
+  test:
+    name: test
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Read-only, deliberately. This job runs the repository's own suites and
+    # any `setup`/`teardown` shell the declaration carries, which on a pull
+    # request is the pull request's own code. Nothing it runs holds a token
+    # that can write anywhere: the baseline is not recorded, the `record` row
+    # says so, and every run measures the base tree instead of reading one.
+    # That costs an instrumented run per change and is the supported
+    # configuration.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The gate resolves the merge-base with the base branch, and a
+          # shallow checkout cannot reach it. lydite refuses rather than
+          # quietly widening or narrowing, so without this the run fails with
+          # exactly the message a consumer would get.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/lydite-binary
+
+      # Everything lydite installs for a component — the pinned cargo tools,
+      # Biome, a language toolchain it had to fetch — lands here, keyed by
+      # version. The key names the pin manifests so a Dependabot bump misses
+      # and installs what it just pinned.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
+          restore-keys: lydite-${{ runner.os }}-
+
+      # No working-directory override, and that is deliberate. A step-level
+      # relative working-directory is resolved against the workspace rather
+      # than against the job's default, so `..` would name a directory above
+      # the checkout — one with no declaration and no work tree, where
+      # `lydite test` reports "no components declared" and exits 0. The suites
+      # and the gate would both stop running while this job stayed green,
+      # which is the failure the whole gate exists to prevent, in the workflow
+      # that runs it. The scan root is named by the flag instead, which lydite
+      # resolves against its own directory and needs no runner semantics to be
+      # right.
+      - name: lydite test
+        run: lydite test --dir . --gate-coverage
+
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: test
+
+  publish:
+    name: publish
+    needs: [setup, referral, scan, test]
+    # Runs whatever the others did. A comment that only appears when everything
+    # passed is a comment nobody needs: the run that failed is the one whose
+    # reader wants to know why.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Mints the Actions OIDC token the relay authenticates. It is not a
+      # credential and grants nothing by itself — the relay decides what may be
+      # written from the claims GitHub signed into it.
+      id-token: write
+      # The fallback path only, for a repository the app is not installed on.
+      # It is a required path rather than a stopgap: a consumer who has
+      # installed nothing still gets a comment.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/lydite-binary
+
+      # Every job's directory, each under its own name. `publish` takes as many
+      # as it is given and names any it could not read, so a job that died
+      # before uploading renders as a section saying so rather than vanishing.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-reports-*
+          path: reports
+
+      - name: render the comment
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          shopt -s nullglob
+          args=()
+          for dir in reports/*/; do
+            args+=(--reports "${dir%/}")
+          done
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no report directories were uploaded; there is nothing to publish" >&2
+            exit 1
+          fi
+          lydite publish "${args[@]}" --base "$BASE_SHA" --out comment.md
+          echo "::group::the comment"
+          cat comment.md
+          echo "::endgroup::"
+
+      - uses: ./.github/actions/lydite-comment
+        with:
+          body-file: comment.md
+          pull-request: ${{ github.event.pull_request.number }}
+          relay: ${{ vars.LYDITE_RELAY_URL }}

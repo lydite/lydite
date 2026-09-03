@@ -1,0 +1,112 @@
+# Deploys the Workers, on the tag that releases the CLI.
+#
+# The same tag deliberately. ADR 0010's release coupling is that everything in
+# the monorepo ships from one tag so the parts cannot drift apart, and the relay
+# is now part of what a consumer's pull-request comment depends on: a relay
+# expecting a marker the CLI no longer writes is a comment that stops being
+# edited and starts being duplicated.
+#
+# Outside the gt pipeline, as `lydite-pr.yml` is. gt's CD stages are disabled in
+# this repository and `release.yml` is already hand-written for the same reason.
+#
+# It sets no secrets. `workers-secrets-sync.yml` does that, manually, because
+# rotating a credential is a decision somebody takes rather than something every
+# release should do.
+name: workers deploy
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  # A deploy is worth being able to re-run without cutting a tag — a Cloudflare
+  # outage mid-release is the case, and re-tagging to retry is worse.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy ${{ matrix.worker }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: workers
+    strategy:
+      # One at a time. Two wrangler deploys against one account racing to
+      # create the same DNS record is a failure that reads as a Cloudflare
+      # problem, and there are two Workers — the parallelism is worth nothing.
+      max-parallel: 1
+      # A failed pr-relay must not stop oauth-exchange from being deployed:
+      # they share an account and nothing else.
+      fail-fast: false
+      matrix:
+        worker: [pr-relay, oauth-exchange]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # From the workspace's own engines.node, for the reason go-version
+          # comes from go.mod: a version restated in a workflow is a version
+          # that goes stale without anyone noticing.
+          node-version-file: source/cloud-services/package.json
+
+      - name: install
+        working-directory: source/cloud-services
+        run: npm ci
+
+      # The suite before the deploy. These Workers hold lydite's App
+      # credentials and decide what may be written to somebody else's
+      # repository, so a deploy that skipped its own trust-boundary tests
+      # because the tag was already cut is not a deploy worth having.
+      - name: test
+        working-directory: source/cloud-services
+        run: npx vitest run
+
+      - name: typecheck
+        working-directory: source/cloud-services
+        run: npx tsc --noEmit
+
+      # The App ID is not a credential — it is the `iss` claim of the App JWT,
+      # public in the same sense a username is — so it is a variable, and it is
+      # written into the deployed Worker's vars rather than its secrets.
+      #
+      # Values reach the script through `env:` and are referenced as shell
+      # variables. Interpolating an expression into a `run:` body splices it
+      # into text a shell parses, which Semgrep's
+      # yaml.github-actions.security.run-shell-injection rule has caught in a
+      # lydite workflow before.
+      - name: deploy
+        working-directory: source/cloud-services/${{ matrix.worker }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER: ${{ matrix.worker }}
+          APP_ID: ${{ vars.LYDITE_APP_ID }}
+          DASHBOARD_CLIENT_ID: ${{ vars.LYDITE_DASHBOARD_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+
+          # The routes are Custom Domains, so wrangler creates the DNS records
+          # itself. That is why the API token carries Zone → DNS → Edit as well
+          # as Workers Scripts → Edit — there is no separate permission for a
+          # Worker's secrets, which is the same one.
+          case "$WORKER" in
+            pr-relay)
+              if [ -z "$APP_ID" ]; then
+                echo "LYDITE_APP_ID is not set, so the relay would sign a JWT with no issuer" >&2
+                exit 1
+              fi
+              npx wrangler deploy --var "LYDITE_APP_ID:$APP_ID"
+              ;;
+            oauth-exchange)
+              if [ -z "$DASHBOARD_CLIENT_ID" ]; then
+                echo "LYDITE_DASHBOARD_CLIENT_ID is not set, so the exchange has no client to be" >&2
+                exit 1
+              fi
+              npx wrangler deploy --var "LYDITE_DASHBOARD_CLIENT_ID:$DASHBOARD_CLIENT_ID"
+              ;;
+            *)
+              echo "unknown worker: $WORKER" >&2
+              exit 1
+              ;;
+          esac
