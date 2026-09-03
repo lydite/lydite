@@ -12,15 +12,26 @@ where the answer appears. This file stays the specification of record for the
 component work — it carries the reasoning, what each step left open, and the
 prompt each step was built from.
 
-**The next slice is not a step of this plan.**
+**One slice sits between step 7 and step 8, and it has landed.**
 [#62](https://github.com/lydite/lydite/issues/62) and
-[#64](https://github.com/lydite/lydite/issues/64), taken together: nothing
-lydite scans, measures or gates reaches a pull request at all, and there is no
-recorded decision about the identity that would post it. The results go to the
-job log and stop there, so every gate built here is invisible to the person
-whose change it is about. Both come before step 8, and the design for both is
-settled — `pr-surface-and-identity.md` is its prompt and carries the decisions
-with the reasoning that produced them.
+[#64](https://github.com/lydite/lydite/issues/64), taken together: every gate
+built here reported to a job log and stopped, so it was invisible to the person
+whose change it was about, and nothing recorded the identity that would post it.
+`pr-surface-and-identity.md` is its prompt and carries the decisions with the
+reasoning that produced them; [ADR 0022](../../docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md)
+and [ADR 0023](../../docs/adr/0023-one-standing-comment-rendered-by-the-cli.md)
+are the record.
+
+**What it changed for step 8.** `lydite publish` already takes N report
+directories — `--reports` is repeatable, and a directory per job is the CI case
+it was built for — so a shard matrix is *additive* rather than a redesign:
+more `test` jobs is more artifacts, and nothing about the comment changes.
+`lydite-pr.yml` is where a planner and a merge step slot in, beside the
+`referral`, `scan`, `test` and `publish` jobs that are there now, and
+`.github/actions/` holds the composites those jobs use. Two other things step 8
+should know: gt's CI accepts exactly `preflight, build, test, end2end`, so no
+stage can be added for a plan or a merge; and `.lydite-reports/<command>.json`
+is now written on every run, which is the document a merge step would read.
 
 ## Order
 
@@ -34,7 +45,7 @@ with the reasoning that produced them.
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
 | 7 | #58 | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done — #54 |
-| 8 | #61 | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `ci-test.yml` | `pr8-plan-and-merge.md` | deferred behind #62, #64 |
+| 8 | #61 | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `lydite-pr.yml` | `pr8-plan-and-merge.md` | not started |
 | 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
 
 Steps 1–5 were built before the epic existed and have no issue of their own; the

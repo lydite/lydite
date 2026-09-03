@@ -1,13 +1,21 @@
 # Session prompt — step 8: `lydite test plan`, `lydite test merge`, and the reusable workflow
 
-> **Not the next session.** Step 8 is deferred behind
-> [#62](https://github.com/lydite/lydite/issues/62) and
-> [#64](https://github.com/lydite/lydite/issues/64), taken as one slice: nothing
-> lydite scans or measures reaches a pull request, and nothing records the
-> identity that would post it. Every gate built so far is invisible where it
-> matters. Read this when that slice has landed — and check what it changed,
-> since a surface that publishes results is one the planner and the merge step
-> both have to feed.
+> **The slice this waited on has landed.** #62 and #64 delivered the pull-request
+> surface and the identity that posts it, so the planner and the merge step now
+> have something to feed. Three things about it change this prompt rather than
+> merely preceding it:
+>
+> - **`lydite publish` already accepts N report directories.** `--reports` is
+>   repeatable and a directory per job is the case it was built for, so the
+>   shard matrix is additive: more `test` jobs is more artifacts. Nothing about
+>   the comment has to change to carry a sharded run.
+> - **The reusable workflow this prompt calls for is `lydite-pr.yml`**, which
+>   already exists and already runs `referral`, `scan`, `test` and `publish` as
+>   one run. A plan and a merge job go beside them, not into `ci-test.yml`, and
+>   they cannot be gt stages: `gt repo config` accepts exactly
+>   `preflight, build, test, end2end`.
+> - **Every command writes `.lydite-reports/<command>.json` on every run**, which
+>   is the document a merge step reads rather than a new artifact it defines.
 
 Every component now runs, is measured, is gated and is scanned through one
 declaration. What is still hand-maintained is the *distribution*: a consumer's
@@ -43,9 +51,9 @@ should say step 8 is in progress and name this file as its prompt.
   partial record is worse than none. `merge` is the command that has to fold
   several runs' worth of those together.
 - `CONTEXT.md` — **Shard**, **Scheduler**, **Component**, **Cache**, **Ledger**.
-- `cli/cmd/lydite/test.go` — `runComponents`, the `schedule` row, and how rows
+- `source/cli/cmd/lydite/test.go` — `runComponents`, the `schedule` row, and how rows
   are ordered.
-- `cli/internal/scheduler/` — the port-conflict predicate the planner has to
+- `source/cli/internal/scheduler/` — the port-conflict predicate the planner has to
   share rather than reimplement.
 - `.github/workflows/ci-end2end.yml` and `.github/assert-proving-ground.py` —
   what is already asserted against the proving ground, and how.
