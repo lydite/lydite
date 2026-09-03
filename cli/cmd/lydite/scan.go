@@ -175,15 +175,26 @@ func newScanCmd() *cobra.Command {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
 			}
 
-			// A run in which no check actually ran reports no pass. Counting
-			// rows is not the test: a raw-command component and a
-			// deduplicated one each add an `unmeasured` row, and unmeasured
-			// does not vote — so a repository whose every component declares a
-			// raw command, with Semgrep off, would produce a document full of
-			// amber rows and `verdict: pass`, having executed nothing. Each
-			// opt-out is the repository's to make and none is reported on its
-			// own; all of them together is a different fact, and it is this
-			// one.
+			// A run in which no check ran says so, in a row of its own.
+			//
+			// Counting rows is not the test for that: a raw-command component
+			// and a deduplicated one each add an `unmeasured` row, so a
+			// repository whose every component declares a raw command, with
+			// Semgrep off, produces a document of amber rows and has executed
+			// nothing. Each opt-out is the repository's to make and none is
+			// reported on its own; all of them together is a different fact.
+			//
+			// The row is `unmeasured`, so the verdict stays `pass` and the
+			// exit code 0. That is the grammar's rule and not an oversight
+			// here: refer, unmeasured and dropped all render amber and only
+			// refer votes, which is what lets a check that did not run be
+			// visibly distinct from one that passed without turning every
+			// opt-out into a failing build. Every state reached here is one
+			// the repository asked for in its own configuration — a language
+			// switched off, a component declaring its own command — so failing
+			// it would be lydite refusing a configuration it was handed. What
+			// must not happen is silence, and the row and its `--json` status
+			// are what remove it.
 			if !ranAnyCheck(rep) && len(results) == 0 {
 				rep.Add(ui.Row{
 					Status: ui.StatusUnmeasured,

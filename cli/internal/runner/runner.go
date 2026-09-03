@@ -36,7 +36,6 @@ import (
 	"context"
 	"io"
 	"path"
-	"slices"
 	"sort"
 
 	"lydite/lydite/internal/cargotool"
@@ -108,14 +107,29 @@ func SourceExtsFor(l Lang) []string {
 // whether it belongs to one at all. It reads the same table SourceExtsFor
 // does, so a language that gains an extension gains it in both directions at
 // once.
+//
+// Built once into a reverse map rather than ranging over the table, so the
+// answer cannot depend on map iteration order. No extension belongs to two
+// languages today and TestNoExtensionBelongsToTwoLanguages refuses one that
+// does — but a reverse lookup that ranges would answer differently run to run
+// in the window before anyone noticed, and orphan.Unscanned groups its warning
+// by language, so the same tree would name a different one each time.
 func LangForExt(ext string) (Lang, bool) {
+	lang, ok := langByExt[ext]
+	return lang, ok
+}
+
+// langByExt is sourceExts inverted. A duplicate extension would be lost here
+// rather than answered inconsistently, which is what the test protects.
+var langByExt = func() map[string]Lang {
+	out := map[string]Lang{}
 	for lang, exts := range sourceExts {
-		if slices.Contains(exts, ext) {
-			return lang, true
+		for _, e := range exts {
+			out[e] = lang
 		}
 	}
-	return "", false
-}
+	return out
+}()
 
 // SourceExts returns every extension the languages lydite runs are written
 // in, lowercase and dot-prefixed, sorted.

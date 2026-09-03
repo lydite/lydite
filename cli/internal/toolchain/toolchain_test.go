@@ -227,9 +227,11 @@ func TestNilEnvComposesNothing(t *testing.T) {
 	}
 }
 
-// Two components asking for the same toolchain are probed and reported once:
-// the second one reuses the first's answer rather than repeating both the
-// work and the diagnostic.
+// Two components asking for the same toolchain are probed once and told about
+// separately. The work is shared — the second reuses the first's result rather
+// than probing the machine again — but the line is per component, because what
+// it says is about one directory: "component api declares no version" printed
+// once for a repository leaves every other component unpinned in silence.
 func TestEnsureSharesOneResultAcrossComponentsWantingTheSameThing(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "a"), "go.mod", "module a\n\ngo 1.16\n")
@@ -246,8 +248,13 @@ func TestEnsureSharesOneResultAcrossComponentsWantingTheSameThing(t *testing.T) 
 	if envs.For("a") != envs.For("b") {
 		t.Errorf("two components wanting one toolchain got two results")
 	}
-	if n := strings.Count(log.String(), "using ambient go"); n != 1 {
-		t.Errorf("the ambient toolchain was reported %d times, want once", n)
+	if n := strings.Count(log.String(), "using ambient go"); n != 2 {
+		t.Errorf("the ambient toolchain was reported %d times, want once per component", n)
+	}
+	// The pin is about the machine rather than any one component, so it is
+	// said once however many components share the toolchain.
+	if n := strings.Count(log.String(), "pinned GOTOOLCHAIN"); n != 1 {
+		t.Errorf("the toolchain pin was reported %d times, want once for the run", n)
 	}
 }
 

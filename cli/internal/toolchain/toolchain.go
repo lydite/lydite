@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"lydite/lydite/internal/runner"
@@ -136,7 +137,11 @@ func Compose(leading, trailing []string, vars ...[]string) []string {
 	// directory of the repository being scanned, that puts the scanned
 	// repository on the child's PATH.
 	parts := append([]string{}, leading...)
-	parts = append(parts, nonEmpty([]string{os.Getenv("PATH")})...)
+	// Every element of the inherited PATH, not the variable as a whole: a
+	// PATH of "/usr/bin::/bin" carries an empty element, and an empty element
+	// means the current directory — which for a component's commands is a
+	// directory of the repository being scanned.
+	parts = append(parts, nonEmpty(filepath.SplitList(os.Getenv("PATH")))...)
 	parts = append(parts, trailing...)
 	return append(out, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 }
@@ -219,21 +224,29 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	}
 
 	envs := Envs{}
-	// Keyed by what decides the answer — the language and the version asked
-	// for — so a second component wanting the same toolchain reuses the first
-	// one's result instead of probing the machine again.
-	shared := map[string]*Env{}
+	// The work is shared and the diagnostic is not. Keyed by what decides the
+	// answer — the language and the version asked for — so a second component
+	// wanting the same toolchain reuses the first one's result rather than
+	// probing the machine again; but the line it prints is written per
+	// component, because "component api declares no version" is a statement
+	// about one directory. Logging inside the shared step named whichever
+	// component came first and left the rest unpinned in silence.
+	shared := map[string]*resolution{}
 	for _, req := range reqs {
 		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
-		env, seen := shared[key]
+		got, seen := shared[key]
 		if !seen {
-			resolved, err := resolveOne(ctx, req, ov, w)
+			resolved, err := resolveOne(ctx, req, ov)
 			if err != nil {
 				return nil, err
 			}
-			env = resolved
-			shared[key] = env
+			got = &resolved
+			shared[key] = got
 		}
+		if err := got.log(w, req); err != nil {
+			return nil, err
+		}
+		env := got.env
 		// Only when there is something to apply, so a component with nothing
 		// to add has no entry rather than a nil one — For answers the same
 		// either way, and two shapes for one state is one more than the map
@@ -245,21 +258,84 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	return envs, nil
 }
 
+// resolution is what one requirement resolved to: the environment to apply,
+// and enough of how it got there to write the line each component that shares
+// it needs. The message is not stored, because it names the component and the
+// manifest, and those differ between the components sharing this.
+type resolution struct {
+	env *Env
+	// kind is which branch was taken.
+	kind resolutionKind
+	// bin is the probed command's name, ambient its version, present whether
+	// it was there at all.
+	bin, ambient string
+	present      bool
+	// note is the provisioning step's own sentence, which is about the
+	// machine rather than about any component, so it is shared verbatim.
+	note string
+	// noted guards the shared note, so a step that installed something says
+	// so once rather than once per component that reuses it.
+	noted bool
+}
+
+type resolutionKind int
+
+const (
+	// resolutionNone is a language with no probe, so nothing to say.
+	resolutionNone resolutionKind = iota
+	resolutionAmbient
+	resolutionDisabled
+	resolutionFailed
+	resolutionProvisioned
+)
+
+// log writes the line one component needs about this resolution.
+func (r *resolution) log(w io.Writer, req Requirement) error {
+	switch r.kind {
+	case resolutionNone:
+		return nil
+	case resolutionAmbient:
+		if err := logf(w, "%s: using ambient %s %s (%s)\n",
+			req.Lang, r.bin, display(r.ambient), declaredBy(req)); err != nil {
+			return err
+		}
+		// The pin is about the machine rather than any one component, so it
+		// is said once however many components share this toolchain.
+		if r.note == "" || r.noted {
+			return nil
+		}
+		r.noted = true
+		return logf(w, "%s\n", r.note)
+	case resolutionDisabled:
+		return logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
+			req.Lang, shortfall(req, r.ambient, r.present))
+	case resolutionFailed:
+		return logf(w, "warning: could not provision the %s toolchain (%s): %s — continuing with what is on PATH\n",
+			req.Lang, shortfall(req, r.ambient, r.present), r.note)
+	case resolutionProvisioned:
+		// The install happened once, so it is reported once.
+		if r.note == "" || r.noted {
+			return nil
+		}
+		r.noted = true
+		return logf(w, "%s\n", r.note)
+	}
+	return nil
+}
+
 // resolveOne probes for one requirement's toolchain and provisions it if what
-// is present does not satisfy it, returning the environment that makes the
-// result usable — or nil when there is nothing to apply.
-func resolveOne(ctx context.Context, req Requirement, ov Overrides, w io.Writer) (*Env, error) {
+// is present does not satisfy it. It executes and returns what happened; the
+// caller writes the line, because the line names a component and this is
+// shared between every component that wants the same toolchain.
+func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution, error) {
 	p, ok := probes[req.Lang]
 	if !ok {
-		return nil, nil
+		return resolution{}, nil
 	}
 	ambient, present := installed(ctx, p)
+	r := resolution{kind: resolutionAmbient, bin: p.bin, ambient: ambient, present: present}
 
 	if satisfied(req, ambient, present) {
-		if err := logf(w, "%s: using ambient %s %s (%s)\n",
-			req.Lang, p.bin, display(ambient), declaredBy(req)); err != nil {
-			return nil, err
-		}
 		// Satisfied is not the same as nothing to do. Go still needs its
 		// toolchain pinned so that installing an external tool cannot
 		// silently switch away from the version just verified — see
@@ -267,47 +343,39 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides, w io.Writer)
 		// doesn't simply return nil.
 		if req.Lang == runner.Go {
 			if st := pinAmbientGo(req); st != nil {
-				if err := logf(w, "%s\n", st.note); err != nil {
-					return nil, err
-				}
 				// The ambient version is recorded, not applied. It is the only
 				// thing telling two ambient toolchains apart — this branch
 				// contributes no directory and only GOTOOLCHAIN=local, which
 				// names every ambient Go there has ever been — so a caller
 				// caching a tool built under it has nothing else to key on.
-				return &Env{Vars: st.vars, Resolved: display(ambient)}, nil
+				r.env = &Env{Vars: st.vars, Resolved: display(ambient)}
+				// The pin is about the machine, not about any one component,
+				// so it is said once alongside the per-component line.
+				r.note = st.note
 			}
 		}
-		return nil, nil
+		return r, nil
 	}
 	if ov.Disabled {
-		if err := logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, ambient, present)); err != nil {
-			return nil, err
-		}
-		return nil, nil
+		r.kind = resolutionDisabled
+		return r, nil
 	}
 
 	st, err := provision(ctx, req, ambient, present)
 	if err != nil {
-		if logErr := logf(w, "warning: could not provision the %s toolchain (%s): %v — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, ambient, present), err); logErr != nil {
-			return nil, logErr
-		}
-		return nil, nil
+		r.kind, r.note = resolutionFailed, err.Error()
+		return r, nil
 	}
 	if st == nil {
-		return nil, nil
+		r.kind = resolutionNone
+		return r, nil
 	}
 	for _, dir := range st.pathDirs {
 		ensureExecutable(dir)
 	}
-	if st.note != "" {
-		if err := logf(w, "%s\n", st.note); err != nil {
-			return nil, err
-		}
-	}
-	return &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}, nil
+	r.kind, r.note = resolutionProvisioned, st.note
+	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}
+	return r, nil
 }
 
 // provision dispatches to the per-language provisioner. Each one differs in

@@ -1100,15 +1100,23 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 
 // childEnv is the environment one of a component's commands runs with: the
 // invocation's own pinned-tool directories ahead of the component's resolved
-// toolchain on PATH, then the toolchain's variables and the component's own.
+// toolchain on PATH, then the component's declared variables, and the
+// toolchain's last of all.
 //
 // One function, and one PATH entry, because a child's environment is a flat
 // list where the last occurrence of a key wins — two callers each prepending
 // their own directories produce two PATH entries and one of them is silently
 // dropped, which is invisible in argv and in every log. The pinned tool goes
-// first because it is the more specific of the two, and the component's own
-// variables go last because they are the repository's statement and nothing
-// lydite resolves should overrule them.
+// first on PATH because it is the more specific of the two.
+//
+// **The toolchain's variables go last, so they win**, and the ordering is the
+// whole of the rule: a component declaring `GOTOOLCHAIN: auto` would otherwise
+// cancel the `GOTOOLCHAIN=local` pinAmbientGo exists to set, reinstating the
+// `go install` downgrade that made govulncheck reject the source it was
+// pointed at — with every run still green. A repository states how its own
+// code builds; lydite states which toolchain builds it. Reordering these
+// arguments is that regression, so the inline comment at the return says it
+// again where the change would be made.
 //
 // A PATH the component declares is folded into that one entry rather than set
 // as a variable of its own — it is the single key a component cannot simply
@@ -1134,14 +1142,8 @@ func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) [
 	if tc == nil {
 		return toolchain.Compose(dirs, declared, vars)
 	}
-	// The resolved toolchain's variables go last, so they win. A child's
-	// environment is a flat list where the last occurrence of a key decides,
-	// and a component declaring `GOTOOLCHAIN: auto` would otherwise cancel the
-	// `GOTOOLCHAIN=local` pinAmbientGo exists to set — reinstating the
-	// `go install` downgrade that made govulncheck reject the source it was
-	// pointed at. It is the same boundary the PATH ordering holds, for the
-	// same reason: a repository states how its own code builds, and lydite
-	// states which toolchain builds it.
+	// tc.Vars last, so they win: see the ordering rule above. Swapping these
+	// two lets a declared GOTOOLCHAIN cancel the pin, and nothing goes red.
 	return toolchain.Compose(dirs, declared, vars, tc.Vars)
 }
 
