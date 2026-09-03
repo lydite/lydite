@@ -262,7 +262,7 @@ func TestTheSummaryAccountsForRowsThatVoteOnNothing(t *testing.T) {
 	dir := reportDirWith(t, "test",
 		ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"},
 		ui.Row{Status: ui.StatusContext, Label: "coverage(cli)", Value: "81.5%"},
-		ui.Row{Status: ui.StatusContext, Label: "coverage", Value: "81.5%"},
+		ui.Row{Status: ui.StatusContext, Label: "coverage(repo)", Value: "81.5%"},
 		ui.Row{Status: ui.StatusNew, Label: "coverage(web)", Value: "no baseline yet"},
 	)
 	got := buildComment([]string{dir}, "").Sections[0].Summary

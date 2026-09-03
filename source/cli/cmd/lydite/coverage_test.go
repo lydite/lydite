@@ -122,7 +122,7 @@ func TestACarriedComponentIsCountedAndNamed(t *testing.T) {
 		{Name: "sdk", Dir: "sdk", Lang: runner.Go, Lines: lines(80, 100)},
 	}
 	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(80, 100)}
-	row := composedRow("go coverage", current, map[string]bool{"sdk": true}, baseline, onlyLang(runner.Go), 0.1)
+	row := composedRow("coverage(subset)", current, map[string]bool{"sdk": true}, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v, want a pass", row)
 	}
@@ -143,7 +143,7 @@ func TestAComposedComparisonOnlyCoversWhatItMeasured(t *testing.T) {
 		unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest}, "not affected"),
 	}
 	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(5, 1000)}
-	row := composedRow("go coverage", current, nil, baseline, onlyLang(runner.Go), 0.1)
+	row := composedRow("coverage(subset)", current, nil, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status == ui.StatusFail {
 		t.Fatalf("row = %+v — the unrun component's baseline must not drag the comparison", row)
 	}
@@ -161,7 +161,7 @@ func TestAComposedFigureWithAnIncompleteBaselineIsNotCompared(t *testing.T) {
 		measured("api", runner.Go, 50, 100),
 		measured("sdk", runner.Go, 90, 100),
 	}
-	row := composedRow("go coverage", current, nil, gitstate.Baseline{"api": lines(50, 100)}, onlyLang(runner.Go), 0.1)
+	row := composedRow("coverage(subset)", current, nil, gitstate.Baseline{"api": lines(50, 100)}, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusNew {
 		t.Errorf("row = %+v, want new — the baseline covers one of the two components", row)
 	}
@@ -250,7 +250,7 @@ func TestOnlyAnUnselectedComponentCarriesForward(t *testing.T) {
 				current = []measurement{{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: baseline["web"]}}
 				carried["web"] = true
 			}
-			row := composedRow("typescript coverage", current, carried, baseline, onlyLang(runner.TypeScript), 0.1)
+			row := composedRow("coverage(subset)", current, carried, baseline, onlyLang(runner.TypeScript), 0.1)
 			if row.Status != tc.want {
 				t.Errorf("row = %+v, want %q", row, tc.want)
 			}
@@ -1549,7 +1549,7 @@ func TestComposedPatchWillNotCompareAgainstAPartialBaseline(t *testing.T) {
 	}
 }
 
-// onlyLang filters a composed figure to one language.
+// onlyLang filters a composed figure to a subset of the components.
 //
 // A test helper rather than production code: coverage composes at the
 // component and the repository, and a language is neither, so nothing in a run
