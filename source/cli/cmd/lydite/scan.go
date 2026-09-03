@@ -165,7 +165,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
-				for _, row := range resultRows(labelled(results, c.Name)) {
+				for _, row := range resultRows(dir, labelled(results, c.Name)) {
 					rep.Add(row)
 				}
 			}
@@ -203,7 +203,7 @@ func newScanCmd() *cobra.Command {
 				})
 			}
 
-			return report(cmd, rep, results, asJSON, noColor)
+			return report(cmd, rep, dir, results, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory to scan")
@@ -369,7 +369,12 @@ func ranAnyCheck(rep *ui.Report) bool {
 // resultRows turns each check's result into its row. It is the one place a
 // Result becomes a Row, so rows a command adds as it goes and rows added at
 // the end cannot render differently.
-func resultRows(results []executil.Result) []ui.Row {
+//
+// Every row names the log holding the whole of what its check printed, which
+// is what lets a pull-request comment reach past the tail in Detail. A passing
+// check's output is kept too: it is what a reader consults to find out what a
+// clean run actually looked at.
+func resultRows(root string, results []executil.Result) []ui.Row {
 	rows := make([]ui.Row, 0, len(results))
 	for _, r := range results {
 		status := ui.StatusPass
@@ -382,7 +387,10 @@ func resultRows(results []executil.Result) []ui.Row {
 				detail = nil
 			}
 		}
-		rows = append(rows, ui.Row{Status: status, Label: r.Name, Value: value, Detail: detail})
+		rows = append(rows, ui.Row{
+			Status: status, Label: r.Name, Value: value, Detail: detail,
+			Log: checkLog(root, r.Name, r.Output),
+		})
 	}
 	return rows
 }
@@ -398,10 +406,11 @@ func resultRows(results []executil.Result) []ui.Row {
 // JSON cannot be corrupted by Biome's own chatter. Printing only a status
 // line left the developer to re-run the pinned toolchain by hand to find out
 // what was wrong, and put nothing in the PR comment either.
-func report(cmd *cobra.Command, rep *ui.Report, results []executil.Result, asJSON, noColor bool) error {
-	for _, row := range resultRows(results) {
+func report(cmd *cobra.Command, rep *ui.Report, root string, results []executil.Result, asJSON, noColor bool) error {
+	for _, row := range resultRows(root, results) {
 		rep.Add(row)
 	}
+	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {
 		return err

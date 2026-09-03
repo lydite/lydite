@@ -22,30 +22,77 @@ func TestCommentReferencesTheMarkByAbsoluteURL(t *testing.T) {
 	}
 }
 
-func TestCommentRendersTheVerdictAndTheTable(t *testing.T) {
+func TestCommentRendersTheVerdictAndEachSection(t *testing.T) {
 	body := Comment{
-		Verdict:  VerdictRefer,
-		Headline: "no exemption matched",
-		Rows: []CommentRow{
-			{Check: "Changed paths", Head: "12"},
-			{Check: "Exemptions", Base: "3 declared"},
-		},
-		Sections: []CommentSection{{Title: "Uncovered", Items: []string{"`cli/main.go`"}}},
-		Version:  "v0.3.0",
-		Base:     "4c2eaea",
+		Verdict:  VerdictFail,
+		Headline: "test did not pass",
+		Sections: []CommentSection{{
+			Status:  StatusFail,
+			Title:   "test",
+			Summary: "1 failed, 2 passed",
+			Rows: []CommentRow{
+				{Check: "test(cli)", Result: "passed"},
+				{Check: "test(web)", Result: "failed"},
+			},
+			Details: []CommentDetail{{
+				Title: "test(web)",
+				Lines: []string{"FAIL src/app.test.ts"},
+				Log:   ".lydite-reports/web/test.log",
+			}},
+		}},
+		Version: "v0.3.0",
+		Base:    "4c2eaea",
 	}.Render()
 
 	for _, want := range []string{
-		"Referred", "no exemption matched",
-		"| Check | Head | Base |",
-		"| Changed paths | 12 | — |",
-		"| Exemptions | — | 3 declared |",
-		"**Uncovered**", "- `cli/main.go`",
+		"Failed", "test did not pass",
+		"<b>test</b>", "1 failed, 2 passed",
+		"| Check | Result |",
+		"| test(cli) | passed |",
+		"FAIL src/app.test.ts",
+		".lydite-reports/web/test.log",
 		"base 4c2eaea",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("comment is missing %q\n---\n%s", want, body)
 		}
+	}
+}
+
+// A reader arriving at a red comment must see what failed without a click,
+// while the concerns that passed stay one line each.
+func TestAFailingSectionOpensItselfAndAPassingOneDoesNot(t *testing.T) {
+	failing := Comment{Sections: []CommentSection{{Status: StatusFail, Title: "test"}}}.Render()
+	if !strings.Contains(failing, "<details open>") {
+		t.Errorf("a failing section is shut:\n%s", failing)
+	}
+	passing := Comment{Sections: []CommentSection{{Status: StatusPass, Title: "scan"}}}.Render()
+	if strings.Contains(passing, "<details open>") {
+		t.Errorf("a passing section opened itself:\n%s", passing)
+	}
+}
+
+// A referral is what the comment exists to surface to a human, so it opens
+// for the same reason a failure does.
+func TestAReferredSectionOpensItself(t *testing.T) {
+	body := Comment{Sections: []CommentSection{{Status: StatusRefer, Title: "referral"}}}.Render()
+	if !strings.Contains(body, "<details open>") {
+		t.Fatalf("a referred section is shut:\n%s", body)
+	}
+}
+
+// A section with nothing under it must still render. Omitting one is
+// indistinguishable from a concern that passed, which is exactly how a pull
+// request reads green while the gate that would have failed it never ran.
+func TestASectionWithNoRowsIsStillRendered(t *testing.T) {
+	body := Comment{Sections: []CommentSection{{
+		Status: StatusUnmeasured, Title: "scan", Summary: "no report document",
+	}}}.Render()
+	if !strings.Contains(body, "<b>scan</b>") {
+		t.Fatalf("an unmeasured section was dropped:\n%s", body)
+	}
+	if !strings.Contains(body, "no report document") {
+		t.Errorf("the section does not say why it is unmeasured:\n%s", body)
 	}
 }
 
@@ -55,7 +102,10 @@ func TestCommentRendersTheVerdictAndTheTable(t *testing.T) {
 func TestCommentCellsCannotBreakTheTable(t *testing.T) {
 	body := Comment{
 		Verdict: VerdictRefer,
-		Rows:    []CommentRow{{Check: "a | b", Head: "one\ntwo"}},
+		Sections: []CommentSection{{
+			Title: "referral",
+			Rows:  []CommentRow{{Check: "a | b", Result: "one\ntwo"}},
+		}},
 	}.Render()
 	for _, line := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(line, "| ") {
@@ -63,12 +113,26 @@ func TestCommentCellsCannotBreakTheTable(t *testing.T) {
 		}
 		// An escaped pipe is content, not a column boundary, so only
 		// unescaped ones are counted.
-		if n := strings.Count(strings.ReplaceAll(line, "\\|", ""), "|"); n != 4 {
-			t.Fatalf("row has %d column boundaries, want 4: %q", n, line)
+		if n := strings.Count(strings.ReplaceAll(line, "\\|", ""), "|"); n != 3 {
+			t.Fatalf("row has %d column boundaries, want 3: %q", n, line)
 		}
 	}
 	if strings.Contains(body, "one\ntwo") {
 		t.Error("a newline survived into a table cell")
+	}
+}
+
+// Captured output quotes source, so it can contain anything source contains
+// — including a fence, which would close the block early and let the rest of
+// a test failure render as markdown.
+func TestCapturedOutputCannotCloseItsOwnFence(t *testing.T) {
+	body := Comment{Sections: []CommentSection{{
+		Status:  StatusFail,
+		Title:   "test",
+		Details: []CommentDetail{{Lines: []string{"```", "## not a heading"}}},
+	}}}.Render()
+	if n := strings.Count(body, "```"); n != 2 {
+		t.Fatalf("the block has %d fences, want 2:\n%s", n, body)
 	}
 }
 
@@ -81,15 +145,6 @@ func TestCommentDoesNotClaimParityItCannotEstablish(t *testing.T) {
 	}
 }
 
-// An empty section would render a heading with nothing under it, which reads
-// as data that failed to load.
-func TestCommentOmitsAnEmptySection(t *testing.T) {
-	body := Comment{Verdict: VerdictPass, Sections: []CommentSection{{Title: "Uncovered"}}}.Render()
-	if strings.Contains(body, "Uncovered") {
-		t.Fatal("an empty section was rendered")
-	}
-}
-
 // The mark is rendered at the asset's own size rather than scaled down, and
 // carries both dimensions so the comment does not reflow once it loads.
 func TestCommentRendersTheMarkAtItsNativeSize(t *testing.T) {
@@ -98,5 +153,18 @@ func TestCommentRendersTheMarkAtItsNativeSize(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("the mark is missing %s:\n%s", want, body)
 		}
+	}
+}
+
+// The three verdicts read differently on purpose: a referral names no defect
+// and must not borrow the failure's mark.
+func TestEachVerdictHasItsOwnBadge(t *testing.T) {
+	seen := map[string]Verdict{}
+	for _, v := range []Verdict{VerdictPass, VerdictFail, VerdictRefer} {
+		got := badge(v)
+		if prior, ok := seen[got]; ok {
+			t.Fatalf("%s and %s share the badge %q", prior, v, got)
+		}
+		seen[got] = v
 	}
 }

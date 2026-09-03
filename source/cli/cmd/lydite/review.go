@@ -70,10 +70,12 @@ referred — including a correct one.`,
 				if err != nil {
 					return err
 				}
-				if err := publish(ctx, target, decision, change, len(file.Exemptions), report.Verdict(), baseSHA); err != nil {
+				if err := publish(ctx, target, decision, report.Verdict()); err != nil {
 					return err
 				}
 			}
+
+			saveDocument(dir, report)
 
 			if err := report.Write(cmd.OutOrStdout(), asJSON, ui.ColorEnabled(cmd.OutOrStdout(), noColor)); err != nil {
 				return err
@@ -89,7 +91,7 @@ referred — including a correct one.`,
 	// Publishing is off by default and errors rather than skipping when the
 	// platform's environment is absent, so a local review can neither post
 	// by accident nor appear to have posted when it did not.
-	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status and the pull request's standing comment")
+	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
 	return cmd
 }
