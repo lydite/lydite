@@ -13,7 +13,7 @@
     "oauth-exchange"
   ],
   "devDependencies": {
-    "@vitest/coverage-v8": "3.2.7",
+    "@vitest/coverage-v8": "4.1.11",
     "typescript": "7.0.2",
     "vitest": "3.2.7",
     "wrangler": "4.128.0"
