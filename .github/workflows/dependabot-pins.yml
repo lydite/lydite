@@ -18,14 +18,17 @@
 # `actions/checkout` of the head ref would put a branch's code in a job holding
 # a token that can push, which is what lydite's own Semgrep check reports
 # (yaml.github-actions.security.pull-request-target-code-checkout).
+#
+# There is deliberately no `paths:` filter either. One would be a second
+# statement of which manifests have mirrors, and internal/pins is already the
+# first — a mirror added there would silently never trigger this, which is a
+# list that fails open. The job runs on every Dependabot pull request instead
+# and finds no drift on the ones touching nothing it knows about.
 name: dependabot-pins
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-    paths:
-      - "source/cli/internal/golang/go-pin/go.mod"
-      - "source/cli/internal/typescript/biome-pin/package.json"
 
 permissions:
   contents: read
