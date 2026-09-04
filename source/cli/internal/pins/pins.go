@@ -55,15 +55,8 @@ type Drift struct {
 }
 
 func (d Drift) String() string {
-	return fmt.Sprintf("%s: %s states %s but %s pins %s",
-		d.Name, d.File, quote(d.Stated), d.Pin, quote(d.Pinned))
-}
-
-func quote(s string) string {
-	if s == "" {
-		return "nothing"
-	}
-	return `"` + s + `"`
+	return fmt.Sprintf("%s: %s states %q but %s pins %q",
+		d.Name, d.File, d.Stated, d.Pin, d.Pinned)
 }
 
 // Mirrors is every version lydite states twice.

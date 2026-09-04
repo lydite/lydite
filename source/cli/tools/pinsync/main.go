@@ -7,6 +7,7 @@
 //
 //	go run ./tools/pinsync            # write
 //	go run ./tools/pinsync -check     # report, exit 1 on drift
+//	go run ./tools/pinsync -files     # print every file a mirror reads or writes
 //
 // The rule itself is internal/pins. This is a way to run it.
 package main
@@ -14,46 +15,58 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"lydite/lydite/internal/pins"
 )
 
-func main() {
-	check := flag.Bool("check", false, "report drift and exit non-zero, writing nothing")
-	files := flag.Bool("files", false, "print every file a mirror reads or writes, one per line")
-	root := flag.String("root", ".", "the Go module root to work in")
-	flag.Parse()
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+// run is the whole of the command, so that what it prints and what it exits
+// with are assertable without building a binary. main does nothing this does
+// not.
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pinsync", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	check := flags.Bool("check", false, "report drift and exit non-zero, writing nothing")
+	files := flags.Bool("files", false, "print every file a mirror reads or writes, one per line")
+	root := flags.String("root", ".", "the Go module root to work in")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
 
 	// -files is what lets a caller assemble the tree pinsync needs without
 	// restating which files that is. dependabot-pins.yml fetches exactly
-	// these from a pull request, so a mirror added here needs no edit there.
+	// these from a pull request, so a mirror added to internal/pins needs no
+	// edit there.
 	if *files {
 		for _, path := range pins.Files() {
-			fmt.Println(path)
+			_, _ = fmt.Fprintln(stdout, path)
 		}
-		return
+		return 0
 	}
 
-	run := pins.Write
+	apply := pins.Write
 	if *check {
-		run = pins.Check
+		apply = pins.Check
 	}
-	drifted, err := run(*root)
+	drifted, err := apply(*root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pinsync: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "pinsync: %v\n", err)
+		return 1
 	}
 	if len(drifted) == 0 {
-		fmt.Fprintln(os.Stderr, "pinsync: every mirror states its pin")
-		return
+		_, _ = fmt.Fprintln(stderr, "pinsync: every mirror states its pin")
+		return 0
 	}
 	for _, d := range drifted {
-		fmt.Fprintln(os.Stderr, d)
+		_, _ = fmt.Fprintln(stderr, d)
 	}
 	if *check {
-		fmt.Fprintln(os.Stderr, "pinsync: run `go run ./tools/pinsync` to write these")
-		os.Exit(1)
+		_, _ = fmt.Fprintln(stderr, "pinsync: run `go run ./tools/pinsync` to write these")
+		return 1
 	}
-	fmt.Fprintf(os.Stderr, "pinsync: wrote %d mirror(s)\n", len(drifted))
+	_, _ = fmt.Fprintf(stderr, "pinsync: wrote %d mirror(s)\n", len(drifted))
+	return 0
 }
