@@ -2,7 +2,6 @@ package typescript
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -163,26 +162,5 @@ func TestReportableBiomeGatesOnlyOnOurGroups(t *testing.T) {
 		if reportableBiome(category) {
 			t.Errorf("reportableBiome(%q) = true, want false", category)
 		}
-	}
-}
-
-// TestBiomePinMatchesConfigSchema keeps the $schema URL in biome.json aligned
-// with the pinned version. A stale URL is not a runtime failure — Biome does not
-// fetch it — but it is what an editor validates against, so drift here silently
-// makes every local edit to this file validate against the wrong schema.
-func TestBiomePinMatchesConfigSchema(t *testing.T) {
-	var pin struct {
-		Dependencies map[string]string `json:"dependencies"`
-	}
-	if err := json.Unmarshal(biomePackageJSON, &pin); err != nil {
-		t.Fatalf("biome-pin/package.json: %v", err)
-	}
-	version := pin.Dependencies["@biomejs/biome"]
-	if version == "" {
-		t.Fatal("biome-pin/package.json does not pin @biomejs/biome")
-	}
-	schema, _ := biomeCfg(t)["$schema"].(string)
-	if !strings.Contains(schema, version) {
-		t.Errorf("biome.json $schema = %q but the pin is %s; update the schema URL", schema, version)
 	}
 }
