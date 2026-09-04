@@ -88,10 +88,11 @@ jobs:
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
 
-      # The only place component-driven scanning of Rust and TypeScript
-      # executes at all. lydite's own repository has neither — web/ is empty
-      # and its only Cargo.toml files are pin manifests — so `lydite scan
-      # (self)` above exercises the Go path and nothing else.
+      # The only place component-driven scanning of Rust executes at all.
+      # lydite's own repository declares no Rust component — its only
+      # Cargo.toml files are pin manifests, which the declaration excludes —
+      # so the self-scan in `lydite-pr.yml` reaches the Go and TypeScript
+      # paths and nothing else.
       #
       # The verdict is deliberately not asserted, unlike the test step. The
       # proving ground carries real findings on purpose (unlicensed crates, a

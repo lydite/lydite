@@ -115,6 +115,31 @@ func TestDetailIsPreferredOverTheLog(t *testing.T) {
 	}
 }
 
+// A referral's value is the verdict and its detail is what about this change
+// produced it. Without the detail the section reads `referral … no exemptions
+// declared` and nothing else, which a reader takes for a misconfiguration
+// rather than for the answer — and the one actionable line, how to resolve it,
+// is the line that goes missing.
+func TestAReferralExplainsItselfInTheComment(t *testing.T) {
+	root := t.TempDir()
+	rep := ui.NewReport("review")
+	rep.Add(ui.Row{
+		Status: ui.StatusRefer, Label: "referral", Value: "no exemptions declared",
+		Detail: []string{
+			".lydite/exemptions.yml declares no exemptions, so every change is referred",
+			"ask a human to clear this change",
+		},
+	})
+	saveDocument(root, rep)
+
+	body := buildComment([]string{reportsDir(root)}, "").Render()
+	for _, want := range []string{"declares no exemptions", "ask a human to clear this change"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the comment does not carry %q:\n%s", want, body)
+		}
+	}
+}
+
 // Every concern a run reported appears, in a declared order, so two pull
 // requests never present the same results differently.
 func TestSectionsAreInADeclaredOrder(t *testing.T) {
@@ -249,7 +274,7 @@ func TestQuotedOutputIsCappedButNoRowIsLost(t *testing.T) {
 			t.Errorf("row for component %d is missing from the table:\n%s", i, body)
 		}
 	}
-	if !strings.Contains(body, "3 further failure(s)") {
+	if !strings.Contains(body, "3 further result(s)") {
 		t.Errorf("the comment does not say how many failures it left out:\n%s", body)
 	}
 }

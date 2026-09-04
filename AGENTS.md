@@ -36,6 +36,8 @@ source/cli/internal/forge/        # the hosting platform: commit statuses, permi
 source/cli/internal/component/    # .lydite/components.yml: what a repo builds and tests (see Components below)
 source/cli/internal/orphan/       # source files under no component and no exclude (see The orphan gate)
 source/cli/internal/pathmatch/    # the anchored path-pattern syntax both declarations are written in
+source/cli/internal/pins/         # a tool version stated twice: the mirrors, and the drift guard
+source/cli/tools/pinsync/         # writes those mirrors from the manifests Dependabot edits
 source/cli/internal/runner/       # a runner name to its plain/instrumented/build-only invocations
 source/cli/internal/nodedeps/     # how a JavaScript workspace's dependencies get installed
 source/cli/internal/cargotool/    # pinned cargo subcommands: version parsing and the install
@@ -120,6 +122,10 @@ accepts exactly `preflight, build, test, end2end`, so there is no stage a publis
 `statuses: write` cannot be granted to a called stage. The consequence is stated rather than
 hidden — lydite's own coverage gate does not block a merge, which is the state `lydite/referral`
 is already in and for the same reason ([#34](https://github.com/lydite/lydite/issues/34)).
+A coverage regression and a scan finding are advisory here for the same reason; what that
+costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `ci-test.yml`
+keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
+merge gate still covers.
 
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
@@ -1035,12 +1041,66 @@ come back when the TypeScript parser was added. A lockfile hash cannot be forgot
 
 **Go is the one exception, deliberately.** `gosecPkg`/`govulncheckPkg` are const expressions that
 concatenate the version at compile time, and `go:embed` cannot read files inside a nested module,
-so the versions can't be read from `go-pin/go.mod` at runtime. The constants stay and
-`internal/golang/pins_test.go` fails CI if a Dependabot bump to `go-pin/go.mod` isn't mirrored into
-them. `go-pin` is a **separate module** rather than `tool` directives in lydite's own `go.mod`:
+so the versions can't be read from `go-pin/go.mod` at runtime. The constants stay, and
+`internal/pins` is what keeps them true. `go-pin` is a **separate module** rather than `tool` directives in lydite's own `go.mod`:
 declaring them in the main module works, but drags gosec's entire dependency graph (grpc, protobuf,
 `google.golang.org/api`, …) into code lydite never links — measured at go.mod 17→69 lines and
 go.sum 17→114 — which would then generate a stream of irrelevant Dependabot PRs.
+
+### A version stated twice: `internal/pins` and `go run ./tools/pinsync`
+
+Two pins are stated a second time somewhere Dependabot cannot reach: `golang.go`'s constants,
+for the reason above, and `biome.json`'s `$schema` URL, which Biome never fetches and an editor
+validates that file against — a stale one has every local edit checked against the wrong schema.
+Dependabot edits a manifest and nothing else, so a bump arrives with the mirror still stating the
+old version.
+
+`internal/pins` is the whole of that rule: which manifests hold a version, which files restate
+it, and how to read and write both. `Check` reports drift and `Write` resolves it, and
+**nothing there ever edits a manifest** — Dependabot owns those, and a tool that wrote one would
+be choosing a version rather than propagating one. `TestNoDrift` is the guard, in `go test`,
+which is what `ci-gate` blocks on; `go run ./tools/pinsync` is the fix, and the failure names it.
+
+**One package rather than a guard per pin.** The two it replaced each parsed their own manifest,
+so `go.mod` require-line parsing existed twice and would have existed three times the moment
+anything else needed it — and the copy that drifts is the one nobody is looking at. A new pin read
+from its own manifest at run time has no mirror and belongs to no entry.
+
+`.github/workflows/dependabot-pins.yml` runs `Write` on a Dependabot pull request, so the bump
+carries its own mirror instead of a human pushing the fix. Two things about it are load-bearing.
+It is `pull_request_target`, because a `pull_request` run from Dependabot holds a read-only token
+and no secrets — so, as with `lydite-clearance.yml`, the rule executed is always the default
+branch's. And **it never compiles the pull request's source**: pinsync is built from the base
+checkout and reads the head checkout as data. Collapsing the two checkouts, or running `go run`
+inside the head tree, would compile a branch's code in a job that can push.
+
+**It pushes as `lydite-cicd-bot`, a GitHub App**, from `vars.LYDITE_CICD_APP_ID` and
+`secrets.LYDITE_CICD_APP_PRIVATE_KEY`; with the variable unset the job says what to run and
+stops. The App ID is a variable and not a secret because it is not one — it is printed on the
+App's own page, and a secret nobody can check a workflow against is a secret that hides a typo.
+An identity is needed at all because **a push made with `GITHUB_TOKEN` starts no workflow run** —
+the pull request would carry the fix and keep the red checks that fix answers.
+
+An App rather than a personal access token, for what it is not: a PAT carries one person's whole
+account, outlives their involvement, and expires on a schedule nobody is watching. An installation
+token is minted per run, lives an hour, belongs to nobody, and is bounded by what the App declares,
+on the repositories it is installed on. `lydite-cicd-bot` is the identity lydite's own automation
+writes under generally — commits a job produces, tags it cuts, state it records between runs — so
+what it may do is stated on the App and not restated here, where a second copy would go stale the
+first time a different job needs something. Writing a pin mirror needs `contents: write` and
+nothing else.
+
+It is deliberately **not** the relay's App. That one holds `pull_requests: write` and has no
+endpoint that commits; widening it to write contents would undo the separation
+[ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) exists to keep. Two Apps for
+two audiences is the ADR's own shape: one writes to lydite's repositories, the other comments on
+somebody else's.
+
+The App's key is still a secret in this repository, so this is a credential in CI. What makes that
+acceptable is the same thing that makes `lydite-clearance.yml` acceptable: the job holding it runs
+no repository code. It must never become the identity that records a coverage baseline — that job
+does run the repository's code, and handing it this key is exactly
+[#49](https://github.com/lydite/lydite/issues/49) with a nicer name.
 
 **Each cargo tool gets its own manifest, and that is not tidiness.** cargo-audit and cargo-deny
 cannot resolve in a shared dependency graph — cargo-deny's `krates` pins `petgraph =0.8.1` while
@@ -1807,9 +1867,14 @@ credential**. The job presents the GitHub Actions OIDC token; the relay verifies
 from the body, reads the pull-request number out of `ref`, mints an installation token narrowed
 to that one repository and to `pull_requests: write`, posts, and discards it. It stores nothing.
 
-That is what dissolves [#49](https://github.com/lydite/lydite/issues/49): a job with no writable
-token cannot write anywhere, whatever code it runs, so the worst a pull request's own suite can
-provoke is a wrong comment on its own pull request.
+That takes the comment write out of the job that runs the repository's code: with no writable
+token there, the worst a pull request's own suite can provoke through the relay is a wrong comment
+on its own pull request. It **narrows [#49](https://github.com/lydite/lydite/issues/49) rather than
+closing it.** Recording a coverage baseline is a push to the `lydite` branch and needs
+`contents: write`; the relay mints `pull_requests: write` and has no endpoint that commits
+anything. A gating job that also records still holds a pushing token, and what fixes that is the
+record split #49 describes or a relay endpoint that does not exist — which is why this repository
+runs the gate read-only.
 
 - **RS256 is fixed, not read from the token.** Honouring a token's own `alg` is how a verifier
   accepts `alg: none`.
