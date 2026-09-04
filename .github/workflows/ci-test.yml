@@ -55,6 +55,6 @@ jobs:
       # preflight, build, test and end2end, so there is no stage a publish
       # could be. The consequence is that lydite's own coverage gate does not
       # block a merge, which is the state `lydite/referral` is already in and
-      # for the same reason — see #34.
+      # for the same reason — see #34, and #75 for this gap.
       - name: go test
         run: go test -race ./...

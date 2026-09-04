@@ -23,7 +23,8 @@
 # stage can be granted. `ci-test.yml` therefore keeps the plain `go build` and
 # `go test -race` that ci-gate blocks on, and the gated, instrumented run lives
 # here. lydite's own coverage gate consequently does not block a merge — the
-# state `lydite/referral` is already in, for the same reason (#34).
+# state `lydite/referral` is already in, for the same reason (#34). What that
+# trade costs, and what closes it, is #75.
 name: lydite
 
 on:
