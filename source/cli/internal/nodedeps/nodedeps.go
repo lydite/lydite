@@ -16,6 +16,7 @@ package nodedeps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -64,6 +65,33 @@ func HasLockfile(dir string) bool {
 		}
 	}
 	return false
+}
+
+// PackageVersion reads an installed package's own version out of the tree an
+// install produced, and reports false when there is nothing to read.
+//
+// It reads node_modules rather than the lockfile deliberately. The question is
+// what *ran*, not what should have resolved: a lockfile states an intention,
+// and a tree installed before it changed, or one lydite skipped installing,
+// answers that question wrongly in the direction that matters. It is also one
+// code path for npm, yarn and pnpm, where the lockfile is three formats with
+// their own schemas — and pnpm's symlink into .pnpm resolves on the way past.
+//
+// False is an ordinary answer and not a failure. A Yarn PnP workspace has no
+// node_modules at all, and a caller that cannot identify a package must say so
+// rather than guess.
+func PackageVersion(root, pkg string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(root, "node_modules", filepath.FromSlash(pkg), "package.json"))
+	if err != nil {
+		return "", false
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest.Version == "" {
+		return "", false
+	}
+	return manifest.Version, true
 }
 
 // Managers lists every recognised package manager, sorted, for a message

@@ -14,10 +14,13 @@ go test -race ./...            # run tests
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
 go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
-go run ./cmd/lydite test --dir ..  # run each declared component's suite and measure its coverage
-go run ./cmd/lydite test --dir .. --no-coverage   # the fast path: no instrumentation, no coverage rows
+go run ./cmd/lydite test --dir ../..  # run each declared component's suite and measure its coverage
+go run ./cmd/lydite test --dir ../.. --no-coverage  # the fast path: no instrumentation, no coverage rows
 
-# The Go module is rooted at source/cli/, so every command above runs from there.
+# The Go module is rooted at source/cli/, so every command above runs from there —
+# and the scan root is the repository root above it, which is where `.lydite/` is.
+# A `--dir ..` names `source/`, which declares no components, and every gate there
+# reports a repository it never found.
 
 # Release build dry-run (produces dist/):
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
@@ -69,8 +72,10 @@ docs/adr/                         # the decision record
                                   #   exemptions.yml
 .goreleaser.yml                   # build/release config (v2 schema)
 .gt-repo.yaml                     # repo governance; renders .github/dependabot.yml and the gt workflows
-.github/workflows/                # CI stages, the release, the Workers' deploy, and lydite-pr.yml —
-                                  #   everything lydite says about a PR, as one run (see Surface)
+.github/workflows/                # CI stages, the release, the Workers' deploy, lydite-pr.yml —
+                                  #   everything lydite says about a PR, as one run (see Surface) —
+                                  #   and lydite-baseline.yml, the one job that writes the coverage
+                                  #   baseline, after a change has merged (see Coverage)
 .github/actions/                  # the local composites lydite-pr.yml uses, which are the shapes
                                   #   lydite/actions packages (that repository is not here)
 scripts/install.sh                # curl|sh installer shipped with every release
@@ -84,7 +89,7 @@ scripts/install.sh                # curl|sh installer shipped with every release
 ## Status
 
 All seven subcommands (`scan`, `test`, `review`, `publish`, `clearance`, `version`, `update`) are
-fully implemented — every check
+fully implemented, plus `test record` — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
@@ -1297,12 +1302,41 @@ the `lydite` branch; measuring runs each component's suite and any `setup`/`tear
 declaration carries. On a pull request that is the pull request's own code, in a job with a token
 that can push anywhere.
 
-Running the gate **read-only** is a supported configuration and is what this repository does: the
-write fails, the `record` row says `not recorded`, the verdict is unaffected, and every run measures
-the base tree rather than reading a recorded one. The cost is one extra instrumented run per change;
-the cache exists to avoid exactly that, so this is a trade rather than a free choice. Separating
-measuring from recording — a second command that writes what the first produced, executing nothing
-from the repository — is the fix, and belongs with `lydite test plan`/`merge` and the ledger.
+**`lydite test` writes nothing to the `lydite` branch** — not the tree it measured, and not the
+base tree it measured in a throwaway worktree. It reads the baseline, gates, and leaves what it
+would record in `.lydite-reports/baseline.json`. `lydite test record --reports <dir>…` lands that,
+executing no suite, no `setup`/`teardown` command and no compose service. One invariant, checkable
+by grepping for the single `gitstate.WriteBaseline` call site.
+
+**That narrows the tension and does not close it**, which is worth stating exactly because
+[ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) once claimed more than it
+delivered about this same issue. A branch can edit its own workflow and its own component
+declaration, so it can make the measuring job emit a fabricated measurement — and a command that
+executes nothing verifies nothing. A poisoned *baseline* is worse than one bad verdict: it
+persists, and every later change gates against it.
+
+So the write still belongs on a tree that has already merged. `.github/workflows/lydite-baseline.yml`
+is that job here: it runs on a push to the default branch, measures with `--gate-coverage` and lands
+the candidate with `lydite test record`, holding `contents: write` and running code that has already
+passed review and every gate. `lydite-pr.yml`'s `test` job holds `contents: read`, runs `--affected`,
+and records nothing.
+
+**What the command buys that the workflow split does not is the shard.** Under a shard matrix no
+single process sees every component, so nothing can record a complete baseline — each shard measured
+part of a tree and cannot claim the tree. Folding N candidates is the only thing that can, and it is
+what `lydite test merge` builds on ([#61](https://github.com/lydite/lydite/issues/61)). Folding needs
+the one fact no report carries: which entries a run *measured* and which it *carried forward*, since
+each shard carries every component it did not run and only one copy came from a suite that executed.
+
+**A candidate names the tree it measured, and `record` refuses to land it anywhere else.** It is the
+only integrity property available to a command that executes nothing: without it a mis-wired workflow
+lands one tree's numbers under another tree's key, silently, and that entry gates every later change
+whose merge-base is that tree. `record` also re-checks completeness against the declaration read from
+the tree being recorded — never from the candidate, which would let the document answer the question
+its own completeness is in doubt about.
+
+**A consumer wiring `--gate-coverage` and no `record` step stops recording.** Every run is then a
+cache miss: correct, slower, and the `record` row says so.
 
 **Measuring is local; gating touches the network.** `lydite test` always measures. `--no-coverage`
 opts out of instrumentation entirely and emits no coverage row at all. `--gate-coverage` turns on
@@ -1329,7 +1363,8 @@ same argument that keeps a types-only TypeScript package from being reported.
 
 ### A baseline is per-component counts, keyed by tree
 
-`v3/<tree>.json` on the `lydite` branch, an object of component name to `{covered, total}`.
+`v4/<tree>.json` on the `lydite` branch, an object of component name to
+`{covered, total, producer}`.
 
 - **Counts, not percentages.** A percentage cannot be re-weighted: composing a language or global
   figure from components needs each component's size, and so does a run that measured only some of
@@ -1339,28 +1374,40 @@ same argument that keeps a types-only TypeScript package from being reported.
   and not unique directories, so the name is the only one of the two unique by construction.
 - **No language is stored.** The component declaration already states it, and a second statement
   could only drift.
-- **`v3`, so every consumer takes one clean cache miss.** `gitstate.StatePath`'s directory is keyed
+- **The producer is what wrote the report**, not what lydite believes it invoked: the Go toolchain,
+  `cargo-llvm-cov` with the Rust toolchain whose LLVM wrote the line records, or a JavaScript
+  workspace's own runner and coverage provider read back from `node_modules` after the install. It
+  is compared verbatim, and a difference reports the component `new` rather than `regressed` — see
+  [ADR 0025](docs/adr/0025-a-baseline-records-its-producer-and-only-record-writes-it.md).
+- **`v4`, so every consumer takes one clean cache miss.** `gitstate.StatePath`'s directory is keyed
   to the metric and to the unit it is measured over; entries recorded under the old per-language
-  percentages are a different quantity, and are simply never found.
+  percentages are a different quantity, and are simply never found. A gained field bumps it too
+  whenever an entry written without it would read as a *hit* — a `v3` entry carries no producer, so
+  it would match nothing, gate nothing, and never self-heal.
 - **An empty baseline is never cached, and an empty cached baseline is a miss.** Cached, `{}` is
   indistinguishable from a real entry: every later change hits it, reports every component as `new`,
   and the gate enforces nothing — silently, permanently, with no way to self-heal. wardnet's branch
   accumulated nine of them. Treating one as a miss heals the already-written entries with no manual
   purge.
 
-**A run on the default branch records rather than re-measures.** There, HEAD is its own merge-base,
-so the tree the run just measured is the tree a baseline would be read for. Reading it would miss on
+**A run on the default branch measures rather than reads.** There, HEAD is its own merge-base, so
+the tree the run just measured is the tree a baseline would be read for. Reading it would miss on
 the first build and measure the whole repository a second time, in a throwaway worktree, to
 reproduce numbers already in hand. There is nothing to compare against either — the current commit
-*is* the baseline — so the figures render the way an ungated run's do, and the measurement is
-recorded.
+*is* the baseline — so the figures render the way an ungated run's do, and the candidate is left for
+`lydite test record`.
 
-**No run on the default branch is required.** Keying by tree carries the chain through pull
-requests: CI builds `refs/pull/N/merge`, a squash merge lands a commit carrying that same tree, and
-the next pull request's merge-base resolves to it — so the number a change measured *is* the
-baseline for the commit it becomes. Requiring a main run is a consumer obligation that a repository
-running CI only on pull requests satisfies never, and it is strictly more expensive: one
-instrumented run per change rather than one on the branch and another on main.
+**Keying by tree is what lets a pull request's own measurement become the baseline.** CI builds
+`refs/pull/N/merge`, a squash merge lands a commit carrying that same tree, and the next pull
+request's merge-base resolves to it — so the number a change measured *is* the baseline for the
+commit it becomes, and a repository that records on pull requests needs no run on the default branch
+at all.
+
+**A repository that records read-only, as this one does, needs one.** Its pull-request job holds no
+token that can push, so nothing there lands the candidate, and the chain has exactly one writer:
+`lydite-baseline.yml` after the merge. It measures the tree the pull request already measured — the
+cost of not trusting a branch with the write, and the reason the recorder failing silently is
+expensive rather than harmless. Every run against an unrecorded base tree measures that tree again.
 
 **A cache miss measures, and never substitutes.** `measureBaseTree` checks the base commit out into
 a throwaway worktree — **at the scan root inside it, not at the worktree root** — and runs it

@@ -119,3 +119,54 @@ func write(t *testing.T, dir, name string) {
 		t.Fatal(err)
 	}
 }
+
+// The installed tree is what a coverage producer is read from, so this answers
+// with what is on disk rather than with what a lockfile intended.
+func TestPackageVersionReadsTheInstalledTree(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "node_modules", "vitest")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"4.1.11"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := PackageVersion(root, "vitest"); !ok || got != "4.1.11" {
+		t.Errorf("PackageVersion = (%q, %v), want 4.1.11", got, ok)
+	}
+}
+
+// A scoped package is a nested directory, which is the form every coverage
+// provider is published under.
+func TestPackageVersionReadsAScopedPackage(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "node_modules", "@vitest", "coverage-v8")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"4.1.11"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := PackageVersion(root, "@vitest/coverage-v8"); !ok || got != "4.1.11" {
+		t.Errorf("PackageVersion = (%q, %v), want 4.1.11", got, ok)
+	}
+}
+
+// Absent, unreadable and version-less all answer false. A caller that cannot
+// identify a package must say so rather than record a producer it guessed.
+func TestPackageVersionReportsWhatItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	if _, ok := PackageVersion(root, "vitest"); ok {
+		t.Error("PackageVersion found a package in an empty tree")
+	}
+	dir := filepath.Join(root, "node_modules", "broken")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"broken"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := PackageVersion(root, "broken"); ok {
+		t.Error("PackageVersion answered for a manifest carrying no version")
+	}
+}

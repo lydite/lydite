@@ -84,13 +84,33 @@ func (o Overrides) For(e runner.Lang) string {
 type Env struct {
 	PathDirs []string
 	Vars     []string
-	// Resolved names the toolchain this environment selects, for Key alone —
-	// it changes nothing in the child. An ambient toolchain that already
-	// satisfies the declaration contributes no directory and only
-	// GOTOOLCHAIN=local, so without it every such component on every machine
-	// hashes to one value: a CI image whose Go is bumped 1.25 to 1.26 keeps
-	// reusing a tool built by 1.25, which rejects 1.26 source outright.
+	// Resolved names the toolchain this environment selects. It changes
+	// nothing in the child; it is read by Key and by Version.
+	//
+	// Key needs it because an ambient toolchain that already satisfies the
+	// declaration contributes no directory and only GOTOOLCHAIN=local, so
+	// without it every such component on every machine hashes to one value: a
+	// CI image whose Go is bumped 1.25 to 1.26 keeps reusing a tool built by
+	// 1.25, which rejects 1.26 source outright.
+	//
+	// Version needs it because the toolchain is part of what measured a
+	// component's coverage — it writes Go's profile outright, and its LLVM
+	// writes the line records in Rust's lcov — and a baseline records what
+	// measured it.
 	Resolved string
+}
+
+// Version names the toolchain this environment selects, or nothing when there
+// is no environment at all.
+//
+// Nil-safe like Environ, because a component whose language lydite has no
+// probe for is handed no environment, and the answer for one is the same as
+// the answer for a toolchain that would not identify itself: unknown.
+func (e *Env) Version() string {
+	if e == nil {
+		return ""
+	}
+	return e.Resolved
 }
 
 // Environ is the environment a child process running under this toolchain

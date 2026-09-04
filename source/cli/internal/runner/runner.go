@@ -510,3 +510,91 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 		return Invocation{}, false
 	}
 }
+
+// Producer names what wrote a component's coverage report, for the baseline to
+// record beside the counts.
+//
+// It exists because a coverage figure is only comparable to one taken by the
+// same instrument. A runner or coverage-provider bump changes what a line is:
+// vitest 3.2.7 to 4.1.11 took one workspace from 345 lines to 152 over an
+// identical tree, and the gate reported the fall as a regression by whoever
+// bumped it. Recorded, the difference reports the component new instead.
+//
+// It lives here because this is where the instrumented variants are built and
+// where the pins those variants run through are read, so the name and the
+// version can never come from a different place than the invocation does. dir
+// is the component's directory, and lang is the resolved language toolchain —
+// the Go toolchain that wrote a profile, or the Rust toolchain whose LLVM
+// wrote an lcov.
+//
+// An empty answer means lydite could not identify the instrument, which is
+// possible only for JavaScript: it is the one language whose measuring tool
+// lydite deliberately does not pin, because installing one into the tree it is
+// about to gate would have lydite change what the repository resolves to.
+func (r Runner) Producer(dir, lang string) string {
+	switch r.Name {
+	case GoTest:
+		// The profile is the toolchain's own output; nothing else is
+		// involved, so there is no second version to name.
+		return join("go", lang)
+	case CargoNextest, CargoLLVMCovNextest:
+		// Both instrumented variants run through cargo-llvm-cov, and its
+		// line records follow the LLVM in the toolchain that built them —
+		// so the pair is the instrument, not either half.
+		return both(join("cargo-llvm-cov", cargoLLVMCov.Version), join("rust", lang))
+	case Vitest:
+		return jsProducer(dir, "vitest", "@vitest/coverage-v8", "@vitest/coverage-istanbul")
+	case Jest:
+		// Jest instruments through babel-plugin-istanbul, which it bundles,
+		// so the runner's own version is the whole of the answer.
+		return jsProducer(dir, "jest")
+	default:
+		return ""
+	}
+}
+
+// jsProducer names the installed runner and, where one is separate, the
+// coverage provider beside it.
+//
+// Every named package must be identifiable or the answer is empty: a producer
+// naming half of what measured is one that compares equal across a change to
+// the half it left out, which is worse than admitting it does not know. A
+// provider is looked for in order and the first one installed wins, since a
+// workspace carries the one its config selects.
+func jsProducer(dir, run string, providers ...string) string {
+	version, ok := nodedeps.PackageVersion(dir, run)
+	if !ok {
+		return ""
+	}
+	out := join(run, version)
+	if len(providers) == 0 {
+		return out
+	}
+	for _, p := range providers {
+		if v, ok := nodedeps.PackageVersion(dir, p); ok {
+			return both(out, join(p, v))
+		}
+	}
+	return ""
+}
+
+// both names two halves of one instrument, or nothing when either is unknown.
+// A producer naming half of what measured compares equal to itself across a
+// change to the half it omitted, which is the comparison this exists to
+// prevent — so an incomplete answer is no answer.
+func both(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	return a + ", " + b
+}
+
+// join names a tool and its version, or nothing at all when the version is
+// unknown — a bare tool name would compare equal to itself across every
+// version of it, which is the comparison a producer exists to prevent.
+func join(name, version string) string {
+	if version == "" {
+		return ""
+	}
+	return name + " " + version
+}

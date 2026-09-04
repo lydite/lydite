@@ -153,10 +153,14 @@ jobs:
     # Read-only, deliberately. This job runs the repository's own suites and
     # any `setup`/`teardown` shell the declaration carries, which on a pull
     # request is the pull request's own code. Nothing it runs holds a token
-    # that can write anywhere: the baseline is not recorded, the `record` row
-    # says so, and every run measures the base tree instead of reading one.
-    # That costs an instrumented run per change and is the supported
-    # configuration.
+    # that can write anywhere — and nothing it runs would use one: `lydite
+    # test` writes nothing to the lydite branch, leaving its measurement as a
+    # candidate in .lydite-reports/ for `lydite test record` to land.
+    #
+    # Nothing lands it here. `lydite-baseline.yml` records after a change has
+    # merged, where the code has already passed review and every gate, so the
+    # baseline this job reads is one lydite measured on a tree nobody was
+    # proposing at the time.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,8 +192,18 @@ jobs:
       # that runs it. The scan root is named by the flag instead, which lydite
       # resolves against its own directory and needs no runner semantics to be
       # right.
+      # --affected on a pull request, exactly as `lydite/actions` passes it:
+      # a change runs the components it could have broken, and every other
+      # component's baseline entry carries forward so the candidate still
+      # covers the whole declaration. It is what makes the recorded baseline
+      # worth having — without it every pull request runs every component and
+      # the cache saves only the base-tree measurement.
+      #
+      # Never on a push. `lydite-baseline.yml` runs everything, because a
+      # partial run records nothing and a narrowed run there would leave the
+      # entry it exists to write.
       - name: lydite test
-        run: lydite test --dir . --gate-coverage
+        run: lydite test --dir . --affected --gate-coverage
 
       - uses: ./.github/actions/lydite-reports
         if: always()
