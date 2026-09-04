@@ -138,16 +138,26 @@ func (s section) render(title string) ui.CommentSection {
 	for _, row := range s.doc.Rows {
 		out.Rows = append(out.Rows, ui.CommentRow{Status: row.Status, Check: row.Label, Result: row.Value})
 	}
-	// Only a failing row's output. A clean run has a log per check and
-	// pasting all of them would bury the verdict under the thing that went
-	// right; the row still names its log, and the artifact still holds it.
-	var failed int
+	// Only a row the reader has to act on. A clean run has a log per check
+	// and pasting all of them would bury the verdict under the thing that
+	// went right; the row still names its log, and the artifact still holds
+	// it.
+	//
+	// A referral is one of those rows, and the one whose detail is least
+	// replaceable: its value says what the verdict is and its detail says
+	// what about this change produced it — which paths no exemption covers,
+	// or which disqualifier fired, and what the reader can do about it. A
+	// section carrying `referral … no exemptions declared` and nothing else
+	// reads as a misconfiguration rather than as the answer it is. The
+	// terminal has said this all along; the comment is where the person whose
+	// change it is actually reads it.
+	var quoted int
 	for _, row := range s.doc.Rows {
-		if row.Status != ui.StatusFail {
+		if row.Status != ui.StatusFail && row.Status != ui.StatusRefer {
 			continue
 		}
-		failed++
-		if failed > detailCap {
+		quoted++
+		if quoted > detailCap {
 			continue
 		}
 		out.Details = append(out.Details, ui.CommentDetail{
@@ -156,14 +166,14 @@ func (s section) render(title string) ui.CommentSection {
 			Log:   row.Log,
 		})
 	}
-	if rest := failed - detailCap; rest > 0 {
+	if rest := quoted - detailCap; rest > 0 {
 		out.Items = append(out.Items,
-			fmt.Sprintf("%d further failure(s) are in the run's artifact rather than here", rest))
+			fmt.Sprintf("%d further result(s) are in the run's artifact rather than here", rest))
 	}
 	return out
 }
 
-// detailCap is how many failing rows get their output quoted in one section.
+// detailCap is how many rows get their output quoted in one section.
 //
 // A hosting platform refuses a comment over a size limit — GitHub's is 65536
 // bytes — and a refused comment is no surface at all, which is the outcome
