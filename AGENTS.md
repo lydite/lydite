@@ -72,7 +72,7 @@ docs/adr/                         # the decision record
 .github/workflows/                # CI stages, the release, the Workers' deploy, and lydite-pr.yml —
                                   #   everything lydite says about a PR, as one run (see Surface)
 .github/actions/                  # the local composites lydite-pr.yml uses, which are the shapes
-                                  #   lydite/actions packages (the published action is not here)
+                                  #   lydite/actions packages (that repository is not here)
 scripts/install.sh                # curl|sh installer shipped with every release
 ```
 
@@ -705,7 +705,7 @@ unmatched, and therefore widens.
 component. Every signal for "is this a pull request" is unreliable where lydite runs — a
 detached HEAD, a shallow clone, a fork with no upstream fetched, a default branch not called
 `main` — and the caller already knows the event, so the workflow passes `--affected` on pull
-requests exactly as `action.yml` already passes `--diff-base auto`. `--affected` alongside
+requests exactly as `lydite/actions` already passes `--diff-base auto`. `--affected` alongside
 `--component` is refused rather than intersected: the planner emits per-shard `--component`
 lists that are already the selected set, so the combination is never needed, and an
 intersection nobody asked for narrows silently when it is wrong.
@@ -1001,7 +1001,7 @@ noted:
 
 **A check whose findings never stream must set `executil.Result.Detail`.** `executil.Run`
 streams every tool's stdout/stderr live, so for gosec, clippy, cargo-audit and Semgrep the
-findings are on the terminal and in the log `action.yml` captures before anyone reads the
+findings are on the terminal and in the job log before anyone reads the
 `Result`. Biome is the exception: its report goes to a file via `--reporter-file` so its own
 chatter cannot corrupt the JSON, so nothing streams and `Output` holds no findings.
 `cmd/lydite/scan.go`'s `report` prints `Detail` under a failing check — without it a
@@ -1602,8 +1602,9 @@ than by substring, so a branch called `not-main` is not a candidate either.
 **The remote stays `origin`, deliberately.** A repository with two remotes is real and lydite cannot
 guess which one a pull request targets; discovering it would be a second inference with the same
 failure mode and no flag to escape it. Naming the limit is better than half-solving it. What
-actually fixes stacked pull requests is the action passing `GITHUB_BASE_REF` on `pull_request`
-events, which is a change in `lydite/actions`.
+actually fixes a stacked pull request is a caller passing the branch it targets, which
+`lydite/actions` does: every job it runs takes `--base-branch` from `github.base_ref`, on
+`pull_request` events and never on a push.
 
 ## Output grammar and `--json`
 
@@ -1625,9 +1626,8 @@ is the single place that mapping lives: `✗` anywhere is 1, else a referral is 
 the terminal, so the two cannot disagree, and statuses travel as their own names rather than
 as glyphs. `TestJSONKeysArePartOfTheContract` pins the keys; `ui.jsonRow` stays a separate
 type from `ui.Row` for that reason, so a field added for rendering cannot quietly become
-part of the published document. `lydite/actions` greps for a
-`^\[(PASS|FAIL)\] <name>$` shape this grammar does not produce, and therefore matches nothing
-— cutting it over to `--json` is a change in that repository. **Do not reintroduce a bracketed
+part of the published document. `lydite/actions` parses no output at all: it reads the
+documents a run wrote, which is what a consumer should do. **Do not reintroduce a bracketed
 text mode to accommodate it.** A text-scraping consumer forces every refinement to the human
 surface through a synchronised release in another repo, which is the coupling `--json` exists
 to remove.
@@ -1813,9 +1813,9 @@ the referral, the scan and the suites as one collapsible section each. See
 **`lydite publish` renders and posts nothing.** `--reports <dir>` (repeatable), `--out
 <file|->`. No network, no token, no knowledge of a hosting platform. A developer runs it locally
 and reads exactly what a reviewer will see; and the posting step is content-agnostic, so
-refining the comment never needs a release of whatever posts it. That coupling is not
-hypothetical — `lydite/actions` greps for a `^\[(PASS|FAIL)\] <name>$` shape `internal/ui` has
-never produced, so it matches nothing and reports nothing.
+refining the comment never needs a release of whatever posts it. `lydite/actions` therefore
+parses no output at all: it reads the documents a run wrote, which is the only interface
+lydite publishes for a consumer.
 
 **Every command writes its report document into `.lydite-reports/`, on every run.**
 `scan.json`, `test.json`, `review.json` — unconditionally, not only under `--json`, because a
@@ -1907,7 +1907,8 @@ on who opened it.
 `--baseline-commit`, so the fallback blocks on the same thing `semgrep ci` would — what the change
 introduces — and nothing else. `--diff-base auto` resolves the merge-base with `origin/main` via the
 same `internal/gitstate.BaseSHA` the coverage gate already uses, so a PR's scan and its coverage
-agree on what "this change" means. `action.yml` passes `auto` on every `pull_request` event.
+agree on what "this change" means. `lydite/actions` passes `auto` on every `pull_request`
+event, and nothing on a push.
 
 Two deliberate choices in `cmd/lydite/scan.go`'s `resolveDiffBase`:
 
@@ -1928,44 +1929,52 @@ Dependabot events. It is not required for CI to be green — the diff-aware fall
 does hand an upload token to a workflow that executes the bumped dependency's code, so it's a
 per-repo judgment call.
 
-## The `action.yml` composite action
+## `lydite/actions`
 
-**It still invokes the removed `lydite coverage`, and its output parser matches nothing lydite
-prints.** Both are changes in `lydite/actions`
-([#47](https://github.com/lydite/lydite/issues/47)): the coverage gate is now `lydite test
---gate-coverage`, and the action should pass `--base-branch` from `GITHUB_BASE_REF` on
-`pull_request` events, which is what actually fixes stacked pull requests. `tool_result()`
-matches `^\[(PASS|FAIL)\] <name>$`, a shape `internal/ui` does not produce — see "Output
-grammar and `--json`" above. It has to read `--json` instead. Reintroducing a bracketed text
-mode here is the wrong direction: it is what couples the human surface to a parser in another
-repository.
+The actions a consumer runs live in [`lydite/actions`](https://github.com/lydite/actions), not
+here (ADR 0010). It ships `setup`, `review`, `scan`, `test` and `publish`, plus a reusable
+`.github/workflows/lydite.yml` that runs the referral, the scan and the gated suites in parallel
+and renders one comment from all of them. Consumers pin the floating major, `@v1`, which a
+release moves.
 
-**The shape it should take is already dogfooded here.** `.github/workflows/lydite-pr.yml` runs
-the referral, the scan and the gated suites in parallel and renders one comment from all three,
-using the local composites in `.github/actions/` — `lydite-binary`, `lydite-reports`,
-`lydite-comment`. Those are the shapes `lydite/actions` packages as `setup`, `scan`, `test` and
-`publish` plus a reusable workflow; the only difference is that the local `lydite-binary` uses
-the binary the pull request built, because a dogfood against the last release tests the last
-release. **A consumer's comment is rendered by `lydite publish` and nothing else** — the posting
-step takes a file and a marker and knows nothing about coverage, components or verdicts, which
-is what stops a refinement to the comment becoming a two-repository release. It also means the
-sticky-comment action earns nothing here: the marker upsert is `lydite-comment`, in twenty
-lines of `gh api`, and the relay does the same thing on the authenticated path.
+**What is here is the dogfood, and the two are deliberately the same shape.**
+`.github/workflows/lydite-pr.yml` runs those four concerns through the local composites in
+`.github/actions/` — `lydite-binary`, `lydite-reports`, `lydite-comment`. The one difference is
+that `lydite-binary` uses the binary the pull request built, because a dogfood against the last
+release tests the last release. When the shape here changes, that repository is where the change
+has to land as well; nothing enforces it.
 
-Unlike `inforge`'s action (install-only — its invocations vary too much per call site to bake in),
-lydite's usage is uniform enough (`.lydite/config.yml` already carries all the config) that the action
-owns the whole install → run → report flow: install lydite, run `scan`/`test` (each toggleable
-independently), post one sticky PR comment summarizing both (upsert,
-not a fresh comment every run — via `marocchino/sticky-pull-request-comment`), and optionally
-upload to Codecov (non-blocking, purely for its dashboard/history) and/or switch lydite's own
-Semgrep check into `semgrep ci` mode (diff-aware + uploads to the Semgrep AppSec Platform) when a
-`SEMGREP_APP_TOKEN`-equivalent input is supplied. The Codecov upload is two `codecov/codecov-action`
-invocations sharing the same `codecov-token` gate — one `report_type: coverage`, one
-`report_type: test_results` — both relying entirely on that action's own recursive workspace
-auto-discovery rather than lydite passing explicit `files:`/`directory:` paths itself. This is
-why a consumer's CI only needs to hand lydite a token: lydite owns the whole Codecov
-relationship (coverage *and* JUnit test-results), so the calling workflow never has to install a
-Codecov CLI or push to Codecov directly itself.
+**A consumer's comment is rendered by `lydite publish` and nothing else.** The posting step takes
+a file and a marker and knows nothing about coverage, components or verdicts, which is what stops
+a refinement to the comment becoming a two-repository release. It is also why a sticky-comment
+action earns nothing: the marker upsert is twenty lines of `gh api`, and the relay does the same
+thing on the authenticated path.
+
+**It uploads to no third party, and Codecov is not coming back.** A run's coverage and JUnit
+results go to its own artifacts and nowhere else. lydite replaced Codecov as the blocking gate,
+and a dashboard is not a reason to keep the relationship: it would put a token in CI for
+something non-blocking, and the history it offers is what
+[#26](https://github.com/lydite/lydite/issues/26)'s ledger is for — owned here, where the
+measurements are made, rather than reconstructed by a third party from uploads.
+
+**Only `publish` authenticates**, and the split matters: `id-token: write` for the relay, and
+`pull-requests: write` for the fallback path alone. Every other job holds a read-only token, which
+is what lets `test` run a pull request's own suites and `setup`/`teardown` shell without holding
+anything that can write.
+
+**Never interpolate `${{ inputs.* }}` or `${{ steps.*.outputs.* }}` directly into a `run:` script
+body** — pass it via that step's `env:` block instead, and reference the env var name (`"$DIR"`,
+not `"${{ inputs.dir }}"`) inside the script. Semgrep's own
+`yaml.github-actions.security.run-shell-injection` rule caught this exact mistake in a lydite
+action once already: expression interpolation into a shell script is a script-injection vector if
+the value could ever contain shell metacharacters, however trusted it looks. `if:` conditions and
+`with:` blocks on a `uses:` step are fine to interpolate directly — only `run:` bodies splice text
+into something a shell then executes.
+
+**The marker is read back from the comment's own first line, never restated in a workflow.** It is
+`ui.Marker`, and a second copy is one that can disagree — a run would then post a fresh comment
+every time instead of editing the standing one, and the relay and the fallback would orphan each
+other's comments rather than handing over.
 
 **The pull-request comment carries no logo.** It identified whose verdict it was while the
 comment arrived under a consumer's own `github-actions[bot]`; the App is that identity now, so a
@@ -2028,10 +2037,9 @@ mistaken for a description of current behavior:
 
 **The CLI output grammar is implemented**, in `internal/ui`, and every command renders
 through it — glyphs, leader dots aligning the value column at 34 characters, `--no-color`,
-and a verdict-plus-duration last line. `lydite/actions` parses a
-`^\[(PASS|FAIL)\] <name>$` shape this grammar does not produce, and therefore reads nothing;
-cutting it over to `--json` is a change in that repository. Do not restore the bracketed text
-form to accommodate it — a text-scraping consumer makes every refinement to the human surface
+and a verdict-plus-duration last line. Nothing parses it: `lydite/actions` reads the
+documents a run wrote. Do not restore a bracketed text
+form for a consumer to scrape — that makes every refinement to the human surface
 a two-repository release.
 
 **There is no light product theme and no responsive design.** The light token ramp exists
