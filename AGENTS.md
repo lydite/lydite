@@ -1070,10 +1070,24 @@ branch's. And **it never compiles the pull request's source**: pinsync is built 
 checkout and reads the head checkout as data. Collapsing the two checkouts, or running `go run`
 inside the head tree, would compile a branch's code in a job that can push.
 
-It needs `secrets.PIN_SYNC_TOKEN`, and without one the job says what to run and stops. That is not
-a stopgap: a push made with `GITHUB_TOKEN` starts no workflow run, so the pull request would carry
-the fix and keep the red checks that fix answers. The token is the cost of the automation, and it
-is why the job runs no repository code.
+**It pushes as `lydite-cicd-bot`, a GitHub App**, from `LYDITE_CICD_APP_ID` and
+`LYDITE_CICD_PRIVATE_KEY`; with neither set the job says what to run and stops. An identity is
+needed at all because **a push made with `GITHUB_TOKEN` starts no workflow run** — the pull
+request would carry the fix and keep the red checks that fix answers.
+
+An App rather than a personal access token, for what it is not: a PAT carries one person's whole
+account, outlives their involvement, and expires on a schedule nobody is watching. An installation
+token is minted per run, lives an hour, belongs to nobody, and is bounded by what the App declares
+— `contents: write`, on the repositories it is installed on. It is the same one-App-per-purpose
+shape [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) already argues for, and
+deliberately **not** the relay's App: that one holds `pull_requests: write` and has no endpoint
+that commits, and widening it to write contents would undo the separation the ADR exists to keep.
+
+The App's key is still a secret in this repository, so this is a credential in CI. What makes that
+acceptable is the same thing that makes `lydite-clearance.yml` acceptable: the job holding it runs
+no repository code. It must never become the identity that records a coverage baseline — that job
+does run the repository's code, and handing it this key is exactly
+[#49](https://github.com/lydite/lydite/issues/49) with a nicer name.
 
 **Each cargo tool gets its own manifest, and that is not tidiness.** cargo-audit and cargo-deny
 cannot resolve in a shared dependency graph — cargo-deny's `krates` pins `petgraph =0.8.1` while
