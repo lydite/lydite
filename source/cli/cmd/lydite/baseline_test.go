@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/runner"
 )
 
 // producing builds a measured entry attributed to one instrument.
@@ -220,5 +223,128 @@ func TestRecordIsNotBlockedByAComponentNothingCanMeasure(t *testing.T) {
 	}}
 	if gap, blocked := missingFromRecord(decl, candidateDoc{}); blocked {
 		t.Errorf("a component declaring a raw command blocked recording as %q", gap)
+	}
+}
+
+// Recording the same measurement twice does not push twice. The branch is
+// shared and busy, so a run that would rewrite an entry byte for byte is a
+// wasted fetch-commit-push against a ref other jobs are reading.
+func TestRecordingATreeTwiceIsIdempotent(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	if out, errOut, err := runRecordCmd(t, root, "--json"); err != nil {
+		t.Fatalf("first recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("second recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	if got := jsonRows(t, out)["record"]; !strings.Contains(got.Value, "already holds") {
+		t.Errorf("record = %q, want the second recording to find its own entry", got.Value)
+	}
+}
+
+// A directory holding no candidate is named and skipped rather than failing the
+// command, since a --no-coverage run writes none and a caller may reasonably
+// pass `record` the same directory list it passes `publish`. With no candidate
+// anywhere there is nothing to do, and that is an error: the command was asked
+// to record and could not reach an answer.
+func TestRecordSaysWhenNoDirectoryHoldsACandidate(t *testing.T) {
+	root := gateRepo(t)
+	if err := os.MkdirAll(filepath.Join(root, runner.ReportDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runRecordCmd(t, root)
+	if err == nil {
+		t.Fatalf("record succeeded with no candidate anywhere\n%s", out)
+	}
+	if !strings.Contains(err.Error(), candidateName) {
+		t.Errorf("error = %q, want the missing document named", err)
+	}
+}
+
+// A run that measured nothing establishes no candidate, and says which of the
+// reasons it was. A document that simply omitted its components would be
+// indistinguishable from one describing a repository that declares none.
+func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
+	cmd := newRootCmd()
+	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: "go-test"}}}
+	ms := []measurement{unmeasuredComponent(decl.Components[0], "the suite failed")}
+
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, 0.1)
+	if len(doc.Components) != 0 || doc.Reason == "" {
+		t.Errorf("doc = %+v, want no components and a reason", doc)
+	}
+	if !strings.Contains(value, "nothing to record") {
+		t.Errorf("row = %q, want it to say nothing was established", value)
+	}
+}
+
+// A partial candidate is worse than none: any non-empty entry reads as a cache
+// hit, so the missing component is new on every later change and every composed
+// figure it belongs to stops comparing — silently. So a run that could not
+// measure a component it was supposed to establishes nothing at all.
+func TestARunMissingAComponentEstablishesNoCandidate(t *testing.T) {
+	cmd := newRootCmd()
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	ok := measured("api", "go", 50, 100)
+	broken := unmeasuredComponent(decl.Components[1], "the suite failed")
+
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, []measurement{ok, broken}, nil, 0.1)
+	if len(doc.Components) != 0 {
+		t.Errorf("doc = %+v, want nothing established when a component is missing", doc)
+	}
+	if !strings.Contains(value, "web") || !strings.Contains(value, "gates on nothing") {
+		t.Errorf("row = %q, want the gap named and its consequence stated", value)
+	}
+}
+
+// A component the declaration no longer holds does not survive in the entry.
+// Otherwise a baseline accumulates a tail of components nobody can measure, and
+// each one blocks nothing while quietly widening what a composed figure sums.
+func TestRecordingDropsAComponentTheDeclarationLost(t *testing.T) {
+	decl := component.File{Components: []component.Component{{Name: "svc", Dir: "svc", Runner: "go-test"}}}
+	if !declares(decl, "svc") {
+		t.Error("declares says a declared component is absent")
+	}
+	if declares(decl, "gone") {
+		t.Error("declares says an undeclared component is present")
+	}
+}
+
+// Folding nothing is an error rather than an empty baseline. An empty entry,
+// once written, reads as a hit for every later change and gates nothing.
+func TestFoldingNothingIsAnError(t *testing.T) {
+	if _, err := foldCandidates(nil); err == nil {
+		t.Fatal("foldCandidates accepted an empty set")
+	}
+}
+
+// A fold in which no shard established anything carries a shard's own reason
+// forward, so the row says why rather than reporting an absence.
+func TestFoldingKeepsAShardsReason(t *testing.T) {
+	got, err := foldCandidates([]candidateDoc{
+		{Tree: "aaaaaaaaaaaa", Reason: "the suite failed"},
+		{Tree: "aaaaaaaaaaaa"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Reason != "the suite failed" {
+		t.Errorf("reason = %q, want the shard's own reason kept", got.Reason)
+	}
+}
+
+// A component declaring a raw command has no producer, because lydite does not
+// know what such a run would invoke, let alone what wrote a report.
+func TestAComponentWithARawCommandHasNoProducer(t *testing.T) {
+	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "docs"}}
+	if got := producerOf(t.TempDir(), c, nil); got != "" {
+		t.Errorf("producer = %q, want nothing for a component lydite does not invoke", got)
 	}
 }

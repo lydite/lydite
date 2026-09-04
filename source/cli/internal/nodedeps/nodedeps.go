@@ -81,6 +81,7 @@ func HasLockfile(dir string) bool {
 // node_modules at all, and a caller that cannot identify a package must say so
 // rather than guess.
 func PackageVersion(root, pkg string) (string, bool) {
+	// #nosec G304 -- nosemgrep: go.lang.security.audit.dangerous-file-read.dangerous-file-read -- root is the component directory from the repository's own declaration, and pkg is one of the fixed package names internal/runner names for each runner; neither reaches here from a scanned file's contents
 	data, err := os.ReadFile(filepath.Join(root, "node_modules", filepath.FromSlash(pkg), "package.json"))
 	if err != nil {
 		return "", false
