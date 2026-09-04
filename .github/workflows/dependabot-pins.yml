@@ -61,7 +61,10 @@ jobs:
       - name: Check whether the app is configured
         id: configured
         env:
-          APP_ID: ${{ secrets.LYDITE_CICD_APP_ID }}
+          # A variable rather than a secret: an App ID is public, printed on
+          # the App's own page, and a secret that is not one is a secret
+          # nobody can check a workflow against.
+          APP_ID: ${{ vars.LYDITE_CICD_APP_ID }}
         run: |
           if [ -z "${APP_ID}" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -70,18 +73,19 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Narrowed by the App's own installation: this one holds `contents:
-      # write` and nothing else, on the repositories it is installed on. The
-      # token it mints lives an hour and belongs to no person, which is what
-      # separates it from a personal access token carrying somebody's whole
-      # account.
+      # Bounded by the App itself: what it declares, on the repositories it
+      # is installed on. The token lives an hour and belongs to no person,
+      # which is what separates it from a personal access token carrying
+      # somebody's whole account. Writing a mirror needs `contents: write`
+      # and nothing else — the App is where that is stated, so a job asking
+      # for more than it needs is visible there rather than here.
       - name: Mint the app's token
         id: token
         if: steps.configured.outputs.present == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.LYDITE_CICD_APP_ID }}
-          private-key: ${{ secrets.LYDITE_CICD_PRIVATE_KEY }}
+          app-id: ${{ vars.LYDITE_CICD_APP_ID }}
+          private-key: ${{ secrets.LYDITE_CICD_APP_PRIVATE_KEY }}
 
       - name: Check out the base branch
         if: steps.configured.outputs.present == 'true'

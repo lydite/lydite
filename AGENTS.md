@@ -1070,18 +1070,27 @@ branch's. And **it never compiles the pull request's source**: pinsync is built 
 checkout and reads the head checkout as data. Collapsing the two checkouts, or running `go run`
 inside the head tree, would compile a branch's code in a job that can push.
 
-**It pushes as `lydite-cicd-bot`, a GitHub App**, from `LYDITE_CICD_APP_ID` and
-`LYDITE_CICD_PRIVATE_KEY`; with neither set the job says what to run and stops. An identity is
-needed at all because **a push made with `GITHUB_TOKEN` starts no workflow run** — the pull
-request would carry the fix and keep the red checks that fix answers.
+**It pushes as `lydite-cicd-bot`, a GitHub App**, from `vars.LYDITE_CICD_APP_ID` and
+`secrets.LYDITE_CICD_APP_PRIVATE_KEY`; with the variable unset the job says what to run and
+stops. The App ID is a variable and not a secret because it is not one — it is printed on the
+App's own page, and a secret nobody can check a workflow against is a secret that hides a typo.
+An identity is needed at all because **a push made with `GITHUB_TOKEN` starts no workflow run** —
+the pull request would carry the fix and keep the red checks that fix answers.
 
 An App rather than a personal access token, for what it is not: a PAT carries one person's whole
 account, outlives their involvement, and expires on a schedule nobody is watching. An installation
-token is minted per run, lives an hour, belongs to nobody, and is bounded by what the App declares
-— `contents: write`, on the repositories it is installed on. It is the same one-App-per-purpose
-shape [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) already argues for, and
-deliberately **not** the relay's App: that one holds `pull_requests: write` and has no endpoint
-that commits, and widening it to write contents would undo the separation the ADR exists to keep.
+token is minted per run, lives an hour, belongs to nobody, and is bounded by what the App declares,
+on the repositories it is installed on. `lydite-cicd-bot` is the identity lydite's own automation
+writes under generally — commits a job produces, tags it cuts, state it records between runs — so
+what it may do is stated on the App and not restated here, where a second copy would go stale the
+first time a different job needs something. Writing a pin mirror needs `contents: write` and
+nothing else.
+
+It is deliberately **not** the relay's App. That one holds `pull_requests: write` and has no
+endpoint that commits; widening it to write contents would undo the separation
+[ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) exists to keep. Two Apps for
+two audiences is the ADR's own shape: one writes to lydite's repositories, the other comments on
+somebody else's.
 
 The App's key is still a secret in this repository, so this is a credential in CI. What makes that
 acceptable is the same thing that makes `lydite-clearance.yml` acceptable: the job holding it runs
