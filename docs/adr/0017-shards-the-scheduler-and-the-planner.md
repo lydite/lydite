@@ -10,8 +10,8 @@ to remember to do.
 So a CI job holds a **shard** — a set of components lydite runs in one process
 — and the scheduler runs inside a shard. Locally there is one shard holding
 every selected component. In CI there is one shard per matrix job, and lydite
-computes the grouping. `--concurrency max` puts one component in each, which is
-what ADR 0016 described; anything lower groups them.
+computes the grouping. `--concurrency max` runs every one of a shard's
+components at once.
 
 This amends ADR 0016's "one job per component" only in its unit. Everything
 that section argued for is unchanged: scanning, testing, coverage and mutation
@@ -36,9 +36,9 @@ assertion and one with none.
 
 - `lydite test --concurrency N` runs a shard: N components at once, serialising
   any pair that publishes a host port in common.
-- `lydite test plan --concurrency N` is a pure function — read the declaration,
-  read each compose file's ports, emit the grouping. No process, no state, no
-  network. A CI workflow turns its output into a matrix.
+- `lydite test plan` is a pure function — read the declaration, read each
+  compose file's ports, emit the grouping. No process, no state, no network. A
+  CI workflow turns its output into a matrix.
 - Each matrix job selects its components with the existing repeatable
   `--component` flag, carried in the matrix from the plan. The shard id is a
   label on the job and the artifact, never an input: passing both an id and a
@@ -51,6 +51,14 @@ The port-conflict predicate is one implementation with two callers: the planner
 groups by it, the scheduler serialises by it. Two copies would agree until one
 learned about a port syntax the other had not — the reason `internal/nodedeps`,
 `internal/cargotool`, `internal/download` and `internal/pathmatch` each exist.
+
+A shard is a **conflict group**: the transitive closure of that predicate, so a
+pair sharing a host port is always in one shard and always serialised by the
+scheduler rather than split across two jobs. See
+[ADR 0026](0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md),
+which supersedes the `--concurrency` knob this section originally gave the
+planner, and states why keeping such a pair together is what makes a shard safe
+on a runner hosting more than one job at a time.
 
 ## Considered and rejected
 
