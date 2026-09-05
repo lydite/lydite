@@ -16,9 +16,10 @@ _Note_: per component and not repository-wide, because a change to a well-tested
 _Avoid_: "diff coverage" (used interchangeably by other tools like Codecov, but this repo standardizes on "patch coverage").
 
 **Baseline**:
-The per-**Component** line counts cached on the `lydite` branch for one **tree**, against which both **Aggregate coverage** and **Patch coverage** are gated — patch coverage has no baseline of its own.
+The per-**Component** line counts, and the **Producer** that measured them, cached on the `lydite` branch for one **tree**, against which both **Aggregate coverage** and **Patch coverage** are gated — patch coverage has no baseline of its own.
 Counts rather than percentages, because a percentage cannot be re-weighted: composing a language or global figure from components, or from a run that measured only some of them, needs each component's size and not only its ratio.
-Keyed by tree rather than by commit, because coverage is a property of content and because the tree is the one identifier a pull request shares with the commit it becomes. A run measures the merged result; a squash merge lands a commit carrying that same tree, so the number the pull request already measured is the baseline for the commit it produces, and no separate run on the default branch is needed to record it.
+Keyed by tree rather than by commit, because coverage is a property of content and because the tree is the one identifier a pull request shares with the commit it becomes. A run measures the merged result; a squash merge lands a commit carrying that same tree, so the number the pull request already measured is the baseline for the commit it produces.
+_Note_: measuring a baseline and recording one are separate acts, and separate commands. Measuring runs the repository's own suites; recording writes to a shared branch. A repository that will not give a pull request's job a token that can push therefore records after the merge instead, and pays a measurement of the base tree for every change until it does.
 _Note_: it is a **Cache**, so a miss costs time rather than information — the measurement is reproduced by checking the tree out and measuring it again. What must never happen is a miss that reads as a hit: an entry that is empty, partial, or recorded under a different quantity gates on nothing while every run reports success, which is the failure this repository has already shipped once.
 
 **Coverable line**:
@@ -28,6 +29,11 @@ A source line that a language's own coverage tool (`go tool cover`, `cargo llvm-
 The engine backing lydite's TypeScript check: Biome, and only Biome. `typescript.linter` in `.lydite/config.yml` accepts `biome` alone; the retired `eslint` value is rejected with an error rather than accepted and quietly run under Biome.
 _Note_: the TypeScript check gates on **correctness** as well as security, so it is not "security findings only" the way the other language checks are. The ESLint stack it replaced covered a different set of security rules — Node/backend heuristics with no Biome equivalent — so this is a change in what is gated, not only in what runs it. See [ADR 0008](docs/adr/0008-biome-as-the-only-typescript-linter.md).
 _Avoid_: "linting mode", "the TS linter setting", describing Biome as opt-in.
+
+**Producer**:
+What actually wrote a coverage report: the Go toolchain, `cargo-llvm-cov` together with the Rust toolchain whose LLVM emits the line records, or a JavaScript workspace's own test runner and coverage provider. Recorded in the **Baseline** beside the counts, because two coverage figures are comparable only if the same instrument produced them — a runner or provider bump changes what counts as a line, and the difference then reads as a regression by whoever bumped it.
+_Note_: it is deliberately not the same thing as a **Pin**. A pin is what lydite chose; a producer is what ran. They coincide for Rust, and for JavaScript they cannot: lydite will not install a test runner into the tree it is about to gate, so the producer there is the repository's own dependency, read back after the install. A producer lydite cannot identify is recorded as unknown and compares equal to unknown, which gates exactly as it did before producers existed.
+_Avoid_: "instrument version", "tool version" alone — a producer is often two versions, and naming half of it compares equal across a change to the other half.
 
 **Pin**:
 The exact version of a tool lydite installs and runs, recorded in a real package-manager manifest (`package.json`, `Cargo.toml`, `go.mod`, `requirements.txt`) so Dependabot can see and bump it — never only in a Go constant. The distinguishing property of a pin is that something must be able to *age it out*: a pin nothing can bump is indistinguishable from a scanner that has silently stopped being current.

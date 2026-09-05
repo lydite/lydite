@@ -228,6 +228,10 @@ the component's to declare.`,
 			return renderTestReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
+	// A subcommand beside a runnable command: cobra resolves subcommands
+	// before positional arguments, so `lydite test` still runs the suites and
+	// `lydite test record` lands what they measured.
+	cmd.AddCommand(newRecordCmd())
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
 	cmd.Flags().StringSliceVar(&components, "component", nil, "component to run; repeatable, and every declared component by default")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")

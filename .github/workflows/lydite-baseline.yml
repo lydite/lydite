@@ -7,19 +7,21 @@
 # the repository's own test suite, and those two must not be the same job on a
 # pull request: a branch can edit its own workflow and its own component
 # declaration, so a job that runs a branch's code with a writable token is
-# arbitrary write access for anyone who can open a pull request. `ci-test.yml`
-# therefore gates read-only and records nothing.
+# arbitrary write access for anyone who can open a pull request.
+# `lydite-pr.yml`'s test job therefore gates read-only and records nothing.
 #
 # Here the code has already merged. It has passed review, the gate and every
 # other stage, so running it with a writable token is the risk any post-merge
 # job carries rather than a new one.
 #
-# Uploading the pull request's measurement and committing it from a separate job
-# does not solve the same problem: the measuring job runs the branch's code
-# whatever token it holds, so the numbers it emits are the branch's to choose.
-# That trades trusting the branch's token for trusting the branch's data, and
-# verifying the data means measuring it again — which is this workflow. See
-# lydite/lydite#49.
+# `lydite test` writes nothing to the lydite branch at all, so measuring and
+# recording are two commands. They are one job here, sharing this job's token:
+# the split that matters is which workflow runs them, not which step. That does not by itself
+# make a pull request's measurement safe to record: the measuring job runs the
+# branch's code whatever token it holds, so the numbers it emits are the
+# branch's to choose, and `lydite test record` verifies no number. What makes
+# this workflow safe is where it runs, not which command it uses. See
+# lydite/lydite#49 and docs/adr/0025.
 #
 # Not a gt CI stage, deliberately. The orchestrator skips every stage for a tree
 # already validated on the pull request, which is exactly what a squash merge
@@ -44,9 +46,6 @@ jobs:
   record:
     name: record coverage baseline
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: source/cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,15 +58,43 @@ jobs:
           go-version-file: source/cli/go.mod
           cache: true
 
+      # The Go module is rooted at source/cli; the scan root is the repository
+      # root, which is where .lydite/ lives. Each step names the one it needs
+      # rather than sharing a job-level working-directory, because a `--dir`
+      # written relative to the wrong one is a scan root with no declaration —
+      # where `lydite test` reports "no components declared" and this job fails
+      # without ever reaching the recording it exists for.
       - name: build lydite
+        working-directory: source/cli
         run: go build -o /tmp/lydite ./cmd/lydite
 
       # On the default branch HEAD is its own merge-base, so nothing is
-      # compared: this measures the tree and records it. The next pull request's
-      # merge-base is this commit, so it reads the entry instead of measuring
-      # the tree again — which is the whole reason this job exists.
+      # compared: this measures the tree and leaves the candidate in
+      # .lydite-reports/. The next pull request's merge-base is this commit, so
+      # it reads the recorded entry instead of measuring the tree again —
+      # which is the whole reason this job exists.
       #
       # It is deliberately not `--affected`: a partial run records nothing, so a
       # narrowed run here would leave the entry it exists to write.
       - name: lydite test --gate-coverage
-        run: /tmp/lydite test --dir .. --gate-coverage
+        run: /tmp/lydite test --dir . --gate-coverage
+
+      # The only step in either workflow that writes the lydite branch. It
+      # runs nothing from the repository — no suite, no setup or teardown
+      # command, no compose service — and refuses a candidate naming a tree
+      # other than the one checked out.
+      #
+      # `contents: write` is job-scoped and actions/checkout persists the
+      # credential, so the measuring step above holds it too. Nothing here
+      # pretends otherwise: what makes this safe is that the code has already
+      # merged, not the step boundary.
+      #
+      # It runs even when the step above failed. A gate that says nothing
+      # about coverage — orphans, watch, schedule — would otherwise discard a
+      # complete candidate, and no later run records this tree, because the
+      # next push carries a different one. `record` refuses a candidate that
+      # is partial, names another tree, or was never written, so the worst an
+      # unconditional run does is say so.
+      - name: lydite test record
+        if: ${{ !cancelled() }}
+        run: /tmp/lydite test record --dir . --reports .lydite-reports

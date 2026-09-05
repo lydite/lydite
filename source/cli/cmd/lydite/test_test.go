@@ -201,6 +201,26 @@ func runTestCmdStreams(t *testing.T, root string, extra ...string) (string, stri
 	return out.String(), errOut.String(), err
 }
 
+// runRecordCmd lands what a `lydite test` run in root left in its report
+// directory, which is the step that writes to the lydite branch.
+//
+// Two commands, because `lydite test` writes nothing there: measuring runs the
+// repository's suites and recording holds a token that can push, and the
+// tests exercise the same split a workflow does.
+func runRecordCmd(t *testing.T, root string, extra ...string) (string, string, error) {
+	t.Helper()
+	cmd := newRootCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs(append([]string{
+		"test", "record", "--dir", root, "--no-color",
+		"--reports", filepath.Join(root, runner.ReportDir),
+	}, extra...))
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), errOut.String(), err
+}
+
 // fixtureRepo is a scan root holding one buildable Go module with a passing
 // test, plus the declaration handed in.
 func fixtureRepo(t *testing.T, declaration string) string {

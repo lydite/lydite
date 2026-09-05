@@ -66,7 +66,7 @@ func TestReadBaselineTreatsEmptyAsCacheMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadBaseline: %v", err)
 	}
-	if !hit || report["api"] != (coverage.LineCount{Covered: 117, Total: 200}) {
+	if !hit || report["api"] != entry(117, 200) {
 		t.Errorf("ReadBaseline on a real baseline = (%v, hit=%v), want ({api:{117 200}}, hit=true)", report, hit)
 	}
 }
@@ -137,7 +137,7 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	run(writer, "commit", "-m", "coverage baseline for concurrent")
 	run(writer, "push", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "stalerace", Baseline{"api": {Covered: 30, Total: 100}}); err != nil {
+	if err := WriteBaseline(ctx, clone, "stalerace", Baseline{"api": entry(30, 100)}); err != nil {
 		t.Fatalf("WriteBaseline over a stale tracking ref: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
 	run(clone, "remote", "add", "origin", origin)
 	run(clone, "fetch", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "rejected", Baseline{"api": {Covered: 30, Total: 100}}); err == nil {
+	if err := WriteBaseline(ctx, clone, "rejected", Baseline{"api": entry(30, 100)}); err == nil {
 		t.Error("WriteBaseline returned nil even though the push was rejected and the baseline never landed")
 	}
 }
@@ -278,7 +278,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 	}
 
 	// Only a commit-keyed entry, as written before this change.
-	if err := WriteBaseline(ctx, repo, head, Baseline{"api": {Covered: 11, Total: 100}}); err != nil {
+	if err := WriteBaseline(ctx, repo, head, Baseline{"api": entry(11, 100)}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err := ReadBaseline(ctx, repo, tree, head)
@@ -291,7 +291,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 
 	// Now a tree-keyed entry as well: it must win, because it is the one a
 	// pull request records and the one a later main commit shares.
-	if err := WriteBaseline(ctx, repo, tree, Baseline{"api": {Covered: 77, Total: 100}}); err != nil {
+	if err := WriteBaseline(ctx, repo, tree, Baseline{"api": entry(77, 100)}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err = ReadBaseline(ctx, repo, tree, head)
@@ -564,4 +564,11 @@ func TestAnUnreadableBaselineIsAMissRatherThanAnError(t *testing.T) {
 	if _, hit, err := ReadBaseline(ctx, clone, "good"); err != nil || !hit {
 		t.Errorf("ReadBaseline on a good entry = (hit=%v, %v), want a hit", hit, err)
 	}
+}
+
+// entry builds a baseline entry with no producer, which is what a test about
+// storage and retrieval is asking about — the producer is compared by the
+// gate, and nothing here is a gate.
+func entry(covered, total int) Entry {
+	return Entry{LineCount: coverage.LineCount{Covered: covered, Total: total}}
 }

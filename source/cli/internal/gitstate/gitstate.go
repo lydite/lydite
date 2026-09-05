@@ -55,11 +55,20 @@ const BranchName = "lydite"
 // every consumer takes one clean cache miss, and the gate recovers by
 // recording afresh.
 //
+// A gained field bumps it too, whenever an entry lacking that field would
+// still be read as a hit. An entry carrying no Producer matches only a
+// measurement lydite could not attribute, so under a directory whose entries
+// predate the field every component reports as new and the gate enforces
+// nothing — while ReadBaseline reports a hit, which is the failure mode the
+// empty-entry rule exists for arriving through the reader instead. A clean
+// miss measures the base tree and records a complete entry, which is slower
+// and correct.
+//
 // A directory rather than a marker inside the file: the entries stay a plain
 // component -> counts object, which is what makes them readable by hand on the
 // branch, and the superseded ones stay in place to be inspected rather than
 // overwritten.
-const stateDir = "v3"
+const stateDir = "v4"
 
 // StatePath is the path, inside BranchName, of the baseline for key (a tree
 // or commit SHA).
@@ -247,13 +256,44 @@ func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
 	return BaseSHA(ctx, dir, branch)
 }
 
-// Baseline is one tree's measurement: each component's line counts, keyed by
-// the name the component declaration gives it.
+// Entry is one component's measurement: its line counts, and what produced
+// them.
+//
+// The counts are embedded rather than held in a named field so that an entry
+// reads as the counts it mostly is: Covered, Total and Percent are promoted,
+// and the JSON is a flat object rather than a nested one.
+type Entry struct {
+	coverage.LineCount
+	// Producer names the instrument that wrote the report these counts came
+	// from — the Go toolchain, cargo-llvm-cov and the Rust toolchain, or a
+	// JavaScript workspace's own test runner and coverage provider.
+	//
+	// It is here because the gate's whole claim is "is this worse than it
+	// was", which means something only if both sides measured the same
+	// quantity. A runner or provider bump changes what a line is: vitest
+	// 3.2.7 to 4.1.11 took one workspace from 345 lines to 152 over an
+	// identical tree, 185 of the 193 dropped lines being covered ones, and
+	// the gate reported the fall as a regression by the author of the bump.
+	// Compared verbatim, so any difference reports the component new rather
+	// than regressed — see docs/adr/0025.
+	//
+	// Empty when lydite could not identify what measured a component, which
+	// is possible only for JavaScript: it is the one language whose measuring
+	// instrument lydite deliberately does not pin, since installing one into
+	// the tree it is about to gate would have lydite change what the
+	// repository resolves to. An empty producer matches only another empty
+	// one, so a component whose instrument lydite cannot name is still
+	// compared rather than permanently reported new.
+	Producer string `json:"producer,omitempty"`
+}
+
+// Baseline is one tree's measurement: each component's entry, keyed by the
+// name the component declaration gives it.
 //
 // The name and not the directory, because a repository may legitimately
 // declare two components over one directory tree and the name is the only one
 // of the two that is unique by construction.
-type Baseline map[string]coverage.LineCount
+type Baseline map[string]Entry
 
 // ReadBaseline returns the cached baseline for sha, and false if none exists
 // yet (a cache miss, not an error — the caller computes and writes one).

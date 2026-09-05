@@ -24,6 +24,12 @@ func lines(covered, total int) coverage.LineCount {
 	return coverage.LineCount{Covered: covered, Total: total}
 }
 
+// entry is a baseline entry with no producer, for a test whose subject is the
+// arithmetic rather than the instrument. A test about the producer names one.
+func entry(covered, total int) gitstate.Entry {
+	return gitstate.Entry{LineCount: lines(covered, total)}
+}
+
 // measured is a component that produced a measurement.
 func measured(name string, lang runner.Lang, covered, total int) measurement {
 	return measurement{Name: name, Dir: name, Lang: lang, Lines: lines(covered, total)}
@@ -121,7 +127,7 @@ func TestACarriedComponentIsCountedAndNamed(t *testing.T) {
 		measured("api", runner.Go, 50, 100),
 		{Name: "sdk", Dir: "sdk", Lang: runner.Go, Lines: lines(80, 100)},
 	}
-	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(80, 100)}
+	baseline := gitstate.Baseline{"api": entry(50, 100), "sdk": entry(80, 100)}
 	row := composedRow("coverage(subset)", current, map[string]bool{"sdk": true}, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v, want a pass", row)
@@ -142,7 +148,7 @@ func TestAComposedComparisonOnlyCoversWhatItMeasured(t *testing.T) {
 		measured("api", runner.Go, 50, 100),
 		unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest}, "not affected"),
 	}
-	baseline := gitstate.Baseline{"api": lines(50, 100), "sdk": lines(5, 1000)}
+	baseline := gitstate.Baseline{"api": entry(50, 100), "sdk": entry(5, 1000)}
 	row := composedRow("coverage(subset)", current, nil, baseline, onlyLang(runner.Go), 0.1)
 	if row.Status == ui.StatusFail {
 		t.Fatalf("row = %+v — the unrun component's baseline must not drag the comparison", row)
@@ -161,7 +167,7 @@ func TestAComposedFigureWithAnIncompleteBaselineIsNotCompared(t *testing.T) {
 		measured("api", runner.Go, 50, 100),
 		measured("sdk", runner.Go, 90, 100),
 	}
-	row := composedRow("coverage(subset)", current, nil, gitstate.Baseline{"api": lines(50, 100)}, onlyLang(runner.Go), 0.1)
+	row := composedRow("coverage(subset)", current, nil, gitstate.Baseline{"api": entry(50, 100)}, onlyLang(runner.Go), 0.1)
 	if row.Status != ui.StatusNew {
 		t.Errorf("row = %+v, want new — the baseline covers one of the two components", row)
 	}
@@ -171,7 +177,7 @@ func TestAComposedFigureWithAnIncompleteBaselineIsNotCompared(t *testing.T) {
 // fails. The comparison is at display precision, so a component shown as
 // holding steady is never failed for a difference the report cannot show.
 func TestAComponentIsGatedAgainstItsOwnBaseline(t *testing.T) {
-	base := gitstate.Baseline{"api": lines(80, 100)}
+	base := gitstate.Baseline{"api": entry(80, 100)}
 	for _, tc := range []struct {
 		name    string
 		covered int
@@ -200,7 +206,7 @@ func TestAComponentIsGatedAgainstItsOwnBaseline(t *testing.T) {
 // nothing about itself is one a reader takes for a measurement.
 func TestAnUnmeasuredComponentNamesWhyAndWhatIsCarried(t *testing.T) {
 	c := component.Component{Name: "tally", Dir: "rust", Runner: runner.CargoNextest}
-	base := gitstate.Baseline{"tally": lines(60, 100)}
+	base := gitstate.Baseline{"tally": entry(60, 100)}
 
 	skipped := unmeasuredComponent(c, "the component was not selected for this run")
 	skipped.Carryable = true
@@ -243,11 +249,11 @@ func TestOnlyAnUnselectedComponentCarriesForward(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := unmeasuredComponent(decl.Components[0], "why")
 			m.Carryable = tc.carryable
-			baseline := gitstate.Baseline{"web": lines(80, 100)}
+			baseline := gitstate.Baseline{"web": entry(80, 100)}
 			current := []measurement{m}
 			carried := map[string]bool{}
 			if tc.carryable {
-				current = []measurement{{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: baseline["web"]}}
+				current = []measurement{fromEntry(measurement{Name: "web", Dir: "web", Lang: runner.TypeScript}, baseline["web"])}
 				carried["web"] = true
 			}
 			row := composedRow("coverage(subset)", current, carried, baseline, onlyLang(runner.TypeScript), 0.1)
@@ -364,10 +370,10 @@ func TestPatchIsGatedAgainstTheComponentsOwnBaseline(t *testing.T) {
 // the tolerance would otherwise lower what the next one is measured against,
 // and coverage bleeds one tolerance per merge with every gate green.
 func TestAToleratedDipDoesNotLowerTheBaseline(t *testing.T) {
-	baseline := gitstate.Baseline{"api": lines(800, 1000), "web": lines(500, 1000)}
+	baseline := gitstate.Baseline{"api": entry(800, 1000), "web": entry(500, 1000)}
 	// api dips 0.1pp — inside the tolerance. web drops 10pp, which failed
 	// visibly on the change that introduced it, so it is recorded as measured.
-	record := gitstate.Baseline{"api": lines(799, 1000), "web": lines(400, 1000)}
+	record := gitstate.Baseline{"api": entry(799, 1000), "web": entry(400, 1000)}
 	got := withToleratedDipsRestored(record, baseline, 0.1)
 	if got["api"] != baseline["api"] {
 		t.Errorf("api = %+v, want the baseline's %+v restored", got["api"], baseline["api"])
@@ -543,9 +549,9 @@ func TestTheRemovedCoverageCommandNamesWhatReplacedIt(t *testing.T) {
 func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
 	ms := inDeclarationOrder(decl, nil, true)
-	baseline := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
-	// recordThisTree writes through git, so the assertion is on the shape it
-	// builds: every declared component present, and nothing else.
+	baseline := gitstate.Baseline{"api": entry(50, 100), "gone": entry(90, 100)}
+	// candidateThisTree writes no git state, so the assertion is on the shape
+	// it builds: every declared component present, and nothing else.
 	record := gitstate.Baseline{}
 	for _, m := range ms {
 		if b, ok := baseline[m.Name]; ok {
@@ -784,8 +790,8 @@ func TestAGateThatCouldNotRunFailsThroughARowAndKeepsTheReport(t *testing.T) {
 // ever records, and every later shard's freshly measured components would be
 // silently discarded.
 func TestRecordingMergesRatherThanSkipping(t *testing.T) {
-	existing := gitstate.Baseline{"api": lines(50, 100), "gone": lines(90, 100)}
-	fresh := gitstate.Baseline{"web": lines(70, 100)}
+	existing := gitstate.Baseline{"api": entry(50, 100), "gone": entry(90, 100)}
+	fresh := gitstate.Baseline{"web": entry(70, 100)}
 	declared := map[string]bool{"api": true, "web": true}
 
 	merged := gitstate.Baseline{}
@@ -797,7 +803,7 @@ func TestRecordingMergesRatherThanSkipping(t *testing.T) {
 	for name, l := range fresh {
 		merged[name] = l
 	}
-	if len(merged) != 2 || merged["api"] != lines(50, 100) || merged["web"] != lines(70, 100) {
+	if len(merged) != 2 || merged["api"] != entry(50, 100) || merged["web"] != entry(70, 100) {
 		t.Errorf("merged = %v, want the earlier shard's api beside this one's web", merged)
 	}
 	// An entry for a component the declaration no longer holds does not
@@ -856,10 +862,10 @@ func TestAFailedGateLeavesNoDuplicateRows(t *testing.T) {
 // how much the component counts towards a figure describing a tree it no
 // longer matches.
 func TestARestoredDipKeepsThisTreesSize(t *testing.T) {
-	baseline := gitstate.Baseline{"api": lines(800, 1000)}
+	baseline := gitstate.Baseline{"api": entry(800, 1000)}
 	// The component doubled in size and dipped 0.05pp, which is inside the
 	// tolerance.
-	record := gitstate.Baseline{"api": lines(1599, 2000)}
+	record := gitstate.Baseline{"api": entry(1599, 2000)}
 	got := withToleratedDipsRestored(record, baseline, 0.1)["api"]
 	if got.Total != 2000 {
 		t.Errorf("total = %d, want this tree's 2000 rather than the baseline's 1000", got.Total)
@@ -894,7 +900,7 @@ func TestAPartialRunDoesNotRecordAPartialBaseline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// The record holds only what was measured, which is what the
 			// predicate reads.
-			record := gitstate.Baseline{"api": lines(9, 10)}
+			record := gitstate.Baseline{"api": entry(9, 10)}
 			gap, blocked := recordingBlockedBy([]measurement{measured("api", runner.Go, 9, 10), tc.gap}, record)
 			if blocked == tc.wantRecord {
 				t.Errorf("recordingBlockedBy = (%v, %v), want blocked = %v", gap.Name, blocked, !tc.wantRecord)
@@ -912,7 +918,7 @@ func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
 	ms := []measurement{measured("api", runner.Go, 9, 10), skipped}
 
 	// It carried, so the record holds an entry for it.
-	carried := gitstate.Baseline{"api": lines(9, 10), "web": lines(5, 10)}
+	carried := gitstate.Baseline{"api": entry(9, 10), "web": entry(5, 10)}
 	if gap, blocked := recordingBlockedBy(ms, carried); blocked {
 		t.Errorf("recording blocked by %q, but selection determined it could not have been broken", gap.Name)
 	}
@@ -920,7 +926,7 @@ func TestADeselectedComponentDoesNotBlockRecording(t *testing.T) {
 	// It was entitled to carry and had nothing to carry, which is a different
 	// thing. Recording anyway writes the same gap forward on every merge, and
 	// it can then never heal: each run reproduces it from the last.
-	if _, blocked := recordingBlockedBy(ms, gitstate.Baseline{"api": lines(9, 10)}); !blocked {
+	if _, blocked := recordingBlockedBy(ms, gitstate.Baseline{"api": entry(9, 10)}); !blocked {
 		t.Error("a deselected component with no baseline entry did not block recording")
 	}
 }
@@ -1040,7 +1046,7 @@ func TestAPartiallyMeasuredBaseTreeIsNotCached(t *testing.T) {
 			out := gitstate.Baseline{}
 			for _, m := range tc.ms {
 				if m.Measured() {
-					out[m.Name] = m.Lines
+					out[m.Name] = m.entry()
 				}
 			}
 			gap, blocked := recordingBlockedBy(tc.ms, out)
@@ -1059,18 +1065,18 @@ func TestAPartiallyMeasuredBaseTreeIsNotCached(t *testing.T) {
 // gate against — the per-merge ratchet the anchoring exists to prevent,
 // reintroduced one path over.
 func TestARerunOfOneTreeDoesNotLowerItsAnchoredEntry(t *testing.T) {
-	anchored := gitstate.Baseline{"api": lines(800, 1000)}
+	anchored := gitstate.Baseline{"api": entry(800, 1000)}
 	// The same tree measured again, 0.05pp lower: noise, which is what the
 	// tolerance is for.
-	remeasured := gitstate.Baseline{"api": lines(799, 1000)}
+	remeasured := gitstate.Baseline{"api": entry(799, 1000)}
 	got := withToleratedDipsRestored(remeasured, anchored, 0.1)
 	if pct := got["api"].Percent(); pct < 79.95 || pct > 80.05 {
 		t.Errorf("api = %v%%, want the anchored 80%% kept", pct)
 	}
 	// A drop beyond the tolerance is recorded: it failed visibly on the change
 	// that introduced it, so accepting it is deliberate.
-	dropped := withToleratedDipsRestored(gitstate.Baseline{"api": lines(700, 1000)}, anchored, 0.1)
-	if dropped["api"] != lines(700, 1000) {
+	dropped := withToleratedDipsRestored(gitstate.Baseline{"api": entry(700, 1000)}, anchored, 0.1)
+	if dropped["api"] != entry(700, 1000) {
 		t.Errorf("api = %v, want the measured drop recorded", dropped["api"])
 	}
 }
@@ -1294,20 +1300,44 @@ func TestTheGateAgainstARealRepository(t *testing.T) {
 	if !strings.Contains(patch.Value, "new lines") {
 		t.Errorf("patch(svc) = %q, want the changed-line counts", patch.Value)
 	}
-	// This tree's measurement was recorded for whatever comes next.
-	if got := rows["record"]; !strings.Contains(got.Value, "recorded for") {
+	// The run established a candidate, and wrote nothing itself: the whole of
+	// what separates the job that runs the repository's code from the job
+	// that holds a token which can push.
+	if got := rows["record"]; !strings.Contains(got.Value, "`lydite test record` lands it") {
+		t.Errorf("record = %q, want a candidate ready to be recorded", got.Value)
+	}
+	if strings.Contains(errOut, "git push") {
+		t.Errorf("the gate pushed to the %s branch: %s", gitstate.BranchName, errOut)
+	}
+
+	// The second command lands it, running none of the repository.
+	recOut, recErr, recRunErr := runRecordCmd(t, root, "--json")
+	if recRunErr != nil {
+		t.Fatalf("lydite test record: %v\nstdout: %s\nstderr: %s", recRunErr, recOut, recErr)
+	}
+	if got := jsonRows(t, recOut)["record"]; !strings.Contains(got.Value, "recorded for") {
 		t.Errorf("record = %q, want this tree's measurement recorded", got.Value)
 	}
 
-	// The second run hits the cache. Without this the assertion above passes on
-	// an implementation that measures the base tree on every single run, which
-	// is the cost the caching exists to pay once.
+	// A change based on a recorded tree reads the entry instead of measuring
+	// it. Without this the assertions above pass on an implementation that
+	// measures the base tree on every run, which is the cost the recording
+	// exists to pay once — and the reason the recorder runs on the default
+	// branch at all.
+	run("switch", "--quiet", "main")
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("the gate failed on the default branch: %v\n%s", err, errOut)
+	}
+	if out, errOut, err := runRecordCmd(t, root); err != nil {
+		t.Fatalf("recording the default branch: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	run("switch", "--quiet", "change")
 	out2, errOut2, err2 := runTestCmdStreams(t, root, "--gate-coverage", "--json")
 	if err2 == nil {
 		t.Fatalf("the gate passed on the second run\nstdout: %s\nstderr: %s", out2, errOut2)
 	}
 	if got, ok := jsonRows(t, out2)["baseline"]; ok && strings.Contains(got.Value, "measuring it now") {
-		t.Errorf("baseline = %q on the second run, want a cache hit", got.Value)
+		t.Errorf("baseline = %q against a recorded base tree, want a cache hit", got.Value)
 	}
 }
 
@@ -1389,9 +1419,13 @@ func TestTheSelfBasePathAnchorsAgainstThePreviousCommit(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
 		}
 	}
-	// The first run on the default branch records this tree.
+	// The first run on the default branch measures this tree, and the record
+	// command lands it.
 	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
 		t.Fatalf("first run: %v\n%s", err, errOut)
+	}
+	if out, errOut, err := runRecordCmd(t, root); err != nil {
+		t.Fatalf("recording the first run: %v\nstdout: %s\nstderr: %s", err, out, errOut)
 	}
 	first := previousOrCurrentBaseline(t, root, "HEAD")
 	if len(first) == 0 {

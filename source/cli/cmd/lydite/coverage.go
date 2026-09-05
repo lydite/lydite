@@ -44,6 +44,15 @@ type measurement struct {
 	Lines coverage.LineCount
 	// Hits is the per-line data the patch gate reads, nil when Why is set.
 	Hits coverage.LineHits
+	// Producer names what wrote the report Lines was read from, and is what
+	// stops a comparison being made across a change to it. Empty for a
+	// component lydite could not identify an instrument for, and for one that
+	// produced no measurement at all.
+	//
+	// It travels on the measurement rather than being recomputed when a
+	// baseline is written, because a carried-forward entry's producer is the
+	// one that measured it — possibly several trees ago — and not this run's.
+	Producer string
 	// Why says why there is no measurement, and is empty exactly when there
 	// is one. It is carried rather than inferred, because "this component was
 	// not affected" and "this component's report could not be read" are the
@@ -68,6 +77,19 @@ type measurement struct {
 
 // Measured reports whether this component produced a coverage measurement.
 func (m measurement) Measured() bool { return m.Why == "" && m.Lines.Measured() }
+
+// entry is what this measurement records as a baseline: the counts, and what
+// produced them. One conversion, so no caller can write counts and forget the
+// producer beside them.
+func (m measurement) entry() gitstate.Entry {
+	return gitstate.Entry{LineCount: m.Lines, Producer: m.Producer}
+}
+
+// fromEntry is a component whose measurement is a baseline entry carried
+// forward rather than taken this run, keeping the producer that measured it.
+func fromEntry(m measurement, e gitstate.Entry) measurement {
+	return measurement{Name: m.Name, Dir: m.Dir, Lang: m.Lang, Lines: e.LineCount, Producer: e.Producer}
+}
 
 // unmeasuredComponent is a component with no measurement, and the reason.
 func unmeasuredComponent(c component.Component, why string) measurement {
@@ -115,7 +137,26 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	if !rep.Lines.Measured() {
 		return unmeasuredComponent(c, "the coverage report lists no coverable line")
 	}
-	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c), Lines: rep.Lines, Hits: rep.Hits}
+	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
+		Lines: rep.Lines, Hits: rep.Hits, Producer: producerOf(root, c, tc)}
+}
+
+// producerOf names what wrote this component's report.
+//
+// Asked here rather than at the call site so that a measurement cannot be
+// built without one: a component recorded with no producer compares equal
+// across every change to its instrument, which is the comparison the field
+// exists to prevent, and it would fail silently.
+//
+// The component's own directory, because a JavaScript workspace's runner and
+// coverage provider are its dependencies and are read out of the tree the
+// install produced — the same directory the suite ran in.
+func producerOf(root string, c component.Component, tc *toolchain.Env) string {
+	r, ok := runner.Lookup(c.Runner)
+	if !ok {
+		return ""
+	}
+	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), tc.Version())
 }
 
 // coverageOptions is what the command decided about coverage before anything
@@ -293,18 +334,18 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	if headErr == nil && baseErr == nil && headTree == baseTree {
 		ungatedRows(rep, ms)
 		floorRows(rep, ms, cfg.Coverage.Floor)
-		// The row is written from what recording actually did, not from what
-		// it was about to attempt. Recording declines for three reasons — a
-		// run that measured nothing, a component with no entry to record, a
-		// push that never landed — and all three report to stderr, which the
-		// pull-request comment does not render. A row claiming a recording
-		// that did not happen is the same untruth as a gate that did not run
-		// reading as one that passed.
+		// The row is written from what the run actually established, not from
+		// what it was about to attempt. A candidate is declined for three
+		// reasons — a run that measured nothing, a component with no entry to
+		// record, a tree that would not resolve — and all three report to
+		// stderr, which the pull-request comment does not render. A row
+		// claiming a recording that did not happen is the same untruth as a
+		// gate that did not run reading as one that passed.
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
 			Value:  "not read — HEAD is its own merge-base, so there is no earlier measurement to compare against",
 			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
-		rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
-			Value: recordThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), cfg.Coverage.Tolerance)})
+		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), cfg.Coverage.Tolerance)
+		rep.Add(candidateRow(cmd, dir, doc, value))
 		return nil
 	}
 
@@ -328,7 +369,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 			continue
 		}
 		if lines, ok := baseline[m.Name]; ok && lines.Measured() {
-			current[i] = measurement{Name: m.Name, Dir: m.Dir, Lang: m.Lang, Lines: lines}
+			current[i] = fromEntry(m, lines)
 			carried[m.Name] = true
 		}
 	}
@@ -353,9 +394,38 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	// the baseline read this change is gated against, and the entry this
 	// change leaves for the next one. Sharing a label would put two rows under
 	// it, which is what a consumer keying rows by label cannot survive.
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: "record",
-		Value: recordThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)})
+	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)
+	rep.Add(candidateRow(cmd, dir, doc, value))
 	return nil
+}
+
+// reasonOnly is a candidate that establishes nothing, and why.
+//
+// It still names the tree it was taken on. `record` binds a candidate to the
+// checkout it may be landed from and refuses one that names no tree at all, so
+// a reason-carrying document without it is unreadable — and the command that
+// would have shown the reason fails with "no candidate found" instead, which
+// says the run produced nothing rather than what it produced nothing about.
+//
+// A tree that will not resolve leaves it empty, which is the one case where
+// there is genuinely nothing to bind to.
+func reasonOnly(ctx context.Context, dir, prefix, reason string) (candidateDoc, string) {
+	tree, _ := gitstate.TreeSHA(ctx, dir, "HEAD")
+	return candidateDoc{Tree: tree, Reason: reason}, prefix + " — " + reason
+}
+
+// candidateRow saves what this run would record and says so.
+//
+// The row is `record` rather than `candidate`, because what a reader wants to
+// know is whether the next change has a baseline to gate against, and the
+// answer travels through this file whether or not the write lands here.
+func candidateRow(cmd *cobra.Command, root string, doc candidateDoc, value string) ui.Row {
+	if err := writeCandidate(root, doc); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write the candidate baseline: %v\n", err)
+		return ui.Row{Status: ui.StatusContext, Label: "record",
+			Value: "not recorded — the candidate baseline could not be written, so there is nothing for `lydite test record` to land"}
+	}
+	return ui.Row{Status: ui.StatusContext, Label: "record", Value: value}
 }
 
 // previousTreeBaseline is the entry recorded for the commit immediately before
@@ -413,23 +483,23 @@ func baselineFor(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, b
 	if err != nil {
 		return nil, err
 	}
-	// Never cache a baseline that measured nothing. Cached, it is
-	// indistinguishable from a real entry: every later change gets a cache
-	// hit, reports every component as new, and the gate enforces nothing —
-	// silently, permanently, with no way to self-heal. wardnet's state branch
-	// accumulated nine of them. Measuring again next time is the strictly
-	// better failure.
+	// A base tree nothing could be measured at gates against nothing, and the
+	// run says so rather than comparing against an empty baseline — which
+	// renders every component new and enforces nothing.
 	if len(baseline) == 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"warning: measured no coverage at all at %s, so it was not cached as a baseline. The gate cannot compare against a baseline of nothing; fix what failed above and the next run measures it again.\n", base)
-		return baseline, nil
+			"warning: measured no coverage at all at %s. The gate cannot compare against a baseline of nothing; fix what failed above and the next run measures it again.\n", base)
 	}
-	if err := gitstate.WriteBaseline(ctx, dir, firstNonEmpty(tree, base), baseline); err != nil {
-		// Best-effort: the baseline is already in hand and the gate below is
-		// what matters. A write that never lands costs the next run the same
-		// measurement, not a wrong verdict.
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to cache the coverage baseline for %s: %v\n", base, err)
-	}
+	// The measurement is not cached, because `lydite test` writes nothing to
+	// the lydite branch. It runs the repository's own suites and any
+	// setup/teardown shell the declaration carries, and a job doing that must
+	// not also hold a token that can push — which is the whole of what makes
+	// the recording a separate command.
+	//
+	// What fills this cache is `lydite test record` on a tree that has
+	// already merged, so the cost here is bounded by how often a base tree is
+	// one nothing recorded: the first change after adopting the gate, and any
+	// change based on a commit whose own run never landed its entry.
 	return baseline, nil
 }
 
@@ -546,7 +616,7 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	out := gitstate.Baseline{}
 	for _, m := range ms {
 		if m.Measured() {
-			out[m.Name] = m.Lines
+			out[m.Name] = m.entry()
 			continue
 		}
 		// Named on stderr rather than dropped in silence, and the tail with
@@ -587,12 +657,61 @@ func componentRow(m measurement, baseline gitstate.Baseline, tolerance float64) 
 		return ui.Row{Status: ui.StatusNew, Label: label,
 			Value: lineValue(m.Lines) + ", no baseline yet"}
 	}
+	// New, and never regressed. The two sides were measured by different
+	// instruments, so their difference is a change of definition rather than
+	// a change in coverage — reporting it as a regression bills it to whoever
+	// bumped the instrument, whose only ways out are to widen the tolerance
+	// for every future change or to merge red.
+	if base.Producer != m.Producer {
+		return ui.Row{Status: ui.StatusNew, Label: label,
+			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
+				lineValue(m.Lines), producerName(m.Producer), producerName(base.Producer))}
+	}
 	if regressedBeyond(pct, base.Percent(), tolerance) {
 		return ui.Row{Status: ui.StatusFail, Label: label,
 			Value: fmt.Sprintf("%s, baseline %.1f%%, regressed %.1f%%", lineValue(m.Lines), base.Percent(), base.Percent()-pct)}
 	}
 	return ui.Row{Status: ui.StatusPass, Label: label,
 		Value: fmt.Sprintf("%s, baseline %.1f%%", lineValue(m.Lines), base.Percent())}
+}
+
+// comparableBase is the baseline entry a measurement may be gated against:
+// present, measured, and produced by the same instrument this run used.
+//
+// Anything else answers with the zero entry, which is not Measured — so every
+// caller's existing "no baseline" path renders it as new without a second rule
+// about what an incomparable baseline means.
+func comparableBase(m measurement, baseline gitstate.Baseline) (gitstate.Entry, bool) {
+	b, ok := baseline[m.Name]
+	if !ok || !b.Measured() || b.Producer != m.Producer {
+		return gitstate.Entry{}, false
+	}
+	return b, true
+}
+
+// producerName renders a producer for a reader, including the one lydite could
+// not identify — which is a real state for a JavaScript component and must not
+// render as an empty gap in the middle of a sentence.
+func producerName(p string) string {
+	if p == "" {
+		return "an unidentified instrument"
+	}
+	return p
+}
+
+// notCompared says why a composed figure has no comparison, naming the
+// components rather than only reporting that something is absent: without them
+// a reader cannot tell a one-off — a component this very change declared —
+// from a baseline that has been incomplete for months.
+func notCompared(missing, reinstrumented []string) string {
+	var parts []string
+	if len(missing) > 0 {
+		parts = append(parts, "no baseline yet for "+strings.Join(missing, ", "))
+	}
+	if len(reinstrumented) > 0 {
+		parts = append(parts, "a different instrument measured the baseline for "+strings.Join(reinstrumented, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // composedRow gates a language, or the repository, against the same subset of
@@ -611,17 +730,25 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 	}
 	var baseLines coverage.LineCount
 	covered := 0
-	var missing []string
+	var missing, reinstrumented []string
 	for _, m := range current {
 		if !in(m) || !m.Lines.Measured() {
 			continue
 		}
-		if b, ok := baseline[m.Name]; ok && b.Measured() {
-			baseLines = baseLines.Add(b)
+		b, ok := baseline[m.Name]
+		switch {
+		case ok && b.Measured() && b.Producer == m.Producer:
+			baseLines = baseLines.Add(b.LineCount)
 			covered++
-			continue
+		case ok && b.Measured():
+			// A baseline exists and is not comparable, which is a different
+			// thing from having none and wants different words: one is a
+			// component nobody has measured yet, the other a component whose
+			// instrument moved under it.
+			reinstrumented = append(reinstrumented, m.Name)
+		default:
+			missing = append(missing, m.Name)
 		}
-		missing = append(missing, m.Name)
 	}
 	value := composedValue(lines, measured, carriedN, total)
 	// Compared only when the baseline covers every component this figure is
@@ -637,7 +764,7 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 	// broken for months.
 	if covered != measured+carriedN {
 		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: fmt.Sprintf("%s, no baseline yet for %s", value, strings.Join(missing, ", "))}
+			Value: value + ", " + notCompared(missing, reinstrumented)}
 	}
 	pct, basePct := lines.Percent(), baseLines.Percent()
 	if regressedBeyond(pct, basePct, tolerance) {
@@ -713,8 +840,13 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 			// report has no entry for. There is no coverable line to gate.
 			continue
 		}
-		byComponent[m.Name] = patchRow(label, hit, total, baseline[m.Name], cfg.Coverage.Patch.Tolerance)
-		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: baseline[m.Name]})
+		// The same comparability rule the aggregate applies. Patch gates
+		// against the component's aggregate baseline percentage, so a
+		// baseline taken by another instrument is as incomparable here as it
+		// is there, and an unmeasured base already renders as new.
+		base, _ := comparableBase(m, baseline)
+		byComponent[m.Name] = patchRow(label, hit, total, base.LineCount, cfg.Coverage.Patch.Tolerance)
+		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: base.LineCount})
 	}
 	return byComponent, parts, nil
 }
@@ -789,8 +921,6 @@ func composedPatchRow(label string, parts []patchPart, tolerance float64) ui.Row
 	return ui.Row{Status: ui.StatusPass, Label: label,
 		Value: fmt.Sprintf("%s, baseline %.1f%%", counts, basePct)}
 }
-
-
 
 // patchRow renders one component's patch verdict. The gate is that component's
 // own aggregate baseline: patch coverage has no baseline of its own, and its
@@ -926,8 +1056,8 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, gateable, floor)})
 }
 
-// recordThisTree writes what this run measured as the baseline for the tree it
-// measured.
+// candidateThisTree is what this run would record as the baseline for the tree
+// it measured, and the words the row shows.
 //
 // On a pull request HEAD is the merged result, and a squash merge lands a
 // commit carrying exactly that tree — so this is already the baseline for the
@@ -936,20 +1066,24 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 // branch, an obligation a repository running CI only on pull requests never
 // meets.
 //
-// Best-effort throughout: the gate has already reached its verdict, and a
-// write that never lands costs the next run a measurement rather than a wrong
-// answer.
+// It writes nothing to the lydite branch, and neither does anything else
+// `lydite test` reaches. Measuring runs each component's suite and any
+// setup/teardown shell the declaration carries, so on a pull request it runs
+// the pull request's own code; a token that can push has no business in that
+// job. `lydite test record` lands this document, executing none of it.
+//
 // It returns what it did, in the words a row shows, so no caller can announce
 // a recording that did not happen.
-func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, tolerance float64) string {
+func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, tolerance float64) (candidateDoc, string) {
 	declared := make(map[string]bool, len(decl.Components))
 	for _, c := range decl.Components {
 		declared[c.Name] = true
 	}
+	carried := map[string]bool{}
 	record := gitstate.Baseline{}
 	for _, m := range ms {
 		if m.Measured() {
-			record[m.Name] = m.Lines
+			record[m.Name] = m.entry()
 			continue
 		}
 		// A component this run did not select keeps the entry the base tree
@@ -967,10 +1101,11 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		// leaving the baseline a tail of components nobody can measure.
 		if lines, ok := baseline[m.Name]; ok && m.Carryable && lines.Measured() && declared[m.Name] {
 			record[m.Name] = lines
+			carried[m.Name] = true
 		}
 	}
 	if len(record) == 0 {
-		return "nothing to record — no component produced a measurement"
+		return reasonOnly(ctx, dir, "nothing to record", "no component produced a measurement")
 	}
 	// A run that could not measure a component it was supposed to has not
 	// established this tree's baseline, and recording a partial one is worse
@@ -991,55 +1126,17 @@ func recordThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl co
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
 			gap.Name, gap.Why)
-		return fmt.Sprintf("not recorded — %s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name)
+		return reasonOnly(ctx, dir, "not recorded", fmt.Sprintf(
+			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name))
 	}
 	record = withToleratedDipsRestored(record, baseline, tolerance)
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
-		return "not recorded — this tree could not be resolved"
+		return candidateDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
 	}
-	// Merged onto whatever this tree already holds, never skipped because it
-	// holds something: a re-run that measures more than the last one must not
-	// be refused for finding an entry there.
-	//
-	// It does not make a sharded run record. A shard narrows with
-	// `--component`, which leaves every other component with no entry and no
-	// licence to carry one, so recordingBlockedBy above returns first and the
-	// shard records nothing at all. That is deliberate for now — a shard has
-	// measured part of a tree and cannot honestly claim the tree — and
-	// `lydite test merge` is what will fold a sharded run into one document
-	// and one recording.
-	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, tree); hit {
-		// Anchored against what this tree already holds as well as against the
-		// base baseline. The same tree is the same content, so a difference
-		// between two measurements of it is the measurement noise the
-		// tolerance exists for — and without this a run on the default branch
-		// re-measures a tree a pull request already recorded and replaces the
-		// anchored high-water entry with a raw dipped one, handing the next
-		// change a lowered number to gate against. That is the per-merge
-		// ratchet withToleratedDipsRestored exists to prevent, reintroduced
-		// one path over.
-		record = withToleratedDipsRestored(record, existing, tolerance)
-		merged := gitstate.Baseline{}
-		for name, lines := range existing {
-			if declared[name] {
-				merged[name] = lines
-			}
-		}
-		for name, lines := range record {
-			merged[name] = lines
-		}
-		if len(merged) == len(existing) && sameCounts(merged, existing) {
-			return fmt.Sprintf("%s already holds this measurement", shortSHA(tree))
-		}
-		record = merged
-	}
-	if err := gitstate.WriteBaseline(ctx, dir, tree, record); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to record this tree's coverage for %s: %v\n", tree, err)
-		return "not recorded — the write to the " + gitstate.BranchName + " branch did not land"
-	}
-	return "recorded for " + shortSHA(tree)
+	return candidateFrom(tree, record, carried),
+		fmt.Sprintf("%d component(s) ready for %s — `lydite test record` lands it", len(record), shortSHA(tree))
 }
 
 // sameCounts reports whether two baselines hold the same entries, so a run
@@ -1098,11 +1195,16 @@ func withToleratedDipsRestored(record, baseline gitstate.Baseline, tolerance flo
 	for name, lines := range record {
 		out[name] = lines
 		b, ok := baseline[name]
-		if !ok || !b.Measured() || !lines.Measured() {
+		// The same instrument on both sides, or no anchoring. Across a change
+		// of instrument the two percentages measure different quantities, so
+		// anchoring to the old one records a number the new instrument never
+		// produced — for a component the gate itself has just refused to
+		// compare. The measured counts are recorded verbatim instead.
+		if !ok || !b.Measured() || !lines.Measured() || b.Producer != lines.Producer {
 			continue
 		}
 		if lines.Percent() < b.Percent() && !regressedBeyond(lines.Percent(), b.Percent(), tolerance) {
-			out[name] = atPercentOf(b.Percent(), lines.Total)
+			out[name] = gitstate.Entry{LineCount: atPercentOf(b.Percent(), lines.Total), Producer: lines.Producer}
 		}
 	}
 	return out
@@ -1178,9 +1280,6 @@ func everything(measurement) bool { return true }
 // `orphans`, `watch` or `schedule` either — and it is the reason a consumer
 // keys on the status rather than parsing the name.
 func repoLabel(metric string) string { return metric + "(repo)" }
-
-
-
 
 // lineValue renders a measurement the way every row shows it: the percentage,
 // and the counts it came from. The counts are there because they are what the
