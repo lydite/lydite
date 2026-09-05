@@ -156,8 +156,18 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		rep.Add(unmeasuredRow(repoLabel("coverage"),
 			"the shards wrote no "+measurementsName+", so there are no counts to compose — each shard writes one when --gate-coverage reaches a baseline"))
 	}
-	if row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); ok {
+	switch row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); {
+	case ok:
 		rep.Add(row)
+	case cfg.Coverage.Floor > 0 && !folded.measured:
+		// A floor is configured and the shards wrote no counts to hold
+		// anything to. A shard emits no summary — the count is over the whole
+		// declaration — so without this the merged report is byte-identical to
+		// one where the floor is off, which is a gate that did not run reading
+		// as one that did.
+		rep.Add(unmeasuredRow("floor", fmt.Sprintf(
+			"the shards wrote no %s, so the %.1f%% floor was applied to no component",
+			measurementsName, cfg.Coverage.Floor)))
 	}
 	if folded.measured {
 		rep.Add(recordRow(folded.doc))
@@ -386,10 +396,12 @@ type composition struct {
 	// run with --no-coverage — in which case there is no figure to compose and
 	// a row saying 0.0% would be a measurement of nothing.
 	measured bool
-	// gated says at least one entry names the baseline it was compared with.
-	// Without one the figure is composed and shown, never gated: a run where
+	// gated says the shards compared what they measured against a baseline.
+	// Without that the figure is composed and shown, never gated: a run where
 	// HEAD is its own merge-base measures every component and holds none of
-	// them to anything.
+	// them to anything. It is the shards' own statement rather than an
+	// inference from an entry carrying a baseline, because a first adoption
+	// gates every component against nothing and is still a gated run.
 	gated bool
 }
 
@@ -431,13 +443,12 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 		out.floorMs = append(out.floorMs, m)
 		if e.Base != nil {
 			out.baseline[c.Name] = *e.Base
-			out.gated = true
 		}
 		if p, ok := e.patchPartOf(c.Name); ok {
 			out.parts = append(out.parts, p)
 		}
 	}
-	out.doc, out.measured = folded, true
+	out.doc, out.measured, out.gated = folded, true, folded.Gated
 	return out
 }
 

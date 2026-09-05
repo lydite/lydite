@@ -46,6 +46,13 @@ type measurementsDoc struct {
 	// measured nothing at all, which is not the same as an empty object and
 	// is why Reason is beside it.
 	Components map[string]componentMeasurement `json:"components,omitempty"`
+	// Gated says this run compared what it measured against a baseline. It is
+	// stated rather than inferred from an entry carrying one: a first
+	// adoption gates every component against nothing and would otherwise be
+	// indistinguishable from a run on the default branch, which compares
+	// nothing on purpose. The fold reads it to decide whether its
+	// repository-wide figures are a comparison or a measurement.
+	Gated bool `json:"gated,omitempty"`
 	// Reason says why there is nothing to record, and is empty exactly when
 	// there is something. A document that simply omitted its components would
 	// be indistinguishable from one that measured a repository with none.
@@ -156,12 +163,19 @@ func foldMeasurements(docs []measurementsDoc) (measurementsDoc, error) {
 		return measurementsDoc{}, fmt.Errorf("no measurements were found in any of the named report directories")
 	}
 	out := measurementsDoc{Tree: docs[0].Tree, Components: map[string]componentMeasurement{}}
+	// Gated if any shard was. Every shard of one run passes the same flags, so
+	// a mix means one of them could not reach a baseline at all — and a figure
+	// composed over the rest is still a comparison for the components that
+	// have one, which composedRow already reports per component.
 	var reasons []string
 	for _, doc := range docs {
 		if doc.Tree != out.Tree {
 			return measurementsDoc{}, fmt.Errorf(
 				"the measurements describe different trees (%s and %s), so they are not shards of one run",
 				shortSHA(out.Tree), shortSHA(doc.Tree))
+		}
+		if doc.Gated {
+			out.Gated = true
 		}
 		if doc.Reason != "" {
 			reasons = append(reasons, doc.Reason)
@@ -196,8 +210,8 @@ func (d measurementsDoc) baseline() gitstate.Baseline {
 // measurementsFrom builds the document a run hands on: what it would record,
 // what it actually measured, which entries it carried forward rather than
 // measured, and what each was gated against.
-func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, baseline gitstate.Baseline, parts []patchPart) measurementsDoc {
-	doc := measurementsDoc{Tree: tree, Components: make(map[string]componentMeasurement, len(record))}
+func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, baseline gitstate.Baseline, gated bool, parts []patchPart) measurementsDoc {
+	doc := measurementsDoc{Tree: tree, Gated: gated, Components: make(map[string]componentMeasurement, len(record))}
 	patch := make(map[string]patchCount, len(parts))
 	for _, p := range parts {
 		patch[p.Name] = patchCount{Hit: p.Hit, Total: p.Total}

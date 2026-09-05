@@ -373,7 +373,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
 		// No patch parts: HEAD is its own merge-base, so the diff this
 		// figure would be composed over is empty.
-		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), nil, nil, cfg.Coverage.Tolerance)
+		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), nil, false, nil, cfg.Coverage.Tolerance)
 		rep.Add(candidateRow(cmd, dir, doc, value))
 		return nil
 	}
@@ -428,7 +428,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	// the baseline read this change is gated against, and the entry this
 	// change leaves for the next one. Sharing a label would put two rows under
 	// it, which is what a consumer keying rows by label cannot survive.
-	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, baseline, parts, cfg.Coverage.Tolerance)
+	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, baseline, true, parts, cfg.Coverage.Tolerance)
 	rep.Add(candidateRow(cmd, dir, doc, value))
 	return nil
 }
@@ -1152,7 +1152,10 @@ func floorSummaryRow(ms []measurement, floor float64) (ui.Row, bool) {
 // which gates nothing; stored as a comparison it would have the fold publish a
 // verdict against a tree that is not any merge-base, over a run whose every
 // row says nothing was gated.
-func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, anchor, gatedAgainst gitstate.Baseline, parts []patchPart, tolerance float64) (measurementsDoc, string) {
+// gated says this run compared against a baseline at all, which is not the
+// same as any component having found an entry: a first adoption compares every
+// component against nothing and must still fold as a gated run.
+func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, anchor, gatedAgainst gitstate.Baseline, gated bool, parts []patchPart, tolerance float64) (measurementsDoc, string) {
 	declared := make(map[string]bool, len(decl.Components))
 	for _, c := range decl.Components {
 		declared[c.Name] = true
@@ -1224,7 +1227,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	// may then refuse, which is the untruth this whole file is arranged to
 	// avoid. The two numbers differ exactly when the fold has something left
 	// to decide.
-	return measurementsFrom(tree, record, measured, carried, gatedAgainst, parts),
+	return measurementsFrom(tree, record, measured, carried, gatedAgainst, gated, parts),
 		fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
 			len(record), recordable(decl), shortSHA(tree))
 }

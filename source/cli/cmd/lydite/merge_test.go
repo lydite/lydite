@@ -86,7 +86,7 @@ func shardOf(t *testing.T, name string, covered, total int) string {
 			{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
 			{Status: ui.StatusPass, Label: "coverage(" + name + ")", Value: "measured"},
 		},
-		&measurementsDoc{Tree: "tree", Components: map[string]componentMeasurement{
+		&measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{
 			name: {
 				Entry: gitstate.Entry{LineCount: coverage.LineCount{Covered: covered, Total: total}, Producer: "go"},
 				Base:  &gitstate.Entry{LineCount: coverage.LineCount{Covered: covered, Total: total}, Producer: "go"},
@@ -104,6 +104,9 @@ func TestMergeComposesTheRepositoryFigureOnce(t *testing.T) {
 		t.Fatalf("merge: %v\n%s", err, out)
 	}
 	got := jsonRowByLabel(t, out, repoLabel("coverage"))
+	if got.Status != "pass" || !strings.Contains(got.Value, "baseline") {
+		t.Errorf("coverage(repo) = %+v, want a gated row: the shards compared against a baseline", got)
+	}
 	if !strings.HasPrefix(got.Value, "66.7% (4/6 lines), 2 of 2 component(s)") {
 		t.Errorf("coverage(repo) = %q, want the sum of both shards' counts", got.Value)
 	}
@@ -292,5 +295,25 @@ func TestMergeDoesNotGateWhatTheShardsDidNot(t *testing.T) {
 	}
 	if strings.Contains(got.Value, "baseline") {
 		t.Errorf("coverage(repo) = %q, want no comparison", got.Value)
+	}
+}
+
+// A configured floor with nothing to hold anything to must not read as a
+// repository that cleared it. A shard emits no summary — the count is over the
+// whole declaration — so without a row here the merged report is
+// byte-identical to one where the floor is off.
+func TestMergeSaysAFloorItCouldNotApply(t *testing.T) {
+	root := mergeRepo(t)
+	write(t, root, ".lydite/config.yml", "coverage:\n  floor: 80\n")
+	plain := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}}, nil)
+	bare := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(b)", Value: "passed"}}, nil)
+
+	out, err := runMergeCmd(t, root, plain, bare)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "floor")
+	if got.Status != "unmeasured" {
+		t.Errorf("floor = %+v, want unmeasured: nothing was held to it", got)
 	}
 }
