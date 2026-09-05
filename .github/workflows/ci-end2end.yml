@@ -88,43 +88,6 @@ jobs:
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
 
-      # The measure/record split, end to end, against a real repository.
-      #
-      # `lydite-baseline.yml` is the only writer of the coverage baseline, it
-      # runs on pushes to the default branch alone, and it failed at "no
-      # components declared" for the whole life of the source/ layout without
-      # anyone noticing — a baseline that is never written costs a slower run
-      # and never a red one. Nothing about that was visible from a pull
-      # request until this step existed.
-      #
-      # The origin is repointed at a local bare repository first, so the
-      # recording is exercised for real and pushes nowhere. Pushing HEAD to it
-      # as `main` also makes HEAD its own merge-base, which is the shape the
-      # baseline workflow runs in.
-      #
-      # `lydite test` is expected to fail here: the proving ground's orphan
-      # gate fires on `scripts/seed.ts` on purpose. That is the point — a gate
-      # saying nothing about coverage must not discard a complete candidate,
-      # which is why the recording runs regardless of the status above.
-      - name: lydite test record (proving ground)
-        run: |
-          set -euo pipefail
-          git init --bare --quiet --initial-branch=main "$RUNNER_TEMP/baseline-origin.git"
-          git -C proving-ground remote set-url origin "$RUNNER_TEMP/baseline-origin.git"
-          git -C proving-ground push --quiet origin HEAD:refs/heads/main
-          status=0
-          /tmp/lydite test --dir proving-ground --gate-coverage --json > gated.json || status=$?
-          echo "lydite test --gate-coverage exited $status"
-          # Both statuses are captured rather than allowed to abort the step,
-          # so a failed recording reaches the assertion below and is explained
-          # there instead of ending the job with an empty document.
-          recorded=0
-          /tmp/lydite test record --dir proving-ground \
-            --reports proving-ground/.lydite-reports --json > recorded.json || recorded=$?
-          echo "lydite test record exited $recorded"
-          cat recorded.json
-          python3 .github/assert-proving-ground.py --record gated.json recorded.json
-
       # The only place component-driven scanning of Rust executes at all.
       # lydite's own repository declares no Rust component — its only
       # Cargo.toml files are pin manifests, which the declaration excludes —
@@ -214,6 +177,210 @@ jobs:
         with:
           name: proving-ground-component-logs
           path: proving-ground/.lydite-reports/
+          if-no-files-found: ignore
+
+  # The coverage gate, end to end, against a real repository: a baseline miss
+  # measured in a worktree, a recording, a cache hit, a sharded run and the
+  # fold. This is lydite/lydite#48.
+  #
+  # It replaces the `lydite test record` step that used to sit in the job above:
+  # steps 4 and 5 here are a strict superset of it, and paying for a gated run
+  # twice is a full extra pass over four components. What that step guarded —
+  # that `lydite-baseline.yml`, the only writer of the baseline, actually
+  # writes one — is guarded here and more thoroughly, because that workflow
+  # runs only on pushes to the default branch and its failure mode is a slow
+  # job rather than a red one.
+  #
+  # Its own runner and its own local bare origin, so the recording is exercised
+  # for real and pushes nowhere.
+  proving-ground-coverage:
+    name: proving ground — coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: lydite/proving-ground
+          path: proving-ground
+          # Every gate here resolves a merge-base, which a shallow checkout
+          # cannot reach.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/cli/go.mod
+          cache: true
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-tools-${{ runner.os }}-${{ hashFiles('source/cli/internal/**/Cargo.toml', 'source/cli/internal/**/go.mod', 'source/cli/internal/**/requirements.txt') }}
+          restore-keys: lydite-tools-${{ runner.os }}-
+
+      - name: build lydite
+        working-directory: source/cli
+        run: go build -o /tmp/lydite ./cmd/lydite
+
+      # 1. The planner, which runs no suite and needs no git at all. `api` and
+      # `tally` publish host port 5432 under services deliberately named `db`
+      # and `postgres`, so they have to land in one shard: apart, they are safe
+      # only on a runner topology that gives every matrix job its own machine.
+      - name: lydite test plan (proving ground)
+        run: |
+          set -euo pipefail
+          /tmp/lydite test plan --dir proving-ground --out matrix.json
+          cat matrix.json
+          python3 .github/assert-proving-ground.py --plan matrix.json
+
+      # 2. A local bare origin, the base commit B as `main`, and a probe branch
+      # P adding an untested exported function under go/api/. Nothing leaves
+      # this runner.
+      #
+      # The package name is read from a file already there rather than written
+      # down here: nothing in this repository pins what lydite/proving-ground
+      # calls that package, and a hardcoded one turns a rename over there into
+      # a failure reported against lydite.
+      - name: base and probe
+        run: |
+          set -euo pipefail
+          git init --bare --quiet --initial-branch=main "$RUNNER_TEMP/coverage-origin.git"
+          git -C proving-ground config user.email ci@lydite.invalid
+          git -C proving-ground config user.name "lydite ci"
+          git -C proving-ground remote set-url origin "$RUNNER_TEMP/coverage-origin.git"
+          git -C proving-ground push --quiet origin HEAD:refs/heads/main
+          git -C proving-ground rev-parse HEAD > "$RUNNER_TEMP/base-commit"
+          git -C proving-ground switch --quiet -c coverage-probe
+          pkg=$(awk '/^package /{print $2; exit}' proving-ground/go/api/api.go)
+          if [ -z "$pkg" ]; then
+            echo "could not read the package name from proving-ground/go/api/api.go" >&2
+            exit 1
+          fi
+          printf 'package %s\n\n// CoverageProbe is exported, untested, and here so the gate has\n// something to fail on.\nfunc CoverageProbe(n int) int {\n\tif n > 0 {\n\t\treturn n\n\t}\n\treturn -n\n}\n' "$pkg" \
+            > proving-ground/go/api/coverage_probe.go
+          # The probe file alone, never `add -A`: a stray artefact swept into
+          # the commit would widen selection, and the assertions would then
+          # fail on the harness rather than on lydite.
+          git -C proving-ground add go/api/coverage_probe.go
+          git -C proving-ground commit --quiet -m "coverage probe"
+
+      # 3. Nothing has been recorded yet, so this is a cache miss: the base
+      # tree is checked out into a throwaway worktree and measured through the
+      # same path this run just took. The assertion is the negative as much as
+      # the positive — a gate that compared nothing is green too, so what is
+      # checked is that the component the probe changed FAILED and the one it
+      # could not have touched carried its baseline forward.
+      - name: baseline miss (proving ground)
+        run: |
+          status=0
+          /tmp/lydite test --dir proving-ground --affected --gate-coverage --json > miss.json || status=$?
+          echo "lydite test --gate-coverage exited $status"
+          cat miss.json
+          python3 .github/assert-proving-ground.py --miss miss.json
+
+      # 4. The measure/record split, on the base tree. `lydite test` writes
+      # nothing to the lydite branch; `lydite test record` lands it, executing
+      # no suite, no setup or teardown command and no compose service.
+      #
+      # The recording runs even when the measuring step failed: the proving
+      # ground fails its orphan gate on purpose, and a gate saying nothing
+      # about coverage must not discard a complete set of measurements.
+      - name: record the base tree (proving ground)
+        run: |
+          set -uo pipefail
+          git -C proving-ground switch --quiet --detach "$(cat "$RUNNER_TEMP/base-commit")"
+          status=0
+          /tmp/lydite test --dir proving-ground --gate-coverage --json > gated.json || status=$?
+          echo "lydite test --gate-coverage exited $status"
+          recorded=0
+          /tmp/lydite test record --dir proving-ground \
+            --reports proving-ground/.lydite-reports --json > recorded.json || recorded=$?
+          echo "lydite test record exited $recorded"
+          cat recorded.json
+          python3 .github/assert-proving-ground.py --record gated.json recorded.json || exit 1
+          # The branch itself, not only the row that claims to have written it.
+          # A partial entry reads as a cache hit on every later change, so what
+          # is asserted is one entry per declared component and nothing else.
+          tree=$(git -C proving-ground rev-parse 'HEAD^{tree}')
+          git -C proving-ground fetch --quiet origin lydite
+          git -C proving-ground show "origin/lydite:v4/${tree}.json" > entries.json
+          cat entries.json
+          python3 .github/assert-proving-ground.py --entries entries.json
+
+      # 5. The shards, run sequentially in this one job rather than on three
+      # runners: what is being asserted is what each shard reports, and a matrix
+      # would buy nothing but three more checkouts. Each takes the slice the
+      # planner gave it, and each must now HIT the baseline recorded above —
+      # a run that measured the base tree again is green and slow, which is
+      # exactly how this class of failure goes unnoticed.
+      - name: the shards (proving ground)
+        run: |
+          set -uo pipefail
+          git -C proving-ground switch --quiet coverage-probe
+          shards=$(python3 -c 'import json,sys; print(" ".join(e["name"]+":"+e["components"] for e in json.load(open("matrix.json"))))')
+          reports=()
+          for shard in $shards; do
+            name=${shard%%:*}
+            components=${shard#*:}
+            status=0
+            /tmp/lydite test --dir proving-ground --affected --component "$components" \
+              --gate-coverage --json > "shard-$name.json" || status=$?
+            echo "shard $name exited $status"
+            cat "shard-$name.json"
+            rm -rf "reports-$name"
+            cp -R proving-ground/.lydite-reports "reports-$name"
+            reports+=("reports-$name")
+          done
+          printf '%s\n' "${reports[@]}" > "$RUNNER_TEMP/shard-dirs"
+          python3 .github/assert-proving-ground.py --hit shard-*.json
+
+      # 6. The fold. Every declared component takes exactly one row, the
+      # whole-tree gates collapse to one each, and the two figures no shard can
+      # produce — coverage(repo) and patch(repo) — are computed here and
+      # nowhere else.
+      - name: lydite test merge (proving ground)
+        run: |
+          set -uo pipefail
+          args=()
+          while read -r dir; do args+=(--reports "$dir"); done < "$RUNNER_TEMP/shard-dirs"
+          status=0
+          /tmp/lydite test merge --dir proving-ground "${args[@]}" --json > merged.json || status=$?
+          echo "lydite test merge exited $status"
+          cat merged.json
+          python3 .github/assert-proving-ground.py --merged merged.json
+
+      # 7. The same fold with one shard's directory omitted. This is how a dead
+      # runner is exercised without one dying: an `unmeasured` row does not
+      # vote, so a fold that reported one would publish `"verdict": "pass"`
+      # over a repository half of which was never tested.
+      - name: a shard that never reported (proving ground)
+        run: |
+          set -uo pipefail
+          args=()
+          while read -r dir; do
+            case "$dir" in
+              *web) continue ;;
+            esac
+            args+=(--reports "$dir")
+          done < "$RUNNER_TEMP/shard-dirs"
+          status=0
+          /tmp/lydite test merge --dir proving-ground "${args[@]}" --json > incomplete.json || status=$?
+          echo "lydite test merge exited $status"
+          if [ "$status" -eq 0 ]; then
+            echo "a fold missing a shard exited 0" >&2
+            exit 1
+          fi
+          cat incomplete.json
+          python3 .github/assert-proving-ground.py --incomplete incomplete.json web
+
+      - name: collect component logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-coverage-logs
+          path: |
+            proving-ground/.lydite-reports/
+            reports-*/
           if-no-files-found: ignore
 
   # The single job the branch-protection ruleset actually requires. Individual

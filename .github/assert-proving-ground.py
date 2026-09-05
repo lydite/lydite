@@ -59,6 +59,13 @@ EXPECTED_SERIALISED = ("tally", "api")
 # for. So the components that must NOT have run are named too, and their
 # absence from the suites is what is checked.
 SELECTION_PROBE = "go/api/selection_probe.go"
+# The coverage probe adds an untested exported function under this component,
+# which is what the gate has to fail on.
+PROBE_COMPONENT = "api"
+# The conflict groups the planner has to produce. `api` and `tally` publish the
+# contended port and must run in one process; nothing else contends with
+# anything, so each is a shard of one.
+EXPECTED_SHARDS = [("api", "tally"), ("sdk",), ("web",)]
 EXPECTED_AFFECTED = ["api", "sdk", "web"]
 EXPECTED_UNAFFECTED = ["tally"]
 # sdk and web are reachable only through the edge, so the reason each carries
@@ -406,6 +413,288 @@ def main_scan(path: str) -> int:
     return 0
 
 
+def main_plan(path: str) -> int:
+    """Assert the planner grouped the components the conflict relation groups.
+
+    A shard is a conflict group, so `api` and `tally` — which publish host port
+    5432 under services deliberately named `db` and `postgres` — must land in
+    one job, where the scheduler serialises them. Apart, they are safe only on a
+    runner topology that gives every matrix job its own machine, and self-hosted
+    runners routinely place several on one host.
+
+    The sets are asserted rather than the order, because the order is the
+    declaration's and that is another repository's file to change. What is
+    pinned is the grouping and the name, which is what a shard's artifact is
+    called: a name that did not follow its members would orphan the directory
+    the fold reads.
+    """
+    with open(path, encoding="utf-8") as fh:
+        matrix = json.load(fh)
+    failures = []
+
+    got = {frozenset(entry["components"].split(",")) for entry in matrix}
+    want = {frozenset(group) for group in EXPECTED_SHARDS}
+    if got != want:
+        failures.append(
+            f"shards are {sorted(sorted(g) for g in got)}, want "
+            f"{sorted(sorted(g) for g in want)} — {' and '.join(EXPECTED_SERIALISED)} publish port "
+            f"{CONTENDED_PORT} in common and must run in one process"
+        )
+    for entry in matrix:
+        want_name = "-".join(entry["components"].split(","))
+        if entry["name"] != want_name:
+            failures.append(
+                f"shard {entry['name']!r} holds {entry['components']!r}; the name is the members "
+                "joined by '-', and it is what the shard's artifact is called"
+            )
+
+    for failure in failures:
+        print(f"proving ground plan: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"proving ground plan: {len(matrix)} shard(s), grouping {EXPECTED_SERIALISED} together")
+    return 0
+
+
+def main_miss(path: str) -> int:
+    """Assert the gate missed the cache, measured the base tree, and gated.
+
+    Every claim here is a negative as well as a positive. "The run was green"
+    is satisfied by a gate that compared nothing, and so is "every row is
+    present": what separates a gate that ran from one that did not is that the
+    component whose coverage fell FAILED, and that the components the change
+    could not have touched did not.
+    """
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    rows = {r["label"]: r for r in doc["rows"]}
+    failures = []
+
+    baseline = rows.get("baseline")
+    if baseline is None or "measuring it now" not in baseline.get("value", ""):
+        failures.append(
+            f"baseline row is {baseline!r}; want a cache miss that measures the base tree — "
+            "without it this run compared against something already recorded and proves nothing "
+            "about the measurement path"
+        )
+
+    fallen = rows.get(f"coverage({PROBE_COMPONENT})")
+    if fallen is None:
+        failures.append(f"no coverage({PROBE_COMPONENT}) row, but the probe changed it")
+    elif fallen.get("status") != "fail":
+        failures.append(
+            f"coverage({PROBE_COMPONENT}) is {fallen.get('status')!r}: {fallen.get('value', '')} — the probe adds "
+            "an untested function, so a gate that ran has to fail it"
+        )
+    patch = rows.get(f"patch({PROBE_COMPONENT})")
+    if patch is None:
+        failures.append(
+            f"no patch({PROBE_COMPONENT}) row: the probe's new lines are untested, and a silent skip reads "
+            "as 'patch coverage passed'"
+        )
+    elif patch.get("status") != "fail":
+        failures.append(f"patch({PROBE_COMPONENT}) is {patch.get('status')!r}: {patch.get('value', '')}")
+
+    # The component the change could not have touched. Its baseline entry
+    # carries forward, and the composed figure says how many of its parts came
+    # that way — a figure that did not would be indistinguishable from one
+    # where every component ran.
+    for name in EXPECTED_UNAFFECTED:
+        row = rows.get(f"coverage({name})")
+        if row is None:
+            failures.append(f"no coverage({name}) row: an unrun component must still be accounted for")
+        elif row.get("status") != "unmeasured" or "carrying the baseline" not in row.get("value", ""):
+            failures.append(
+                f"coverage({name}) is {row!r}, want an unmeasured row carrying the baseline forward"
+            )
+    repo = rows.get(f"coverage({REPO_UNIT})")
+    if repo is None:
+        failures.append(f"no coverage({REPO_UNIT}) row")
+    elif "carried forward" not in repo.get("value", ""):
+        failures.append(
+            f"coverage({REPO_UNIT}) is {repo.get('value')!r}; a composed figure has to say how much of "
+            "itself this run measured, or it reads as one that measured everything"
+        )
+
+    for failure in failures:
+        print(f"proving ground gate: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        f"proving ground gate: the baseline missed and was measured; coverage({PROBE_COMPONENT}) and "
+        f"patch({PROBE_COMPONENT}) failed on the probe, and {EXPECTED_UNAFFECTED} carried forward"
+    )
+    return 0
+
+
+def main_entries(path: str) -> int:
+    """Assert the recorded baseline holds one entry per declared component.
+
+    A partial baseline is worse than none: any non-empty entry reads as a cache
+    hit, so a missing component is `new` on every later change and the composed
+    figures stop comparing at all — silently, and with a green verdict.
+    """
+    with open(path, encoding="utf-8") as fh:
+        entries = json.load(fh)
+    failures = []
+
+    got = sorted(entries)
+    if got != sorted(EXPECTED_COVERAGE_UNITS):
+        failures.append(
+            f"the recorded baseline holds {got}, want {sorted(EXPECTED_COVERAGE_UNITS)} — a component "
+            "with no entry is new on every later change, and nothing gates it"
+        )
+    for name, entry in sorted(entries.items()):
+        if not entry.get("total"):
+            failures.append(f"{name} was recorded with no coverable line: {entry!r}")
+        if not entry.get("producer"):
+            failures.append(
+                f"{name} was recorded with no producer, so it compares equal across every change "
+                "to its instrument"
+            )
+
+    for failure in failures:
+        print(f"proving ground entries: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"proving ground entries: the baseline holds {got}, each with counts and a producer")
+    return 0
+
+
+def main_hit(*paths: str) -> int:
+    """Assert every shard hit the baseline cache.
+
+    The base tree is measured in a throwaway worktree on a miss, and that is the
+    single most expensive thing lydite does. Once recorded it must be read, not
+    remeasured — and a run that remeasured it is green and slow, which is
+    exactly how this went unnoticed for the life of the source/ layout.
+    """
+    failures = []
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        for row in doc["rows"]:
+            if row["label"] == "baseline" and "measuring it now" in row.get("value", ""):
+                failures.append(
+                    f"{path} measured the base tree again: {row['value']!r} — it was recorded by the "
+                    "step above, so a miss here means the recording did not land or is not being read"
+                )
+
+    for failure in failures:
+        print(f"proving ground hit: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"proving ground hit: {len(paths)} shard(s) read the recorded baseline rather than measuring it")
+    return 0
+
+
+def main_merged(path: str) -> int:
+    """Assert the fold is one complete run rather than N partial ones.
+
+    Every declared component takes exactly one row, the whole-tree gates
+    collapse to one each, and the two figures no shard can produce are present.
+    A fold that dropped a component would publish a passing verdict over a
+    repository it half tested, which is why the count is asserted rather than
+    the verdict.
+    """
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    labels = [r["label"] for r in doc["rows"]]
+    rows = {r["label"]: r for r in doc["rows"]}
+    failures = []
+
+    for name in EXPECTED_COVERAGE_UNITS:
+        for metric in ("test", "coverage"):
+            label = f"{metric}({name})"
+            if labels.count(label) != 1:
+                failures.append(
+                    f"{label} appears {labels.count(label)} time(s): every declared component takes "
+                    "exactly one row across the shards"
+                )
+    for label in ("orphans", "watch", "select", "schedule"):
+        if labels.count(label) != 1:
+            failures.append(
+                f"{label} appears {labels.count(label)} time(s): the shards all answer it the same "
+                "way, so the fold collapses them to one"
+            )
+    for label in (f"coverage({REPO_UNIT})", f"patch({REPO_UNIT})"):
+        if label not in rows:
+            failures.append(
+                f"no {label} row: it sums every component's counts, so no shard can produce it and "
+                "the fold is the only thing that can"
+            )
+    shards = rows.get("shards")
+    if shards is None:
+        failures.append("no `shards` row: the fold did not say whether it was complete")
+    elif shards.get("status") != "pass":
+        failures.append(f"shards is {shards.get('status')!r}: {shards.get('value', '')}")
+
+    # The port lock has to have been contended somewhere in the matrix. Every
+    # assertion about it is satisfied by a run that never had two components
+    # going at once, because the lock is never taken.
+    schedule = rows.get("schedule")
+    if schedule is not None:
+        concurrent = concurrency(schedule.get("value", ""))
+        if concurrent is None or concurrent < 2:
+            failures.append(
+                f"the folded schedule reports {schedule.get('value')!r}: no shard ever ran two "
+                f"components at once, so the lock {EXPECTED_SERIALISED} contend for was never taken"
+            )
+        a, b = EXPECTED_SERIALISED
+        want = re.compile(
+            rf"(?:{re.escape(a)} and {re.escape(b)}|{re.escape(b)} and {re.escape(a)})"
+            rf" serialised on port {CONTENDED_PORT}$"
+        )
+        if not any(want.match(line) for line in schedule.get("detail", [])):
+            failures.append(
+                f"the folded schedule detail {schedule.get('detail')!r} does not record {a} and {b} "
+                f"being serialised on port {CONTENDED_PORT}"
+            )
+
+    for failure in failures:
+        print(f"proving ground merge: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        f"proving ground merge: {len(EXPECTED_COVERAGE_UNITS)} component(s), one row each; the "
+        f"whole-tree gates collapsed and coverage({REPO_UNIT}) and patch({REPO_UNIT}) were composed once"
+    )
+    return 0
+
+
+def main_incomplete(path: str, absent: str) -> int:
+    """Assert the fold fails, by name, over a shard that never reported.
+
+    This is how a dead runner is exercised without one dying. An `unmeasured`
+    row would not vote, so a fold that reported one would publish
+    `"verdict": "pass"` over a repository half of which was never tested.
+    """
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    rows = {r["label"]: r for r in doc["rows"]}
+    failures = []
+
+    if doc.get("verdict") != "fail":
+        failures.append(
+            f"verdict is {doc.get('verdict')!r}: a fold missing a shard must fail, because an "
+            "unmeasured row does not vote and would publish a pass"
+        )
+    shards = rows.get("shards")
+    if shards is None:
+        failures.append("no `shards` row on an incomplete fold")
+    elif absent not in "\n".join(shards.get("detail", [])):
+        failures.append(
+            f"shards detail {shards.get('detail')!r} does not name {absent}, which no shard reported"
+        )
+
+    for failure in failures:
+        print(f"proving ground incomplete: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"proving ground incomplete: the fold failed and named {absent} as the component nobody reported")
+    return 0
+
+
 def main_record(gated: str, recorded: str) -> int:
     """Assert the measure/record split actually lands a baseline.
 
@@ -475,6 +764,18 @@ def main_record(gated: str, recorded: str) -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "--plan":
+        sys.exit(main_plan(sys.argv[2]))
+    if sys.argv[1] == "--miss":
+        sys.exit(main_miss(sys.argv[2]))
+    if sys.argv[1] == "--entries":
+        sys.exit(main_entries(sys.argv[2]))
+    if sys.argv[1] == "--hit":
+        sys.exit(main_hit(*sys.argv[2:]))
+    if sys.argv[1] == "--merged":
+        sys.exit(main_merged(sys.argv[2]))
+    if sys.argv[1] == "--incomplete":
+        sys.exit(main_incomplete(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--record":
         sys.exit(main_record(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--affected":

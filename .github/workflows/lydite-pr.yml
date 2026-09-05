@@ -6,10 +6,17 @@
 # release is the point — a dogfood against the last release tests the last
 # release.
 #
-#   referral ─┐   no needs, so the status lands in seconds
-#   scan ─────┤   each job uploads its .lydite-reports/
-#   test ─────┘
-#             └─► publish   needs all, if: always()
+#   referral ──────────────┐   no needs, so the status lands in seconds
+#   scan ──────────────────┤   each job uploads its .lydite-reports/
+#   plan ─► test (matrix) ─► merge
+#                          └─► publish   needs all, if: always()
+#
+# `plan` groups the declared components into shards — the sets that must run in
+# one process, because they publish a host port in common or are rooted at
+# overlapping directories — and `merge` folds the shards' documents back into
+# one `test` section. A shard reports exactly the components it was given, so
+# every declared component takes exactly one row across the matrix and the fold
+# fails over a shard whose job died.
 #
 # One run, so every report is an artifact of it. That is the whole reason the
 # four are here together: the comment is assembled from all of them, and a
@@ -145,11 +152,40 @@ jobs:
         with:
           name: scan
 
-  test:
-    name: test
+  # Pure: it reads .lydite/components.yml and each component's compose file,
+  # and nothing else. No git, no network, no process — which is why it needs no
+  # history, and why it cannot narrow by --affected. The shards narrow instead.
+  plan:
+    name: plan
     needs: setup
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/lydite-binary
+
+      - name: lydite test plan
+        id: plan
+        run: |
+          set -euo pipefail
+          lydite test plan --dir . --out "${RUNNER_TEMP}/matrix.json"
+          printf 'shards=%s\n' "$(cat "${RUNNER_TEMP}/matrix.json")" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: test (${{ matrix.shard.name }})
+    needs: [setup, plan]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      # Every failing shard, in one run. A cancelled sibling leaves its
+      # components with no row at all, which `lydite test merge` reports as a
+      # shard that died rather than as the failure that actually happened.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     # Read-only, deliberately. This job runs the repository's own suites and
     # any `setup`/`teardown` shell the declaration carries, which on a pull
     # request is the pull request's own code. Nothing it runs holds a token
@@ -202,8 +238,75 @@ jobs:
       # Never on a push, where it would buy nothing: on the default branch
       # the merge-base is HEAD itself, so `--affected` selects every component
       # anyway and the flag only obscures the intent.
+      # --component says what this job is responsible for, and --affected which
+      # of those need running. The two compose: this shard reports one row per
+      # component in its slice whether or not selection ran it, and nothing at
+      # all about any other — which is what lets the fold below decide
+      # completeness from the declaration and the documents alone.
       - name: lydite test
-        run: lydite test --dir . --affected --gate-coverage
+        env:
+          COMPONENTS: ${{ matrix.shard.components }}
+        run: lydite test --dir . --affected --component "$COMPONENTS" --gate-coverage
+
+      # Under its own prefix, so `publish` never reads a shard's document as a
+      # `test` section of its own: there would be one per shard, each answering
+      # about part of the repository under one heading.
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: ${{ matrix.shard.name }}
+          prefix: lydite-shard
+
+  # The only thing that computes coverage(repo) and patch(repo): both sum every
+  # component's counts, so a shard holding two of four would answer about its
+  # own two under a label about the repository.
+  #
+  # It touches no network and runs nothing from the repository. The shards'
+  # measurements carry each component's counts, its patch part and the baseline
+  # entry it was gated against, so the composition needs neither the lydite
+  # branch nor a merge-base.
+  merge:
+    name: merge
+    needs: [setup, plan, test]
+    # Whatever the shards did. A shard that failed is exactly the run whose
+    # fold a reader wants, and a shard that died is what the fold exists to
+    # report rather than to inherit as silence.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/lydite-binary
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-shard-*
+          path: shards
+
+      # A directory per shard. `merge` fails when a declared component has no
+      # row in any of them, so a matrix job that never uploaded is reported
+      # rather than folded into silence — an unmeasured row does not vote, and
+      # would publish a passing verdict over a repository half of which was
+      # never tested.
+      #
+      # Its exit code is captured rather than allowed to end the step, so the
+      # upload below still runs: the fold's own document is what the comment
+      # renders, and it is most worth having when the fold failed.
+      - name: lydite test merge
+        run: |
+          shopt -s nullglob
+          args=()
+          for dir in shards/*/; do
+            args+=(--reports "${dir%/}")
+          done
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no shard uploaded a report directory; there is nothing to fold" >&2
+            exit 1
+          fi
+          status=0
+          lydite test merge --dir . "${args[@]}" || status=$?
+          echo "lydite test merge exited $status"
 
       - uses: ./.github/actions/lydite-reports
         if: always()
@@ -212,7 +315,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [setup, referral, scan, test]
+    needs: [setup, referral, scan, merge]
     # Runs whatever the others did. A comment that only appears when everything
     # passed is a comment nobody needs: the run that failed is the one whose
     # reader wants to know why.
