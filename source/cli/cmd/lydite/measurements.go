@@ -57,6 +57,18 @@ type measurementsDoc struct {
 // compose a figure over every component without touching the network.
 type componentMeasurement struct {
 	gitstate.Entry
+	// Unanchored is the counts this run took, before a within-tolerance dip
+	// was anchored back to the baseline's percentage. Absent when the two
+	// agree, which is every entry but a tolerated dip.
+	//
+	// The two are different quantities and the fold needs both: what
+	// `lydite test record` lands is the anchored entry, because recording a
+	// dipped number verbatim turns the tolerance into an unbounded downward
+	// ratchet — and what `coverage(repo)` sums is what was measured, because
+	// an unsharded run composes from exactly that. Composing from the anchored
+	// entry instead gives a sharded run headroom it did not earn, and prints a
+	// total a reader cannot reach by adding up the rows above it.
+	Unanchored *coverage.LineCount `json:"unanchored,omitempty"`
 	// Carried marks an entry inherited from the base tree rather than
 	// measured here, because affected selection did not run this component.
 	//
@@ -181,10 +193,10 @@ func (d measurementsDoc) baseline() gitstate.Baseline {
 	return out
 }
 
-// measurementsFrom builds the document a run hands on, from what it would have
-// recorded, which of those entries it measured, and what each was gated
-// against.
-func measurementsFrom(tree string, record gitstate.Baseline, carried map[string]bool, baseline gitstate.Baseline, parts []patchPart) measurementsDoc {
+// measurementsFrom builds the document a run hands on: what it would record,
+// what it actually measured, which entries it carried forward rather than
+// measured, and what each was gated against.
+func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, baseline gitstate.Baseline, parts []patchPart) measurementsDoc {
 	doc := measurementsDoc{Tree: tree, Components: make(map[string]componentMeasurement, len(record))}
 	patch := make(map[string]patchCount, len(parts))
 	for _, p := range parts {
@@ -192,6 +204,10 @@ func measurementsFrom(tree string, record gitstate.Baseline, carried map[string]
 	}
 	for name, e := range record {
 		m := componentMeasurement{Entry: e, Carried: carried[name]}
+		if raw, ok := measured[name]; ok && raw.LineCount != e.LineCount {
+			lines := raw.LineCount
+			m.Unanchored = &lines
+		}
 		if p, ok := patch[name]; ok {
 			m.Patch = &p
 		}
@@ -208,9 +224,17 @@ func measurementsFrom(tree string, record gitstate.Baseline, carried map[string]
 	return doc
 }
 
-// asMeasurement is one folded entry as the value the composition reads.
+// asMeasurement is one folded entry as the value the composition reads: the
+// counts the run measured, never the anchored ones it would record.
+//
+// A carried entry has no measurement of its own and contributes the baseline's
+// counts, which is exactly what an unsharded run composes for it.
 func (e componentMeasurement) asMeasurement(c component.Component) measurement {
-	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c), Lines: e.LineCount, Producer: e.Producer}
+	lines := e.LineCount
+	if e.Unanchored != nil {
+		lines = *e.Unanchored
+	}
+	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c), Lines: lines, Producer: e.Producer}
 }
 
 // patchPartOf is this entry's contribution to `patch(repo)`, and false when

@@ -138,8 +138,14 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 
 	folded := foldMeasured(rep, decl, inputs)
 	switch {
-	case folded.measured:
+	case folded.measured && folded.gated:
 		composedRows(rep, folded.ms, folded.carried, folded.baseline, folded.parts, cfg)
+	case folded.measured:
+		// The shards measured and compared nothing — the shape a run takes
+		// where HEAD is its own merge-base. A gated row here would publish a
+		// verdict the run it folds refused to reach, against a baseline no
+		// shard was held to.
+		rep.Add(ungatedComposedRow(repoLabel("coverage"), folded.ms, everything))
 	case anyCoverageRow(inputs, decl):
 		// The shards measured and wrote no measurements, which is what a run
 		// that was never asked to gate does. A figure over the repository is
@@ -148,7 +154,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		// process publishes is indistinguishable from a repository nobody
 		// measured.
 		rep.Add(unmeasuredRow(repoLabel("coverage"),
-			"the shards wrote no "+measurementsName+", so there are no counts to compose — pass --gate-coverage to each shard"))
+			"the shards wrote no "+measurementsName+", so there are no counts to compose — each shard writes one when --gate-coverage reaches a baseline"))
 	}
 	if row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); ok {
 		rep.Add(row)
@@ -173,21 +179,21 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		}
 	}
 
+	// One `shards` row, whatever went wrong. It is added last because the
+	// verdict check below reads the rows above it, and two rows under one
+	// label is what a consumer keying rows by label cannot survive — which is
+	// the very failure this row exists to report, reproduced by the row that
+	// reports it.
+	problems = append(problems, uncarriedVerdicts(rep, inputs)...)
 	if len(problems) > 0 {
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "shards",
 			Value: fmt.Sprintf("%d shard(s) do not fold into one run of %d component(s)", len(inputs), len(decl.Components)),
 			Detail: append(problems,
 				"every declared component takes exactly one row across the shards, and every whole-tree gate the same answer; a shard whose job died satisfies neither, and an unmeasured row would let that publish a passing verdict")})
-	} else {
-		rep.Add(ui.Row{Status: ui.StatusPass, Label: "shards",
-			Value: fmt.Sprintf("%d shard(s) cover %d of %d component(s)", len(inputs), len(decl.Components), len(decl.Components))})
+		return
 	}
-
-	// The safety net for a verdict the fold's own rows do not carry. Every row
-	// a shard wrote is either reproduced above or replaced by something the
-	// fold computed, so this should never fire — and if it does, a shard
-	// failed over something the fold dropped, which must not become a pass.
-	carryVerdict(rep, inputs)
+	rep.Add(ui.Row{Status: ui.StatusPass, Label: "shards",
+		Value: fmt.Sprintf("%d shard(s) cover %d of %d component(s)", len(inputs), len(decl.Components), len(decl.Components))})
 }
 
 // readShards reads each named directory's test report and measurements, adding
@@ -209,15 +215,17 @@ func readShards(rep *ui.Report, reports []string) []shardInput {
 		// file that is there and will not parse is neither, and is named:
 		// treated as absent it would leave that shard's components composing
 		// nothing while the row above still read `pass`.
+		row := ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
+			Value: fmt.Sprintf("%d row(s), %s", len(doc.Rows), doc.Verdict)}
 		switch m, err := readMeasurements(dir); {
 		case err == nil:
 			in.measured = m
 		case !errors.Is(err, fs.ErrNotExist):
-			rep.Add(ui.Row{Status: ui.StatusFail, Label: "read(" + dir + ")",
-				Value: "measurements not readable", Detail: []string{err.Error()}})
+			row.Status = ui.StatusFail
+			row.Value += ", measurements not readable"
+			row.Detail = []string{err.Error()}
 		}
-		rep.Add(ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
-			Value: fmt.Sprintf("%d row(s), %s", len(doc.Rows), doc.Verdict)})
+		rep.Add(row)
 		inputs = append(inputs, in)
 	}
 	return inputs
@@ -378,6 +386,11 @@ type composition struct {
 	// run with --no-coverage — in which case there is no figure to compose and
 	// a row saying 0.0% would be a measurement of nothing.
 	measured bool
+	// gated says at least one entry names the baseline it was compared with.
+	// Without one the figure is composed and shown, never gated: a run where
+	// HEAD is its own merge-base measures every component and holds none of
+	// them to anything.
+	gated bool
 }
 
 // foldMeasured builds that composition, padding every declared component the
@@ -418,6 +431,7 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 		out.floorMs = append(out.floorMs, m)
 		if e.Base != nil {
 			out.baseline[c.Name] = *e.Base
+			out.gated = true
 		}
 		if p, ok := e.patchPartOf(c.Name); ok {
 			out.parts = append(out.parts, p)
@@ -445,30 +459,27 @@ func recordRow(folded measurementsDoc) ui.Row {
 			len(folded.Components), shortSHA(folded.Tree))}
 }
 
-// carryVerdict fails the fold when a shard reached a worse verdict than any row
-// in the fold carries.
+// uncarriedVerdicts names every shard that failed over something no row in the
+// fold carries.
 //
-// It should never fire: every row a shard wrote is reproduced above or replaced
-// by something the fold computed from the same facts. If it does, a shard
-// failed over a row the fold dropped, and a fold that quietly passed would be
-// the exact failure the completeness check exists to prevent, one layer out.
-func carryVerdict(rep *ui.Report, inputs []shardInput) {
+// It is the safety net for the reasoning above it: every row a shard wrote is
+// reproduced or replaced by something the fold computed from the same facts, so
+// it should find nothing. If it does, a shard failed over a row the fold
+// dropped, and a fold that quietly passed would be the exact failure the
+// completeness check exists to prevent, one layer out.
+func uncarriedVerdicts(rep *ui.Report, inputs []shardInput) []string {
 	if rep.Verdict() == ui.VerdictFail {
-		return
+		return nil
 	}
 	var failed []string
 	for _, in := range inputs {
 		if in.read && in.doc.Verdict == ui.VerdictFail {
-			failed = append(failed, in.dir)
+			failed = append(failed,
+				in.dir+" failed, and the fold reproduced no row explaining it — read that shard's own report")
 		}
 	}
-	if len(failed) == 0 {
-		return
-	}
 	sort.Strings(failed)
-	rep.Add(ui.Row{Status: ui.StatusFail, Label: "shards",
-		Value:  fmt.Sprintf("%d shard(s) failed over something this fold does not carry", len(failed)),
-		Detail: append(failed, "read each shard's own report; the fold reproduced no row explaining the failure")})
+	return failed
 }
 
 // anyCoverageRow reports whether any shard measured a component's coverage.

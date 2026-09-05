@@ -373,7 +373,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
 		// No patch parts: HEAD is its own merge-base, so the diff this
 		// figure would be composed over is empty.
-		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), nil, cfg.Coverage.Tolerance)
+		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), nil, nil, cfg.Coverage.Tolerance)
 		rep.Add(candidateRow(cmd, dir, doc, value))
 		return nil
 	}
@@ -428,7 +428,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	// the baseline read this change is gated against, and the entry this
 	// change leaves for the next one. Sharing a label would put two rows under
 	// it, which is what a consumer keying rows by label cannot survive.
-	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, parts, cfg.Coverage.Tolerance)
+	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, baseline, parts, cfg.Coverage.Tolerance)
 	rep.Add(candidateRow(cmd, dir, doc, value))
 	return nil
 }
@@ -628,7 +628,11 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 	// checked, by the resolution this run did for itself, so a repository
 	// carrying a bad value is told about it exactly once and on the tree
 	// whose author can fix it.
-	envs, err := ensureToolchains(ctx, cmd, root, baseCfg, componentUnits(decl))
+	// The whole of the base tree's declaration, because that is what this
+	// measurement runs: a baseline missing a component reads as a cache hit
+	// on every later change, so a shard measures the base tree completely or
+	// not at all.
+	envs, err := ensureToolchains(ctx, cmd, root, baseCfg, componentUnits(decl.Components))
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: could not resolve the base tree's toolchains (%v) — measuring it with what is on PATH\n", err)
@@ -1139,7 +1143,16 @@ func floorSummaryRow(ms []measurement, floor float64) (ui.Row, bool) {
 //
 // It returns what it did, in the words a row shows, so no caller can announce
 // a recording that did not happen.
-func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, parts []patchPart, tolerance float64) (measurementsDoc, string) {
+// anchor is the baseline a within-tolerance dip is restored against, and
+// gatedAgainst is the baseline this run actually compared with — the same map
+// on the gated path, and nil where HEAD is its own merge-base. They are
+// separated because the second travels into the document, and `lydite test
+// merge` composes a *gated* repository-wide figure from whatever it finds
+// there. On the default branch the anchor is the previous commit's entry,
+// which gates nothing; stored as a comparison it would have the fold publish a
+// verdict against a tree that is not any merge-base, over a run whose every
+// row says nothing was gated.
+func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, anchor, gatedAgainst gitstate.Baseline, parts []patchPart, tolerance float64) (measurementsDoc, string) {
 	declared := make(map[string]bool, len(decl.Components))
 	for _, c := range decl.Components {
 		declared[c.Name] = true
@@ -1164,7 +1177,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		// A component the base tree had and this tree does not declare is
 		// gone: it is not in ms at all, so its entry dies with it rather than
 		// leaving the baseline a tail of components nobody can measure.
-		if lines, ok := baseline[m.Name]; ok && m.Carryable && lines.Measured() && declared[m.Name] {
+		if lines, ok := anchor[m.Name]; ok && m.Carryable && lines.Measured() && declared[m.Name] {
 			record[m.Name] = lines
 			carried[m.Name] = true
 		}
@@ -1194,7 +1207,11 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		return reasonOnly(ctx, dir, "not recorded", fmt.Sprintf(
 			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name))
 	}
-	record = withToleratedDipsRestored(record, baseline, tolerance)
+	// Held before the anchoring, because the two are different quantities: the
+	// anchored entry is what gets recorded, and what was measured is what the
+	// repository-wide figures sum.
+	measured := record
+	record = withToleratedDipsRestored(record, anchor, tolerance)
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
@@ -1207,7 +1224,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	// may then refuse, which is the untruth this whole file is arranged to
 	// avoid. The two numbers differ exactly when the fold has something left
 	// to decide.
-	return measurementsFrom(tree, record, carried, baseline, parts),
+	return measurementsFrom(tree, record, measured, carried, gatedAgainst, parts),
 		fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
 			len(record), recordable(decl), shortSHA(tree))
 }

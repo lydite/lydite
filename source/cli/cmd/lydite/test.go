@@ -149,7 +149,7 @@ the component's to declare.`,
 			// It is resolved here rather than inherited from a `lydite scan`
 			// earlier in the same job: the result is a value handed to each
 			// component's own commands, not a change to this process.
-			envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(file))
+			envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(own))
 			if err != nil {
 				return err
 			}
@@ -1181,17 +1181,20 @@ func env(c component.Component) []string {
 	return out
 }
 
-// componentUnits is what each declared component needs a toolchain for, in
+// componentUnits is what each of these components needs a toolchain for, in
 // declaration order.
 //
-// Every declared component and not only the selected ones: narrowing here
-// would make which toolchains a run provisions depend on which components it
-// happened to choose, so two runs of one repository would prepare
-// differently. A component declaring its own command implies no language and
-// needs nothing.
-func componentUnits(file component.File) []toolchain.Unit {
+// The caller says which components, and it is the set that run may execute
+// rather than the set affected selection ended up choosing: a component
+// deselected on one run and selected on the next must not resolve a different
+// toolchain, and selection is not known until after the git walk this feeds.
+// A shard's set is its own, since it can never execute a component outside it
+// and materialising a rustup channel for one is a download nothing uses.
+//
+// A component declaring its own command implies no language and needs nothing.
+func componentUnits(components []component.Component) []toolchain.Unit {
 	var out []toolchain.Unit
-	for _, c := range file.Components {
+	for _, c := range components {
 		lang := langOf(c)
 		if lang == "" {
 			continue

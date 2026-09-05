@@ -275,7 +275,7 @@ func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: "go-test"}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "the suite failed")}
 
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, nil, nil, 0.1)
 	if len(doc.Components) != 0 || doc.Reason == "" {
 		t.Errorf("doc = %+v, want no components and a reason", doc)
 	}
@@ -297,7 +297,7 @@ func TestARunMissingAComponentEstablishesNoCandidate(t *testing.T) {
 	ok := measured("api", "go", 50, 100)
 	broken := unmeasuredComponent(decl.Components[1], "the suite failed")
 
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, []measurement{ok, broken}, nil, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, []measurement{ok, broken}, nil, nil, nil, 0.1)
 	if len(doc.Components) != 0 {
 		t.Errorf("doc = %+v, want nothing established when a component is missing", doc)
 	}
@@ -472,7 +472,7 @@ func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
 		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
 		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
 	}
-	doc := measurementsFrom("tree", record, nil, baseline, nil)
+	doc := measurementsFrom("tree", record, record, nil, baseline, nil)
 	if doc.Components["same"].Base == nil {
 		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
 	}
@@ -499,8 +499,38 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 	unrun := unmeasuredComponent(decl.Components[1], "the component was not selected for this run")
 	unrun.Unselected = true
 	_, value := candidateThisTree(context.Background(), cmd, root, decl,
-		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, 0.1)
+		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, nil, 0.1)
 	if !strings.HasPrefix(value, "1 of 2 component(s)") {
 		t.Errorf("record row = %q, want it to name the declaration's count as well as its own", value)
+	}
+}
+
+// The anchored entry and what was measured are different quantities, and the
+// fold needs both: `record` lands the anchored one, because a dipped number
+// recorded verbatim turns the tolerance into an unbounded downward ratchet,
+// and `coverage(repo)` sums what was measured, because that is what an
+// unsharded run composes. Composing from the anchor gives a sharded run
+// headroom it did not earn, and prints a total nobody can reach by adding up
+// the rows above it.
+func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
+	record := gitstate.Baseline{"api": producing(90, 100, "go")}
+	measured := gitstate.Baseline{"api": producing(89, 100, "go")}
+	doc := measurementsFrom("tree", record, measured, nil, nil, nil)
+
+	e := doc.Components["api"]
+	if e.LineCount != (coverage.LineCount{Covered: 90, Total: 100}) {
+		t.Errorf("the recorded entry is %+v, want the anchored counts", e.LineCount)
+	}
+	if e.Unanchored == nil || *e.Unanchored != (coverage.LineCount{Covered: 89, Total: 100}) {
+		t.Fatalf("unanchored = %+v, want the counts the run measured", e.Unanchored)
+	}
+	if got := e.asMeasurement(component.Component{Name: "api", Dir: "api", Runner: "go-test"}); got.Lines != *e.Unanchored {
+		t.Errorf("the composition reads %+v, want the measured counts", got.Lines)
+	}
+	// An entry that never dipped carries nothing extra: the two agree, and a
+	// second copy of one number is one that can disagree with the first.
+	plain := measurementsFrom("tree", record, record, nil, nil, nil)
+	if plain.Components["api"].Unanchored != nil {
+		t.Error("an entry that was not anchored still carries a second copy of its counts")
 	}
 }

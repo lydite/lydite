@@ -264,3 +264,33 @@ func TestMergeHoldsTheFloorAgainstWhatTheShardsMeasured(t *testing.T) {
 		t.Errorf("floor = %+v, want a pass counting only what the shards measured", got)
 	}
 }
+
+// A run where HEAD is its own merge-base measures every component and holds
+// none of them to anything, and its rows say so. A fold that gated anyway
+// would publish a verdict the run it folded refused to reach, against a
+// baseline no shard was ever held to.
+func TestMergeDoesNotGateWhatTheShardsDidNot(t *testing.T) {
+	root := mergeRepo(t)
+	ungated := func(name string, covered, total int) string {
+		return shardDir(t,
+			[]ui.Row{
+				{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+				{Status: ui.StatusContext, Label: "coverage(" + name + ")", Value: "measured"},
+			},
+			&measurementsDoc{Tree: "tree", Components: map[string]componentMeasurement{
+				name: {Entry: gitstate.Entry{
+					LineCount: coverage.LineCount{Covered: covered, Total: total}, Producer: "go"}},
+			}})
+	}
+	out, err := runMergeCmd(t, root, ungated("a", 1, 2), ungated("b", 3, 4))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, repoLabel("coverage"))
+	if got.Status != "context" {
+		t.Errorf("coverage(repo) = %+v, want a context row: no shard compared anything", got)
+	}
+	if strings.Contains(got.Value, "baseline") {
+		t.Errorf("coverage(repo) = %q, want no comparison", got.Value)
+	}
+}

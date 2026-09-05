@@ -731,10 +731,10 @@ requests exactly as `lydite/actions` already passes `--diff-base auto`.
 **`--affected` and `--component` compose, and a shard passes both.** `--component` says what this
 job is responsible for; `--affected` says which of those need running. The rest of the slice is
 reported `not affected`, with its baseline entry carried forward, by the one shard that owns it.
-That combination was previously refused on the grounds that a planner would emit `--component`
-lists that were already the selected set — which only a planner that narrowed would do, and
-`lydite test plan` does not: it reads the declaration and the compose files, and `--affected`
-needs a merge-base, git history and a checkout that is not shallow. See ADR 0026.
+The two narrow different things and neither substitutes for the other: `lydite test plan` cannot
+narrow by `--affected`, which needs a merge-base, git history and a checkout that is not shallow,
+so the matrix it emits covers the whole declaration and the shards select within their slices. See
+[ADR 0026](docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md).
 
 **An unresolvable merge-base is an error**, not a fallback in either direction. Falling back to
 nothing is the failure this exists to avoid; falling back to everything is safe but makes the

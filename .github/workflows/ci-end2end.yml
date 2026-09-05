@@ -181,15 +181,14 @@ jobs:
 
   # The coverage gate, end to end, against a real repository: a baseline miss
   # measured in a worktree, a recording, a cache hit, a sharded run and the
-  # fold. This is lydite/lydite#48.
+  # fold.
   #
-  # It replaces the `lydite test record` step that used to sit in the job above:
-  # steps 4 and 5 here are a strict superset of it, and paying for a gated run
-  # twice is a full extra pass over four components. What that step guarded —
-  # that `lydite-baseline.yml`, the only writer of the baseline, actually
-  # writes one — is guarded here and more thoroughly, because that workflow
-  # runs only on pushes to the default branch and its failure mode is a slow
-  # job rather than a red one.
+  # It is the only thing that holds `lydite-baseline.yml` to writing a baseline
+  # at all. That workflow runs on pushes to the default branch alone, and its
+  # failure mode is a slow job rather than a red one — a baseline nothing
+  # writes costs a base-tree measurement per change and is visible from no pull
+  # request. Both jobs here are gated runs over four components, so the whole
+  # of that guard lives in this one rather than being paid for twice.
   #
   # Its own runner and its own local bare origin, so the recording is exercised
   # for real and pushes nowhere.
@@ -322,6 +321,12 @@ jobs:
           for shard in $shards; do
             name=${shard%%:*}
             components=${shard#*:}
+            # Cleared first, so a shard that dies before writing its documents
+            # is snapshotted as empty rather than as a copy of the previous
+            # shard's. Copied instead, the fold would report the earlier
+            # shard's components twice and name the duplication as the defect,
+            # rather than the shard that actually died.
+            rm -rf proving-ground/.lydite-reports
             status=0
             /tmp/lydite test --dir proving-ground --affected --component "$components" \
               --gate-coverage --json > "shard-$name.json" || status=$?
