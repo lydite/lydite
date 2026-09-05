@@ -629,26 +629,26 @@ def main_merged(path: str) -> int:
     elif shards.get("status") != "pass":
         failures.append(f"shards is {shards.get('status')!r}: {shards.get('value', '')}")
 
-    # The port lock has to have been contended somewhere in the matrix. Every
-    # assertion about it is satisfied by a run that never had two components
-    # going at once, because the lock is never taken.
+    # The folded schedule row accounts for every shard, not for the contention
+    # inside one. These shards ran `--affected` and the probe touches only
+    # go/api/, so `tally` never ran and its pair with `api` was never
+    # serialised — that constraint is the unnarrowed `proving ground` job's to
+    # assert, on a run where both components actually start.
+    #
+    # What has to hold here is that the fold saw every shard. A row naming
+    # fewer than the plan produced is a shard whose document was dropped, which
+    # is exactly what the completeness check above must not be allowed to miss.
     schedule = rows.get("schedule")
-    if schedule is not None:
-        concurrent = concurrency(schedule.get("value", ""))
-        if concurrent is None or concurrent < 2:
+    if schedule is None:
+        failures.append("no `schedule` row: the fold did not account for the shards")
+    else:
+        folded = re.match(r"(\d+) shard\(s\)", schedule.get("value", ""))
+        if folded is None:
+            failures.append(f"folded schedule value {schedule.get('value')!r} names no shard count")
+        elif int(folded.group(1)) != len(EXPECTED_SHARDS):
             failures.append(
-                f"the folded schedule reports {schedule.get('value')!r}: no shard ever ran two "
-                f"components at once, so the lock {EXPECTED_SERIALISED} contend for was never taken"
-            )
-        a, b = EXPECTED_SERIALISED
-        want = re.compile(
-            rf"(?:{re.escape(a)} and {re.escape(b)}|{re.escape(b)} and {re.escape(a)})"
-            rf" serialised on port {CONTENDED_PORT}$"
-        )
-        if not any(want.match(line) for line in schedule.get("detail", [])):
-            failures.append(
-                f"the folded schedule detail {schedule.get('detail')!r} does not record {a} and {b} "
-                f"being serialised on port {CONTENDED_PORT}"
+                f"the fold accounted for {folded.group(1)} shard(s), want {len(EXPECTED_SHARDS)} — "
+                "a shard whose document was dropped is the failure the fold exists to report"
             )
 
     for failure in failures:
@@ -656,8 +656,9 @@ def main_merged(path: str) -> int:
     if failures:
         return 1
     print(
-        f"proving ground merge: {len(EXPECTED_COVERAGE_UNITS)} component(s), one row each; the "
-        f"whole-tree gates collapsed and coverage({REPO_UNIT}) and patch({REPO_UNIT}) were composed once"
+        f"proving ground merge: {len(EXPECTED_SHARDS)} shard(s) folded into "
+        f"{len(EXPECTED_COVERAGE_UNITS)} component(s), one row each; the whole-tree gates collapsed "
+        f"and coverage({REPO_UNIT}) and patch({REPO_UNIT}) were composed once"
     )
     return 0
 

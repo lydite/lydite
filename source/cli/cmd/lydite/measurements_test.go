@@ -459,3 +459,48 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 			got, got.Percent(), higher, higher.Percent())
 	}
 }
+
+// `patch(repo)` is composed straight from the stored baseline counts, so an
+// entry a different instrument produced would have the fold compare across a
+// change of instrument — the comparison the shard's own patch row refused.
+func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
+	record := gitstate.Baseline{
+		"same":  {LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go 1.26.5"},
+		"moved": {LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "vitest 4.1.11"},
+	}
+	baseline := gitstate.Baseline{
+		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
+		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
+	}
+	doc := measurementsFrom("tree", record, nil, baseline, nil)
+	if doc.Components["same"].Base == nil {
+		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
+	}
+	if got := doc.Components["moved"].Base; got != nil {
+		t.Errorf("moved carries a baseline from another instrument: %+v", got)
+	}
+}
+
+// A run responsible for part of the declaration establishes part of a
+// candidate, which is expected — completeness is the fold's question. A row
+// saying only how many entries it holds announces a recording `lydite test
+// record` may then refuse, so it says how many the tree declares as well.
+func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	cmd := newRootCmd()
+	// A real tree, because the row names the one it would be recorded for.
+	root := gitRepo(t, map[string]string{"api/x.go": "package api\n"})
+	gitIn(t, root, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+	// One component measured, the other never reached: the shape a shard, and
+	// an --affected run over a newly declared component, both produce.
+	unrun := unmeasuredComponent(decl.Components[1], "the component was not selected for this run")
+	unrun.Unselected = true
+	_, value := candidateThisTree(context.Background(), cmd, root, decl,
+		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, 0.1)
+	if !strings.HasPrefix(value, "1 of 2 component(s)") {
+		t.Errorf("record row = %q, want it to name the declaration's count as well as its own", value)
+	}
+}

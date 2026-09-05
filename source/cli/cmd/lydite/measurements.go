@@ -72,7 +72,7 @@ type componentMeasurement struct {
 	// numbers, so folding reports could not recover them.
 	Patch *patchCount `json:"patch,omitempty"`
 	// Base is the baseline entry this component was gated against, absent for
-	// a run that gated nothing. It travels here so `lydite test merge`
+	// a run that gated nothing and for one a different instrument measured. It travels here so `lydite test merge`
 	// composes the baseline side of every figure from what the shards already
 	// read, rather than reading the lydite branch a second time.
 	Base *gitstate.Entry `json:"base,omitempty"`
@@ -195,7 +195,12 @@ func measurementsFrom(tree string, record gitstate.Baseline, carried map[string]
 		if p, ok := patch[name]; ok {
 			m.Patch = &p
 		}
-		if b, ok := baseline[name]; ok && b.Measured() {
+		// Only a baseline the same instrument produced. `patch(repo)` is
+		// composed straight from these counts, so an entry stored without
+		// that check would have the fold compare across a change of
+		// instrument — the comparison ADR 0025 exists to prevent, and one the
+		// shard's own `patch(<name>)` row already refused.
+		if b, ok := baseline[name]; ok && b.Measured() && b.Producer == e.Producer {
 			m.Base = &b
 		}
 		doc.Components[name] = m

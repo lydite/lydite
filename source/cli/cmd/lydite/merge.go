@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"sort"
 	"strconv"
@@ -149,7 +150,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		rep.Add(unmeasuredRow(repoLabel("coverage"),
 			"the shards wrote no "+measurementsName+", so there are no counts to compose — pass --gate-coverage to each shard"))
 	}
-	if row, ok := floorSummaryRow(folded.ms, cfg.Coverage.Floor); ok {
+	if row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); ok {
 		rep.Add(row)
 	}
 	if folded.measured {
@@ -204,9 +205,16 @@ func readShards(rep *ui.Report, reports []string) []shardInput {
 		}
 		in.doc, in.read = doc, true
 		// A shard run with --no-coverage writes no measurements at all, which
-		// is a run that gated nothing rather than a run that went missing.
-		if m, err := readMeasurements(dir); err == nil {
+		// is a run that gated nothing rather than a run that went missing. A
+		// file that is there and will not parse is neither, and is named:
+		// treated as absent it would leave that shard's components composing
+		// nothing while the row above still read `pass`.
+		switch m, err := readMeasurements(dir); {
+		case err == nil:
 			in.measured = m
+		case !errors.Is(err, fs.ErrNotExist):
+			rep.Add(ui.Row{Status: ui.StatusFail, Label: "read(" + dir + ")",
+				Value: "measurements not readable", Detail: []string{err.Error()}})
 		}
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
 			Value: fmt.Sprintf("%d row(s), %s", len(doc.Rows), doc.Verdict)})
@@ -358,6 +366,14 @@ type composition struct {
 	carried  map[string]bool
 	baseline gitstate.Baseline
 	parts    []patchPart
+	// floorMs is ms with every carried entry back to unmeasured, which is
+	// what the shards themselves held the floor against: a carried number
+	// describes the base tree, and the component whose baseline it came from
+	// ran nowhere in this matrix. Counted as measured it would fail a floor
+	// no shard could have emitted a row for, and floorSummaryRow suppresses
+	// the summary when anything is below — so the merged report would carry
+	// no floor row at all with a floor configured and a component under it.
+	floorMs []measurement
 	// measured is false when no shard wrote any measurement at all — a matrix
 	// run with --no-coverage — in which case there is no figure to compose and
 	// a row saying 0.0% would be a measurement of nothing.
@@ -390,12 +406,16 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 			m := unmeasuredComponent(c, "no shard's measurements hold this component")
 			m.Unmeasurable = unmeasurableByDeclaration(c)
 			out.ms = append(out.ms, m)
+			out.floorMs = append(out.floorMs, m)
 			continue
 		}
-		out.ms = append(out.ms, e.asMeasurement(c))
+		m := e.asMeasurement(c)
+		out.ms = append(out.ms, m)
 		if e.Carried {
 			out.carried[c.Name] = true
+			m = unmeasuredComponent(c, "the component was not selected for this run")
 		}
+		out.floorMs = append(out.floorMs, m)
 		if e.Base != nil {
 			out.baseline[c.Name] = *e.Base
 		}

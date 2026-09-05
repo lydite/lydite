@@ -74,6 +74,9 @@ carries the report.`,
 				return err
 			}
 			shards := shardsOf(file.Components, items)
+			if err := uniqueNames(shards); err != nil {
+				return err
+			}
 
 			rep := ui.NewReport("plan")
 			for _, s := range shards {
@@ -106,7 +109,8 @@ carries the report.`,
 // shard is one CI job's worth of components: the set that must run in one
 // process, and what makes it a set.
 type shard struct {
-	// Name is the members joined by "-". Unique, because component names are.
+	// Name is the members joined by "-", checked for collisions by
+	// uniqueNames.
 	Name string
 	// Components are its members, in declaration order.
 	Components []string
@@ -254,4 +258,29 @@ func shardsOf(components []component.Component, items []scheduler.Item) []shard 
 		out = append(out, *s)
 	}
 	return out
+}
+
+// uniqueNames refuses a plan whose shards would take the same name.
+//
+// The name is the matrix job's and the artifact's suffix, so two shards sharing
+// one collide on upload and the fold reads one of them twice while the other's
+// components go missing — which it reports as a shard that died, naming
+// components nothing was wrong with.
+//
+// Joining members with "-" is ambiguous, because nothing forbids a component
+// name containing one: `a-b` beside `c` and `a` beside `b-c` both spell
+// `a-b-c`. It is a declaration nobody writes and a failure nobody could
+// diagnose from the symptom, so it is refused here rather than disambiguated
+// with an index a reader cannot map back to the components.
+func uniqueNames(shards []shard) error {
+	seen := make(map[string][]string, len(shards))
+	for _, s := range shards {
+		if first, ok := seen[s.Name]; ok {
+			return fmt.Errorf("two shards would both be named %q — [%s] and [%s]"+
+				"\n       a shard is named for its members, so rename a component so the two differ",
+				s.Name, strings.Join(first, ", "), strings.Join(s.Components, ", "))
+		}
+		seen[s.Name] = s.Components
+	}
+	return nil
 }

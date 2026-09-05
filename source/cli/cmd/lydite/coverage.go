@@ -1200,8 +1200,32 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
 		return measurementsDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
 	}
+	// Against the declaration, not against what this run was responsible for.
+	// A document covering part of the tree is expected — a shard covers its
+	// slice, and completeness is the fold's question — but a row saying only
+	// how many entries it holds announces a recording `lydite test record`
+	// may then refuse, which is the untruth this whole file is arranged to
+	// avoid. The two numbers differ exactly when the fold has something left
+	// to decide.
 	return measurementsFrom(tree, record, carried, baseline, parts),
-		fmt.Sprintf("%d component(s) ready for %s — `lydite test record` lands it", len(record), shortSHA(tree))
+		fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
+			len(record), recordable(decl), shortSHA(tree))
+}
+
+// recordable counts the declared components a complete baseline must cover:
+// every one except those nothing could ever measure, which contribute to
+// neither side of any comparison and whose absence is permanent and expected.
+//
+// It reads the declaration alone, exactly as `lydite test record` does, so the
+// row a run shows and the question the fold asks are the same question.
+func recordable(decl component.File) int {
+	n := 0
+	for _, c := range decl.Components {
+		if !unmeasurableByDeclaration(c) {
+			n++
+		}
+	}
+	return n
 }
 
 // sameCounts reports whether two baselines hold the same entries, so a run

@@ -154,3 +154,28 @@ func TestPlanWritesNoReportDocument(t *testing.T) {
 		t.Errorf("plan wrote a report document: %v", err)
 	}
 }
+
+// The name is the matrix job's and the artifact's suffix. Two shards sharing
+// one collide on upload, and the fold then reads one twice while the other's
+// components go missing — reported as a shard that died, naming components
+// nothing was wrong with.
+func TestPlanRefusesTwoShardsWithOneName(t *testing.T) {
+	root := t.TempDir()
+	// `a-b` beside `c`, and `a` beside `b-c`, both spell `a-b-c`. Each pair is
+	// a shard because the two share a directory.
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: a-b\n    dir: one\n    runner: go-test\n"+
+			"  - name: c\n    dir: one\n    runner: go-test\n"+
+			"  - name: a\n    dir: two\n    runner: go-test\n"+
+			"  - name: b-c\n    dir: two\n    runner: go-test\n")
+	write(t, root, "one/.keep", "")
+	write(t, root, "two/.keep", "")
+	out, err := runPlanCmd(t, root)
+	if err == nil {
+		t.Fatalf("two shards took one name:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "a-b-c") {
+		t.Errorf("error = %v, want it to name the collision", err)
+	}
+}

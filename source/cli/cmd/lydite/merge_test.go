@@ -217,3 +217,50 @@ func TestMergeFailsOnADirectoryWithNoReport(t *testing.T) {
 		t.Errorf("the fold does not name the directory it could not read:\n%s", out)
 	}
 }
+
+// A measurements file that is there and will not parse is neither a shard that
+// gated nothing nor one that went missing. Treated as absent it would leave
+// that shard's components composing nothing while its `read` row still said
+// the document was fine.
+func TestMergeNamesMeasurementsItCannotRead(t *testing.T) {
+	root := mergeRepo(t)
+	broken := shardOf(t, "b", 3, 4)
+	if err := os.WriteFile(filepath.Join(broken, measurementsName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), broken)
+	if err == nil {
+		t.Fatalf("an unreadable measurements document folded cleanly:\n%s", out)
+	}
+	if !strings.Contains(out, "measurements not readable") {
+		t.Errorf("the fold does not name the document it could not read:\n%s", out)
+	}
+}
+
+// A carried entry describes the base tree, and the component it belongs to ran
+// in no shard. Counted as measured it fails a floor no shard emitted a row for
+// — and floorSummaryRow suppresses the summary when anything is below, so the
+// merged report would carry no floor row at all with a floor configured and a
+// component under it.
+func TestMergeHoldsTheFloorAgainstWhatTheShardsMeasured(t *testing.T) {
+	root := mergeRepo(t)
+	write(t, root, ".lydite/config.yml", "coverage:\n  floor: 80\n")
+	carried := shardDir(t,
+		[]ui.Row{
+			{Status: ui.StatusUnmeasured, Label: "test(b)", Value: "not affected"},
+			{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the component was not selected for this run"},
+		},
+		&measurementsDoc{Tree: "tree", Components: map[string]componentMeasurement{
+			// Well below the floor, and carried: the shard that owns b never
+			// ran it, so no floor(b) row exists anywhere.
+			"b": {Entry: gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 10}, Producer: "go"}, Carried: true},
+		}})
+	out, err := runMergeCmd(t, root, shardOf(t, "a", 9, 10), carried)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "floor")
+	if got.Status != "pass" || !strings.HasPrefix(got.Value, "1 of 2 component(s)") {
+		t.Errorf("floor = %+v, want a pass counting only what the shards measured", got)
+	}
+}

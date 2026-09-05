@@ -288,11 +288,14 @@ jobs:
       # row in any of them, so a matrix job that never uploaded is reported
       # rather than folded into silence — an unmeasured row does not vote, and
       # would publish a passing verdict over a repository half of which was
-      # never tested.
+      # never tested. That verdict is this job's, so the exit code is re-raised
+      # rather than only reported; the upload below runs on `if: always()`.
       #
-      # Its exit code is captured rather than allowed to end the step, so the
-      # upload below still runs: the fold's own document is what the comment
-      # renders, and it is most worth having when the fold failed.
+      # Each shard's component subdirectories are copied in first. The folded
+      # rows carry the shards' own `log` paths, and `publish` resolves those
+      # against the directory it is given — this one. Without the copy a red
+      # component's row in the comment names a log that is in an artifact
+      # `publish` deliberately never downloads, and carries no tail at all.
       - name: lydite test merge
         run: |
           shopt -s nullglob
@@ -304,9 +307,14 @@ jobs:
             echo "no shard uploaded a report directory; there is nothing to fold" >&2
             exit 1
           fi
+          mkdir -p .lydite-reports
+          for logs in shards/*/*/; do
+            cp -R "$logs" .lydite-reports/
+          done
           status=0
           lydite test merge --dir . "${args[@]}" || status=$?
           echo "lydite test merge exited $status"
+          exit "$status"
 
       - uses: ./.github/actions/lydite-reports
         if: always()
