@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
@@ -55,8 +56,9 @@ func TestAnUnchangedProducerStillGates(t *testing.T) {
 
 // An unidentified instrument compares equal to an unidentified one, so a
 // component lydite cannot introspect — a Yarn PnP workspace, an install that
-// wrote no node_modules — gates exactly as it did before producers existed.
-// Refusing to compare there would silently stop gating a whole repository.
+// wrote no node_modules — is still compared rather than permanently reported
+// new. Refusing to compare there would silently stop gating a whole
+// repository.
 func TestAnUnidentifiedProducerGatesAsBefore(t *testing.T) {
 	m := measured("web", "typescript", 50, 100)
 	baseline := gitstate.Baseline{"web": producing(80, 100, "")}
@@ -346,5 +348,114 @@ func TestAComponentWithARawCommandHasNoProducer(t *testing.T) {
 	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "docs"}}
 	if got := producerOf(t.TempDir(), c, nil); got != "" {
 		t.Errorf("producer = %q, want nothing for a component lydite does not invoke", got)
+	}
+}
+
+// The patch gate holds new code to the component's own aggregate baseline
+// percentage, so it is as incomparable across a change of instrument as the
+// aggregate is — and refuses for the same reason. Without this the producer
+// rule holds at two altitudes and silently lapses at the third.
+func TestThePatchGateWillNotCompareAcrossAChangeOfInstrument(t *testing.T) {
+	m := measured("web", "typescript", 90, 100)
+	m.Producer = "vitest 4.1.11, @vitest/coverage-v8 4.1.11"
+	baseline := gitstate.Baseline{"web": producing(80, 100, "vitest 3.2.7, @vitest/coverage-v8 3.2.7")}
+
+	base, ok := comparableBase(m, baseline)
+	if ok || base.Measured() {
+		t.Fatalf("comparableBase = (%+v, %v), want no baseline to gate against", base, ok)
+	}
+	if row := patchRow("patch(web)", 5, 10, base.LineCount, 0.1); row.Status != "new" {
+		t.Errorf("patch(web) = %+v, want new — the baseline percentage came from another instrument", row)
+	}
+
+	// And still gates when the instrument is unchanged, so the rule above is
+	// not satisfied by a patch gate that compares against nothing.
+	same := gitstate.Baseline{"web": producing(80, 100, m.Producer)}
+	base, ok = comparableBase(m, same)
+	if !ok {
+		t.Fatal("comparableBase refused a baseline taken by the same instrument")
+	}
+	if row := patchRow("patch(web)", 5, 10, base.LineCount, 0.1); row.Status != "fail" {
+		t.Errorf("patch(web) = %+v, want a failure — 50%% of new lines against an 80%% baseline", row)
+	}
+}
+
+// A candidate that exists but cannot be parsed is refused with the path named.
+// It is not the same as an absent one: something wrote a document there, and a
+// reader has to be told which one it could not use.
+func TestAMalformedCandidateNamesThePathItCameFrom(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, runner.ReportDir+"/"+candidateName, `{"tree": "abc",`)
+	_, err := readCandidate(filepath.Join(root, runner.ReportDir))
+	if err == nil {
+		t.Fatal("readCandidate accepted a truncated document")
+	}
+	if !strings.Contains(err.Error(), candidateName) {
+		t.Errorf("error = %q, want the path named", err)
+	}
+}
+
+// Re-recording a tree does not lower the entry it already holds.
+//
+// The anchor is against what this tree already holds, not only against what
+// the measuring run compared with: the same tree is the same content, so a
+// difference between two measurements of it is the measurement noise the
+// tolerance exists for. Without it a second recording replaces an anchored
+// high-water entry with a raw dipped one, and the next change gates against
+// the lowered number — a per-merge ratchet, one recording at a time.
+//
+// Driven through the command rather than through withToleratedDipsRestored,
+// because the helper being correct says nothing about whether anything calls
+// it: the anchoring lived in the measuring path before recording became a
+// command of its own, and a unit test of the helper passed either way.
+func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
+	root := gateRepo(t)
+	// A tolerance wide enough that the fixture's coarse profile can dip
+	// inside it. The fixture measures two statements, so its only movements
+	// are 50 points and 100; a realistic tolerance cannot absorb either, and
+	// what is under test is the anchoring rather than the threshold.
+	write(t, root, config.FileName, "coverage:\n  tolerance: 60\n")
+	if r := executil.RunQuiet(context.Background(), root, "git", "add", "-A"); !r.Ok() {
+		t.Fatal(r.Err)
+	}
+	if r := executil.RunQuiet(context.Background(), root, "git", "-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-m", "widen the tolerance"); !r.Ok() {
+		t.Fatal(r.Err)
+	}
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+
+	// What the run measured is in the candidate, not on the branch: the
+	// measuring command writes nothing there, which is the split this whole
+	// change is about.
+	candidate, err := readCandidate(filepath.Join(root, runner.ReportDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured := candidate.Components["svc"]
+	if !measured.Measured() {
+		t.Fatalf("the run measured nothing for svc: %+v", candidate)
+	}
+
+	// An earlier recording of this same tree that measured higher. Written
+	// directly, because reproducing it needs a second suite the fixture does
+	// not have — what is under test is what happens to it, not how it arose.
+	higher := gitstate.Entry{
+		LineCount: coverage.LineCount{Covered: measured.Total, Total: measured.Total},
+		Producer:  measured.Producer,
+	}
+	tree := candidate.Tree
+	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Baseline{"svc": higher}); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, errOut, err := runRecordCmd(t, root); err != nil {
+		t.Fatalf("recording again: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	got := previousOrCurrentBaseline(t, root, "HEAD")["svc"]
+	if got.Percent() != higher.Percent() {
+		t.Errorf("svc = %+v (%.1f%%), want the anchored %+v (%.1f%%) kept — a tolerated dip must not lower the entry",
+			got, got.Percent(), higher, higher.Percent())
 	}
 }

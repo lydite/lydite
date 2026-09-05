@@ -373,6 +373,18 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 				// so it is said once alongside the per-component line.
 				r.note = st.note
 			}
+			return r, nil
+		}
+		// Every other language contributes no directory and no variable here,
+		// and still needs an environment carrying what it resolved to. The
+		// toolchain is half of what measured a component's coverage — its
+		// LLVM writes the line records in an lcov — and a baseline records
+		// what measured it. Without this the ambient-satisfied path answers
+		// with no version at all, so a machine that already has the right
+		// toolchain records a different producer from one that provisioned
+		// it, and the two never compare.
+		if ambient != "" {
+			r.env = &Env{Resolved: display(ambient)}
 		}
 		return r, nil
 	}

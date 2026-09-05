@@ -88,6 +88,43 @@ jobs:
           cat report.json
           python3 .github/assert-proving-ground.py report.json proving-ground
 
+      # The measure/record split, end to end, against a real repository.
+      #
+      # `lydite-baseline.yml` is the only writer of the coverage baseline, it
+      # runs on pushes to the default branch alone, and it failed at "no
+      # components declared" for the whole life of the source/ layout without
+      # anyone noticing — a baseline that is never written costs a slower run
+      # and never a red one. Nothing about that was visible from a pull
+      # request until this step existed.
+      #
+      # The origin is repointed at a local bare repository first, so the
+      # recording is exercised for real and pushes nowhere. Pushing HEAD to it
+      # as `main` also makes HEAD its own merge-base, which is the shape the
+      # baseline workflow runs in.
+      #
+      # `lydite test` is expected to fail here: the proving ground's orphan
+      # gate fires on `scripts/seed.ts` on purpose. That is the point — a gate
+      # saying nothing about coverage must not discard a complete candidate,
+      # which is why the recording runs regardless of the status above.
+      - name: lydite test record (proving ground)
+        run: |
+          set -euo pipefail
+          git init --bare --quiet --initial-branch=main "$RUNNER_TEMP/baseline-origin.git"
+          git -C proving-ground remote set-url origin "$RUNNER_TEMP/baseline-origin.git"
+          git -C proving-ground push --quiet origin HEAD:refs/heads/main
+          status=0
+          /tmp/lydite test --dir proving-ground --gate-coverage --json > gated.json || status=$?
+          echo "lydite test --gate-coverage exited $status"
+          # Both statuses are captured rather than allowed to abort the step,
+          # so a failed recording reaches the assertion below and is explained
+          # there instead of ending the job with an empty document.
+          recorded=0
+          /tmp/lydite test record --dir proving-ground \
+            --reports proving-ground/.lydite-reports --json > recorded.json || recorded=$?
+          echo "lydite test record exited $recorded"
+          cat recorded.json
+          python3 .github/assert-proving-ground.py --record gated.json recorded.json
+
       # The only place component-driven scanning of Rust executes at all.
       # lydite's own repository declares no Rust component — its only
       # Cargo.toml files are pin manifests, which the declaration excludes —

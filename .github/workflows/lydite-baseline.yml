@@ -15,7 +15,8 @@
 # job carries rather than a new one.
 #
 # `lydite test` writes nothing to the lydite branch at all, so measuring and
-# recording are two commands here as well as two jobs. That does not by itself
+# recording are two commands. They are one job here, sharing this job's token:
+# the split that matters is which workflow runs them, not which step. That does not by itself
 # make a pull request's measurement safe to record: the measuring job runs the
 # branch's code whatever token it holds, so the numbers it emits are the
 # branch's to choose, and `lydite test record` verifies no number. What makes
@@ -78,9 +79,22 @@ jobs:
       - name: lydite test --gate-coverage
         run: /tmp/lydite test --dir . --gate-coverage
 
-      # The write, and the only step in either workflow that has one. It runs
-      # nothing from the repository — no suite, no setup or teardown command,
-      # no compose service — and refuses a candidate naming a tree other than
-      # the one checked out.
+      # The only step in either workflow that writes the lydite branch. It
+      # runs nothing from the repository — no suite, no setup or teardown
+      # command, no compose service — and refuses a candidate naming a tree
+      # other than the one checked out.
+      #
+      # `contents: write` is job-scoped and actions/checkout persists the
+      # credential, so the measuring step above holds it too. Nothing here
+      # pretends otherwise: what makes this safe is that the code has already
+      # merged, not the step boundary.
+      #
+      # It runs even when the step above failed. A gate that says nothing
+      # about coverage — orphans, watch, schedule — would otherwise discard a
+      # complete candidate, and no later run records this tree, because the
+      # next push carries a different one. `record` refuses a candidate that
+      # is partial, names another tree, or was never written, so the worst an
+      # unconditional run does is say so.
       - name: lydite test record
+        if: ${{ !cancelled() }}
         run: /tmp/lydite test record --dir . --reports .lydite-reports

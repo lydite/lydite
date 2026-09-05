@@ -56,12 +56,16 @@ type candidateEntry struct {
 	// Carried marks an entry inherited from the base tree rather than
 	// measured here, because affected selection did not run this component.
 	//
-	// It is what lets shards be folded. A shard that ran `cli` carries `web`
-	// and the shard that ran `web` carries `cli`, so both documents hold both
-	// components and only this flag says which copy came from a suite that
-	// actually ran. Folding without it would let a carried entry overwrite a
-	// measured one, recording the base tree's number for a component this
-	// change rewrote.
+	// A fold needs it, because the same component can appear in more than one
+	// document and only one copy came from a suite that ran: taking the last
+	// would record the base tree's number for a component the change rewrote.
+	//
+	// That is not yet enough to fold a *shard*. Only `--affected` marks a
+	// component carryable, and it is refused alongside the `--component` a
+	// shard narrows with — so a shard establishes no candidate at all today,
+	// which is honest: it measured part of a tree and cannot claim the tree.
+	// Closing that is `lydite test merge`'s (#61), and this flag is what it
+	// will fold on.
 	Carried bool `json:"carried,omitempty"`
 }
 
@@ -115,12 +119,10 @@ func readCandidate(dir string) (candidateDoc, error) {
 // tree ever had — the numbers would each be right and the entry wrong.
 //
 // A measured entry beats a carried one, whichever order the documents arrive
-// in. Each shard carries forward every component it did not run, so most
-// components appear in every document and only one copy came from a suite
-// that executed; taking the last would record the base tree's number for a
-// component this change rewrote. Two measured entries for one component mean
-// two shards ran it, which the planner does not emit — the first is kept and
-// the fold does not pretend to arbitrate.
+// in, so a component appearing in several documents is recorded from the run
+// that actually measured it. Two measured entries for one component mean two
+// runs measured it; the first is kept and the fold does not pretend to
+// arbitrate.
 func foldCandidates(docs []candidateDoc) (candidateDoc, error) {
 	if len(docs) == 0 {
 		return candidateDoc{}, fmt.Errorf("no candidate baseline was found in any of the named report directories")

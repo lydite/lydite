@@ -199,9 +199,9 @@ jobs:
       # worth having — without it every pull request runs every component and
       # the cache saves only the base-tree measurement.
       #
-      # Never on a push. `lydite-baseline.yml` runs everything, because a
-      # partial run records nothing and a narrowed run there would leave the
-      # entry it exists to write.
+      # Never on a push, where it would buy nothing: on the default branch
+      # the merge-base is HEAD itself, so `--affected` selects every component
+      # anyway and the flag only obscures the intent.
       - name: lydite test
         run: lydite test --dir . --affected --gate-coverage
 

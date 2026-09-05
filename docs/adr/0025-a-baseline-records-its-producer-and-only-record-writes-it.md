@@ -89,8 +89,16 @@ pinned tool, so a consumer upgrading lydite changes it with nothing in the
 repository's diff to signal it. The producer therefore travels with the entry
 rather than being recomputed at recording time.
 
-**The residual, stated rather than hidden:** a provider that changes its counting
-without changing its version is undetectable, and nothing can detect it.
+**Two residuals, stated rather than hidden.** A provider that changes its
+counting without changing its version is undetectable, and nothing can detect
+it. And the toolchain half is the version lydite *resolved*, which is the probed
+version where the ambient toolchain already satisfies the declaration and the
+manifest's own text where lydite provisioned one — so a repository pinning a
+channel rather than a version (`stable`) can record `rust stable` on one runner
+and `rust 1.91.0` on another, and the two do not compare. That costs one ungated
+change per runner, in the direction that reports `new` rather than a false
+regression; closing it means probing again after provisioning
+([#89](https://github.com/lydite/lydite/issues/89)).
 
 ## `lydite test` writes nothing to the `lydite` branch
 
@@ -138,10 +146,17 @@ A command that folds N candidates is the only thing that can, and it is what
 ([#61](https://github.com/lydite/lydite/issues/61)).
 
 Folding needs one fact no report carries: **which entries a run measured and
-which it carried forward.** Each shard carries every component it did not run, so
-most components appear in every document and only one copy came from a suite that
-executed. Without that flag a carried entry can overwrite a measured one,
-recording the base tree's number for a component the change rewrote.
+which it carried forward.** A component can appear in several documents and only
+one copy came from a suite that ran, so without that flag a carried entry can
+overwrite a measured one, recording the base tree's number for a component the
+change rewrote.
+
+The flag is not yet enough to fold a shard, and saying so is the point. Only
+`--affected` marks a component carryable, and it is refused alongside the
+`--component` a shard narrows with, so a shard establishes no candidate at all
+today — honest, because it measured part of a tree and cannot claim the tree.
+What this change lands is the document, the fold and the write; what closes the
+shard case is `lydite test merge`.
 
 ### The candidate names the tree it measured
 

@@ -399,6 +399,21 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	return nil
 }
 
+// reasonOnly is a candidate that establishes nothing, and why.
+//
+// It still names the tree it was taken on. `record` binds a candidate to the
+// checkout it may be landed from and refuses one that names no tree at all, so
+// a reason-carrying document without it is unreadable — and the command that
+// would have shown the reason fails with "no candidate found" instead, which
+// says the run produced nothing rather than what it produced nothing about.
+//
+// A tree that will not resolve leaves it empty, which is the one case where
+// there is genuinely nothing to bind to.
+func reasonOnly(ctx context.Context, dir, prefix, reason string) (candidateDoc, string) {
+	tree, _ := gitstate.TreeSHA(ctx, dir, "HEAD")
+	return candidateDoc{Tree: tree, Reason: reason}, prefix + " — " + reason
+}
+
 // candidateRow saves what this run would record and says so.
 //
 // The row is `record` rather than `candidate`, because what a reader wants to
@@ -1090,8 +1105,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		}
 	}
 	if len(record) == 0 {
-		return candidateDoc{Reason: "no component produced a measurement"},
-			"nothing to record — no component produced a measurement"
+		return reasonOnly(ctx, dir, "nothing to record", "no component produced a measurement")
 	}
 	// A run that could not measure a component it was supposed to has not
 	// established this tree's baseline, and recording a partial one is worse
@@ -1112,8 +1126,8 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
 			gap.Name, gap.Why)
-		reason := fmt.Sprintf("%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name)
-		return candidateDoc{Reason: reason}, "not recorded — " + reason
+		return reasonOnly(ctx, dir, "not recorded", fmt.Sprintf(
+			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name))
 	}
 	record = withToleratedDipsRestored(record, baseline, tolerance)
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
@@ -1181,7 +1195,12 @@ func withToleratedDipsRestored(record, baseline gitstate.Baseline, tolerance flo
 	for name, lines := range record {
 		out[name] = lines
 		b, ok := baseline[name]
-		if !ok || !b.Measured() || !lines.Measured() {
+		// The same instrument on both sides, or no anchoring. Across a change
+		// of instrument the two percentages measure different quantities, so
+		// anchoring to the old one records a number the new instrument never
+		// produced — for a component the gate itself has just refused to
+		// compare. The measured counts are recorded verbatim instead.
+		if !ok || !b.Measured() || !lines.Measured() || b.Producer != lines.Producer {
 			continue
 		}
 		if lines.Percent() < b.Percent() && !regressedBeyond(lines.Percent(), b.Percent(), tolerance) {

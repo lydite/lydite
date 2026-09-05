@@ -60,9 +60,9 @@ func TestAJavaScriptProducerIsEmptyWithoutItsProvider(t *testing.T) {
 }
 
 // A workspace lydite cannot introspect at all — Yarn PnP, or an install that
-// never ran — has no producer rather than a wrong one. The gate then behaves as
-// it did before producers existed, which is the safe answer for a repository
-// whose instrument lydite cannot name.
+// never ran — has no producer rather than a wrong one. Two such measurements
+// compare, which is the safe answer for a repository whose instrument lydite
+// cannot name: the alternative never gates it again.
 func TestAWorkspaceWithNoInstallHasNoProducer(t *testing.T) {
 	if got := registry[Vitest].Producer(t.TempDir(), "22.11.0"); got != "" {
 		t.Errorf("producer = %q, want nothing when there is no node_modules", got)
@@ -94,5 +94,28 @@ func TestAnUnknownToolchainLeavesNoProducer(t *testing.T) {
 		if got := registry[name].Producer(t.TempDir(), ""); got != "" {
 			t.Errorf("%s producer = %q, want nothing when the toolchain is unknown", name, got)
 		}
+	}
+}
+
+// Jest instruments through the babel plugin it bundles, so its own version is
+// the whole of the instrument and there is no provider to name beside it.
+func TestTheJestProducerIsTheRunnerAlone(t *testing.T) {
+	root := installs(t, map[string]string{"jest": "30.2.0"})
+	if got := registry[Jest].Producer(root, "22.11.0"); got != "jest 30.2.0" {
+		t.Errorf("producer = %q, want the runner alone", got)
+	}
+	if got := registry[Jest].Producer(t.TempDir(), "22.11.0"); got != "" {
+		t.Errorf("producer = %q, want nothing when jest is not installed", got)
+	}
+}
+
+// The instrumented variant of cargo-llvm-cov-nextest measures through the same
+// pair as cargo-nextest's, so it names the same producer. A runner whose plain
+// variant is already instrumented must not answer differently from one whose
+// instrumented variant is.
+func TestBothRustRunnersNameTheSameProducer(t *testing.T) {
+	dir, lang := t.TempDir(), "1.91.0"
+	if a, b := registry[CargoNextest].Producer(dir, lang), registry[CargoLLVMCovNextest].Producer(dir, lang); a != b {
+		t.Errorf("cargo-nextest = %q, cargo-llvm-cov-nextest = %q, want one answer", a, b)
 	}
 }

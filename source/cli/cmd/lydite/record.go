@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
@@ -101,8 +102,13 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		return err
 	}
 	if len(folded.Components) == 0 {
+		// The reason travels as a Detail line rather than inside the value.
+		// It is the one field here written by a run this command did not
+		// perform, so it may carry anything that run's own inputs carried —
+		// and a Detail is indented, which is what stops a line of it being
+		// read as a status row of its own.
 		rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "record",
-			Value: "nothing to record — " + folded.Reason})
+			Value: "nothing to record", Detail: []string{folded.Reason}})
 		return nil
 	}
 
@@ -140,21 +146,34 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		return nil
 	}
 
-	record := folded.baseline()
+	// The declaration bounds what may be recorded, on both sides of the merge
+	// below. A candidate is written by a run this command did not perform, so
+	// a name in it that the tree does not declare is a component nothing can
+	// ever measure again — the same thing an entry left behind by a deleted
+	// component is, and it is dropped for the same reason.
+	record := declaredOnly(decl, folded.baseline())
+
+	// The tolerance is read from the tree being recorded, because it is that
+	// tree's own statement of how much measurement noise it accepts.
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", config.FileName, err)
+	}
+
 	// Merged onto whatever this tree already holds, never skipped because it
 	// holds something: a re-run that measured more than the last one must not
 	// be refused for finding an entry there.
-	//
-	// A component the declaration no longer holds is dropped rather than
-	// carried, so the entry does not accumulate a tail of components nobody
-	// can measure.
 	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, head); hit {
-		merged := gitstate.Baseline{}
-		for name, e := range existing {
-			if declares(decl, name) {
-				merged[name] = e
-			}
-		}
+		// Anchored against what this tree already holds, not only against
+		// what the measuring run compared with. The same tree is the same
+		// content, so a difference between two measurements of it is the
+		// measurement noise the tolerance exists for — and without this a
+		// recording that re-measures a tree an earlier one already recorded
+		// replaces the anchored high-water entry with a raw dipped one,
+		// handing the next change a lowered number to gate against. That is
+		// the per-merge ratchet withToleratedDipsRestored exists to prevent.
+		record = withToleratedDipsRestored(record, existing, cfg.Coverage.Tolerance)
+		merged := declaredOnly(decl, existing)
 		for name, e := range record {
 			merged[name] = e
 		}
@@ -244,6 +263,23 @@ func unmeasurableByDeclaration(c component.Component) bool {
 	}
 	inv, ok := r.Build(runner.Instrumented, c.Args)
 	return !ok || inv.CoverageReport == ""
+}
+
+// declaredOnly is a baseline narrowed to the components the tree declares.
+//
+// It is applied to everything that reaches the branch, so the declaration read
+// from the recorded tree is the whole of what may appear under that tree's
+// key. A component the declaration no longer holds dies with it rather than
+// leaving a tail of entries nobody can measure, and a name a candidate
+// invented never arrives.
+func declaredOnly(decl component.File, b gitstate.Baseline) gitstate.Baseline {
+	out := make(gitstate.Baseline, len(b))
+	for name, e := range b {
+		if declares(decl, name) {
+			out[name] = e
+		}
+	}
+	return out
 }
 
 // declares reports whether the declaration still holds a component by name.

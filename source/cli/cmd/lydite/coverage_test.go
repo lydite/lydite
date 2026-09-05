@@ -550,8 +550,8 @@ func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
 	ms := inDeclarationOrder(decl, nil, true)
 	baseline := gitstate.Baseline{"api": entry(50, 100), "gone": entry(90, 100)}
-	// recordThisTree writes through git, so the assertion is on the shape it
-	// builds: every declared component present, and nothing else.
+	// candidateThisTree writes no git state, so the assertion is on the shape
+	// it builds: every declared component present, and nothing else.
 	record := gitstate.Baseline{}
 	for _, m := range ms {
 		if b, ok := baseline[m.Name]; ok {

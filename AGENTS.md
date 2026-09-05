@@ -1919,9 +1919,9 @@ token there, the worst a pull request's own suite can provoke through the relay 
 on its own pull request. It **narrows [#49](https://github.com/lydite/lydite/issues/49) rather than
 closing it.** Recording a coverage baseline is a push to the `lydite` branch and needs
 `contents: write`; the relay mints `pull_requests: write` and has no endpoint that commits
-anything. A gating job that also records still holds a pushing token, and what fixes that is the
-record split #49 describes or a relay endpoint that does not exist — which is why this repository
-runs the gate read-only.
+anything. `lydite test record` takes the coverage write out of the gating job the same way, and
+neither closes the rest: a recording job holds a pushing token whatever command it runs, so it
+belongs on a tree that has already merged — which is where `lydite-baseline.yml` runs it.
 
 - **RS256 is fixed, not read from the token.** Honouring a token's own `alg` is how a verifier
   accepts `alg: none`.

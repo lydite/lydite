@@ -406,7 +406,77 @@ def main_scan(path: str) -> int:
     return 0
 
 
+def main_record(gated: str, recorded: str) -> int:
+    """Assert the measure/record split actually lands a baseline.
+
+    This is the assertion `.github/workflows/lydite-baseline.yml` never had.
+    That workflow is the only writer of the coverage baseline, it runs on
+    pushes to the default branch alone, and it spent the whole life of the
+    `source/` layout failing at "no components declared" without anyone
+    noticing — because a baseline that is never written costs a slower run and
+    never a red one. Nothing about that failure was visible from a pull
+    request, which is what makes it worth paying for a gated run here.
+
+    Two things have to hold, and neither is the verdict. The measuring run
+    must write a candidate and record nothing itself, and the recording run
+    must land it. The proving ground fails its orphan gate on purpose, so this
+    also pins the rule that a gate saying nothing about coverage does not
+    discard a complete candidate.
+    """
+    with open(gated, encoding="utf-8") as fh:
+        gated_doc = json.load(fh)
+    with open(recorded, encoding="utf-8") as fh:
+        recorded_doc = json.load(fh)
+    gated_rows = {r["label"]: r for r in gated_doc["rows"]}
+    recorded_rows = {r["label"]: r for r in recorded_doc["rows"]}
+    failures = []
+
+    # The measuring run establishes a candidate and says so. A run that had
+    # gone back to writing the branch itself would say "recorded for" here.
+    record = gated_rows.get("record")
+    if record is None:
+        failures.append("no `record` row on the gated run: it established no candidate and did not say so")
+    elif "lands it" not in record.get("value", ""):
+        failures.append(
+            f"gated run's record row is {record.get('value')!r}; want a candidate handed on, "
+            "which is the whole of what separates measuring from recording"
+        )
+
+    # Every declared component reaches the candidate, or the recording below
+    # is refused for a reason that has nothing to do with the split.
+    for name in EXPECTED_COVERAGE_UNITS:
+        row = gated_rows.get(f"coverage({name})")
+        if row is None:
+            failures.append(f"no coverage({name}) row on the gated run")
+
+    landed = recorded_rows.get("record")
+    if landed is None:
+        failures.append("no `record` row on the recording run")
+    elif landed.get("status") != "pass":
+        failures.append(
+            f"record is {landed.get('status')!r}: {landed.get('value', '')} — the recording did not "
+            "land, which is the failure lydite-baseline.yml hid for the life of the source/ layout"
+        )
+    if recorded_doc.get("verdict") != "pass":
+        failures.append(
+            f"recording verdict is {recorded_doc.get('verdict')!r}; the measuring run fails its "
+            "orphan gate on purpose, and that must not stop the tree being recorded"
+        )
+
+    for failure in failures:
+        print(f"proving ground record: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        "proving ground record: the gated run handed on a candidate and wrote no baseline itself; "
+        "`lydite test record` landed it despite the expected orphan-gate failure"
+    )
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--record":
+        sys.exit(main_record(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--affected":
         sys.exit(main_affected(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--scan":

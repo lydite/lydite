@@ -55,14 +55,14 @@ const BranchName = "lydite"
 // every consumer takes one clean cache miss, and the gate recovers by
 // recording afresh.
 //
-// A gained field bumps it too, whenever an entry written without that field
-// would be read as a hit. An Entry has a Producer, and one recorded before
-// Producer existed unmarshals with an empty one — which matches nothing this
-// run can measure, so every component reports as new and the gate enforces
-// nothing while ReadBaseline reports a hit. That is the failure mode the empty
-// entry rule exists for, arriving through the reader instead. A clean miss
-// measures the base tree and records a complete entry, which is slower and
-// correct.
+// A gained field bumps it too, whenever an entry lacking that field would
+// still be read as a hit. An entry carrying no Producer matches only a
+// measurement lydite could not attribute, so under a directory whose entries
+// predate the field every component reports as new and the gate enforces
+// nothing — while ReadBaseline reports a hit, which is the failure mode the
+// empty-entry rule exists for arriving through the reader instead. A clean
+// miss measures the base tree and records a complete entry, which is slower
+// and correct.
 //
 // A directory rather than a marker inside the file: the entries stay a plain
 // component -> counts object, which is what makes them readable by hand on the
@@ -260,9 +260,8 @@ func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
 // them.
 //
 // The counts are embedded rather than held in a named field so that an entry
-// reads as the counts it mostly is — Covered, Total and Percent are promoted,
-// and the JSON stays the flat object the branch has always carried, with one
-// key added.
+// reads as the counts it mostly is: Covered, Total and Percent are promoted,
+// and the JSON is a flat object rather than a nested one.
 type Entry struct {
 	coverage.LineCount
 	// Producer names the instrument that wrote the report these counts came
@@ -282,9 +281,9 @@ type Entry struct {
 	// is possible only for JavaScript: it is the one language whose measuring
 	// instrument lydite deliberately does not pin, since installing one into
 	// the tree it is about to gate would have lydite change what the
-	// repository resolves to. An empty producer compares equal to an empty
-	// one, so such a component gates exactly as it did before this field
-	// existed rather than never gating again.
+	// repository resolves to. An empty producer matches only another empty
+	// one, so a component whose instrument lydite cannot name is still
+	// compared rather than permanently reported new.
 	Producer string `json:"producer,omitempty"`
 }
 
