@@ -353,6 +353,17 @@ func Load(ctx context.Context, dir string, c component.Component, out io.Writer)
 // whose answer cannot differ.
 type RuntimeSource func() (Runtime, error)
 
+// NoRuntime is the RuntimeSource for a caller that reads a stack without ever
+// running it.
+//
+// `lydite test plan` needs each component's published host ports and starts
+// nothing, and probing would make a pure command depend on the state of the
+// machine: a laptop with no container engine would fail to emit a matrix for a
+// repository whose suites run perfectly well on the runner that gets it. The
+// zero Runtime is only ever handed to Up and Down, which such a caller does not
+// reach.
+func NoRuntime() (Runtime, error) { return Runtime{}, nil }
+
 // LoadWith is Load against a caller-supplied runtime source.
 func LoadWith(runtime RuntimeSource, dir string, c component.Component, out io.Writer) (*Stack, error) {
 	path, err := composePath(dir, c)

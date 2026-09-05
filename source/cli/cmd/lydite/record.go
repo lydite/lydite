@@ -16,7 +16,7 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
-// newRecordCmd lands the candidate baselines one or more runs produced.
+// newRecordCmd lands the baseline one or more runs measured.
 //
 // It exists because measuring and recording want different things of the job
 // they run in, and those things are incompatible. Measuring runs each
@@ -38,8 +38,12 @@ import (
 // has passed review and every gate. See docs/adr/0025.
 //
 // It is a subcommand of `test` because the document it consumes is one
-// `lydite test` wrote, and because `lydite test plan` and `lydite test merge`
-// join it there.
+// `lydite test` wrote, beside `lydite test plan` and `lydite test merge`.
+//
+// It folds the --reports directories itself rather than reading what `merge`
+// produced, because it runs in a job `merge` does not precede: recording is one
+// write after every shard has measured, in a workflow whose other jobs hold no
+// token that can push.
 func newRecordCmd() *cobra.Command {
 	var dir string
 	var reports []string
@@ -49,15 +53,15 @@ func newRecordCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Short:         "Record the coverage baseline a run measured, running none of the repository",
-		Long: `Write the candidate baseline one or more ` + candidateName + ` documents hold to the ` +
+		Long: `Write the baseline one or more ` + measurementsName + ` documents hold to the ` +
 			gitstate.BranchName + ` branch.
 
 Each --reports directory is a ` + runner.ReportDir + ` directory a lydite test run wrote —
 one per shard, or one for the whole run. Nothing from the repository is
 executed: no suite, no setup or teardown command, and no compose service.
 
-The candidates must all describe the tree that is checked out, so a document
-cannot be recorded anywhere but where it was measured.`,
+The documents must all describe the tree that is checked out, so a measurement
+cannot be recorded anywhere but where it was taken.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if len(reports) == 0 {
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
@@ -76,28 +80,28 @@ cannot be recorded anywhere but where it was measured.`,
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
 	cmd.Flags().StringSliceVar(&reports, "reports", nil,
-		"a "+runner.ReportDir+" directory holding a "+candidateName+"; repeatable")
+		"a "+runner.ReportDir+" directory holding a "+measurementsName+"; repeatable")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	return cmd
 }
 
-// recordBaseline folds the named candidates and lands the result.
+// recordBaseline folds the named documents and lands the result.
 //
 // Every refusal is a failing row rather than an error, because this command
-// reached an answer: the candidates were read and something about them says
+// reached an answer: the documents were read and something about them says
 // they must not be recorded. An error is reserved for not reaching one at all
 // — an unreadable directory, a checkout with no tree.
 func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, reports []string) error {
-	docs, err := candidatesIn(rep, reports)
+	docs, err := measurementsIn(rep, reports)
 	if err != nil {
 		return err
 	}
 	if len(docs) == 0 {
-		return errors.New("none of the named report directories holds a " + candidateName +
+		return errors.New("none of the named report directories holds a " + measurementsName +
 			"\n       a `lydite test` run writes one; a run with --no-coverage does not")
 	}
-	folded, err := foldCandidates(docs)
+	folded, err := foldMeasurements(docs)
 	if err != nil {
 		return err
 	}
@@ -112,7 +116,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		return nil
 	}
 
-	// The binding. A candidate names the tree it measured, and this refuses
+	// The binding. A document names the tree it measured, and this refuses
 	// to record it anywhere else: without it a mis-wired workflow lands one
 	// tree's numbers under another tree's key, silently, and that entry then
 	// gates every later change whose merge-base is that tree.
@@ -122,14 +126,14 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	}
 	if head != folded.Tree {
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "record",
-			Value: fmt.Sprintf("not recorded — the candidate measured %s, but %s is checked out", shortSHA(folded.Tree), shortSHA(head)),
+			Value: fmt.Sprintf("not recorded — the measurement was taken on %s, but %s is checked out", shortSHA(folded.Tree), shortSHA(head)),
 			Detail: []string{
 				"record where the measurement was taken, or check that tree out first",
 			}})
 		return nil
 	}
 
-	// Read from the tree being recorded, never from the candidate: the
+	// Read from the tree being recorded, never from the fold: the
 	// declaration says which components a complete baseline must cover, and
 	// taking that from the same document whose completeness is in question
 	// would make the check answer itself.
@@ -147,7 +151,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	}
 
 	// The declaration bounds what may be recorded, on both sides of the merge
-	// below. A candidate is written by a run this command did not perform, so
+	// below. The fold is written by runs this command did not perform, so
 	// a name in it that the tree does not declare is a component nothing can
 	// ever measure again — the same thing an entry left behind by a deleted
 	// component is, and it is dropped for the same reason.
@@ -199,20 +203,20 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	return nil
 }
 
-// candidatesIn reads one candidate per named directory, adding a row for each
+// measurementsIn reads one document per named directory, adding a row for each
 // so a folded recording says what it was folded from.
 //
-// A directory holding no candidate is named and skipped rather than failing
+// A directory holding no measurements is named and skipped rather than failing
 // the command: a run with --no-coverage writes none, and a caller passing the
 // same directory list to `record` as to `publish` is doing something
 // reasonable.
-func candidatesIn(rep *ui.Report, reports []string) ([]candidateDoc, error) {
-	var docs []candidateDoc
+func measurementsIn(rep *ui.Report, reports []string) ([]measurementsDoc, error) {
+	var docs []measurementsDoc
 	for _, dir := range reports {
-		doc, err := readCandidate(dir)
+		doc, err := readMeasurements(dir)
 		if err != nil {
 			rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "read(" + dir + ")",
-				Value: "no candidate baseline", Detail: []string{err.Error()}})
+				Value: "no measurements", Detail: []string{err.Error()}})
 			continue
 		}
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
@@ -232,7 +236,7 @@ func candidatesIn(rep *ui.Report, reports []string) ([]candidateDoc, error) {
 // A component nothing could ever measure is not a gap — a raw `command:`, or a
 // runner whose instrumented variant names no report — and it is recognised the
 // same way `lydite test` recognises it, from the declaration alone.
-func missingFromRecord(decl component.File, doc candidateDoc) (string, bool) {
+func missingFromRecord(decl component.File, doc measurementsDoc) (string, bool) {
 	var gaps []string
 	for _, c := range decl.Components {
 		if _, ok := doc.Components[c.Name]; ok {
@@ -270,7 +274,7 @@ func unmeasurableByDeclaration(c component.Component) bool {
 // It is applied to everything that reaches the branch, so the declaration read
 // from the recorded tree is the whole of what may appear under that tree's
 // key. A component the declaration no longer holds dies with it rather than
-// leaving a tail of entries nobody can measure, and a name a candidate
+// leaving a tail of entries nobody can measure, and a name a document
 // invented never arrives.
 func declaredOnly(decl component.File, b gitstate.Baseline) gitstate.Baseline {
 	out := make(gitstate.Baseline, len(b))

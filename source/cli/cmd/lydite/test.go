@@ -94,15 +94,6 @@ the component's to declare.`,
 				// workflow believing it gates.
 				return errors.New("--no-coverage measures nothing for --gate-coverage to gate; pass one")
 			}
-			if onlyAffected && len(components) > 0 {
-				// Two narrowing mechanisms composed. The planner emits
-				// per-shard --component lists that are already the selected
-				// set, so the combination is never needed — and an
-				// intersection nobody asked for narrows silently when it is
-				// wrong.
-				return errors.New("--affected and --component both narrow the run; pass one")
-			}
-
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
@@ -125,10 +116,28 @@ the component's to declare.`,
 			// invocation chose.
 			rep.Add(watchRow(ctx, dir, file))
 
-			selected, err := file.Select(components)
+			// The responsibility set: what this run reports on, and the
+			// whole of it. `--component` says what this job is responsible
+			// for and `--affected` says which of those need running, so the
+			// two compose rather than competing — a shard runs
+			// `--affected --component <slice>` and reports one row per
+			// component in the slice, whether or not selection ran it.
+			//
+			// A run reports nothing at all about a component outside this
+			// set. Under a matrix that is what keeps every declared component
+			// appearing exactly once across the shards, which is the property
+			// `lydite test merge` decides completeness from.
+			own, err := file.Select(components)
 			if err != nil {
 				return err
 			}
+			// Narrowed by --component, which is what makes a repository-wide
+			// figure unanswerable here: coverage(repo) and patch(repo) sum
+			// every component, and a shard holding two of four would publish
+			// its own two under a label about the repository. `lydite test
+			// merge` emits them once, from every shard's measurements.
+			narrowed := len(components) > 0
+			selected := own
 			// Before any suite runs. `lydite test` is the command that invokes
 			// `go test`, `cargo llvm-cov` and `npx vitest`, so it is the one
 			// that has to make their toolchains present — a runner with no
@@ -162,7 +171,13 @@ the component's to declare.`,
 				if err != nil {
 					return err
 				}
-				selected = res.Selected
+				// Selection is computed over the whole declaration and
+				// intersected with this run's responsibility set afterwards,
+				// so the `select` row says the same thing in every shard.
+				// Computing it over the slice would give each shard its own
+				// counts and reasons, and the fold has no way to tell that
+				// from shards that saw different trees.
+				selected = intersect(res.Selected, own)
 				rep.Add(selectRow(res, len(file.Components)))
 				// The same label shape a suite row takes, so every component
 				// produces exactly one test(<name>) row whether it ran or
@@ -175,11 +190,14 @@ the component's to declare.`,
 				// the rows interleave into declaration order. Added here they
 				// would all precede the suites, and a declaration of a, b, c
 				// with only b affected would document b last.
+				//
+				// Scoped to the responsibility set, so `test(a): not
+				// affected` is emitted by the one shard that owns a.
 				skipped = make(map[string]ui.Row, len(res.Skipped))
-				for _, c := range res.Skipped {
+				for _, c := range intersect(res.Skipped, own) {
 					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"}
 				}
-				ordered = file.Components
+				ordered = own
 			}
 			cov := coverageOptions{
 				Instrument:  !noCoverage,
@@ -187,11 +205,12 @@ the component's to declare.`,
 				BaseBranch:  baseBranch,
 				Concurrency: limit,
 				Selected:    onlyAffected,
+				Narrowed:    narrowed,
 			}
 			if len(selected) == 0 {
 				// Nothing ran, so nothing interleaves: the skipped rows are
 				// the whole set, still in declaration order.
-				for _, c := range file.Components {
+				for _, c := range own {
 					if r, ok := skipped[c.Name]; ok {
 						rep.Add(r)
 					}
@@ -203,7 +222,7 @@ the component's to declare.`,
 				// still the tree whose coverage the next change gates
 				// against.
 				if len(file.Components) > 0 {
-					addCoverageRows(ctx, cmd, rep, dir, file, nil, cfg, cov)
+					addCoverageRows(ctx, cmd, rep, dir, file, own, nil, cfg, cov)
 				}
 				// Only when the declaration is genuinely empty. A run that
 				// selected nothing has components declared and has already
@@ -224,16 +243,20 @@ the component's to declare.`,
 			}
 
 			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep)
-			addCoverageRows(ctx, cmd, rep, dir, file, ms, cfg, cov)
+			addCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
 			return renderTestReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
 	// A subcommand beside a runnable command: cobra resolves subcommands
 	// before positional arguments, so `lydite test` still runs the suites and
 	// `lydite test record` lands what they measured.
-	cmd.AddCommand(newRecordCmd())
+	cmd.AddCommand(newRecordCmd(), newPlanCmd(), newMergeCmd())
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
-	cmd.Flags().StringSliceVar(&components, "component", nil, "component to run; repeatable, and every declared component by default")
+	// What this run is responsible for. It reports one row per component
+	// named here and nothing at all about any other, which is what lets
+	// `lydite test merge` fold a matrix of shards into one document — and
+	// what `--affected` then narrows within.
+	cmd.Flags().StringSliceVar(&components, "component", nil, "component this run is responsible for; repeatable, and every declared component by default")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	// A flag and never a key in .lydite/config.yml: how many components a
@@ -249,7 +272,7 @@ the component's to declare.`,
 	// selection cannot report. The caller already knows the event, so it says
 	// so; a bare `lydite test` always runs every component.
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
-		"run only the components the change against the merge-base could have broken")
+		"of the components this run is responsible for, run only those the change against the merge-base could have broken")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	// Instrumentation is on by default despite costing real time — cargo
 	// llvm-cov forces a separate instrumented build, and Go's -coverpkg=./...
@@ -290,10 +313,12 @@ const defaultConcurrency = 4
 
 // resolveConcurrency turns the flag into a slot count.
 //
-// "max" is a slot for every component, which is what the planner passes when it
-// wants a shard to hold everything it was given; the scheduler never admits
-// more than it has, so the bound needs no count to be resolved against and can
-// be checked before any work happens. A number below one is refused rather than
+// "max" is a slot for every component, for a caller that wants a shard to run
+// everything it was given at once; the scheduler never admits more than it has,
+// so the bound needs no count to be resolved against and can be checked before
+// any work happens. It bounds the components inside one process and says
+// nothing about how many jobs a matrix has — `lydite test plan` takes no such
+// knob, because one word meaning both is one a reader cannot tell apart. A number below one is refused rather than
 // clamped: it is a typo, and silently running anyway would have lydite ignore
 // something the caller said.
 func resolveConcurrency(flag string) (int, error) {
@@ -1373,4 +1398,25 @@ func watchRow(ctx context.Context, dir string, file component.File) ui.Row {
 		Value:  fmt.Sprintf("%d of %d pattern(s) cover no file", len(unmatched), declared),
 		Detail: detail,
 	}
+}
+
+// intersect narrows a selection to the components this run is responsible
+// for, keeping the order it was given.
+//
+// Selection runs over the whole declaration, because a dependency edge
+// reaches components in other shards and a closure computed over a slice
+// would stop at its boundary. What each shard then reports is its own share
+// of that one answer.
+func intersect(cs []component.Component, own []component.Component) []component.Component {
+	mine := make(map[string]bool, len(own))
+	for _, c := range own {
+		mine[c.Name] = true
+	}
+	out := make([]component.Component, 0, len(cs))
+	for _, c := range cs {
+		if mine[c.Name] {
+			out = append(out, c)
+		}
+	}
+	return out
 }

@@ -73,6 +73,12 @@ type measurement struct {
 	// component failed to build would otherwise report that component's last
 	// good figure with a ✓ beside it.
 	Carryable bool
+	// Unselected marks a component this run never reached, so its absence is
+	// not a gap the run left. Completeness is the fold's question, asked once
+	// against the declaration of the tree being recorded; a run refuses to
+	// establish a candidate only over a component it selected and failed to
+	// measure.
+	Unselected bool
 }
 
 // Measured reports whether this component produced a coverage measurement.
@@ -186,6 +192,13 @@ type coverageOptions struct {
 	// would attribute the merge-base's number to a component whose code this
 	// very change may have rewritten.
 	Selected bool
+	// Narrowed says `--component` was passed, which is what makes a
+	// repository-wide figure unanswerable here. coverage(repo) and patch(repo)
+	// sum every component; a shard holding two of four would publish its own
+	// two under a label about the repository, and three shards would publish
+	// three different answers to one question. `lydite test merge` emits them
+	// once instead.
+	Narrowed bool
 }
 
 // addCoverageRows renders — and, when asked, gates — this run's coverage.
@@ -210,16 +223,22 @@ type coverageOptions struct {
 // A gate the caller asked for and lydite could not run is a failing row, not an
 // unmeasured one. The caller passed --gate-coverage; silently not gating is the
 // state this whole file exists to make impossible.
-func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, decl component.File, ms []measurement, cfg config.Config, opts coverageOptions) {
+// own is what this run is responsible for: its `--component` list, or the
+// whole declaration. It reports one row per component in it and nothing at all
+// about any other, so every declared component appears exactly once across a
+// matrix of shards. It is a parameter rather than a field on the options
+// because an empty set is a report about no component, and a caller must not be
+// able to reach that by omission.
+func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, decl component.File, own []component.Component, ms []measurement, cfg config.Config, opts coverageOptions) {
 	if !opts.Instrument {
 		return
 	}
-	ordered := inDeclarationOrder(decl, ms, opts.Selected)
+	ordered := inDeclarationOrder(own, ms, opts.Selected)
 	if !opts.Gate {
-		ungatedRows(rep, ordered)
+		ungatedRows(rep, ordered, !opts.Narrowed)
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
 			Value: "not read — pass --gate-coverage to compare against it"})
-		floorRows(rep, ordered, cfg.Coverage.Floor)
+		floorRows(rep, ordered, cfg.Coverage.Floor, !opts.Narrowed)
 		return
 	}
 	// Into a report of its own, committed only once it succeeds. gatedRows
@@ -232,10 +251,10 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 	if err := gatedRows(ctx, cmd, gated, dir, decl, ordered, cfg, opts); err != nil {
 		// The measurements are still worth showing: they are what a reader
 		// needs in order to act on the gate that could not run.
-		ungatedRows(rep, ordered)
+		ungatedRows(rep, ordered, !opts.Narrowed)
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "baseline",
 			Value: "not gated", Detail: strings.Split(err.Error(), "\n")})
-		floorRows(rep, ordered, cfg.Coverage.Floor)
+		floorRows(rep, ordered, cfg.Coverage.Floor, !opts.Narrowed)
 		return
 	}
 	for _, row := range gated.Rows() {
@@ -243,20 +262,23 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 	}
 }
 
-// inDeclarationOrder returns one measurement per declared component, in the
-// order the file declares them.
+// inDeclarationOrder returns one measurement per component this run is
+// responsible for, in the order the file declares them.
 //
-// Every declared component, including one this invocation never selected:
+// Every component in that set, including one this invocation never selected:
 // omitting the rest would make a narrowed run indistinguishable from a
-// complete one. Declaration order rather than completion order, so two runs of
-// one declaration produce the same document.
-func inDeclarationOrder(decl component.File, ms []measurement, selected bool) []measurement {
+// complete one. Nothing outside it, because a shard that padded a row for
+// every *declared* component publishes rows about components other shards are
+// running, and the merged document then holds one answer per shard under each
+// label. Declaration order rather than completion order, so two runs of one
+// declaration produce the same document.
+func inDeclarationOrder(own []component.Component, ms []measurement, selected bool) []measurement {
 	byName := make(map[string]measurement, len(ms))
 	for _, m := range ms {
 		byName[m.Name] = m
 	}
-	out := make([]measurement, 0, len(decl.Components))
-	for _, c := range decl.Components {
+	out := make([]measurement, 0, len(own))
+	for _, c := range own {
 		if m, ok := byName[c.Name]; ok {
 			out = append(out, m)
 			continue
@@ -266,6 +288,7 @@ func inDeclarationOrder(decl component.File, ms []measurement, selected bool) []
 		// in this file describes a component this run actually reached.
 		m := unmeasuredComponent(c, "the component was not selected for this run")
 		m.Carryable = selected
+		m.Unselected = true
 		out = append(out, m)
 	}
 	return out
@@ -277,9 +300,13 @@ func inDeclarationOrder(decl component.File, ms []measurement, selected bool) []
 // measured 40% would otherwise render the same glyph as one that measured 95%,
 // and a workflow missing --gate-coverage would report the green a gated run
 // reports.
-func ungatedRows(rep *ui.Report, ms []measurement) {
+func ungatedRows(rep *ui.Report, ms []measurement, composed bool) {
 	ungatedComponentRows(rep, ms)
-	rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, everything))
+	// Only a run responsible for the whole declaration answers about the
+	// repository. A shard's own components are not it.
+	if composed {
+		rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, everything))
+	}
 }
 
 // ungatedComponentRows is the per-component half, shared by the two runs that
@@ -332,8 +359,8 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	headTree, headErr := gitstate.TreeSHA(ctx, dir, "HEAD")
 	baseTree, baseErr := gitstate.TreeSHA(ctx, dir, base)
 	if headErr == nil && baseErr == nil && headTree == baseTree {
-		ungatedRows(rep, ms)
-		floorRows(rep, ms, cfg.Coverage.Floor)
+		ungatedRows(rep, ms, !opts.Narrowed)
+		floorRows(rep, ms, cfg.Coverage.Floor, !opts.Narrowed)
 		// The row is written from what the run actually established, not from
 		// what it was about to attempt. A candidate is declined for three
 		// reasons — a run that measured nothing, a component with no entry to
@@ -344,7 +371,9 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
 			Value:  "not read — HEAD is its own merge-base, so there is no earlier measurement to compare against",
 			Detail: []string{"nothing was gated: this tree is the one a later change is measured against, and recording it is what this run is for"}})
-		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), cfg.Coverage.Tolerance)
+		// No patch parts: HEAD is its own merge-base, so the diff this
+		// figure would be composed over is empty.
+		doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, previousTreeBaseline(ctx, dir), nil, cfg.Coverage.Tolerance)
 		rep.Add(candidateRow(cmd, dir, doc, value))
 		return nil
 	}
@@ -387,14 +416,19 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 			rep.Add(row)
 		}
 	}
-	rep.Add(composedRow(repoLabel("coverage"), current, carried, baseline, everything, cfg.Coverage.Tolerance))
-	composedPatchRows(rep, parts, cfg.Coverage.Patch.Tolerance)
-	floorRows(rep, ms, cfg.Coverage.Floor)
+	// The two rows no shard can produce. Both sum every component, so a run
+	// responsible for part of the declaration answers about the part and
+	// labels it the repository; `lydite test merge` composes them once from
+	// every shard's measurements instead.
+	if !opts.Narrowed {
+		composedRows(rep, current, carried, baseline, parts, cfg)
+	}
+	floorRows(rep, ms, cfg.Coverage.Floor, !opts.Narrowed)
 	// `record` and not `baseline`: the two are different events in one run —
 	// the baseline read this change is gated against, and the entry this
 	// change leaves for the next one. Sharing a label would put two rows under
 	// it, which is what a consumer keying rows by label cannot survive.
-	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, cfg.Coverage.Tolerance)
+	doc, value := candidateThisTree(ctx, cmd, dir, decl, ms, baseline, parts, cfg.Coverage.Tolerance)
 	rep.Add(candidateRow(cmd, dir, doc, value))
 	return nil
 }
@@ -409,9 +443,9 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 //
 // A tree that will not resolve leaves it empty, which is the one case where
 // there is genuinely nothing to bind to.
-func reasonOnly(ctx context.Context, dir, prefix, reason string) (candidateDoc, string) {
+func reasonOnly(ctx context.Context, dir, prefix, reason string) (measurementsDoc, string) {
 	tree, _ := gitstate.TreeSHA(ctx, dir, "HEAD")
-	return candidateDoc{Tree: tree, Reason: reason}, prefix + " — " + reason
+	return measurementsDoc{Tree: tree, Reason: reason}, prefix + " — " + reason
 }
 
 // candidateRow saves what this run would record and says so.
@@ -419,8 +453,8 @@ func reasonOnly(ctx context.Context, dir, prefix, reason string) (candidateDoc, 
 // The row is `record` rather than `candidate`, because what a reader wants to
 // know is whether the next change has a baseline to gate against, and the
 // answer travels through this file whether or not the write lands here.
-func candidateRow(cmd *cobra.Command, root string, doc candidateDoc, value string) ui.Row {
-	if err := writeCandidate(root, doc); err != nil {
+func candidateRow(cmd *cobra.Command, root string, doc measurementsDoc, value string) ui.Row {
+	if err := writeMeasurements(root, doc); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write the candidate baseline: %v\n", err)
 		return ui.Row{Status: ui.StatusContext, Label: "record",
 			Value: "not recorded — the candidate baseline could not be written, so there is nothing for `lydite test record` to land"}
@@ -851,15 +885,22 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 	return byComponent, parts, nil
 }
 
-// composedPatchRows is the patch half of the totals, added after every
-// component's own rows.
+// composedRows renders the two figures over the repository as a whole:
+// coverage(repo) and patch(repo).
 //
-// A change that touched no component's measurable lines emits no row: there is
-// nothing to gate, and a row saying so on every documentation change is the
-// noise that trains readers to skip the rows that matter.
-func composedPatchRows(rep *ui.Report, parts []patchPart, tolerance float64) {
+// One implementation with two callers — the unnarrowed local run, and
+// `lydite test merge` folding a matrix of shards. Two that agreed today would
+// come apart the day one learned about a case the other had not, and nothing
+// would show it: the same reason `internal/scheduler` owns the port-conflict
+// predicate the planner also reads.
+//
+// A change that touched no component's measurable lines emits no patch row:
+// there is nothing to gate, and a row saying so on every documentation change
+// is the noise that trains readers to skip the rows that matter.
+func composedRows(rep *ui.Report, current []measurement, carried map[string]bool, baseline gitstate.Baseline, parts []patchPart, cfg config.Config) {
+	rep.Add(composedRow(repoLabel("coverage"), current, carried, baseline, everything, cfg.Coverage.Tolerance))
 	if len(parts) > 0 {
-		rep.Add(composedPatchRow(repoLabel("patch"), parts, tolerance))
+		rep.Add(composedPatchRow(repoLabel("patch"), parts, cfg.Coverage.Patch.Tolerance))
 	}
 }
 
@@ -995,23 +1036,14 @@ func hasExt(file string, exts []string) bool {
 // *small* untested sub-unit. A repository that wants crate-level floors
 // declares those crates as components, which is a statement about what it
 // wants tested made in the file whose history records exactly that.
-func floorRows(rep *ui.Report, ms []measurement, floor float64) {
+// summary says whether to add the row counting how many components cleared
+// the floor. It is a figure over every component the declaration holds, so a
+// run responsible for part of it emits the per-component rows alone and
+// `lydite test merge` counts once.
+func floorRows(rep *ui.Report, ms []measurement, floor float64, summary bool) {
 	if floor <= 0 || len(ms) == 0 {
 		return
 	}
-	// Only components a run could ever measure are in the denominator. A raw
-	// `command:` is not a gap in this run's coverage, and counting it renders
-	// a complete run as `1 of 2 component(s)` — the "N of M" shape that exists
-	// so a partial run cannot read as a repository-wide pass, saying the
-	// opposite of what happened. recordingBlockedBy already excludes them from
-	// the same question.
-	gateable := 0
-	for _, m := range ms {
-		if !m.Unmeasurable {
-			gateable++
-		}
-	}
-	below, cleared := 0, 0
 	for _, m := range ms {
 		if m.Unmeasurable {
 			// Named, because a component the floor can never apply to is worth
@@ -1030,15 +1062,49 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 		// printed as meeting the floor must never be failed for a difference
 		// the report cannot show.
 		if math.Round(m.Lines.Percent()*10) >= math.Round(floor*10) {
+			continue
+		}
+		rep.Add(ui.Row{Status: ui.StatusFail, Label: "floor(" + m.Name + ")",
+			Value: fmt.Sprintf("%s, floor %.1f%%", lineValue(m.Lines), floor)})
+	}
+	if !summary {
+		return
+	}
+	if row, ok := floorSummaryRow(ms, floor); ok {
+		rep.Add(row)
+	}
+}
+
+// floorSummaryRow counts how many components cleared the floor, and false when
+// there is nothing to say: the floor is off, no component is in the set, or one
+// of them is below it and has already failed on its own row.
+//
+// One implementation with two callers — the unnarrowed run, and
+// `lydite test merge` counting once over every shard's components. A shard
+// counts nothing here: the number is over the whole declaration, and three
+// shards publishing three of them under one label is what the responsibility
+// set exists to prevent.
+func floorSummaryRow(ms []measurement, floor float64) (ui.Row, bool) {
+	if floor <= 0 || len(ms) == 0 {
+		return ui.Row{}, false
+	}
+	gateable, cleared, below := 0, 0, 0
+	for _, m := range ms {
+		if m.Unmeasurable {
+			continue
+		}
+		gateable++
+		if !m.Measured() {
+			continue
+		}
+		if math.Round(m.Lines.Percent()*10) >= math.Round(floor*10) {
 			cleared++
 			continue
 		}
 		below++
-		rep.Add(ui.Row{Status: ui.StatusFail, Label: "floor(" + m.Name + ")",
-			Value: fmt.Sprintf("%s, floor %.1f%%", lineValue(m.Lines), floor)})
 	}
 	if below > 0 {
-		return
+		return ui.Row{}, false
 	}
 	// A floor that cleared nothing examined nothing, whatever the count reads
 	// like. Without this a run where every component's report was unreadable
@@ -1046,14 +1112,13 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 	// gate that looked at no component at all, which is the rule this file is
 	// arranged around, inverted.
 	if cleared == 0 {
-		rep.Add(unmeasuredRow("floor", fmt.Sprintf("no component was measured, so the %.1f%% floor was applied to none of them", floor)))
-		return
+		return unmeasuredRow("floor", fmt.Sprintf("no component was measured, so the %.1f%% floor was applied to none of them", floor)), true
 	}
 	// "N of M" rather than a bare count: the two differ exactly when some
 	// component went ungated, so a partial run cannot read as a
 	// repository-wide pass.
-	rep.Add(ui.Row{Status: ui.StatusPass, Label: "floor",
-		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, gateable, floor)})
+	return ui.Row{Status: ui.StatusPass, Label: "floor",
+		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, gateable, floor)}, true
 }
 
 // candidateThisTree is what this run would record as the baseline for the tree
@@ -1074,7 +1139,7 @@ func floorRows(rep *ui.Report, ms []measurement, floor float64) {
 //
 // It returns what it did, in the words a row shows, so no caller can announce
 // a recording that did not happen.
-func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, tolerance float64) (candidateDoc, string) {
+func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl component.File, ms []measurement, baseline gitstate.Baseline, parts []patchPart, tolerance float64) (measurementsDoc, string) {
 	declared := make(map[string]bool, len(decl.Components))
 	for _, c := range decl.Components {
 		declared[c.Name] = true
@@ -1133,9 +1198,9 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	tree, err := gitstate.TreeSHA(ctx, dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
-		return candidateDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
+		return measurementsDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
 	}
-	return candidateFrom(tree, record, carried),
+	return measurementsFrom(tree, record, carried, baseline, parts),
 		fmt.Sprintf("%d component(s) ready for %s — `lydite test record` lands it", len(record), shortSHA(tree))
 }
 
@@ -1163,12 +1228,17 @@ func sameCounts(a, b gitstate.Baseline) bool {
 // every merge — and it can then never heal, because each run reproduces it
 // from the last.
 //
-// A component nothing could ever measure is the one exemption: it contributes
-// to neither side of any comparison, so its absence is permanent and expected
-// rather than a gap a run created.
+// A component nothing could ever measure is one exemption: it contributes to
+// neither side of any comparison, so its absence is permanent and expected
+// rather than a gap a run created. A component this run never selected is the
+// other, and for a different reason: completeness is the fold's question,
+// asked once against the declaration of the tree being recorded. A shard is
+// missing most components by construction, so a run that refused over them
+// would establish nothing at all — and `lydite test record` refuses the
+// partial document that leaves behind, by name.
 func recordingBlockedBy(ms []measurement, record gitstate.Baseline) (measurement, bool) {
 	for _, m := range ms {
-		if m.Unmeasurable {
+		if m.Unmeasurable || m.Unselected {
 			continue
 		}
 		if _, ok := record[m.Name]; !ok {

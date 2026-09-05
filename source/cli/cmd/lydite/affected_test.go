@@ -159,16 +159,38 @@ func TestAffectedOnAnEmptyDiffIsUnmeasuredNotPassed(t *testing.T) {
 	}
 }
 
-func TestAffectedRefusesTheComponentFlag(t *testing.T) {
+// The two flags compose: --component says what this job is responsible for,
+// --affected says which of those need running. A shard runs both, and the
+// whole of what makes a fold possible is that it then reports its own
+// components and nothing about anybody else's.
+func TestAffectedAndComponentCompose(t *testing.T) {
 	root := affectedRepo(t)
-	commitChange(t, root, "moda/x.go", "package moda\n\n// Foo is unchanged in shape.\nfunc Foo() int { return 1 }\n")
+	commitChange(t, root, "modb/x.go", "package modb\n\n// Foo is unchanged in shape.\nfunc Foo() int { return 2 }\n")
 
-	_, err := runTestCmd(t, root, "--affected", "--component", "a", "--json")
-	if err == nil {
-		t.Fatal("--affected with --component was accepted; two narrowing mechanisms compose silently")
+	out, err := runTestCmd(t, root, "--affected", "--component", "a", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
 	}
-	if !strings.Contains(err.Error(), "both narrow the run") {
-		t.Errorf("error = %v, want it to name the conflict", err)
+	// a is this run's responsibility and the change did not touch it, so it
+	// is reported as not affected rather than dropped.
+	if got := jsonRowByLabel(t, out, "test(a)"); got.Status != "unmeasured" || got.Value != "not affected" {
+		t.Errorf("test(a) = %+v, want an unmeasured 'not affected' row", got)
+	}
+	// b is affected and is somebody else's shard. A row about it here is the
+	// defect: the fold would then hold two answers under one label.
+	for _, label := range []string{"test(b)", "coverage(b)", "patch(b)"} {
+		if strings.Contains(out, "\""+label+"\"") {
+			t.Errorf("%s appears in a run responsible only for a", label)
+		}
+	}
+	// The select row is computed over the whole declaration, so every shard
+	// writes the same one and the fold can collapse them.
+	if got := jsonRowByLabel(t, out, "select"); got.Value != "1 of 2 affected" {
+		t.Errorf("select = %q, want the count over the whole declaration", got.Value)
+	}
+	// No figure over the repository: this run measured part of it.
+	if strings.Contains(out, "coverage(repo)") {
+		t.Error("a narrowed run published a figure about the repository")
 	}
 }
 

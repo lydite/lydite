@@ -108,8 +108,8 @@ type Outcome struct {
 // Conflicts returns every pair of items holding something in common, once per
 // thing they share.
 //
-// The planner uses this to keep such a pair out of one shard, where they would
-// serialise; the scheduler uses it for the report. Both read the same
+// The planner uses this to keep such a pair *in* one shard, where the scheduler
+// serialises them; the scheduler uses it for the report. Both read the same
 // predicate, because two that agreed today would come apart the day one learned
 // about a port syntax the other had not.
 func Conflicts(items []Item) []Conflict {
