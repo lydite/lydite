@@ -24,30 +24,58 @@ is the repository root above it, where `.lydite/` lives. Every `go` and
 **First commit: correct the plan.** `.agents/plans/component-platform.md` should
 say step 9 is in progress and name this file as its prompt.
 
-## Resolve this before you plan anything else
+## Settled, before any planning
 
-**[#18](https://github.com/lydite/lydite/issues/18) and
-[ADR 0016](../../docs/adr/0016-components-and-lydite-run-tests.md) contradict each
-other, and nobody has noticed.** #18's scope says `cargo-mutants --in-diff` and
-Stryker `--since`, both pinned as third-party tools. ADR 0016's section *"lydite
-owns mutation in every language"* says the opposite in as many words — "mutation
-is built rather than delegated, for Go, Rust and TypeScript alike" — and
-addresses the delegation objection directly, naming `gotreesitter` as what makes
-a cgo-free binary able to parse Rust and TypeScript.
+The contradiction this prompt was written to flag is resolved, in
+[ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md). Read it first;
+it is the decision record for everything below and states what was rejected.
 
-The ADR is the decision record and wins on precedence. But do not simply proceed
-on that: the issue was written first and its argument for delegation
-(diff-scoping and equivalence annotations already exist in those tools) is not
-addressed by the ADR, which argues from *consistency* rather than from cost.
-Take it through the `challenge` skill, decide deliberately, and then make the two
-agree — either by correcting #18's body, or by superseding that ADR section.
-Shipping while they disagree is how the next reader inherits the ambiguity.
+- **lydite owns the engine in all three languages.** ADR 0016's ownership
+  section stands. #18's scope is corrected to drop `cargo-mutants` and Stryker.
+  The delegation argument is real and is recorded as rejected rather than
+  unaddressed: its marginal infrastructure is near zero, but it costs one
+  operator taxonomy, one acknowledgement model and one definition of a survivor.
+- **The slice ships all three languages** and closes #18 and #19.
+- **`lydite mutation` is a top-level command**, not a flag on `lydite test`. It
+  runs as its own CI matrix beside the test matrix. ADR 0016 put mutation in the
+  test job because those checks "share a compilation"; mutation does not —
+  coverage builds the instrumented variant once, mutation builds the plain one
+  per mutant. It reuses `lydite test plan`'s matrix and shares one fold
+  implementation with `lydite test merge`.
+- **Diff-scoped always**, over lines coverage reports as executed. No whole-repo
+  mode. Nothing to mutate is `unmeasured`, never a pass.
+- **No baseline.** Nothing in `measurements.json`, nothing on the `lydite`
+  branch, `lydite test record` untouched.
+- **Survivor fails (`✗`, exit 1); a hang counts as killed; an unviable mutant is
+  excluded from the denominator and reported separately; a failing baseline
+  suite is `unmeasured`.**
+- **`//lydite:equivalent <reason>` at the site**, reason required and its absence
+  an error. It is a suppression, so it clears the gate and refers the change. One
+  token in `suppressionTokens`; no file- or function-level form.
+- **#19's five operators, fixed and not configurable.** The accepted cost is the
+  equivalent-mutant rate of removed statements and arithmetic operators, which is
+  paid by authors rather than by machines. Measure it on the proving ground.
+- **Mutants run concurrently, except for a component declaring compose services**,
+  which runs them serially — its suites would share a database. Derived from
+  `scheduler.Conflicts`, third caller.
+- **No runtime budget.** Rows carry mutant count and elapsed time so a budget can
+  later be a measured decision. An oversized run dies as a job timeout and the
+  fold catches the missing row.
+- **The proving ground gains a planted survivor in each language** — a function
+  whose test asserts nothing, beside a properly tested neighbour — and the assert
+  script requires the first to survive and the second to be killed. This is a
+  second cross-repository change and it is the only place the three-language
+  claim is falsifiable.
+
+Still open and to be benchmarked: in-process versus rebuild per mutant (#19).
+`-overlay` shortens the odds for rebuilding.
 
 ## Read before planning
 
-- [ADR 0016](../../docs/adr/0016-components-and-lydite-run-tests.md), the
-  section named above, and *"What this does not settle"*, which leaves the
-  operator catalogue open and says why.
+- [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md) first, then
+  [ADR 0016](../../docs/adr/0016-components-and-lydite-run-tests.md) — its
+  ownership section, which stands, and its job-placement section, which 0027
+  amends.
 - **#19 is the concrete Go spec** and is more specific than the ADR: AST mutation
   through `go/parser` + `go/ast` + `go/printer`; mutate only lines in the diff;
   **skip mutants on uncovered lines**, since they cannot be killed and reporting
@@ -87,24 +115,6 @@ Step 8 landed the sharding, and it bounds this slice in ways the issues predate:
   repository has now shipped two assertions that could not fail, and both were
   found by asking "what would have to break for this to fail?" rather than by
   reading them.
-
-## Decisions for `challenge`, not for a guess
-
-- **The operator catalogue.** ADR 0016 leaves it open because each operator
-  multiplies runtime. Decide it against a measured run of the proving ground.
-- **The gate.** "Zero unacknowledged survivors" is a boolean, and on a mature
-  codebase the first honest run has hundreds. What that means for adoption, and
-  whether mutation is diff-scoped by default, is unsettled.
-- **Where an acknowledgement lives, and what it costs.** #18's composition is
-  that an equivalence annotation *is* a suppression, so it is a referral
-  disqualifier: kill the mutant and merge unattended, or declare it unkillable
-  and be referred. Check that still holds against `internal/referral`'s current
-  disqualifier list, and that the annotation form you choose is actually caught.
-- **`mutation: false` is already parsed** in the declaration. What it opts out of
-  is this step's to define.
-- **On by default or not.** Instrumentation is on by default and the repo argues a
-  gate that is opt-in is a gate that is off. Mutation is far slower; the same
-  argument may or may not survive.
 
 ## Traps this repository has already sprung
 

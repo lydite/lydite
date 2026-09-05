@@ -173,6 +173,12 @@ mutation for that component share a job because they share a compilation:
 for exactly that reason, and splitting them across jobs compiles the workspace
 twice.
 
+Mutation is the exception, and
+[ADR 0027](0027-mutation-is-its-own-command.md) records why: it builds the plain
+variant once per mutant where coverage builds the instrumented one once, so it
+shares a checkout with the rest and not a compilation. It runs as its own
+command in its own matrix, beside the test matrix rather than inside it.
+
 The matrix is computed by lydite and consumed by the repository's own
 `ci-test.yml`, which calls a reusable workflow. gt owns which stages exist;
 the stages themselves belong to the repository and gt never modifies them, so
@@ -235,6 +241,7 @@ the pipeline above it is identical in all three languages.
 
 Mutation's operator catalogue — how far past binary operators and boolean
 literals to go, given each operator multiplies runtime. That belongs with the
-mutation slice, which sits on top of this one. What is settled is that mutation
+mutation slice, which sits on top of this one, and
+[ADR 0027](0027-mutation-is-its-own-command.md) settles it. What is settled is that mutation
 runs per component, inside that component's job, against the same declaration
 everything else uses.

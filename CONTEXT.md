@@ -26,6 +26,25 @@ _Note_: it is a **Cache**, so a miss costs time rather than information — the 
 **Coverable line**:
 A source line that a language's own coverage tool (`go tool cover`, `cargo llvm-cov`, Istanbul) reports an entry for. Comments, blank lines, imports, and braces are never coverable — they simply never appear in a coverage report, so patch coverage's denominator (coverable changed lines) excludes them automatically, without lydite doing any language-aware filtering itself.
 
+**Mutant**:
+A single deliberate change to one line of the source under test — a negated condition, a shifted boundary, a deleted statement — introduced so the suite can be asked whether anything notices. Coverage measures execution; a mutant measures assertion, which is the thing a test that calls a function and asserts nothing does not have.
+_Note_: mutants are generated only for lines in the current change, and only for lines already reported as executed, so their count is proportional to the diff rather than to the repository. A mutant on an uncovered line is skipped rather than reported: it cannot be killed, and reporting it would restate what **Patch coverage** already said about the same line.
+_Avoid_: "mutation" for a single mutant — the mutation is the act, the mutant is the artefact.
+
+**Survivor**:
+A **Mutant** the suite did not notice: the code was changed and every test still passed. It is the only outcome that fails the mutation **Gate**, and it is cleared the way any gate is — by writing the assertion that kills it. A mutant whose run hangs is counted as killed rather than survived, since an infinite loop is a behaviour change something did notice.
+_Avoid_: "escaped mutant", "missed mutant" — other tools' vocabulary for the same thing. Also "uncaught", which reads as an exception.
+
+**Equivalent mutant**:
+A **Survivor** no test could ever kill, because the change it makes is unobservable — a deleted log line, an arithmetic rewrite with identical results over the reachable domain. Equivalence is undecidable in general, so lydite never tries to detect one: the author declares it, in a `//lydite:equivalent <reason>` comment at the site, and the declaration clears the gate.
+_Note_: the declaration is a suppression, and therefore a **Disqualifier**. Killing the mutant merges unattended; declaring it unkillable is referred. So the author always has a way forward and never a way around, and the annotation can add a referral but can never remove one — the rule ADR 0014 sets for anything an author asserts about their own change.
+_Note_: it lives in the source rather than in a central list because any registry must key a mutant by file, line and operator, and every edit above the site would silently invalidate the claim or transfer it to a different mutant. A reason is required for the same reason an **Exemption** requires one: the annotation is the entire risk record for a mutant nobody can kill.
+_Avoid_: "false positive" — the mutant is real and really survived. What is claimed is that killing it is impossible, not that generating it was a mistake.
+
+**Unviable mutant**:
+A **Mutant** that does not compile. It is excluded from the denominator entirely and reported on its own, never counted as killed: a mutant nothing could build is evidence about the generator rather than about the tests, and scoring it as a kill inflates the score silently and permanently. Telling one from a kill is what the build-only variant of a **Component**'s runner exists for, since both exit non-zero.
+_Avoid_: "invalid", "broken" — the mutant is well-formed as an edit; it is the resulting program that will not build.
+
 **Linter**:
 The engine backing lydite's TypeScript check: Biome, and only Biome. `typescript.linter` in `.lydite/config.yml` accepts `biome` alone; the retired `eslint` value is rejected with an error rather than accepted and quietly run under Biome.
 _Note_: the TypeScript check gates on **correctness** as well as security, so it is not "security findings only" the way the other language checks are. The ESLint stack it replaced covered a different set of security rules — Node/backend heuristics with no Biome equivalent — so this is a change in what is gated, not only in what runs it. See [ADR 0008](docs/adr/0008-biome-as-the-only-typescript-linter.md).
