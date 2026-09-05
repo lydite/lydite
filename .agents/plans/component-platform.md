@@ -45,8 +45,8 @@ is now written on every run, which is the document a merge step would read.
 | 5 | — | Affected selection; full run on the default branch | `pr5-affected-selection.md` | done — #46 |
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
 | 7 | #58 | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done — #54 |
-| 8 | #61 | `lydite test plan` and `lydite test merge`, reusable workflow, dogfood in `lydite-pr.yml` | `pr8-plan-and-merge.md` | not started |
-| 9 | #18 #19 | Mutation, on top of all of the above | — | not started |
+| 8 | #61 #48 | `lydite test plan` and `lydite test merge`, both workflows sharded, the coverage gate end to end | `pr8-plan-and-merge.md` | done — see [ADR 0026](../../docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md) |
+| 9 | #18 #19 | Mutation, on top of all of the above | `pr9-mutation.md` | not started |
 
 Steps 1–5 were built before the epic existed and have no issue of their own; the
 PR that delivered each is named above, and backfilling them would be a record
@@ -114,6 +114,45 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   keys that narrowed its walks; a repository declaring nothing is one scan
   refuses to run over. Toolchains resolve per component. See
   [ADR 0020](../../docs/adr/0020-scan-on-components.md).
+
+## What step 8 settled
+
+Decided in the challenge interview and recorded in
+[ADR 0026](../../docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md).
+
+- **A run reports exactly the components it is responsible for.** Its
+  `--component` list, or the whole declaration. That is what makes every
+  declared component appear exactly once across a matrix, so "did a shard die"
+  is a question about the declaration and the documents.
+- **Completeness belongs to the fold.** A run refuses to establish a candidate
+  only over a component it *selected* and failed to measure; `record` asks the
+  question once, against the declaration read from the tree being recorded.
+  Carrying an unrun component's entry forward stays licensed by affected
+  selection alone — `--component` proves nothing about what it did not run.
+- **`plan` takes no knob at all.** ADR 0017's `--concurrency N` is superseded: a
+  shard is a conflict group, the finest grouping that is safe on any runner
+  topology, and `--concurrency` already means something else on `lydite test`.
+- **`--affected` and `--component` compose.** The refusal went with the planner
+  that never existed — this one does not narrow, so the shards do.
+- **`baseline.json` is `measurements.json`**, and carries each component's patch
+  part and the baseline entry it was gated against beside its counts. The
+  repository-wide figures are composed from numbers, and a report's rows carry
+  prose.
+
+## Left open by step 8
+
+- **The reusable workflow in `lydite/actions` is not sharded**, which is #61's
+  third bullet and lives in a repository that is not here. Filed separately; a
+  sibling of [#87](https://github.com/lydite/lydite/issues/87), the `record`
+  step, and a second cross-repository cutover.
+- **A folded run publishes no `coverage(repo)` when the shards did not gate.**
+  The figure is composed from `measurements.json`, which only a gated run
+  writes; `merge` says so in an `unmeasured` row rather than dropping it. Both
+  lydite workflows gate, so nothing here is in that state.
+- **The folded `schedule` row reads the observed concurrency back out of each
+  shard's own value.** It is the one number in a report that cannot be
+  recomputed — it is observed at run time — and the alternative is a second
+  machine-readable channel carrying one integer.
 
 ## Left open by step 7
 
@@ -294,7 +333,9 @@ recorded in [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.
 - **A CI job holds a shard, not a component.** Under one component per job
   nothing in CI ever contends for a port, so the lock's only exercise would be a
   local run somebody has to remember to do. The planner (`lydite test plan`) and
-  the merge command are step 8; the in-shard scheduler is step 4.
+  the merge command are step 8; the in-shard scheduler is step 4. ADR 0026
+  supersedes this ADR's `plan --concurrency N`: a shard is a conflict group,
+  and the pair sharing a port is kept *together* rather than apart.
 - **`--concurrency` defaults to 4, and is not derived from `NumCPU`.** Every
   runner lydite drives is already internally parallel, so one component already
   tries to use the whole machine. It is not 1 either — that leaves the port lock
