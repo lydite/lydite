@@ -305,9 +305,11 @@ func ungatedRows(rep *ui.Report, ms []measurement, composed bool) {
 	// Only a run responsible for the whole declaration answers about the
 	// repository. A shard's own components are not it.
 	//
-	// No carried entries: a run reaching this path holds its own measurements,
-	// where a component it did not select is unmeasured rather than standing in
-	// for the baseline's counts. The fold passes what it carried.
+	// No carried entries, because these are the measurements as taken: a
+	// component this run did not select is unmeasured here rather than
+	// standing in for the baseline's counts, so nothing in ms is carried and
+	// the map would be empty anyway. The fold passes what it carried, since
+	// its measurements arrive with those counts already substituted in.
 	if composed {
 		rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, nil, everything))
 	}
@@ -1234,9 +1236,15 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
 			gap.Name, gap.Why)
-		doc.Reason = fmt.Sprintf(
+		reason := fmt.Sprintf(
 			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name)
-		return doc, "not recorded — " + doc.Reason
+		// Not set on the document. `foldMeasurements` surfaces a reason only
+		// when the fold holds no component, and this document holds every
+		// component the run did measure — so a reason set here reaches no
+		// reader. What does reach one is this row, and, on the fold side,
+		// `missingFromRecord` recomputing the same refusal from the
+		// declaration and naming the same component.
+		return doc, "not recorded — " + reason
 	}
 	// Against the declaration, not against what this run was responsible for.
 	// A document covering part of the tree is expected — a shard covers its

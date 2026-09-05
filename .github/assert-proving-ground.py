@@ -577,6 +577,17 @@ def main_hit(*paths: str) -> int:
     refuse. So the assertion is the pair: no `baseline` row of any kind, and a
     `record` row, which only a run that reached the end of the gate writes.
     """
+    if not paths:
+        # Named no document at all. The loop below would collect no failure and
+        # report success over nothing, which is the vacuous pass this whole
+        # function exists to refuse — and it is reachable the moment the
+        # caller's glob stops matching.
+        print(
+            "proving ground hit: no shard document was named, so nothing was checked — "
+            "the shards step wrote none",
+            file=sys.stderr,
+        )
+        return 1
     failures = []
     for path in paths:
         with open(path, encoding="utf-8") as fh:

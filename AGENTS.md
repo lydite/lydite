@@ -145,10 +145,9 @@ section per shard under one heading, each answering about part of the repository
 `ci-end2end.yml`'s `proving ground — coverage gate` job is what holds all of that to a real
 repository: the plan, a baseline miss measured in a throwaway worktree, the recording, three shards
 that must then *hit* the cache, the fold, and the fold with one shard's directory omitted — which is
-how a dead runner is exercised without one dying. It is the only job that exercises
-`lydite test record` against a real repository, which is what keeps `lydite-baseline.yml` honest: that
-workflow runs on pushes to the default branch alone, and a baseline nothing writes costs a slower run
-rather than a red one.
+how a dead runner is exercised without one dying. It is the only job whose failure to record is
+caught: `lydite-baseline.yml` runs `lydite test record` too, but on pushes to the default branch
+alone, where a baseline nothing writes costs a slower run rather than a red one.
 
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
@@ -214,7 +213,16 @@ late. A component called `a,b` declared beside `a` and `b` makes those two run t
 run, surfacing only at the fold as duplicated rows; one holding a `/` or a `:` is refused by the
 artifact upload, failing a job the composite action promises never to fail. Refused at parse time
 instead, where the author is the person who can act on it, and against a set narrower than any of the
-three accepts — a floor stated once is worth more than three rules that agree until one changes.
+three accepts — a floor stated once is worth more than three rules that agree until one changes. A
+name is a path segment too, so `.` and `..` are refused: a component's log is written to a directory
+named after it, and those two resolve outside the report directory entirely.
+
+**The charset is the one check `LoadHistorical` does not apply.** Every other rule there says whether
+a declaration can run at all, which a base tree must satisfy to be measured; this one says what a
+*later* run can carry through a flag, a job name and an artifact name. Holding a historical tree to
+it would fail the one change that fixes it — the base tree of the pull request renaming an offending
+component still carries the old name — which is the migration hazard `LoadHistorical` exists to
+refuse.
 
 **Unknown keys are rejected**, the same stance `referral.Parse` and `config.validateLinter` take. A
 dropped key means a component configured differently from what its author wrote — a suite running
@@ -800,9 +808,10 @@ shards' documents back into one. See
 **A run reports exactly the components it is responsible for, and nothing about any other.** The
 responsibility set is the `--component` list, or the whole declaration when there is none: one suite
 row and one coverage row per component in it, a patch row for each whose files the diff touched, and
-no row at all about a component outside it. Under one process, padding a `coverage(<name>)` row for every *declared* component is
-informative; under a matrix it means every shard publishes rows about components other shards are
-running, so the merged document holds N answers per component and a consumer keying rows by label
+no row at all about a component outside it. Under one process, padding a `coverage(<name>)` row for
+every *declared* component is informative; under a matrix it means every shard publishes rows about
+components other shards are running, so the merged document holds N answers per component and a
+consumer keying rows by label
 picks one of them.
 
 The rule buys the property everything else rests on: **every declared component appears exactly once

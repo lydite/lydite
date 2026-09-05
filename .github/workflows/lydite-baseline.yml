@@ -95,16 +95,18 @@ jobs:
         run: |
           set -euo pipefail
           lydite test plan --dir . --out "${RUNNER_TEMP}/matrix.json"
-          # The delimiter form, not `shards=<value>`. The matrix is derived from
-          # `.lydite/components.yml`, which a pull request owns, and the
-          # single-line form lets a newline in that value open a second output
-          # entry. It is safe today only because the matrix goes through Go's
-          # json.Marshal, which escapes one — a guarantee enforced in another
-          # program, which is not where a workflow should be reading it from.
+          # The delimiter form, not `shards=<value>`. The matrix is derived
+          # from `.lydite/components.yml`, whose shape this workflow does not
+          # control, and the single-line form lets a newline in that value open
+          # a second output entry. The delimiter is generated per run so the
+          # property is self-contained: a fixed literal would rest on the value
+          # never containing that exact line, which is a guarantee held
+          # somewhere other than here.
+          delim="LYDITE_MATRIX_$(openssl rand -hex 16)"
           {
-            echo "shards<<__LYDITE_MATRIX__"
+            echo "shards<<${delim}"
             cat "${RUNNER_TEMP}/matrix.json"
-            echo "__LYDITE_MATRIX__"
+            echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
   measure:

@@ -345,6 +345,12 @@ func TestMergeFoldsWhatTheSchedulersDid(t *testing.T) {
 	if !strings.Contains(got.Value, "max 2 concurrent") {
 		t.Errorf("schedule = %q, want the highest concurrency any shard reached", got.Value)
 	}
+	// Every shard the fold read, not only those that scheduled something: a
+	// shard whose components were all deselected ran no scheduler and still
+	// folded into this run.
+	if !strings.Contains(got.Value, "2 shard(s)") {
+		t.Errorf("schedule = %q, want the number of shards folded", got.Value)
+	}
 	if !strings.Contains(strings.Join(got.Detail, "\n"), "serialised on port 5432") {
 		t.Errorf("schedule detail %q does not carry the shard's serialised pair", got.Detail)
 	}
@@ -432,5 +438,41 @@ func TestMergeDoesNotPromiseARecordingThatWillBeRefused(t *testing.T) {
 	got := jsonRowByLabel(t, out, "record")
 	if got.Status == "context" || !strings.Contains(got.Value, "b") {
 		t.Errorf("record = %+v, want a non-passing row naming the component with no entry", got)
+	}
+}
+
+// The fold is the only thing that can say a candidate covers the whole
+// declaration, so when it does the row says so against that denominator — the
+// two numbers differ exactly when `lydite test record` has something left to
+// refuse.
+func TestMergeReportsACompleteCandidateAgainstTheDeclaration(t *testing.T) {
+	root := mergeRepo(t)
+	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), shardOf(t, "b", 3, 4))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "record")
+	if got.Status != "context" {
+		t.Errorf("record = %+v, want a context row: the fold is complete", got)
+	}
+	if !strings.HasPrefix(got.Value, "2 of 2 component(s) ready") {
+		t.Errorf("record = %q, want the count against the declaration", got.Value)
+	}
+}
+
+// A fold over no component cannot report a shard that died: completeness is a
+// question about the declaration, and an empty one answers every question with
+// yes. `plan` and `scan` refuse the same state.
+func TestMergeRefusesADeclarationWithNoComponents(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components: []\n")
+	out, err := runMergeCmd(t, root, shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: "orphans", Value: "none in 0 source file(s)"},
+	}, nil))
+	if err == nil {
+		t.Fatalf("a fold over no component reported a verdict:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "nothing to fold") {
+		t.Errorf("error = %v, want it to say there is nothing to fold", err)
 	}
 }

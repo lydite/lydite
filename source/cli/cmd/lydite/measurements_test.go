@@ -547,11 +547,11 @@ func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
 	if _, ok := doc.Components["api"]; !ok {
 		t.Errorf("the run discarded the component it measured: %+v", doc)
 	}
-	if doc.Reason == "" || !strings.Contains(doc.Reason, "web") {
-		t.Errorf("doc.Reason = %q, want the blocked component named", doc.Reason)
-	}
-	if !strings.Contains(value, "not recorded") {
-		t.Errorf("row = %q, want it to say the tree was not recorded", value)
+	// The refusal reaches a reader through the row, not through a field on the
+	// document: foldMeasurements surfaces a reason only when the fold holds no
+	// component, and this document holds one.
+	if !strings.Contains(value, "not recorded") || !strings.Contains(value, "web") {
+		t.Errorf("row = %q, want it to say the tree was not recorded and name the component", value)
 	}
 	// And the fold refuses it, which is where the refusal belongs.
 	if gap, blocked := missingFromRecord(decl, doc); !blocked || !strings.Contains(gap, "web") {
