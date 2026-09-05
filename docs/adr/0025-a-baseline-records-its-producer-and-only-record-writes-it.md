@@ -111,6 +111,11 @@ the job that runs arbitrary code ([#49](https://github.com/lydite/lydite/issues/
 would record in `.lydite-reports/baseline.json`. `lydite test record` lands it,
 executing no suite, no setup or teardown command and no compose service.
 
+> Superseded in one detail by
+> [ADR 0026](0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md):
+> the document is `measurements.json`, and carries each component's patch part
+> and the baseline entry it was gated against as well as its counts.
+
 **Both writes go, not just one.** The base-tree cache fill went with the
 this-tree recording, so the invariant is one sentence — *`lydite test` never
 writes the `lydite` branch* — and is checkable by grepping for one call site.
@@ -157,6 +162,12 @@ The flag is not yet enough to fold a shard, and saying so is the point. Only
 today — honest, because it measured part of a tree and cannot claim the tree.
 What this change lands is the document, the fold and the write; what closes the
 shard case is `lydite test merge`.
+
+> Superseded by
+> [ADR 0026](0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md),
+> which resolves it the other way: carrying stays licensed by selection alone,
+> and a shard's document is partial by construction because completeness is the
+> fold's question rather than the run's.
 
 ### The candidate names the tree it measured
 

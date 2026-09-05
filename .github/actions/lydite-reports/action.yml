@@ -16,6 +16,14 @@ inputs:
   name:
     description: which job's reports these are; becomes the artifact suffix
     required: true
+  prefix:
+    description: >
+      the artifact name's prefix. `lydite-reports` is what `publish` reads, so a
+      directory that is an input to something else — a shard's, which
+      `lydite test merge` folds and `publish` must never see as a section of its
+      own — names itself differently.
+    required: false
+    default: lydite-reports
 
 runs:
   using: composite
@@ -37,7 +45,7 @@ runs:
     - if: steps.present.outputs.found == 'true'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: lydite-reports-${{ inputs.name }}
+        name: ${{ inputs.prefix }}-${{ inputs.name }}
         path: .lydite-reports
         retention-days: 7
         # The directory disowns itself with a .gitignore, and an artifact that

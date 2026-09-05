@@ -46,7 +46,8 @@ source/cli/internal/nodedeps/     # how a JavaScript workspace's dependencies ge
 source/cli/internal/cargotool/    # pinned cargo subcommands: version parsing and the install
 source/cli/internal/download/     # fetch, checksum-verify and unpack an archive safely
 source/cli/internal/compose/      # the services a component's suite needs (see Services below)
-source/cli/internal/scheduler/    # port locks and the concurrency bound (see The scheduler below)
+source/cli/internal/scheduler/    # port locks and the concurrency bound (see The scheduler below),
+                                  #   and the conflict predicate the planner groups shards with
 source/cli/internal/affected/     # which components a change could have broken (see Affected selection)
 source/cli/internal/gitdiff/      # the changed paths, and the tracked-file listing both gates read
 source/cli/internal/config/       # .lydite/config.yml loading (opt-outs + pipeline shape — see Configuration below)
@@ -74,10 +75,10 @@ docs/adr/                         # the decision record
 .gt-repo.yaml                     # repo governance; renders .github/dependabot.yml and the gt workflows
 .github/workflows/                # CI stages, the release, the Workers' deploy, lydite-pr.yml —
                                   #   everything lydite says about a PR, as one run (see Surface) —
-                                  #   and lydite-baseline.yml, the one job that writes the coverage
-                                  #   baseline, after a change has merged (see Coverage)
-.github/actions/                  # the local composites lydite-pr.yml uses, which are the shapes
-                                  #   lydite/actions packages (that repository is not here)
+                                  #   and lydite-baseline.yml, which holds the one job that writes
+                                  #   the coverage baseline, after a change has merged (see Coverage)
+.github/actions/                  # the local composites both lydite workflows use, which are the
+                                  #   shapes lydite/actions packages (that repository is not here)
 scripts/install.sh                # curl|sh installer shipped with every release
 ```
 
@@ -89,7 +90,7 @@ scripts/install.sh                # curl|sh installer shipped with every release
 ## Status
 
 All seven subcommands (`scan`, `test`, `review`, `publish`, `clearance`, `version`, `update`) are
-fully implemented, plus `test record` — every check
+fully implemented, plus `test plan`, `test merge` and `test record` — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
@@ -131,6 +132,22 @@ A coverage regression and a scan finding are advisory here for the same reason; 
 costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `ci-test.yml`
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
+
+**Both lydite workflows shard.** `lydite-pr.yml` is `setup` → `plan` → `test` (a matrix, each job
+running `--affected --component <slice> --gate-coverage` under `contents: read`) → `merge` →
+`publish`. `lydite-baseline.yml` is `plan` → `measure` (the same matrix without `--affected`, since
+ADR 0016 requires the default-branch run to be complete) → one `record` job, which is the only job
+in either workflow granted `contents: write` and runs nothing from the repository. Each shard
+uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`: `publish`
+reads the latter, and a shard's document rendered as a `test` section of its own would put one
+section per shard under one heading, each answering about part of the repository.
+
+`ci-end2end.yml`'s `proving ground — coverage gate` job is what holds all of that to a real
+repository: the plan, a baseline miss measured in a throwaway worktree, the recording, three shards
+that must then *hit* the cache, the fold, and the fold with one shard's directory omitted — which is
+how a dead runner is exercised without one dying. It is the only job whose failure to record is
+caught: `lydite-baseline.yml` runs `lydite test record` too, but on pushes to the default branch
+alone, where a baseline nothing writes costs a slower run rather than a red one.
 
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
@@ -188,6 +205,24 @@ workspace compiles three times and provisions three copies of everything the sui
 
 **`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
 second statement of the language could only disagree with the first.
+
+**A component's name may hold only letters, digits, `.`, `_` and `-`.** It is not merely a label: it
+is a `--component` value inside a comma-separated list, the name of a CI matrix job, and the suffix of
+that job's artifact, so it has to survive all three round trips and the ones it cannot survive fail
+late. A component called `a,b` declared beside `a` and `b` makes those two run twice and itself never
+run, surfacing only at the fold as duplicated rows; one holding a `/` or a `:` is refused by the
+artifact upload, failing a job the composite action promises never to fail. Refused at parse time
+instead, where the author is the person who can act on it, and against a set narrower than any of the
+three accepts — a floor stated once is worth more than three rules that agree until one changes. A
+name is a path segment too, so `.` and `..` are refused: a component's log is written to a directory
+named after it, and those two resolve outside the report directory entirely.
+
+**The charset is the one check `LoadHistorical` does not apply.** Every other rule there says whether
+a declaration can run at all, which a base tree must satisfy to be measured; this one says what a
+*later* run can carry through a flag, a job name and an artifact name. Holding a historical tree to
+it would fail the one change that fixes it — the base tree of the pull request renaming an offending
+component still carries the old name — which is the migration hazard `LoadHistorical` exists to
+refuse.
 
 **Unknown keys are rejected**, the same stance `referral.Parse` and `config.validateLinter` take. A
 dropped key means a component configured differently from what its author wrote — a suite running
@@ -710,10 +745,15 @@ unmatched, and therefore widens.
 component. Every signal for "is this a pull request" is unreliable where lydite runs — a
 detached HEAD, a shallow clone, a fork with no upstream fetched, a default branch not called
 `main` — and the caller already knows the event, so the workflow passes `--affected` on pull
-requests exactly as `lydite/actions` already passes `--diff-base auto`. `--affected` alongside
-`--component` is refused rather than intersected: the planner emits per-shard `--component`
-lists that are already the selected set, so the combination is never needed, and an
-intersection nobody asked for narrows silently when it is wrong.
+requests exactly as `lydite/actions` already passes `--diff-base auto`.
+
+**`--affected` and `--component` compose, and a shard passes both.** `--component` says what this
+job is responsible for; `--affected` says which of those need running. The rest of the slice is
+reported `not affected`, with its baseline entry carried forward, by the one shard that owns it.
+The two narrow different things and neither substitutes for the other: `lydite test plan` cannot
+narrow by `--affected`, which needs a merge-base, git history and a checkout that is not shallow,
+so the matrix it emits covers the whole declaration and the shards select within their slices. See
+[ADR 0026](docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md).
 
 **An unresolvable merge-base is an error**, not a fallback in either direction. Falling back to
 nothing is the failure this exists to avoid; falling back to everything is safe but makes the
@@ -757,6 +797,103 @@ passed" without parsing prose — and the reasons are what make a selection that
 everything visible to a human reading a log. The verdict is still pass and the exit code 0: a
 branch with no commits against its base is correct work, and failing it is how a gate gets
 switched off.
+
+### Shards: `lydite test plan`, and the responsibility set
+
+A CI job holds a **shard** — a set of components lydite runs in one process. `lydite test plan`
+groups every declared component into shards and emits the matrix; `lydite test merge` folds the
+shards' documents back into one. See
+[ADR 0026](docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md).
+
+**A run reports exactly the components it is responsible for, and nothing about any other.** The
+responsibility set is the `--component` list, or the whole declaration when there is none: one suite
+row and one coverage row per component in it, a patch row for each whose files the diff touched, and
+no row at all about a component outside it. Under one process, padding a `coverage(<name>)` row for
+every *declared* component is informative; under a matrix it means every shard publishes rows about
+components other shards are running, so the merged document holds N answers per component and a
+consumer keying rows by label
+picks one of them.
+
+The rule buys the property everything else rests on: **every declared component appears exactly once
+across the shards.** So "did a shard die" is a question about the declaration and the documents, and
+needs no third input to answer.
+
+**`plan` is pure.** It reads `.lydite/components.yml` and each component's compose file, and nothing
+else — no git, no network, no process — so it runs on a shallow checkout, on a fork, and on a machine
+with no container runtime. That is also why it cannot narrow by `--affected`: the shards narrow
+instead. A compose file it cannot read is an error rather than a component with no ports, because a
+matrix built on unknown ports can put two components that contend for one port into different jobs,
+which is the single thing the planner exists to prevent.
+
+**A shard is a conflict group**: the transitive closure of `scheduler.Conflicts` — components sharing
+a published host port, or rooted at overlapping directories. `internal/scheduler` owns that predicate
+and the planner reads it rather than reimplementing it, for the reason `internal/pathmatch` has one
+matcher. Components that conflict with nothing are a shard of one; the grouping is the finest one
+that is safe, and there is nothing to set wrong. **There is no `--shards`, and no `--concurrency`** —
+`--concurrency` on `lydite test` means how many of a shard's components run at once inside one
+process, and reusing the word for how many jobs a matrix has gives one flag two meanings a reader
+cannot tell apart by name.
+
+Keeping a conflicting pair *together* is the point, and the reason is runner topology rather than
+lock coverage: two matrix jobs on hosted runners are separate machines, so two of them binding 5432
+do not collide there — but self-hosted runners routinely place several jobs on one host, and then
+they do. A shard is safe on any topology precisely because the scheduler serialises inside it.
+
+Shards are ordered by the declaration position of their first member and members in declaration
+order, so two runs of one declaration emit an identical matrix — a shard's name is what its artifact
+is called, and a name that moved would orphan the directory the fold reads. The name is the members
+joined by `-`, unique because component names are. The matrix goes to `--out`
+(`[{"name":"api-tally","components":"api,tally"}]`); stdout carries the report.
+
+**`plan` writes no `.lydite-reports/plan.json`, alone among the commands.** The rule that every
+command writes one exists so a *verdict* reaches the surface without depending on a redirection
+somebody remembered; `plan` reaches no verdict, and a section titled "plan" in a pull-request comment
+says nothing a reader can act on.
+
+### `lydite test merge`: the fold decides completeness
+
+`--dir` (for the declaration) and repeatable `--reports`. No network, and nothing from the repository
+is executed.
+
+**A repository that declares no components is an error, not a fold.** Completeness is a question
+about the declaration, and an empty one answers every question with yes — so `merge` refuses it the
+way `plan` and `scan` do rather than reporting that nought of nought components are covered.
+
+**A declared component with no row from any shard is a failure, and so is one with two.** Not
+`unmeasured`: that status does not vote, so a run whose runner died would publish `"verdict": "pass"`
+over a repository it half tested. It is the same reason the `schedule` row fails an interrupted run
+instead of leaving it amber. The `orphans`, `watch` and `select` rows ask about the declaration and
+the tree, so every shard computes the same answer; they collapse to one, and a disagreement fails —
+the shards did not see the same tree. The per-shard `schedule` rows fold into one
+(`N shard(s), max K concurrent`) carrying each shard's serialised pairs beneath.
+
+**`coverage(repo)` and `patch(repo)` are the two rows no shard can produce**, and `merge` is the only
+thing that emits them. Both sum per-component counts and both refuse to compare unless the baseline
+covers every component in the figure, so a shard holding two of four would answer about its own two
+under a label about the repository. A run narrowed by `--component` therefore emits neither, and the
+same holds for the bare `floor` summary row, which counts over the whole declaration.
+
+A report's rows carry rendered prose rather than numbers, so folding reports cannot recover them —
+the shards' `measurements.json` can, which is why it carries each component's patch part and the
+baseline entry it was gated against alongside its counts. The composition is one implementation with
+two callers, the unsharded local run and `merge`, for the reason the port predicate has one.
+
+The fold's own `record` row is held against the declaration by the same `missingFromRecord` the
+recording applies, so it cannot announce a landing `lydite test record` will then refuse. A run that
+could not measure a component still hands on every component it *did* measure, carrying the refusal
+as a reason: the document is the only channel by which a shard's counts reach the fold, and emptying
+it would drop that shard's other components out of `coverage(repo)`, which is then composed over a
+strict subset and rendered as a pass.
+
+**Completeness belongs to the fold, not to the run.** `lydite test` refuses to establish a candidate
+only over a component **it selected and failed to measure**. A component it never ran is simply
+absent, and `record` asks completeness once, against the declaration read from the tree being
+recorded. Carrying an unrun component's baseline forward stays licensed by affected selection and by
+nothing else: selection *proved* the change could not have touched that component, where `--component`
+proves nothing — the caller asked for these — and carrying under it would attribute the merge-base's
+number to a component this very change may have rewritten. The window that opens is real and bounded:
+between the run and the fold a partial document exists on disk, nothing reads it but `record`, and
+`record` refuses it by name.
 
 ### A `watch` pattern that covers no file fails the run
 
@@ -1304,7 +1441,7 @@ that can push anywhere.
 
 **`lydite test` writes nothing to the `lydite` branch** — not the tree it measured, and not the
 base tree it measured in a throwaway worktree. It reads the baseline, gates, and leaves what it
-would record in `.lydite-reports/baseline.json`. `lydite test record --reports <dir>…` lands that,
+would record in `.lydite-reports/measurements.json`. `lydite test record --reports <dir>…` lands that,
 executing no suite, no `setup`/`teardown` command and no compose service. One invariant, checkable
 by grepping for the single `gitstate.WriteBaseline` call site.
 
@@ -1318,15 +1455,21 @@ persists, and every later change gates against it.
 So the write still belongs on a tree that has already merged. `.github/workflows/lydite-baseline.yml`
 is that job here: it runs on a push to the default branch, measures with `--gate-coverage` and lands
 the candidate with `lydite test record`, holding `contents: write` and running code that has already
-passed review and every gate. `lydite-pr.yml`'s `test` job holds `contents: read`, runs `--affected`,
-and records nothing.
+passed review and every gate. Both workflows shard: `plan` groups the components, a matrix measures
+them, and one `record` job folds every shard's measurements. `lydite-pr.yml`'s `test` matrix holds
+`contents: read`, runs `--affected --component <slice>`, and records nothing.
 
 **What the command buys that the workflow split does not is the shard.** Under a shard matrix no
 single process sees every component, so nothing can record a complete baseline — each shard measured
-part of a tree and cannot claim the tree. Folding N candidates is the only thing that can, and it is
-what `lydite test merge` builds on ([#61](https://github.com/lydite/lydite/issues/61)). Folding needs
-the one fact no report carries: which entries a run *measured* and which it *carried forward*, since
-each shard carries every component it did not run and only one copy came from a suite that executed.
+part of a tree and cannot claim the tree. Folding N documents is the only thing that can. Folding
+needs the one fact no report carries: which entries a run *measured* and which it *carried forward*,
+since each shard carries every component it did not run and only one copy came from a suite that
+executed. `record` folds the `--reports` directories itself, because it runs post-merge in a workflow
+`lydite test merge` does not precede.
+
+`measurements.json` is that document. It holds each component's counts and producer — the baseline
+candidate — plus its patch part and the baseline entry it was gated against, which are what
+`lydite test merge` composes the repository-wide figures from.
 
 **A candidate names the tree it measured, and `record` refuses to land it anywhere else.** It is the
 only integrity property available to a command that executes nothing: without it a mis-wired workflow

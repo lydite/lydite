@@ -166,13 +166,14 @@ func readDocuments(dir string) ([]ui.Document, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		// The candidate baseline shares the directory and the extension and
-		// is not a report: it is data `lydite test record` consumes, with no
-		// command and no verdict, so readDocument would refuse it and take
-		// the whole comment down with it. Skipped by name, because the
-		// alternative — tolerating a document with no command — is the check
-		// that tells a report from anything else that happens to be JSON.
-		if entry.Name() == candidateName {
+		// A run's measurements share the directory and the extension and are
+		// not a report: they are data `lydite test record` and `lydite test
+		// merge` consume, with no command and no verdict, so readDocument
+		// would refuse the file and take the whole comment down with it.
+		// Skipped by name, because the alternative — tolerating a document
+		// with no command — is the check that tells a report from anything
+		// else that happens to be JSON.
+		if entry.Name() == measurementsName {
 			continue
 		}
 		doc, err := readDocument(filepath.Join(dir, entry.Name()))
@@ -221,4 +222,10 @@ func readLog(dir, rel string) []string {
 		return nil
 	}
 	return tail(string(content))
+}
+
+// documentPath is where one command's report document lives inside a report
+// directory.
+func documentPath(dir, command string) string {
+	return filepath.Join(dir, documentName(command))
 }

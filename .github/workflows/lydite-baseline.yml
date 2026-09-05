@@ -15,13 +15,18 @@
 # job carries rather than a new one.
 #
 # `lydite test` writes nothing to the lydite branch at all, so measuring and
-# recording are two commands. They are one job here, sharing this job's token:
-# the split that matters is which workflow runs them, not which step. That does not by itself
-# make a pull request's measurement safe to record: the measuring job runs the
-# branch's code whatever token it holds, so the numbers it emits are the
-# branch's to choose, and `lydite test record` verifies no number. What makes
-# this workflow safe is where it runs, not which command it uses. See
-# lydite/lydite#49 and docs/adr/0025.
+# recording are two commands in two jobs, and only the last one holds a token
+# that can push. That does not by itself make a pull request's measurement safe
+# to record: the measuring job runs the branch's code whatever token it holds,
+# so the numbers it emits are the branch's to choose, and `lydite test record`
+# verifies no number. What makes this workflow safe is where it runs, not which
+# command it uses. See lydite/lydite#49 and docs/adr/0025.
+#
+# It shards the way `lydite-pr.yml` does — `plan` groups the components,
+# a matrix runs them, and one `record` folds every shard's measurements. No
+# shard can record: each measured part of the tree, and a partial baseline
+# reads as a cache hit on every later change. So the fold is where completeness
+# is decided, against the declaration read from the tree being recorded.
 #
 # Not a gt CI stage, deliberately. The orchestrator skips every stage for a tree
 # already validated on the pull request, which is exactly what a squash merge
@@ -32,8 +37,10 @@ on:
   push:
     branches: [main]
 
+# Read by default; only the recording job is granted the write, which is the
+# whole of what this workflow exists to hold.
 permissions:
-  contents: write
+  contents: read
 
 # One at a time. Two runs recording different trees is fine — they are different
 # keys — but two racing on the same one make the loser retry for nothing, and
@@ -43,9 +50,74 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  record:
-    name: record coverage baseline
+  # The Go module is rooted at source/cli; the scan root is the repository
+  # root, which is where .lydite/ lives. Every step below names the one it
+  # needs rather than sharing a job-level working-directory, because a `--dir`
+  # written relative to the wrong one is a scan root with no declaration —
+  # where `lydite test` reports "no components declared" and this workflow
+  # fails without ever reaching the recording it exists for.
+  setup:
+    name: setup
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/cli/go.mod
+          cache: true
+
+      - name: build lydite
+        working-directory: source/cli
+        run: go build -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-binary
+          path: ${{ runner.temp }}/lydite
+          retention-days: 1
+
+  plan:
+    name: plan
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/lydite-binary
+
+      - name: lydite test plan
+        id: plan
+        run: |
+          set -euo pipefail
+          lydite test plan --dir . --out "${RUNNER_TEMP}/matrix.json"
+          # The delimiter form, not `shards=<value>`. The matrix is derived
+          # from `.lydite/components.yml`, whose shape this workflow does not
+          # control, and the single-line form lets a newline in that value open
+          # a second output entry. The delimiter is generated per run so the
+          # property is self-contained: a fixed literal would rest on the value
+          # never containing that exact line, which is a guarantee held
+          # somewhere other than here.
+          delim="LYDITE_MATRIX_$(openssl rand -hex 16)"
+          {
+            echo "shards<<${delim}"
+            cat "${RUNNER_TEMP}/matrix.json"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+  measure:
+    name: measure (${{ matrix.shard.name }})
+    needs: [setup, plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,48 +125,81 @@ jobs:
           # HEAD itself — which still needs history to resolve at all.
           fetch-depth: 0
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: source/cli/go.mod
-          cache: true
+      - uses: ./.github/actions/lydite-binary
 
-      # The Go module is rooted at source/cli; the scan root is the repository
-      # root, which is where .lydite/ lives. Each step names the one it needs
-      # rather than sharing a job-level working-directory, because a `--dir`
-      # written relative to the wrong one is a scan root with no declaration —
-      # where `lydite test` reports "no components declared" and this job fails
-      # without ever reaching the recording it exists for.
-      - name: build lydite
-        working-directory: source/cli
-        run: go build -o /tmp/lydite ./cmd/lydite
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
+          restore-keys: lydite-${{ runner.os }}-
 
       # On the default branch HEAD is its own merge-base, so nothing is
-      # compared: this measures the tree and leaves the candidate in
+      # compared: this measures the tree and leaves what it measured in
       # .lydite-reports/. The next pull request's merge-base is this commit, so
       # it reads the recorded entry instead of measuring the tree again —
-      # which is the whole reason this job exists.
+      # which is the whole reason this workflow exists.
       #
-      # It is deliberately not `--affected`: a partial run records nothing, so a
-      # narrowed run here would leave the entry it exists to write.
+      # Deliberately not `--affected`: ADR 0016 requires the default-branch run
+      # to be complete, since a forgotten depends_on edge is caught at merge or
+      # never. `--component` narrows to this shard's slice and nothing else, so
+      # the matrix as a whole still runs every declared component.
       - name: lydite test --gate-coverage
-        run: /tmp/lydite test --dir . --gate-coverage
+        env:
+          COMPONENTS: ${{ matrix.shard.components }}
+        run: lydite test --dir . --component "$COMPONENTS" --gate-coverage
 
-      # The only step in either workflow that writes the lydite branch. It
-      # runs nothing from the repository — no suite, no setup or teardown
-      # command, no compose service — and refuses a candidate naming a tree
-      # other than the one checked out.
-      #
-      # `contents: write` is job-scoped and actions/checkout persists the
-      # credential, so the measuring step above holds it too. Nothing here
-      # pretends otherwise: what makes this safe is that the code has already
-      # merged, not the step boundary.
-      #
-      # It runs even when the step above failed. A gate that says nothing
-      # about coverage — orphans, watch, schedule — would otherwise discard a
-      # complete candidate, and no later run records this tree, because the
-      # next push carries a different one. `record` refuses a candidate that
-      # is partial, names another tree, or was never written, so the worst an
-      # unconditional run does is say so.
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: ${{ matrix.shard.name }}
+          prefix: lydite-shard
+
+  record:
+    name: record coverage baseline
+    needs: [setup, plan, measure]
+    # It runs even when a shard failed. A gate that says nothing about coverage
+    # — orphans, watch, schedule — would otherwise discard a complete set of
+    # measurements, and no later run records this tree, because the next push
+    # carries a different one. `record` refuses a fold that is partial, names
+    # another tree, or was never written, so the worst an unconditional run
+    # does is say so.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job in either workflow that writes the lydite branch. It runs
+    # nothing from the repository — no suite, no setup or teardown command, no
+    # compose service — and refuses a document naming a tree other than the one
+    # checked out. What makes it safe is that the code has already merged;
+    # holding the token in a job that runs none of it is what keeps that true
+    # as this workflow grows.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/lydite-binary
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-shard-*
+          path: shards
+
+      # One write after the fold, never one per shard: N pushes racing one
+      # branch, and every shard's document partial by construction, so each
+      # would be refused. `record` folds the same directories itself — it runs
+      # in a job `merge` does not precede — and asks completeness once, against
+      # the declaration read from the tree being recorded.
       - name: lydite test record
-        if: ${{ !cancelled() }}
-        run: /tmp/lydite test record --dir . --reports .lydite-reports
+        run: |
+          shopt -s nullglob
+          args=()
+          for dir in shards/*/; do
+            args+=(--reports "${dir%/}")
+          done
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no shard uploaded a report directory; there is nothing to record" >&2
+            exit 1
+          fi
+          lydite test record --dir . "${args[@]}"

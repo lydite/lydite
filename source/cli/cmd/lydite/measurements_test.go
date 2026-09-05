@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,19 +117,19 @@ func TestACarriedEntryKeepsItsOwnProducer(t *testing.T) {
 // only one copy came from a suite that executed — taking the last would record
 // the base tree's number for a component this change rewrote.
 func TestFoldingPrefersAMeasuredEntryOverACarriedOne(t *testing.T) {
-	carriedWeb := candidateDoc{Tree: "t1", Components: map[string]candidateEntry{
+	carriedWeb := measurementsDoc{Tree: "t1", Components: map[string]componentMeasurement{
 		"api": {Entry: producing(50, 100, "go 1.26.6")},
 		"web": {Entry: producing(10, 100, "vitest 4.1.11"), Carried: true},
 	}}
-	measuredWeb := candidateDoc{Tree: "t1", Components: map[string]candidateEntry{
+	measuredWeb := measurementsDoc{Tree: "t1", Components: map[string]componentMeasurement{
 		"api": {Entry: producing(50, 100, "go 1.26.6"), Carried: true},
 		"web": {Entry: producing(90, 100, "vitest 4.1.11")},
 	}}
 
-	for _, order := range [][]candidateDoc{{carriedWeb, measuredWeb}, {measuredWeb, carriedWeb}} {
-		got, err := foldCandidates(order)
+	for _, order := range [][]measurementsDoc{{carriedWeb, measuredWeb}, {measuredWeb, carriedWeb}} {
+		got, err := foldMeasurements(order)
 		if err != nil {
-			t.Fatalf("foldCandidates: %v", err)
+			t.Fatalf("foldMeasurements: %v", err)
 		}
 		if got.Components["web"].Covered != 90 {
 			t.Errorf("web = %+v, want the shard that measured it to win", got.Components["web"])
@@ -142,9 +143,9 @@ func TestFoldingPrefersAMeasuredEntryOverACarriedOne(t *testing.T) {
 // Shards of different trees are not shards of one run. Folding them would
 // record a baseline no tree ever had: each number right, the entry wrong.
 func TestFoldingRefusesCandidatesOfDifferentTrees(t *testing.T) {
-	_, err := foldCandidates([]candidateDoc{{Tree: "aaaaaaaaaaaa"}, {Tree: "bbbbbbbbbbbb"}})
+	_, err := foldMeasurements([]measurementsDoc{{Tree: "aaaaaaaaaaaa"}, {Tree: "bbbbbbbbbbbb"}})
 	if err == nil {
-		t.Fatal("foldCandidates accepted documents describing different trees")
+		t.Fatal("foldMeasurements accepted documents describing different trees")
 	}
 	if !strings.Contains(err.Error(), "different trees") {
 		t.Errorf("error = %q, want it to say the trees disagree", err)
@@ -156,9 +157,9 @@ func TestFoldingRefusesCandidatesOfDifferentTrees(t *testing.T) {
 // command. It is not a newer shape; it is not a candidate.
 func TestACandidateWithoutATreeIsRefused(t *testing.T) {
 	root := t.TempDir()
-	write(t, root, ".lydite-reports/"+candidateName, `{"components":{"api":{"covered":1,"total":2}}}`)
-	if _, err := readCandidate(root + "/.lydite-reports"); err == nil {
-		t.Fatal("readCandidate accepted a document naming no tree")
+	write(t, root, ".lydite-reports/"+measurementsName, `{"components":{"api":{"covered":1,"total":2}}}`)
+	if _, err := readMeasurements(root + "/.lydite-reports"); err == nil {
+		t.Fatal("readMeasurements accepted a document naming no tree")
 	}
 }
 
@@ -204,11 +205,11 @@ func TestRecordRefusesAFoldMissingADeclaredComponent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	full := candidateDoc{Components: map[string]candidateEntry{"svc": {Entry: producing(2, 4, "go 1.26")}}}
+	full := measurementsDoc{Components: map[string]componentMeasurement{"svc": {Entry: producing(2, 4, "go 1.26")}}}
 	if gap, blocked := missingFromRecord(decl, full); blocked {
 		t.Errorf("a complete fold was blocked by %q", gap)
 	}
-	empty := candidateDoc{Components: map[string]candidateEntry{}}
+	empty := measurementsDoc{Components: map[string]componentMeasurement{}}
 	gap, blocked := missingFromRecord(decl, empty)
 	if !blocked || gap != "svc" {
 		t.Errorf("missingFromRecord = (%q, %v), want svc named as the gap", gap, blocked)
@@ -223,7 +224,7 @@ func TestRecordIsNotBlockedByAComponentNothingCanMeasure(t *testing.T) {
 	decl := component.File{Components: []component.Component{
 		{Name: "docs", Dir: "docs", Command: []string{"make", "docs"}},
 	}}
-	if gap, blocked := missingFromRecord(decl, candidateDoc{}); blocked {
+	if gap, blocked := missingFromRecord(decl, measurementsDoc{}); blocked {
 		t.Errorf("a component declaring a raw command blocked recording as %q", gap)
 	}
 }
@@ -262,7 +263,7 @@ func TestRecordSaysWhenNoDirectoryHoldsACandidate(t *testing.T) {
 	if err == nil {
 		t.Fatalf("record succeeded with no candidate anywhere\n%s", out)
 	}
-	if !strings.Contains(err.Error(), candidateName) {
+	if !strings.Contains(err.Error(), measurementsName) {
 		t.Errorf("error = %q, want the missing document named", err)
 	}
 }
@@ -275,34 +276,12 @@ func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: "go-test"}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "the suite failed")}
 
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, nil, true, nil, 0.1)
 	if len(doc.Components) != 0 || doc.Reason == "" {
 		t.Errorf("doc = %+v, want no components and a reason", doc)
 	}
 	if !strings.Contains(value, "nothing to record") {
 		t.Errorf("row = %q, want it to say nothing was established", value)
-	}
-}
-
-// A partial candidate is worse than none: any non-empty entry reads as a cache
-// hit, so the missing component is new on every later change and every composed
-// figure it belongs to stops comparing — silently. So a run that could not
-// measure a component it was supposed to establishes nothing at all.
-func TestARunMissingAComponentEstablishesNoCandidate(t *testing.T) {
-	cmd := newRootCmd()
-	decl := component.File{Components: []component.Component{
-		{Name: "api", Dir: "api", Runner: "go-test"},
-		{Name: "web", Dir: "web", Runner: "vitest"},
-	}}
-	ok := measured("api", "go", 50, 100)
-	broken := unmeasuredComponent(decl.Components[1], "the suite failed")
-
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, []measurement{ok, broken}, nil, 0.1)
-	if len(doc.Components) != 0 {
-		t.Errorf("doc = %+v, want nothing established when a component is missing", doc)
-	}
-	if !strings.Contains(value, "web") || !strings.Contains(value, "gates on nothing") {
-		t.Errorf("row = %q, want the gap named and its consequence stated", value)
 	}
 }
 
@@ -322,15 +301,15 @@ func TestRecordingDropsAComponentTheDeclarationLost(t *testing.T) {
 // Folding nothing is an error rather than an empty baseline. An empty entry,
 // once written, reads as a hit for every later change and gates nothing.
 func TestFoldingNothingIsAnError(t *testing.T) {
-	if _, err := foldCandidates(nil); err == nil {
-		t.Fatal("foldCandidates accepted an empty set")
+	if _, err := foldMeasurements(nil); err == nil {
+		t.Fatal("foldMeasurements accepted an empty set")
 	}
 }
 
 // A fold in which no shard established anything carries a shard's own reason
 // forward, so the row says why rather than reporting an absence.
 func TestFoldingKeepsAShardsReason(t *testing.T) {
-	got, err := foldCandidates([]candidateDoc{
+	got, err := foldMeasurements([]measurementsDoc{
 		{Tree: "aaaaaaaaaaaa", Reason: "the suite failed"},
 		{Tree: "aaaaaaaaaaaa"},
 	})
@@ -385,12 +364,12 @@ func TestThePatchGateWillNotCompareAcrossAChangeOfInstrument(t *testing.T) {
 // reader has to be told which one it could not use.
 func TestAMalformedCandidateNamesThePathItCameFrom(t *testing.T) {
 	root := t.TempDir()
-	write(t, root, runner.ReportDir+"/"+candidateName, `{"tree": "abc",`)
-	_, err := readCandidate(filepath.Join(root, runner.ReportDir))
+	write(t, root, runner.ReportDir+"/"+measurementsName, `{"tree": "abc",`)
+	_, err := readMeasurements(filepath.Join(root, runner.ReportDir))
 	if err == nil {
-		t.Fatal("readCandidate accepted a truncated document")
+		t.Fatal("readMeasurements accepted a truncated document")
 	}
-	if !strings.Contains(err.Error(), candidateName) {
+	if !strings.Contains(err.Error(), measurementsName) {
 		t.Errorf("error = %q, want the path named", err)
 	}
 }
@@ -429,7 +408,7 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 	// What the run measured is in the candidate, not on the branch: the
 	// measuring command writes nothing there, which is the split this whole
 	// change is about.
-	candidate, err := readCandidate(filepath.Join(root, runner.ReportDir))
+	candidate, err := readMeasurements(filepath.Join(root, runner.ReportDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,5 +436,125 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 	if got.Percent() != higher.Percent() {
 		t.Errorf("svc = %+v (%.1f%%), want the anchored %+v (%.1f%%) kept — a tolerated dip must not lower the entry",
 			got, got.Percent(), higher, higher.Percent())
+	}
+}
+
+// `patch(repo)` is composed straight from the stored baseline counts, so an
+// entry a different instrument produced would have the fold compare across a
+// change of instrument — the comparison the shard's own patch row refused.
+func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
+	record := gitstate.Baseline{
+		"same":  {LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go 1.26.5"},
+		"moved": {LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "vitest 4.1.11"},
+	}
+	baseline := gitstate.Baseline{
+		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
+		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
+	}
+	doc := measurementsFrom("tree", record, record, nil, baseline, true, nil)
+	if doc.Components["same"].Base == nil {
+		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
+	}
+	if got := doc.Components["moved"].Base; got != nil {
+		t.Errorf("moved carries a baseline from another instrument: %+v", got)
+	}
+}
+
+// A run responsible for part of the declaration establishes part of a
+// candidate, which is expected — completeness is the fold's question. A row
+// saying only how many entries it holds announces a recording `lydite test
+// record` may then refuse, so it says how many the tree declares as well.
+func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	cmd := newRootCmd()
+	// A real tree, because the row names the one it would be recorded for.
+	root := gitRepo(t, map[string]string{"api/x.go": "package api\n"})
+	gitIn(t, root, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+	// One component measured, the other never reached: the shape a shard, and
+	// an --affected run over a newly declared component, both produce.
+	unrun := unmeasuredComponent(decl.Components[1], "the component was not selected for this run")
+	unrun.Unselected = true
+	_, value := candidateThisTree(context.Background(), cmd, root, decl,
+		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, true, nil, 0.1)
+	if !strings.HasPrefix(value, "1 of 2 component(s)") {
+		t.Errorf("record row = %q, want it to name the declaration's count as well as its own", value)
+	}
+}
+
+// The anchored entry and what was measured are different quantities, and the
+// fold needs both: `record` lands the anchored one, because a dipped number
+// recorded verbatim turns the tolerance into an unbounded downward ratchet,
+// and `coverage(repo)` sums what was measured, because that is what an
+// unsharded run composes. Composing from the anchor gives a sharded run
+// headroom it did not earn, and prints a total nobody can reach by adding up
+// the rows above it.
+func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
+	record := gitstate.Baseline{"api": producing(90, 100, "go")}
+	measured := gitstate.Baseline{"api": producing(89, 100, "go")}
+	doc := measurementsFrom("tree", record, measured, nil, nil, true, nil)
+
+	e := doc.Components["api"]
+	if e.LineCount != (coverage.LineCount{Covered: 90, Total: 100}) {
+		t.Errorf("the recorded entry is %+v, want the anchored counts", e.LineCount)
+	}
+	if e.Unanchored == nil || *e.Unanchored != (coverage.LineCount{Covered: 89, Total: 100}) {
+		t.Fatalf("unanchored = %+v, want the counts the run measured", e.Unanchored)
+	}
+	if got := e.asMeasurement(component.Component{Name: "api", Dir: "api", Runner: "go-test"}); got.Lines != *e.Unanchored {
+		t.Errorf("the composition reads %+v, want the measured counts", got.Lines)
+	}
+	// An entry that never dipped carries nothing extra: the two agree, and a
+	// second copy of one number is one that can disagree with the first.
+	plain := measurementsFrom("tree", record, record, nil, nil, true, nil)
+	if plain.Components["api"].Unanchored != nil {
+		t.Error("an entry that was not anchored still carries a second copy of its counts")
+	}
+}
+
+// A partial candidate is worse than none: any non-empty entry reads as a cache
+// hit, so the missing component is new on every later change and every composed
+// figure it belongs to stops comparing, silently. What enforces that is the
+// fold, against the declaration of the tree being recorded — never the run,
+// which sees only its own slice.
+//
+// So a run that could not measure one component still hands on every component
+// it did measure, and says why it must not be landed. The document is the only
+// channel by which a shard's counts reach `lydite test merge`, and emptying it
+// loses them for good: one unreadable report would drop every other component
+// of that shard out of `coverage(repo)`, which is then composed over a strict
+// subset and rendered as a pass.
+func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetErr(io.Discard)
+	root := gitRepo(t, map[string]string{"api/x.go": "package api\n"})
+	gitIn(t, root, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	// api measured; web ran and its report could not be read, which is what
+	// blocks the recording.
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasuredComponent(decl.Components[1], "the coverage report lists no coverable line"),
+	}
+
+	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, nil, nil, true, nil, 0.1)
+
+	if _, ok := doc.Components["api"]; !ok {
+		t.Errorf("the run discarded the component it measured: %+v", doc)
+	}
+	// The refusal reaches a reader through the row, not through a field on the
+	// document: foldMeasurements surfaces a reason only when the fold holds no
+	// component, and this document holds one.
+	if !strings.Contains(value, "not recorded") || !strings.Contains(value, "web") {
+		t.Errorf("row = %q, want it to say the tree was not recorded and name the component", value)
+	}
+	// And the fold refuses it, which is where the refusal belongs.
+	if gap, blocked := missingFromRecord(decl, doc); !blocked || !strings.Contains(gap, "web") {
+		t.Errorf("missingFromRecord = (%q, %v), want the fold to refuse the partial document", gap, blocked)
 	}
 }

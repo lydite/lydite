@@ -61,7 +61,7 @@ func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
 		measured("api", runner.Go, 9, 10),
 		measured("sdk", runner.Go, 8, 10),
 	}
-	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components, ms, config.Default(),
 		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
 	for _, label := range []string{"coverage(api)", "coverage(sdk)", "coverage(repo)"} {
@@ -89,7 +89,7 @@ func TestAnUngatedRunNeverRendersAsAPass(t *testing.T) {
 func TestNoCoverageEmitsNoRows(t *testing.T) {
 	rep := ui.NewReport("test")
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
-	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl,
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components,
 		[]measurement{unmeasuredComponent(decl.Components[0], "coverage is off for this run")},
 		config.Default(), coverageOptions{})
 	if len(rep.Rows()) != 0 {
@@ -274,7 +274,7 @@ func TestTheFloorGatesEachComponentAndNamesWhatItSkipped(t *testing.T) {
 		measured("api", runner.Go, 90, 100),
 		measured("sdk", runner.Go, 10, 100),
 		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not affected"),
-	}, 50)
+	}, 50, true)
 	rows := rowsOf(rep)
 	if got := rows["floor(sdk)"].Status; got != ui.StatusFail {
 		t.Errorf("floor(sdk) = %q, want a failure at 10%% against a 50%% floor", got)
@@ -299,7 +299,7 @@ func TestTheFloorSummarySaysHowManyItCovered(t *testing.T) {
 	floorRows(rep, []measurement{
 		measured("api", runner.Go, 90, 100),
 		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "not affected"),
-	}, 50)
+	}, 50, true)
 	if got := rowsOf(rep)["floor"].Value; !strings.Contains(got, "1 of 2 component(s)") {
 		t.Errorf("floor summary = %q, want it to say one of two was gated", got)
 	}
@@ -309,7 +309,7 @@ func TestTheFloorSummarySaysHowManyItCovered(t *testing.T) {
 // failing a repository over a gap it has always had.
 func TestTheFloorIsOffByDefault(t *testing.T) {
 	rep := ui.NewReport("test")
-	floorRows(rep, []measurement{measured("api", runner.Go, 0, 100)}, config.Default().Coverage.Floor)
+	floorRows(rep, []measurement{measured("api", runner.Go, 0, 100)}, config.Default().Coverage.Floor, true)
 	if len(rep.Rows()) != 0 {
 		t.Errorf("rows = %v, want none with the floor disabled", rep.Rows())
 	}
@@ -392,7 +392,7 @@ func TestEveryDeclaredComponentIsAccountedFor(t *testing.T) {
 		{Name: "api", Dir: "go/api", Runner: runner.GoTest},
 		{Name: "web", Dir: "web", Runner: runner.Vitest},
 	}}
-	got := inDeclarationOrder(decl, []measurement{measured("api", runner.Go, 1, 2)}, true)
+	got := inDeclarationOrder(decl.Components, []measurement{measured("api", runner.Go, 1, 2)}, true)
 	if len(got) != 3 {
 		t.Fatalf("got %d measurements, want one per declared component", len(got))
 	}
@@ -548,7 +548,7 @@ func TestTheRemovedCoverageCommandNamesWhatReplacedIt(t *testing.T) {
 // measure.
 func TestARemovedComponentLeavesTheBaseline(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
-	ms := inDeclarationOrder(decl, nil, true)
+	ms := inDeclarationOrder(decl.Components, nil, true)
 	baseline := gitstate.Baseline{"api": entry(50, 100), "gone": entry(90, 100)}
 	// candidateThisTree writes no git state, so the assertion is on the shape
 	// it builds: every declared component present, and nothing else.
@@ -587,7 +587,7 @@ func TestAFigureOverEveryComponentSaysHowManyItCovered(t *testing.T) {
 		unmeasuredComponent(decl.Components[1], "test(web) did not pass: failed"),
 		unmeasuredComponent(decl.Components[2], "test(admin) did not pass: failed"),
 	}
-	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components, ms, config.Default(),
 		coverageOptions{Instrument: true})
 	rows := rowsOf(rep)
 
@@ -616,7 +616,7 @@ func TestAGlobalFigureThatMeasuredNothingIsUnmeasured(t *testing.T) {
 	rep := ui.NewReport("test")
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "test(api) did not pass: failed")}
-	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, ms, config.Default(),
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components, ms, config.Default(),
 		coverageOptions{Instrument: true})
 	if got := rowsOf(rep)["coverage(repo)"]; got.Status != ui.StatusUnmeasured {
 		t.Errorf("coverage = %+v, want unmeasured", got)
@@ -691,7 +691,7 @@ func TestGatingOnTheDefaultBranchRecordsRatherThanRemeasures(t *testing.T) {
 	rep := ui.NewReport("test")
 	cmd := newTestCmd()
 	cmd.SetErr(&strings.Builder{})
-	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+	addCoverageRows(context.Background(), cmd, rep, root, decl, decl.Components, ms, config.Default(),
 		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
 	rows := rowsOf(rep)
 	base, ok := rows["baseline"]
@@ -729,7 +729,7 @@ func TestOnlyAffectedSelectionMakesAComponentCarryable(t *testing.T) {
 		{"--component narrowed the run", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := inDeclarationOrder(decl, ran, tc.selected)
+			got := inDeclarationOrder(decl.Components, ran, tc.selected)
 			var web measurement
 			for _, m := range got {
 				if m.Name == "web" {
@@ -760,7 +760,7 @@ func TestAGateThatCouldNotRunFailsThroughARowAndKeepsTheReport(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: runner.GoTest}}}
 	ms := []measurement{measured("api", runner.Go, 9, 10)}
 
-	addCoverageRows(context.Background(), cmd, rep, root, decl, ms, config.Default(),
+	addCoverageRows(context.Background(), cmd, rep, root, decl, decl.Components, ms, config.Default(),
 		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
 
 	rows := rowsOf(rep)
@@ -840,7 +840,7 @@ func TestAFailedGateLeavesNoDuplicateRows(t *testing.T) {
 	cfg := config.Default()
 	cfg.Coverage.Floor = 50
 
-	addCoverageRows(context.Background(), cmd, rep, t.TempDir(), decl, ms, cfg,
+	addCoverageRows(context.Background(), cmd, rep, t.TempDir(), decl, decl.Components, ms, cfg,
 		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
 
 	seen := map[string]int{}
@@ -1126,7 +1126,7 @@ func TestAFloorThatClearedNothingIsNotAPass(t *testing.T) {
 	floorRows(rep, []measurement{
 		unmeasuredComponent(component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}, "no report"),
 		unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "no report"),
-	}, 80)
+	}, 80, true)
 	got := rowsOf(rep)["floor"]
 	if got.Status == ui.StatusPass {
 		t.Errorf("floor = %+v, want no pass — it was applied to nothing", got)
@@ -1198,7 +1198,7 @@ func TestTheBaselineReadAndTheRecordAreDifferentRows(t *testing.T) {
 	cmd := newTestCmd()
 	cmd.SetErr(&strings.Builder{})
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: ".", Runner: runner.GoTest}}}
-	addCoverageRows(context.Background(), cmd, rep, root, decl,
+	addCoverageRows(context.Background(), cmd, rep, root, decl, decl.Components,
 		[]measurement{measured("api", runner.Go, 9, 10)}, config.Default(),
 		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
 
@@ -1472,7 +1472,7 @@ func TestTheFloorDenominatorExcludesWhatItCanNeverApplyTo(t *testing.T) {
 		measured("api", runner.Go, 90, 100),
 		unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
 			"the component declares a raw command, which has no instrumented variant"),
-	}, 50)
+	}, 50, true)
 	rows := rowsOf(rep)
 	if got := rows["floor"].Value; !strings.Contains(got, "1 of 1 component(s)") {
 		t.Errorf("floor summary = %q, want 1 of 1 — the raw-command component is not a gap", got)
@@ -1591,4 +1591,81 @@ func TestComposedPatchWillNotCompareAgainstAPartialBaseline(t *testing.T) {
 // are about.
 func onlyLang(l runner.Lang) func(measurement) bool {
 	return func(m measurement) bool { return m.Lang == l }
+}
+
+// narrowedGateRepo is a repository whose HEAD is one commit ahead of its
+// origin, which is what puts a gated run on the comparison path rather than the
+// default-branch one. The base tree measures nothing — there is no suite to run
+// there — so the comparison finds no baseline and reports every component new,
+// which is enough: what is under test is which rows a narrowed run emits, not
+// what they say.
+func narrowedGateRepo(t *testing.T) string {
+	t.Helper()
+	root, origin := t.TempDir(), t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	write(t, root, "f", "x\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+	// One commit past the base, so HEAD is not its own merge-base.
+	write(t, root, "f", "y\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "change")
+	return root
+}
+
+// A shard's actual production configuration is `--affected --component <slice>
+// --gate-coverage`, and the rows it must not emit are the ones summed over
+// every component: three shards each publishing its own `coverage(repo)` is
+// three answers to one question, under one label.
+func TestANarrowedGatedRunPublishesNoFigureOverTheRepository(t *testing.T) {
+	root := narrowedGateRepo(t)
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: ".", Runner: runner.GoTest},
+		{Name: "web", Dir: ".", Runner: runner.Vitest},
+	}}
+	cfg := config.Default()
+	cfg.Coverage.Floor = 50
+
+	narrowed := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	addCoverageRows(context.Background(), cmd, narrowed, root, decl, decl.Components[:1],
+		[]measurement{measured("api", runner.Go, 9, 10)}, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1, Narrowed: true})
+
+	rows := rowsOf(narrowed)
+	for _, label := range []string{repoLabel("coverage"), repoLabel("patch"), "floor"} {
+		if got, ok := rows[label]; ok {
+			t.Errorf("a run responsible for 1 of 2 components published %s: %+v", label, got)
+		}
+	}
+	// Its own component is still reported, and nothing about the one it does
+	// not own.
+	if _, ok := rows["coverage(api)"]; !ok {
+		t.Errorf("the shard did not report its own component: %v", narrowed.Rows())
+	}
+	if got, ok := rows["coverage(web)"]; ok {
+		t.Errorf("the shard reported a component it is not responsible for: %+v", got)
+	}
+
+	// The same run unnarrowed does emit the figure, which is what says the
+	// suppression above is the flag's doing rather than the fixture's.
+	whole := ui.NewReport("test")
+	addCoverageRows(context.Background(), cmd, whole, root, decl, decl.Components,
+		[]measurement{measured("api", runner.Go, 9, 10), measured("web", runner.TypeScript, 1, 2)}, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+	if _, ok := rowsOf(whole)[repoLabel("coverage")]; !ok {
+		t.Errorf("an unnarrowed run published no figure over the repository: %v", whole.Rows())
+	}
 }

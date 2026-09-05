@@ -96,6 +96,27 @@ func TestParseRejects(t *testing.T) {
 			want: "duplicate name",
 		},
 		{
+			// A comma splits the --component flag, so this component would
+			// never run and two others would run twice.
+			name: "a name holding a comma",
+			yaml: "components:\n  - {name: \"a,b\", dir: cli, runner: go-test}\n",
+			want: "may hold only",
+		},
+		{
+			// A slash is refused by the artifact upload, failing a job the
+			// composite action promises never to fail.
+			name: "a name holding a slash",
+			yaml: "components:\n  - {name: a/b, dir: cli, runner: go-test}\n",
+			want: "may hold only",
+		},
+		{
+			// A name is the directory a component's log is written into, and
+			// this one resolves to the scan root.
+			name: "a name that is a path segment",
+			yaml: "components:\n  - {name: \"..\", dir: cli, runner: go-test}\n",
+			want: "outside the report directory",
+		},
+		{
 			name: "missing dir",
 			yaml: "components:\n  - name: a\n    runner: go-test\n",
 			want: "dir is required",
@@ -366,6 +387,19 @@ func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
 	}
 	if len(f.Components) != 1 || f.Components[0].Name != "svc" {
 		t.Fatalf("components = %+v, want the declaration read", f.Components)
+	}
+
+	// The name charset is not enforced here, and that is the point. It is a
+	// rule about what a later run carries through a flag, a job name and an
+	// artifact name — not about whether this tree can be measured — and the
+	// base tree of the pull request that renames an offending component still
+	// carries the old name, so enforcing it would fail the one change that
+	// fixes it.
+	lenient, err := LoadHistorical(write(t, "components:\n  - {name: \"a,b\", dir: svc, runner: go-test}\n"))
+	if err != nil {
+		t.Errorf("LoadHistorical refused a name it cannot ask the author to change: %v", err)
+	} else if len(lenient.Components) != 1 {
+		t.Errorf("components = %+v, want the declaration read as written", lenient.Components)
 	}
 
 	// Everything that makes a declaration runnable is still checked, because

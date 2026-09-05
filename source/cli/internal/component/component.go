@@ -233,13 +233,17 @@ func parse(data []byte, source string, strict bool) (File, error) {
 	if err := dec.Decode(&f); err != nil && !errors.Is(err, io.EOF) {
 		return File{}, fmt.Errorf("parsing %s: %w", source, err)
 	}
-	if err := f.validate(source); err != nil {
+	if err := f.validate(source, strict); err != nil {
 		return File{}, err
 	}
 	return f, nil
 }
 
-func (f File) validate(source string) error {
+// strict says the declaration is one lydite is being configured by rather than
+// one it is measuring. It gates the name charset alone: every other check here
+// is what makes a declaration runnable at all, and a historical tree that fails
+// one of those cannot be measured whatever leniency it is read with.
+func (f File) validate(source string, strict bool) error {
 	seen := map[string]bool{}
 	for i, c := range f.Components {
 		where := fmt.Sprintf("%s: components[%d]", source, i)
@@ -248,6 +252,19 @@ func (f File) validate(source string) error {
 		}
 		if seen[c.Name] {
 			return fmt.Errorf("%s: duplicate name %q", where, c.Name)
+		}
+		// Only when this tree is the one being configured. The name charset
+		// is a rule about what a *later* run can carry through a flag, a job
+		// name and an artifact name; a base tree is being measured rather than
+		// distributed, and holding it to a rule its author cannot act on is
+		// exactly what LoadHistorical exists to refuse. The migration proves
+		// it: the base tree of the pull request that renames an offending
+		// component still carries the old name, so validating it there would
+		// fail the one change that fixes it.
+		if strict {
+			if err := validateName(c.Name); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
 		}
 		seen[c.Name] = true
 		where = fmt.Sprintf("%s (%s)", where, c.Name)
@@ -271,6 +288,48 @@ func (f File) validate(source string) error {
 		return err
 	}
 	return f.validateDeps(source)
+}
+
+// nameChars is what a component name may be spelled with.
+//
+// A name is not only a label. It is a `--component` value in a comma-separated
+// list, the name of a CI matrix job, and the suffix of the artifact that job
+// uploads — so it has to survive all three round trips, and the ones it cannot
+// survive fail late and confusingly. A comma splits the flag, so a component
+// called `a,b` declared beside `a` and `b` makes those two run twice and itself
+// never run, surfacing only at the fold as duplicated rows. A slash or a
+// colon is refused by the artifact upload, which fails a job the composite
+// action promises never to fail.
+//
+// It is a path segment too: a component's log is written to a directory named
+// after it, so a name of "." or ".." resolves outside the report directory
+// entirely.
+//
+// Refused at parse time, where the author is the person who can act on it. The
+// set is deliberately narrower than what any one of these accepts: a floor
+// stated once is worth more than four rules that agree until one of them
+// changes.
+const nameChars = "letters, digits, '.', '_' and '-'"
+
+func validateName(name string) error {
+	// A name is also the directory a component's log is written into, under
+	// the report directory. "." and ".." are path segments before they are
+	// names: filepath.Join cleans them away, so a component called ".." writes
+	// its log at the scan root instead — outside the directory that disowns
+	// itself, and into the tree lydite is measuring.
+	if strings.Trim(name, ".") == "" {
+		return fmt.Errorf("name %q is a path segment as well as a name, and resolves outside the report directory", name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("name %q contains %q — a name is a --component value, a CI matrix job name and an artifact name, so it may hold only %s",
+				name, string(r), nameChars)
+		}
+	}
+	return nil
 }
 
 // validateExcludes rejects an exclude that is malformed or that names
