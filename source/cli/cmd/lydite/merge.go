@@ -61,6 +61,14 @@ carry everything the composition needs.`,
 			if err != nil {
 				return err
 			}
+			// A fold over no component cannot say a shard died: completeness
+			// is a question about the declaration, and an empty one answers
+			// every question with yes. `plan` refuses the same state for the
+			// same reason, and `scan` refuses it rather than emitting a row.
+			if len(decl.Components) == 0 {
+				return errors.New("no components declared in " + component.FileName +
+					"\n       there is nothing to fold, and a fold over no component cannot report a shard that died")
+			}
 			cfg, err := config.Load(dir)
 			if err != nil {
 				return err
@@ -110,7 +118,9 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 			rep.Add(row)
 		}
 	}
-	rep.Add(foldedScheduleRow(inputs))
+	if row, ok := foldedScheduleRow(inputs); ok {
+		rep.Add(row)
+	}
 
 	// One row per declared component, in declaration order. A component no
 	// shard reported is a shard that died; one two shards reported is two
@@ -145,7 +155,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		// where HEAD is its own merge-base. A gated row here would publish a
 		// verdict the run it folds refused to reach, against a baseline no
 		// shard was held to.
-		rep.Add(ungatedComposedRow(repoLabel("coverage"), folded.ms, everything))
+		rep.Add(ungatedComposedRow(repoLabel("coverage"), folded.ms, folded.carried, everything))
 	case anyCoverageRow(inputs, decl):
 		// The shards measured and wrote no measurements, which is what a run
 		// that was never asked to gate does. A figure over the repository is
@@ -170,7 +180,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 			measurementsName, cfg.Coverage.Floor)))
 	}
 	if folded.measured {
-		rep.Add(recordRow(folded.doc))
+		rep.Add(recordRow(decl, folded.doc))
 	}
 
 	// Anything the fold has no rule for is carried through when the shards
@@ -344,9 +354,9 @@ var maxConcurrent = regexp.MustCompile(`max (\d+) concurrent`)
 // A shard that failed its schedule row fails this one: an interrupted shard is
 // a run that tested part of the repository, and the fold must not launder that
 // into a pass.
-func foldedScheduleRow(inputs []shardInput) ui.Row {
+func foldedScheduleRow(inputs []shardInput) (ui.Row, bool) {
 	row := ui.Row{Status: ui.StatusPass, Label: "schedule"}
-	best, shards := 0, 0
+	best, shards, scheduled := 0, 0, 0
 	for _, in := range inputs {
 		if in.read {
 			// Every shard that was read, not every shard that scheduled
@@ -358,6 +368,7 @@ func foldedScheduleRow(inputs []shardInput) ui.Row {
 			if r.Label != "schedule" {
 				continue
 			}
+			scheduled++
 			if r.Status == ui.StatusFail {
 				row.Status = ui.StatusFail
 			}
@@ -370,8 +381,15 @@ func foldedScheduleRow(inputs []shardInput) ui.Row {
 			row.Detail = append(row.Detail, r.Detail...)
 		}
 	}
+	// No shard scheduled anything — every component was deselected, or none was
+	// reached. A single run emits no schedule row at all in that state, and a
+	// fold inventing a green one would be more assertive about the scheduler
+	// than the runs it folds.
+	if scheduled == 0 {
+		return ui.Row{}, false
+	}
 	row.Value = fmt.Sprintf("%d shard(s), max %d concurrent", shards, best)
-	return row
+	return row, true
 }
 
 // composition is every shard's measurements as the values the repository-wide
@@ -457,17 +475,30 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 // only its own components, so three shards would publish three different
 // numbers under one label.
 //
-// It records nothing itself. `record` reads the same --reports directories and
-// folds them again, because it runs in a job with a token that can push and
-// this one does not.
-func recordRow(folded measurementsDoc) ui.Row {
+// It holds the fold against the declaration, which is the one thing a fold can
+// answer definitively and a single shard cannot. Announcing a recording that
+// `record` then refuses is the untruth every row in this file is arranged to
+// avoid, and the predicate is `missingFromRecord` — the same one `record`
+// itself applies, so the two cannot give different answers.
+//
+// It records nothing. `record` reads the same --reports directories and folds
+// them again, because it runs in a job with a token that can push and this one
+// does not.
+func recordRow(decl component.File, folded measurementsDoc) ui.Row {
 	if len(folded.Components) == 0 {
 		return ui.Row{Status: ui.StatusUnmeasured, Label: "record",
 			Value: "nothing to record", Detail: []string{folded.Reason}}
 	}
+	if gap, blocked := missingFromRecord(decl, folded); blocked {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: "record",
+			Value: fmt.Sprintf("not recordable — %s has no entry, and a baseline missing a component gates on nothing", gap),
+			Detail: []string{
+				"`lydite test record` refuses this fold; the next change against this tree measures it instead",
+			}}
+	}
 	return ui.Row{Status: ui.StatusContext, Label: "record",
-		Value: fmt.Sprintf("%d component(s) ready for %s — `lydite test record` lands it",
-			len(folded.Components), shortSHA(folded.Tree))}
+		Value: fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
+			len(folded.Components), recordable(decl), shortSHA(folded.Tree))}
 }
 
 // uncarriedVerdicts names every shard that failed over something no row in the

@@ -1592,3 +1592,80 @@ func TestComposedPatchWillNotCompareAgainstAPartialBaseline(t *testing.T) {
 func onlyLang(l runner.Lang) func(measurement) bool {
 	return func(m measurement) bool { return m.Lang == l }
 }
+
+// narrowedGateRepo is a repository whose HEAD is one commit ahead of its
+// origin, which is what puts a gated run on the comparison path rather than the
+// default-branch one. The base tree measures nothing — there is no suite to run
+// there — so the comparison finds no baseline and reports every component new,
+// which is enough: what is under test is which rows a narrowed run emits, not
+// what they say.
+func narrowedGateRepo(t *testing.T) string {
+	t.Helper()
+	root, origin := t.TempDir(), t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main", ".")
+	run(root, "init", "-b", "main", ".")
+	run(root, "config", "user.email", "t@t")
+	run(root, "config", "user.name", "t")
+	write(t, root, "f", "x\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "seed")
+	run(root, "remote", "add", "origin", origin)
+	run(root, "push", "-u", "origin", "main")
+	// One commit past the base, so HEAD is not its own merge-base.
+	write(t, root, "f", "y\n")
+	run(root, "add", "-A")
+	run(root, "commit", "-m", "change")
+	return root
+}
+
+// A shard's actual production configuration is `--affected --component <slice>
+// --gate-coverage`, and the rows it must not emit are the ones summed over
+// every component: three shards each publishing its own `coverage(repo)` is
+// three answers to one question, under one label.
+func TestANarrowedGatedRunPublishesNoFigureOverTheRepository(t *testing.T) {
+	root := narrowedGateRepo(t)
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: ".", Runner: runner.GoTest},
+		{Name: "web", Dir: ".", Runner: runner.Vitest},
+	}}
+	cfg := config.Default()
+	cfg.Coverage.Floor = 50
+
+	narrowed := ui.NewReport("test")
+	cmd := newTestCmd()
+	cmd.SetErr(&strings.Builder{})
+	addCoverageRows(context.Background(), cmd, narrowed, root, decl, decl.Components[:1],
+		[]measurement{measured("api", runner.Go, 9, 10)}, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1, Narrowed: true})
+
+	rows := rowsOf(narrowed)
+	for _, label := range []string{repoLabel("coverage"), repoLabel("patch"), "floor"} {
+		if got, ok := rows[label]; ok {
+			t.Errorf("a run responsible for 1 of 2 components published %s: %+v", label, got)
+		}
+	}
+	// Its own component is still reported, and nothing about the one it does
+	// not own.
+	if _, ok := rows["coverage(api)"]; !ok {
+		t.Errorf("the shard did not report its own component: %v", narrowed.Rows())
+	}
+	if got, ok := rows["coverage(web)"]; ok {
+		t.Errorf("the shard reported a component it is not responsible for: %+v", got)
+	}
+
+	// The same run unnarrowed does emit the figure, which is what says the
+	// suppression above is the flag's doing rather than the fixture's.
+	whole := ui.NewReport("test")
+	addCoverageRows(context.Background(), cmd, whole, root, decl, decl.Components,
+		[]measurement{measured("api", runner.Go, 9, 10), measured("web", runner.TypeScript, 1, 2)}, cfg,
+		coverageOptions{Instrument: true, Gate: true, Concurrency: 1})
+	if _, ok := rowsOf(whole)[repoLabel("coverage")]; !ok {
+		t.Errorf("an unnarrowed run published no figure over the repository: %v", whole.Rows())
+	}
+}

@@ -145,8 +145,10 @@ section per shard under one heading, each answering about part of the repository
 `ci-end2end.yml`'s `proving ground — coverage gate` job is what holds all of that to a real
 repository: the plan, a baseline miss measured in a throwaway worktree, the recording, three shards
 that must then *hit* the cache, the fold, and the fold with one shard's directory omitted — which is
-how a dead runner is exercised without one dying. It supersedes the `lydite test record` step that
-sat in the `proving ground` job, whose steps it strictly contains.
+how a dead runner is exercised without one dying. It is the only job that exercises
+`lydite test record` against a real repository, which is what keeps `lydite-baseline.yml` honest: that
+workflow runs on pushes to the default branch alone, and a baseline nothing writes costs a slower run
+rather than a red one.
 
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
@@ -204,6 +206,15 @@ workspace compiles three times and provisions three copies of everything the sui
 
 **`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
 second statement of the language could only disagree with the first.
+
+**A component's name may hold only letters, digits, `.`, `_` and `-`.** It is not merely a label: it
+is a `--component` value inside a comma-separated list, the name of a CI matrix job, and the suffix of
+that job's artifact, so it has to survive all three round trips and the ones it cannot survive fail
+late. A component called `a,b` declared beside `a` and `b` makes those two run twice and itself never
+run, surfacing only at the fold as duplicated rows; one holding a `/` or a `:` is refused by the
+artifact upload, failing a job the composite action promises never to fail. Refused at parse time
+instead, where the author is the person who can act on it, and against a set narrower than any of the
+three accepts — a floor stated once is worth more than three rules that agree until one changes.
 
 **Unknown keys are rejected**, the same stance `referral.Parse` and `config.validateLinter` take. A
 dropped key means a component configured differently from what its author wrote — a suite running
@@ -788,8 +799,8 @@ shards' documents back into one. See
 
 **A run reports exactly the components it is responsible for, and nothing about any other.** The
 responsibility set is the `--component` list, or the whole declaration when there is none: one suite
-row, one coverage row and one patch row per component in it, and no row at all about a component
-outside it. Under one process, padding a `coverage(<name>)` row for every *declared* component is
+row and one coverage row per component in it, a patch row for each whose files the diff touched, and
+no row at all about a component outside it. Under one process, padding a `coverage(<name>)` row for every *declared* component is
 informative; under a matrix it means every shard publishes rows about components other shards are
 running, so the merged document holds N answers per component and a consumer keying rows by label
 picks one of them.
@@ -835,6 +846,10 @@ says nothing a reader can act on.
 `--dir` (for the declaration) and repeatable `--reports`. No network, and nothing from the repository
 is executed.
 
+**A repository that declares no components is an error, not a fold.** Completeness is a question
+about the declaration, and an empty one answers every question with yes — so `merge` refuses it the
+way `plan` and `scan` do rather than reporting that nought of nought components are covered.
+
 **A declared component with no row from any shard is a failure, and so is one with two.** Not
 `unmeasured`: that status does not vote, so a run whose runner died would publish `"verdict": "pass"`
 over a repository it half tested. It is the same reason the `schedule` row fails an interrupted run
@@ -853,6 +868,13 @@ A report's rows carry rendered prose rather than numbers, so folding reports can
 the shards' `measurements.json` can, which is why it carries each component's patch part and the
 baseline entry it was gated against alongside its counts. The composition is one implementation with
 two callers, the unsharded local run and `merge`, for the reason the port predicate has one.
+
+The fold's own `record` row is held against the declaration by the same `missingFromRecord` the
+recording applies, so it cannot announce a landing `lydite test record` will then refuse. A run that
+could not measure a component still hands on every component it *did* measure, carrying the refusal
+as a reason: the document is the only channel by which a shard's counts reach the fold, and emptying
+it would drop that shard's other components out of `coverage(repo)`, which is then composed over a
+strict subset and rendered as a pass.
 
 **Completeness belongs to the fold, not to the run.** `lydite test` refuses to establish a candidate
 only over a component **it selected and failed to measure**. A component it never ran is simply
@@ -1436,10 +1458,9 @@ since each shard carries every component it did not run and only one copy came f
 executed. `record` folds the `--reports` directories itself, because it runs post-merge in a workflow
 `lydite test merge` does not precede.
 
-`measurements.json` is that document, and the name is what it now holds: each component's counts and
-producer — the baseline candidate — plus its patch part and the baseline entry it was gated against,
-which are what `lydite test merge` composes the repository-wide figures from. `baseline.json` named
-half of it.
+`measurements.json` is that document. It holds each component's counts and producer — the baseline
+candidate — plus its patch part and the baseline entry it was gated against, which are what
+`lydite test merge` composes the repository-wide figures from.
 
 **A candidate names the tree it measured, and `record` refuses to land it anywhere else.** It is the
 only integrity property available to a command that executes nothing: without it a mis-wired workflow

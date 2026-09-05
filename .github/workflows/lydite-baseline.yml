@@ -95,7 +95,17 @@ jobs:
         run: |
           set -euo pipefail
           lydite test plan --dir . --out "${RUNNER_TEMP}/matrix.json"
-          printf 'shards=%s\n' "$(cat "${RUNNER_TEMP}/matrix.json")" >> "$GITHUB_OUTPUT"
+          # The delimiter form, not `shards=<value>`. The matrix is derived from
+          # `.lydite/components.yml`, which a pull request owns, and the
+          # single-line form lets a newline in that value open a second output
+          # entry. It is safe today only because the matrix goes through Go's
+          # json.Marshal, which escapes one — a guarantee enforced in another
+          # program, which is not where a workflow should be reading it from.
+          {
+            echo "shards<<__LYDITE_MATRIX__"
+            cat "${RUNNER_TEMP}/matrix.json"
+            echo "__LYDITE_MATRIX__"
+          } >> "$GITHUB_OUTPUT"
 
   measure:
     name: measure (${{ matrix.shard.name }})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,28 +285,6 @@ func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
 	}
 }
 
-// A partial candidate is worse than none: any non-empty entry reads as a cache
-// hit, so the missing component is new on every later change and every composed
-// figure it belongs to stops comparing — silently. So a run that could not
-// measure a component it was supposed to establishes nothing at all.
-func TestARunMissingAComponentEstablishesNoCandidate(t *testing.T) {
-	cmd := newRootCmd()
-	decl := component.File{Components: []component.Component{
-		{Name: "api", Dir: "api", Runner: "go-test"},
-		{Name: "web", Dir: "web", Runner: "vitest"},
-	}}
-	ok := measured("api", "go", 50, 100)
-	broken := unmeasuredComponent(decl.Components[1], "the suite failed")
-
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, []measurement{ok, broken}, nil, nil, true, nil, 0.1)
-	if len(doc.Components) != 0 {
-		t.Errorf("doc = %+v, want nothing established when a component is missing", doc)
-	}
-	if !strings.Contains(value, "web") || !strings.Contains(value, "gates on nothing") {
-		t.Errorf("row = %q, want the gap named and its consequence stated", value)
-	}
-}
-
 // A component the declaration no longer holds does not survive in the entry.
 // Otherwise a baseline accumulates a tail of components nobody can measure, and
 // each one blocks nothing while quietly widening what a composed figure sums.
@@ -532,5 +511,50 @@ func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	plain := measurementsFrom("tree", record, record, nil, nil, true, nil)
 	if plain.Components["api"].Unanchored != nil {
 		t.Error("an entry that was not anchored still carries a second copy of its counts")
+	}
+}
+
+// A partial candidate is worse than none: any non-empty entry reads as a cache
+// hit, so the missing component is new on every later change and every composed
+// figure it belongs to stops comparing, silently. What enforces that is the
+// fold, against the declaration of the tree being recorded — never the run,
+// which sees only its own slice.
+//
+// So a run that could not measure one component still hands on every component
+// it did measure, and says why it must not be landed. The document is the only
+// channel by which a shard's counts reach `lydite test merge`, and emptying it
+// loses them for good: one unreadable report would drop every other component
+// of that shard out of `coverage(repo)`, which is then composed over a strict
+// subset and rendered as a pass.
+func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetErr(io.Discard)
+	root := gitRepo(t, map[string]string{"api/x.go": "package api\n"})
+	gitIn(t, root, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: "go-test"},
+		{Name: "web", Dir: "web", Runner: "vitest"},
+	}}
+	// api measured; web ran and its report could not be read, which is what
+	// blocks the recording.
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasuredComponent(decl.Components[1], "the coverage report lists no coverable line"),
+	}
+
+	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, nil, nil, true, nil, 0.1)
+
+	if _, ok := doc.Components["api"]; !ok {
+		t.Errorf("the run discarded the component it measured: %+v", doc)
+	}
+	if doc.Reason == "" || !strings.Contains(doc.Reason, "web") {
+		t.Errorf("doc.Reason = %q, want the blocked component named", doc.Reason)
+	}
+	if !strings.Contains(value, "not recorded") {
+		t.Errorf("row = %q, want it to say the tree was not recorded", value)
+	}
+	// And the fold refuses it, which is where the refusal belongs.
+	if gap, blocked := missingFromRecord(decl, doc); !blocked || !strings.Contains(gap, "web") {
+		t.Errorf("missingFromRecord = (%q, %v), want the fold to refuse the partial document", gap, blocked)
 	}
 }

@@ -15,9 +15,9 @@ the components it is responsible for, and nothing about any other.**
 ## The responsibility set
 
 A run's responsibility set is its `--component` list, or the whole declaration
-when there is none. It reports one row per component in that set — a suite row, a
-coverage row, a patch row — and emits nothing at all about a component outside
-it.
+when there is none. It reports a suite row and a coverage row per component in
+that set, a patch row for each whose files the change touched, and nothing at
+all about a component outside it.
 
 Before this, a `--component`-narrowed run still emitted a `coverage(<name>)` row
 for every *declared* component, padding the ones it never ran with "not

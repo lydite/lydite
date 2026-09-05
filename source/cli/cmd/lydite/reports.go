@@ -169,9 +169,10 @@ func readDocuments(dir string) ([]ui.Document, error) {
 		// A run's measurements share the directory and the extension and are
 		// not a report: they are data `lydite test record` and `lydite test
 		// merge` consume, with no command and no verdict, so readDocument
-		// would refuse the file and take the whole comment down with it. Skipped by name, because the
-		// alternative — tolerating a document with no command — is the check
-		// that tells a report from anything else that happens to be JSON.
+		// would refuse the file and take the whole comment down with it.
+		// Skipped by name, because the alternative — tolerating a document
+		// with no command — is the check that tells a report from anything
+		// else that happens to be JSON.
 		if entry.Name() == measurementsName {
 			continue
 		}

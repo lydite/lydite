@@ -249,6 +249,9 @@ func (f File) validate(source string) error {
 		if seen[c.Name] {
 			return fmt.Errorf("%s: duplicate name %q", where, c.Name)
 		}
+		if err := validateName(c.Name); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
+		}
 		seen[c.Name] = true
 		where = fmt.Sprintf("%s (%s)", where, c.Name)
 		if c.Dir == "" {
@@ -280,6 +283,36 @@ func (f File) validate(source string) error {
 // the same stance pathmatch.ValidatePattern takes for the exemption set: an
 // exclude that silently covers nothing leaves the file it was written for
 // orphaned, and the author has already said what they meant.
+// nameChars is what a component name may be spelled with.
+//
+// A name is not only a label. It is a `--component` value in a comma-separated
+// list, the name of a CI matrix job, and the suffix of the artifact that job
+// uploads — so it has to survive all three round trips, and the ones it cannot
+// survive fail late and confusingly. A comma splits the flag, so a component
+// called `a,b` declared beside `a` and `b` makes those two run twice and itself
+// never run, surfacing only at the fold as duplicated rows. A slash or a
+// colon is refused by the artifact upload, which fails a job the composite
+// action promises never to fail.
+//
+// Refused at parse time instead, where the author is the person who can act on
+// it. The set is deliberately narrower than what any one of the three accepts:
+// a floor stated once is worth more than three rules that agree until one of
+// them changes.
+const nameChars = "letters, digits, '.', '_' and '-'"
+
+func validateName(name string) error {
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("name %q contains %q — a name is a --component value, a CI matrix job name and an artifact name, so it may hold only %s",
+				name, string(r), nameChars)
+		}
+	}
+	return nil
+}
+
 func (f File) validateExcludes(source string) error {
 	for i, e := range f.Excludes {
 		where := fmt.Sprintf("%s: excludes[%d]", source, i)

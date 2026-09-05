@@ -317,3 +317,120 @@ func TestMergeSaysAFloorItCouldNotApply(t *testing.T) {
 		t.Errorf("floor = %+v, want unmeasured: nothing was held to it", got)
 	}
 }
+
+// The fold's schedule row carries two things a single shard's cannot: whether
+// any shard was cut short, and the largest number of components any one of them
+// ran at once. The second is what separates a scheduler that ran from one that
+// only claims to, and neither can be recomputed — both are observed.
+func TestMergeFoldsWhatTheSchedulersDid(t *testing.T) {
+	root := mergeRepo(t)
+	busy := shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: "schedule", Value: "2 component(s), max 2 concurrent, 1 pair(s) serialised",
+			Detail: []string{"a and b serialised on port 5432"}},
+		{Status: ui.StatusPass, Label: "test(a)", Value: "passed"},
+	}, nil)
+	cut := shardDir(t, []ui.Row{
+		{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 0 of 1 component(s)"},
+		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+	}, nil)
+
+	out, err := runMergeCmd(t, root, busy, cut)
+	if err == nil {
+		t.Fatalf("a shard whose run was cut short folded to a pass:\n%s", out)
+	}
+	got := jsonRowByLabel(t, out, "schedule")
+	if got.Status != "fail" {
+		t.Errorf("schedule = %+v, want the interrupted shard's failure carried", got)
+	}
+	if !strings.Contains(got.Value, "max 2 concurrent") {
+		t.Errorf("schedule = %q, want the highest concurrency any shard reached", got.Value)
+	}
+	if !strings.Contains(strings.Join(got.Detail, "\n"), "serialised on port 5432") {
+		t.Errorf("schedule detail %q does not carry the shard's serialised pair", got.Detail)
+	}
+}
+
+// A run where no component was selected schedules nothing, and emits no
+// schedule row. A fold inventing a green one would be more assertive about the
+// scheduler than the runs it folds.
+func TestMergeInventsNoScheduleRow(t *testing.T) {
+	root := mergeRepo(t)
+	idle := func(name string) string {
+		return shardDir(t, []ui.Row{
+			{Status: ui.StatusUnmeasured, Label: "test(" + name + ")", Value: "not affected"},
+		}, nil)
+	}
+	out, err := runMergeCmd(t, root, idle("a"), idle("b"))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	if strings.Contains(out, `"schedule"`) {
+		t.Errorf("the fold invented a schedule row for a run that scheduled nothing:\n%s", out)
+	}
+}
+
+// The shards measured and were never asked to gate. The figure over the
+// repository is composed from counts rather than from rendered rows, so it
+// cannot be recovered here — and a fold that silently lost the row a single
+// process publishes is indistinguishable from a repository nobody measured.
+func TestMergeSaysItLostTheFigureItCannotCompose(t *testing.T) {
+	root := mergeRepo(t)
+	measuredOnly := func(name string) string {
+		return shardDir(t, []ui.Row{
+			{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+			{Status: ui.StatusContext, Label: "coverage(" + name + ")", Value: "50.0% (1/2 lines)"},
+		}, nil)
+	}
+	out, err := runMergeCmd(t, root, measuredOnly("a"), measuredOnly("b"))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, repoLabel("coverage"))
+	if got.Status != "unmeasured" || !strings.Contains(got.Value, measurementsName) {
+		t.Errorf("coverage(repo) = %+v, want an unmeasured row naming what the shards did not write", got)
+	}
+}
+
+// Every shard measured nothing and said why. The fold has a tree and no counts,
+// which is a run with nothing to record rather than one whose shards went
+// missing.
+func TestMergeReportsAFoldWithNothingToRecord(t *testing.T) {
+	root := mergeRepo(t)
+	barren := func(name string) string {
+		return shardDir(t,
+			[]ui.Row{{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"}},
+			&measurementsDoc{Tree: "tree", Gated: true, Reason: "no component produced a measurement"})
+	}
+	out, err := runMergeCmd(t, root, barren("a"), barren("b"))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "record")
+	if got.Status != "unmeasured" || got.Value != "nothing to record" {
+		t.Errorf("record = %+v, want an unmeasured row saying there is nothing to land", got)
+	}
+	if !strings.Contains(strings.Join(got.Detail, "\n"), "no component produced a measurement") {
+		t.Errorf("record detail %q does not carry the shards' reason", got.Detail)
+	}
+}
+
+// The fold is the only thing that can hold a candidate against the whole
+// declaration, so it must not announce a recording `lydite test record` will
+// then refuse.
+func TestMergeDoesNotPromiseARecordingThatWillBeRefused(t *testing.T) {
+	root := mergeRepo(t)
+	partial := shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		// b ran and its report was unreadable, so it contributes no entry.
+		{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the coverage report lists no coverable line"},
+	}, &measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{}})
+
+	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), partial)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "record")
+	if got.Status == "context" || !strings.Contains(got.Value, "b") {
+		t.Errorf("record = %+v, want a non-passing row naming the component with no entry", got)
+	}
+}

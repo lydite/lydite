@@ -304,8 +304,12 @@ func ungatedRows(rep *ui.Report, ms []measurement, composed bool) {
 	ungatedComponentRows(rep, ms)
 	// Only a run responsible for the whole declaration answers about the
 	// repository. A shard's own components are not it.
+	//
+	// No carried entries: a run reaching this path holds its own measurements,
+	// where a component it did not select is unmeasured rather than standing in
+	// for the baseline's counts. The fold passes what it carried.
 	if composed {
-		rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, everything))
+		rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, nil, everything))
 	}
 }
 
@@ -330,13 +334,17 @@ func ungatedComponentRows(rep *ui.Report, ms []measurement) {
 // at all — the language whose only component failed would report the worst
 // possible number as though it had been measured, and a reader acting on it
 // would go looking for missing tests rather than for the failing suite.
-func ungatedComposedRow(label string, ms []measurement, in func(measurement) bool) ui.Row {
-	lines, measured, _ := composed(ms, nil, in)
+// carried names the components whose counts came from the baseline rather than
+// from this run. A figure that counted them as measured would claim to have
+// measured components nothing ran — and would contradict the floor row beside
+// it, which does distinguish the two.
+func ungatedComposedRow(label string, ms []measurement, carried map[string]bool, in func(measurement) bool) ui.Row {
+	lines, measured, carriedN := composed(ms, carried, in)
 	total := count(ms, in)
 	if !lines.Measured() {
 		return unmeasuredRow(label, fmt.Sprintf("none of its %d component(s) produced a measurement", total))
 	}
-	return ui.Row{Status: ui.StatusContext, Label: label, Value: composedValue(lines, measured, 0, total)}
+	return ui.Row{Status: ui.StatusContext, Label: label, Value: composedValue(lines, measured, carriedN, total)}
 }
 
 // gatedRows reads the baseline, compares every altitude against it, gates the
@@ -1188,28 +1196,6 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	if len(record) == 0 {
 		return reasonOnly(ctx, dir, "nothing to record", "no component produced a measurement")
 	}
-	// A run that could not measure a component it was supposed to has not
-	// established this tree's baseline, and recording a partial one is worse
-	// than recording none: ReadBaseline reports a hit for any non-empty entry,
-	// so the missing component reads as new on every later change — and
-	// because a composed figure refuses to compare unless the baseline covers
-	// every component in it, that language's row and the global row stop
-	// gating too. Silently, and with no way to notice.
-	//
-	// Recording nothing leaves the next change a clean cache miss, which
-	// measures the base tree. That is slower and correct.
-	//
-	// A component nothing could ever measure — a raw `command:`, a runner
-	// naming no report — does not block it. It contributes to neither side of
-	// any comparison, so its absence from the baseline is permanent and
-	// expected rather than a gap this run created.
-	if gap, blocked := recordingBlockedBy(ms, record); blocked {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
-			gap.Name, gap.Why)
-		return reasonOnly(ctx, dir, "not recorded", fmt.Sprintf(
-			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name))
-	}
 	// Held before the anchoring, because the two are different quantities: the
 	// anchored entry is what gets recorded, and what was measured is what the
 	// repository-wide figures sum.
@@ -1220,6 +1206,38 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
 		return measurementsDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
 	}
+	doc := measurementsFrom(tree, record, measured, carried, gatedAgainst, gated, parts)
+
+	// A run that could not measure a component it was supposed to has not
+	// established this tree's baseline, and recording a partial one is worse
+	// than recording none: ReadBaseline reports a hit for any non-empty entry,
+	// so the missing component reads as new on every later change — and
+	// because a composed figure refuses to compare unless the baseline covers
+	// every component in it, that language's row and the global row stop
+	// gating too. Silently, and with no way to notice.
+	//
+	// The refusal travels as a reason on a document that still carries every
+	// component this run did measure. Emptying it instead loses those counts
+	// for good: the document is the only channel by which a shard's numbers
+	// reach `lydite test merge`, so one component's unreadable report would
+	// drop every other component of that shard out of `coverage(repo)` — which
+	// is then composed over a strict subset and rendered as a pass. What must
+	// not be recorded is decided by `lydite test record`, against the
+	// declaration of the tree being recorded, and it refuses this document by
+	// name.
+	//
+	// A component nothing could ever measure — a raw `command:`, a runner
+	// naming no report — does not block it. It contributes to neither side of
+	// any comparison, so its absence from the baseline is permanent and
+	// expected rather than a gap this run created.
+	if gap, blocked := recordingBlockedBy(ms, record); blocked {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: component %q has no coverage to record (%s), so this tree's coverage was not recorded — the next change against it measures the tree instead of gating against a baseline missing a component\n",
+			gap.Name, gap.Why)
+		doc.Reason = fmt.Sprintf(
+			"%s has no coverage to record, and a baseline missing a component gates on nothing", gap.Name)
+		return doc, "not recorded — " + doc.Reason
+	}
 	// Against the declaration, not against what this run was responsible for.
 	// A document covering part of the tree is expected — a shard covers its
 	// slice, and completeness is the fold's question — but a row saying only
@@ -1227,9 +1245,8 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	// may then refuse, which is the untruth this whole file is arranged to
 	// avoid. The two numbers differ exactly when the fold has something left
 	// to decide.
-	return measurementsFrom(tree, record, measured, carried, gatedAgainst, gated, parts),
-		fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
-			len(record), recordable(decl), shortSHA(tree))
+	return doc, fmt.Sprintf("%d of %d component(s) ready for %s — `lydite test record` lands it",
+		len(record), recordable(decl), shortSHA(tree))
 }
 
 // recordable counts the declared components a complete baseline must cover:

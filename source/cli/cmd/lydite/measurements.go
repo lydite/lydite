@@ -91,9 +91,10 @@ type componentMeasurement struct {
 	// numbers, so folding reports could not recover them.
 	Patch *patchCount `json:"patch,omitempty"`
 	// Base is the baseline entry this component was gated against, absent for
-	// a run that gated nothing and for one a different instrument measured. It travels here so `lydite test merge`
-	// composes the baseline side of every figure from what the shards already
-	// read, rather than reading the lydite branch a second time.
+	// a run that gated nothing and for one a different instrument measured. It
+	// travels here so `lydite test merge` composes the baseline side of every
+	// figure from what the shards already read, rather than reading the lydite
+	// branch a second time.
 	Base *gitstate.Entry `json:"base,omitempty"`
 }
 
@@ -163,10 +164,6 @@ func foldMeasurements(docs []measurementsDoc) (measurementsDoc, error) {
 		return measurementsDoc{}, fmt.Errorf("no measurements were found in any of the named report directories")
 	}
 	out := measurementsDoc{Tree: docs[0].Tree, Components: map[string]componentMeasurement{}}
-	// Gated if any shard was. Every shard of one run passes the same flags, so
-	// a mix means one of them could not reach a baseline at all — and a figure
-	// composed over the rest is still a comparison for the components that
-	// have one, which composedRow already reports per component.
 	var reasons []string
 	for _, doc := range docs {
 		if doc.Tree != out.Tree {
@@ -174,6 +171,10 @@ func foldMeasurements(docs []measurementsDoc) (measurementsDoc, error) {
 				"the measurements describe different trees (%s and %s), so they are not shards of one run",
 				shortSHA(out.Tree), shortSHA(doc.Tree))
 		}
+		// Gated if any shard was. Every shard of one run passes the same
+		// flags, so a mix means one of them could not reach a baseline at all
+		// — and a figure composed over the rest is still a comparison for the
+		// components that have one, which composedRow reports per component.
 		if doc.Gated {
 			out.Gated = true
 		}

@@ -162,7 +162,7 @@ func writeMatrix(out string, shards []shard) error {
 			return err
 		}
 	}
-	return os.WriteFile(out, append(data, '\n'), 0o600) // #nosec G306 -- the matrix is a workflow input the caller named, not a secret
+	return os.WriteFile(out, append(data, '\n'), 0o600)
 }
 
 // planItems is every declared component as the scheduler sees it: its root,

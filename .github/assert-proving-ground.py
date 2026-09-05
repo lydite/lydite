@@ -562,29 +562,51 @@ def main_entries(path: str) -> int:
 
 
 def main_hit(*paths: str) -> int:
-    """Assert every shard hit the baseline cache.
+    """Assert every shard gated, and read the baseline rather than measuring it.
 
     The base tree is measured in a throwaway worktree on a miss, and that is the
     single most expensive thing lydite does. Once recorded it must be read, not
     remeasured — and a run that remeasured it is green and slow, which is
-    exactly how this went unnoticed for the life of the source/ layout.
+    exactly how this class of failure goes unnoticed.
+
+    A hit emits no `baseline` row at all, so absence is the only positive signal
+    the report carries — and absence is equally what a shard that never gated, a
+    shard whose gating errored, and a shard that died before writing a row all
+    produce. Asserting only that no row says "measuring it now" is therefore
+    satisfied by every one of those, which is the vacuity this file exists to
+    refuse. So the assertion is the pair: no `baseline` row of any kind, and a
+    `record` row, which only a run that reached the end of the gate writes.
     """
     failures = []
     for path in paths:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
-        for row in doc["rows"]:
-            if row["label"] == "baseline" and "measuring it now" in row.get("value", ""):
-                failures.append(
-                    f"{path} measured the base tree again: {row['value']!r} — it was recorded by the "
-                    "step above, so a miss here means the recording did not land or is not being read"
-                )
+        rows = {r["label"]: r for r in doc["rows"]}
+        baseline = rows.get("baseline")
+        if baseline is not None and "measuring it now" in baseline.get("value", ""):
+            failures.append(
+                f"{path} measured the base tree again: {baseline['value']!r} — it was recorded by the "
+                "step above, so a miss here means the recording did not land or is not being read"
+            )
+        elif baseline is not None:
+            # Every other shape of this row means the gate did not compare
+            # against a recorded baseline: it was not asked to, it could not
+            # resolve one, or HEAD was its own merge-base.
+            failures.append(
+                f"{path} carries a baseline row saying {baseline.get('value')!r} — a cache hit emits "
+                "none at all, so this shard did not gate against the recorded entry"
+            )
+        if "record" not in rows:
+            failures.append(
+                f"{path} has no `record` row: only a run that reached the end of the gate writes one, "
+                "so this shard cannot be shown to have gated at all"
+            )
 
     for failure in failures:
         print(f"proving ground hit: {failure}", file=sys.stderr)
     if failures:
         return 1
-    print(f"proving ground hit: {len(paths)} shard(s) read the recorded baseline rather than measuring it")
+    print(f"proving ground hit: {len(paths)} shard(s) gated and read the recorded baseline rather than measuring it")
     return 0
 
 

@@ -318,9 +318,10 @@ const defaultConcurrency = 4
 // so the bound needs no count to be resolved against and can be checked before
 // any work happens. It bounds the components inside one process and says
 // nothing about how many jobs a matrix has — `lydite test plan` takes no such
-// knob, because one word meaning both is one a reader cannot tell apart. A number below one is refused rather than
-// clamped: it is a typo, and silently running anyway would have lydite ignore
-// something the caller said.
+// knob, because one word meaning both is one a reader cannot tell apart.
+//
+// A number below one is refused rather than clamped: it is a typo, and
+// silently running anyway would have lydite ignore something the caller said.
 func resolveConcurrency(flag string) (int, error) {
 	if flag == "max" {
 		return math.MaxInt, nil
