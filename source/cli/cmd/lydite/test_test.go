@@ -464,7 +464,7 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 	// would find one and the assertion below would hold either way.
 	t.Setenv("PATH", t.TempDir())
 	root := fixtureRepo(t, "components: []\n")
-	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, false)
+	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, "test", false)
 	if len(plans) != 1 || !plans[0].ready {
 		t.Fatalf("a component with no compose block must not be probed for a runtime: %+v", plans)
 	}
@@ -561,7 +561,7 @@ func TestTailOfNothingIsNothing(t *testing.T) {
 // declares no services, so nothing is probed and no stack is loaded.
 func planFor(t *testing.T, root string, c component.Component) componentPlan {
 	t.Helper()
-	log := openLog(root, c.Name, false, len(c.Name))
+	log := openLog(root, c.Name, "test.log", false, len(c.Name))
 	t.Cleanup(log.Close)
 	return componentPlan{c: c, log: log, ready: true}
 }
@@ -643,7 +643,7 @@ func TestDependsOnDoesNotSerialise(t *testing.T) {
 		{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
 		{Name: "cli", Dir: "cli", Runner: runner.GoTest, DependsOn: []string{"sdk"}},
 	}
-	plans := planComponents(context.Background(), root, declared, false)
+	plans := planComponents(context.Background(), root, declared, "test", false)
 	var items []scheduler.Item
 	for _, p := range plans {
 		defer p.log.Close()

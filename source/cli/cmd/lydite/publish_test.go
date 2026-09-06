@@ -297,3 +297,34 @@ func TestTheSummaryAccountsForRowsThatVoteOnNothing(t *testing.T) {
 		}
 	}
 }
+
+// Mutation is the fourth concern, and it reaches the comment through the
+// mechanism the other three already use: a document a run wrote, rendered by
+// the generic mapping from a row's label and value. The order is declared
+// rather than derived from what a run happened to produce, so two pull
+// requests never present the same concerns in a different order.
+func TestTheCommentCarriesMutationAfterTheOtherThreeConcerns(t *testing.T) {
+	dirs := []string{
+		reportDirWith(t, "mutation", ui.Row{Status: ui.StatusFail, Label: "mutation(cli)", Value: "1 of 9 mutant(s) survived in 2m4s"}),
+		reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"}),
+		reportDirWith(t, "scan", ui.Row{Status: ui.StatusPass, Label: "gosec(cli)", Value: "clean"}),
+		reportDirWith(t, "review", ui.Row{Status: ui.StatusPass, Label: "referral", Value: "exempt"}),
+	}
+	comment := buildComment(dirs, "")
+
+	var titles []string
+	for _, s := range comment.Sections {
+		titles = append(titles, s.Title)
+	}
+	want := []string{"referral", "scan", "test", "mutation"}
+	if strings.Join(titles, ",") != strings.Join(want, ",") {
+		t.Fatalf("sections are %v, want %v", titles, want)
+	}
+	if comment.Verdict != ui.VerdictFail {
+		t.Errorf("verdict is %q; a survivor fails the run", comment.Verdict)
+	}
+	body := comment.Render()
+	if !strings.Contains(body, "1 of 9 mutant(s) survived") {
+		t.Errorf("the survivor does not reach the comment:\n%s", body)
+	}
+}

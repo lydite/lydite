@@ -68,9 +68,14 @@ jobs:
           go-version-file: source/cli/go.mod
           cache: true
 
+      # The tags `.goreleaser.yml` builds a release with. This job records a
+      # baseline and never mutates anything, so they change nothing it does —
+      # they are here so the binary every lydite workflow runs is one shape.
       - name: build lydite
         working-directory: source/cli
-        run: go build -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
+        env:
+          LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+        run: go build -tags "$LYDITE_BUILD_TAGS" -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

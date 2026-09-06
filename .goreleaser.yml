@@ -30,6 +30,21 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
+    # The grammar tables mutation parses Rust and TypeScript with. gotreesitter
+    # embeds all 206 of its grammars by default, which is 20MB of blobs in a
+    # binary that parses three languages — measured at 45MB against 25MB here.
+    #
+    # Both halves of the tag list are load-bearing. `grammar_subset` switches
+    # the wildcard embed off; each `grammar_subset_<lang>` tag switches one
+    # blob back on, and a language named nowhere here fails at its first parse
+    # rather than at build time. `ci-test.yml` runs the suite under these exact
+    # tags for that reason: a bare `go test` embeds everything and so cannot
+    # see a missing one.
+    tags:
+      - grammar_subset
+      - grammar_subset_rust
+      - grammar_subset_typescript
+      - grammar_subset_tsx
 
 # One archive so consumers get everything, plus a raw uncompressed binary for
 # curl-and-run / CI usage that doesn't want an extraction step.

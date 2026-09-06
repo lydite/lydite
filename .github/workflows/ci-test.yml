@@ -24,6 +24,14 @@ permissions:
   # the repository for anyone who can open a pull request from a branch.
   contents: read
 
+# The grammar tables mutation parses Rust and TypeScript with, stated once for
+# both steps below. gotreesitter embeds all 206 of its grammars unless
+# `grammar_subset` turns the wildcard embed off, and each `grammar_subset_<lang>`
+# tag turns one blob back on. `.goreleaser.yml` carries the same list, because a
+# release build is not this workflow's to run.
+env:
+  LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+
 jobs:
   build-test:
     defaults:
@@ -41,8 +49,11 @@ jobs:
           go-version-file: source/cli/go.mod
           cache: true
 
+      # Under the tags the release builds with, so this stage compiles what
+      # ships. A bare `go build` also works and produces a binary carrying all
+      # 206 of gotreesitter's grammars — correct, and 20MB larger.
       - name: go build
-        run: go build ./...
+        run: go build -tags "$LYDITE_BUILD_TAGS" ./...
 
       # The plain suite, not lydite's instrumented one. `ci-gate` is the only
       # required check this repository has, so what runs here is what blocks a
@@ -56,5 +67,10 @@ jobs:
       # could be. The consequence is that lydite's own coverage gate does not
       # block a merge, which is the state `lydite/referral` is already in and
       # for the same reason — see #34, and #75 for this gap.
+      # Under the release tags as well, and that is not tidiness: with
+      # `grammar_subset` set, a language whose own tag is missing fails at its
+      # first parse rather than at build time, and a bare `go test` embeds
+      # every grammar and so can never see one missing. This is the run that
+      # blocks a merge, so it is the run that has to be the shipped shape.
       - name: go test
-        run: go test -race ./...
+        run: go test -race -tags "$LYDITE_BUILD_TAGS" ./...
