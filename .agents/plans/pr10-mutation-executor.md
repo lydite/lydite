@@ -72,7 +72,13 @@ suite — five review rounds found defects in it that no compiler could see.
    declarations that covered no mutant and nothing prints them. Stderr, named,
    the way every other lydite warning goes.
 4. **Rust and TypeScript**, through `gotreesitter`, behind the same interface.
-   Isolation there is a worker directory rather than an overlay.
+   Isolation there is a worker directory rather than an overlay, and that is the
+   step that owes containment. `checkPath` is lexical and says so: a symlink
+   committed into the scanned repository leaves the component through a path
+   that is lexically spotless, so every write into a worker directory resolves
+   the joined path and refuses a result outside the worker root, the shape
+   `internal/download`'s `safeJoin` already has. The same obligation covers the
+   overlay keys step 1 builds, since those are paths too.
 5. **The proving ground's planted survivors** — a function whose test calls it
    and asserts nothing, beside a properly tested neighbour, in each of the three
    languages, with `.github/assert-proving-ground.py` requiring the first to
@@ -109,7 +115,8 @@ suite — five review rounds found defects in it that no compiler could see.
 - **gosec G101 matches an identifier's name before its value.** A constant called
   `Token` holding any string at all is a hardcoded credential to it. lydite's own
   self-scan caught this on the merged branch. Rename where the name is free;
-  `#nosec` where it is not, as `internal/semgrep` does for an env var's name.
+  `#nosec G101 -- <why this name holds no credential>` where it is not, the form
+  `internal/semgrep` uses for an env var's name and the only form in this repo.
 - **Dependency direction is a review finding here.** `internal/referral` decides
   what merges unread, and importing the mutation engine for one string constant
   linked `go/parser`, the download client and the cargo tooling into that
@@ -117,15 +124,19 @@ suite — five review rounds found defects in it that no compiler could see.
   `go list -deps` when a low-level package gains an import.
 - **New surface inside a repair commit is where defects survive.** Every round,
   the findings clustered on the parts that were not themselves repairs.
-- **Sandbox:** push over HTTPS with a `gh` token
-  (`git push "https://x-access-token:${GH_TOKEN}@github.com/lydite/lydite.git"
-  <branch>:<branch>`), which is what worked this session. `git fetch` over the
-  configured SSH remote also worked, so the older note that SSH is wholly
-  blocked is at least too broad; pushing over SSH was not retried. There is no container runtime, so anything touching the proving
-  ground is validated by CI on the PR. `--gate-coverage`, `--affected`,
-  `scan --diff-base auto` and `review --base auto` cannot resolve a merge-base
-  locally — clone into the scratch directory with a `file://` origin. `lydite
-  test record` pushes to `origin/lydite`; use a scratch clone unless you mean it.
+- **Sandbox:** push over HTTPS with a `gh` token, supplied through a credential
+  helper rather than in the URL — a token in the remote lands in the process
+  argument list, in shell history, and in git's own error text on a failed push:
+  `git -c credential.helper='!f(){ echo username=x-access-token; echo
+  password=$GH_TOKEN; };f' push https://github.com/lydite/lydite.git
+  <branch>:<branch>`. `gh auth setup-git` once, then a plain `git push`, does the
+  same job. `git fetch` over the configured SSH remote also worked, so the older
+  note that SSH is wholly blocked is at least too broad; pushing over SSH was not
+  retried. There is no container runtime, so anything touching the proving ground
+  is validated by CI on the PR. `--gate-coverage`, `--affected`, `scan
+  --diff-base auto` and `review --base auto` cannot resolve a merge-base locally
+  — clone into the scratch directory with a `file://` origin. `lydite test
+  record` pushes to `origin/lydite`; use a scratch clone unless you mean it.
   Every PR here is referred and needs `/lydite clear`; a push voids it.
 
 ## Decisions for `challenge`, not for a guess
