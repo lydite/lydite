@@ -24,12 +24,17 @@ type Backend interface {
 	// Worker opens an isolated place to stage mutants in, numbered so a
 	// language needing a directory can name one per concurrency slot.
 	//
+	// It takes the run's context because opening one is real work: a
+	// JavaScript worker installs the workspace's dependencies, and an
+	// interrupt that could not reach that would leave the run waiting on an
+	// `npm ci` for a component it has already stopped mutating.
+	//
 	// One per slot and never one per mutant. A tree copy — and for
 	// TypeScript a dependency install — is not affordable per mutant, so a
 	// worker is reused with the mutated file restored between them. Go
 	// needs no directory at all, since an overlay names the mutated file
 	// wherever it is written, and the same interface covers both.
-	Worker(n int) (Worker, error)
+	Worker(ctx context.Context, n int) (Worker, error)
 }
 
 // Worker presents one mutant at a time.
@@ -196,7 +201,7 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 		}
 	}()
 	for n := range workers {
-		w, err := b.Worker(n)
+		w, err := b.Worker(ctx, n)
 		if err != nil {
 			return nil, err
 		}

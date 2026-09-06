@@ -35,7 +35,7 @@ func goComponent(t *testing.T, rel, src string) Go {
 
 func stage(t *testing.T, g Go, m Mutant) (Worker, Staged) {
 	t.Helper()
-	w, err := g.Worker(0)
+	w, err := g.Worker(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestAStaleMutantIsRefusedRatherThanSpliced(t *testing.T) {
 	g := goComponent(t, "a.go", goSrc)
 	m := negated("a.go", goSrc)
 	m.Original = ">" // the file holds "<" at that offset
-	w, err := g.Worker(0)
+	w, err := g.Worker(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestAStaleMutantIsRefusedRatherThanSpliced(t *testing.T) {
 
 func TestAPathOutsideTheComponentIsRefused(t *testing.T) {
 	g := goComponent(t, "a.go", goSrc)
-	w, err := g.Worker(0)
+	w, err := g.Worker(t.Context(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

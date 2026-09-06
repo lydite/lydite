@@ -21,6 +21,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
@@ -154,9 +155,20 @@ a suppression, declaring one refers the change to a human.`,
 				return err
 			}
 
+			// Only for a language whose mutants need a worker directory. A
+			// repository of Go components pays no git walk for a copy it
+			// never makes.
+			var files []string
+			if needsWorktree(selected) {
+				if files, err = gitdiff.Tracked(ctx, dir); err != nil {
+					return err
+				}
+			}
+
 			opts := mutationOptions{
 				root:    dir,
 				changed: changed,
+				files:   files,
 				limit:   limit,
 				timeout: timeout,
 				stream:  stream,
@@ -214,6 +226,12 @@ type mutationOptions struct {
 	// changed is every line the diff added, repository-wide, keyed by a path
 	// relative to the scan root.
 	changed map[string][]int
+	// files is every path git knows about, scan-root relative: tracked, plus
+	// untracked ones git is not ignoring. It is what a worker directory is
+	// copied from, and it is read once for the run rather than once per
+	// component — every component reads the same listing, and asking git per
+	// component is the same answer computed N times.
+	files   []string
 	limit   int
 	timeout time.Duration
 	stream  bool
@@ -361,7 +379,20 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, out
 	}
-	backend, err := backendFor(lang, filepath.Join(opts.root, filepath.FromSlash(c.Dir)), build, suite)
+	backend, err := backendFor(lang, filepath.Join(opts.root, filepath.FromSlash(c.Dir)), build, suite,
+		mutation.ComponentFiles(c.Dir, opts.files),
+		func(ctx context.Context, dir string) error {
+			// The runner's own preparation, in the worker rather than in the
+			// component: a JavaScript workspace copied without its
+			// node_modules fails at import, naming the tests rather than the
+			// absent dependencies. Once per worker and never once per mutant,
+			// which is the bound that makes a tree copy affordable.
+			row, ok := prepare(ctx, suite, dir, label, c, cfg, tc, log)
+			if !ok {
+				return errors.New(strings.Join(row.Detail, "; "))
+			}
+			return nil
+		})
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
 	}
@@ -446,10 +477,21 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 // A language with no backend is unmeasured with the reason said out loud,
 // never skipped: a component silently absent from a mutation report reads as
 // one whose suite killed everything.
-func backendFor(lang runner.Lang, dir string, build, suite runner.Invocation) (mutation.Backend, error) {
+func backendFor(lang runner.Lang, dir string, build, suite runner.Invocation, files []string, prep func(context.Context, string) error) (mutation.Backend, error) {
 	switch lang {
 	case runner.Go:
+		// Go needs no worker directory at all: an overlay names the mutated
+		// file wherever it is written, so every other path resolves in the
+		// component's own tree and nothing is copied.
 		return mutation.Go{Dir: dir, Build: build, Suite: suite}, nil
+	case runner.Rust, runner.TypeScript:
+		// A component whose files git lists none of has nothing to copy, and
+		// a worker holding an empty tree would report every mutant unviable
+		// with a compiler error nobody could act on.
+		if len(files) == 0 {
+			return nil, errors.New("git lists no file under this component, so there is nothing to copy into a worker directory")
+		}
+		return mutation.Tree{Dir: dir, Files: files, Build: build, Suite: suite, Prepare: prep}, nil
 	default:
 		return nil, fmt.Errorf("lydite has no mutation backend for %s yet", lang)
 	}
@@ -716,4 +758,16 @@ func detailed(row ui.Row, log *componentLog, lines ...string) ui.Row {
 		row.Log = log.Rel
 	}
 	return row
+}
+
+// needsWorktree reports whether any selected component's mutants are run in a
+// copy of its tree rather than through an overlay.
+func needsWorktree(selected []component.Component) bool {
+	for _, c := range selected {
+		switch langOf(c) {
+		case runner.Rust, runner.TypeScript:
+			return true
+		}
+	}
+	return false
 }

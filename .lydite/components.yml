@@ -35,4 +35,14 @@ components:
 # real Rust that no component builds, tests or scans, and this is where a
 # repository says that out loud. Without it `lydite scan` reports Rust source
 # that nothing checks, which is true and is not something anyone should fix.
-excludes: ["source/cli/internal/**/*-pin/**"]
+#
+# The mutation engine's golden fixtures are the second entry. They are a Rust
+# file, a TypeScript file and a TSX file that nothing compiles, tests or ships:
+# what they exist for is to be *parsed*, so that a grammar bump that moves a
+# node boundary fails in `go test` here rather than changing a consumer's
+# verdict silently. Declaring a component over them would have lydite try to
+# build a crate that is deliberately not one; leaving them undeclared is what
+# this line says out loud.
+excludes:
+  - "source/cli/internal/**/*-pin/**"
+  - "source/cli/internal/mutation/testdata/**"

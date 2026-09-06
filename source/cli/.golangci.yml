@@ -4,6 +4,14 @@
 # `staticcheck`, so enabling `staticcheck` covers the gosimple checks too.
 version: "2"
 
+# The tags a release builds with. Without them the linter analyses the
+# all-grammars build of gotreesitter, which is not the code that ships.
+build-tags:
+  - grammar_subset
+  - grammar_subset_rust
+  - grammar_subset_typescript
+  - grammar_subset_tsx
+
 linters:
   enable:
     - errcheck

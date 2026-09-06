@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +10,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/mutation"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/ui"
 )
@@ -183,22 +184,39 @@ func TestAComponentThatOptedOutStillTakesARowAndRunsNothing(t *testing.T) {
 	}
 }
 
-// A component whose language lydite parses no source for is unmeasured with
-// the reason said out loud. Absent, it would read as one whose suite killed
-// everything.
-func TestAComponentWithNoBackendIsUnmeasuredAndSaysWhy(t *testing.T) {
-	c := component.Component{Name: "web", Dir: ".", Runner: "vitest"}
-	root := t.TempDir()
-	write(t, root, "a.ts", "export const a = 1\n")
-	plan := componentPlan{c: c, log: testLog(t)}
-	row, _ := mutateComponent(t.Context(), plan, config.Config{}, nil, nil,
-		mutationOptions{root: root, changed: map[string][]int{"a.ts": {1}}})
+// Go needs no worker directory: an overlay names the mutated file wherever it
+// is written. Rust and TypeScript have no such instruction, so their mutants
+// run in a copy of the component's tree — and a component git lists no file
+// under has nothing to copy, which is said out loud rather than reported as a
+// component whose suite killed everything.
+func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
+	goComponent := component.Component{Name: "cli", Dir: ".", Runner: "go-test"}
+	web := component.Component{Name: "web", Dir: ".", Runner: "vitest"}
 
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("status is %q, want %q", row.Status, ui.StatusUnmeasured)
+	if needsWorktree([]component.Component{goComponent}) {
+		t.Error("a Go component asked for a worker directory")
 	}
-	if !strings.Contains(row.Value, "typescript") {
-		t.Errorf("the row does not name the language: %q", row.Value)
+	if !needsWorktree([]component.Component{goComponent, web}) {
+		t.Error("a TypeScript component did not ask for a worker directory")
+	}
+
+	none := func(context.Context, string) error { return nil }
+	backend, err := backendFor(runner.Go, t.TempDir(), runner.Invocation{}, runner.Invocation{}, nil, none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(mutation.Go); !ok {
+		t.Errorf("Go got %T, want the overlay backend", backend)
+	}
+	backend, err = backendFor(runner.TypeScript, t.TempDir(), runner.Invocation{}, runner.Invocation{}, []string{"src/a.ts"}, none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(mutation.Tree); !ok {
+		t.Errorf("TypeScript got %T, want the worker-directory backend", backend)
+	}
+	if _, err := backendFor(runner.Rust, t.TempDir(), runner.Invocation{}, runner.Invocation{}, nil, none); err == nil {
+		t.Error("a component git lists no file under was given a worker directory to copy nothing into")
 	}
 }
 

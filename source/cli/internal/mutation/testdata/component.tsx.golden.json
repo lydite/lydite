@@ -1,0 +1,42 @@
+[
+  {
+    "path": "component.tsx",
+    "line": 6,
+    "column": 24,
+    "operator": "conditional-boundary",
+    "offset": 264,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003e"
+  },
+  {
+    "path": "component.tsx",
+    "line": 6,
+    "column": 24,
+    "operator": "negate-conditional",
+    "offset": 264,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003c"
+  },
+  {
+    "path": "component.tsx",
+    "line": 7,
+    "column": 13,
+    "operator": "conditional-boundary",
+    "offset": 282,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003c="
+  },
+  {
+    "path": "component.tsx",
+    "line": 7,
+    "column": 13,
+    "operator": "negate-conditional",
+    "offset": 282,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003e="
+  }
+]

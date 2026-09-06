@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +47,7 @@ type Go struct {
 // They are a few hundred bytes each, so the number of them is a property of
 // the interface rather than a cost: a Go mutant needs no tree copy, and the
 // same Backend covers the languages that do.
-func (g Go) Worker(n int) (Worker, error) {
+func (g Go) Worker(_ context.Context, n int) (Worker, error) {
 	dir, err := os.MkdirTemp("", fmt.Sprintf("lydite-mutation-%d-", n))
 	if err != nil {
 		return nil, fmt.Errorf("opening a worker directory for mutation: %w", err)

@@ -361,6 +361,8 @@ func Generate(lang runner.Lang, path string, src []byte, lines map[int]bool) ([]
 	switch lang {
 	case runner.Go:
 		return GenerateGo(path, src, lines)
+	case runner.Rust, runner.TypeScript:
+		return GenerateTreeSitter(lang, path, src, lines)
 	default:
 		return nil, nil, ErrNoGenerator{Lang: lang}
 	}

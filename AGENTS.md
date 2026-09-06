@@ -11,6 +11,14 @@ blocking gate) across `wardnet`, `wardnet-cloud`, and `inforge` with one consist
 ```sh
 go build ./...                 # build the binary
 go test -race ./...            # run tests
+
+# The shipped shape. gotreesitter embeds all 206 of its grammars unless
+# `grammar_subset` turns the wildcard embed off, and each grammar_subset_<lang>
+# tag turns one blob back on — 15MB against 33MB for the same binary. A build
+# without them is correct and larger; a build with `grammar_subset` and a
+# language's own tag missing panics at that language's first parse, which is why
+# ci-test runs the suite under this exact list.
+go build -tags 'grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx' ./...
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
 go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
@@ -1875,6 +1883,65 @@ change. Kill the mutant and merge unattended; declare it unkillable and a human 
 The bound that makes it structural rather than usually-true: a mutant exists only on a changed
 line, so a declaration acknowledging one is itself on a changed line, which referral sees as added.
 
+### Rust and TypeScript are parsed with tree-sitter
+
+Go is parsed with `go/ast`, because the language ships its own parser and nothing could be more
+faithful. The other two have no parser in the standard library, and lydite must stay a single
+statically-linked `CGO_ENABLED=0` binary for four platforms — which every C-backed tree-sitter
+binding rules out. `github.com/odvcencio/gotreesitter` is a pure-Go tree-sitter runtime, so the
+grammar tables are the only input.
+
+**The node types are the whole of what lydite knows per language**, held in one `grammar` table
+each: the infix node whose `operator` field the three operator rewrites replace, the return node,
+the statement node, which inner expressions a statement deletion applies to, the literal node types
+and what each holds, and the line-comment node. A table rather than a traversal per language,
+because the operators are the same five and only the names differ — a language needing its own walk
+would be evidence the catalogue had stopped being one taxonomy. Every entry was verified against the
+grammars themselves rather than read off documentation.
+
+**A whole-statement deletion is restricted to a call, an assignment or an increment.** In both
+grammars the statement node also wraps `if` and `return`, and deleting one of those is a
+control-flow change that mostly fails to compile — an unviable mutant per branch, which is noise
+about the generator rather than evidence about the tests. It is the same restriction Go's own
+`ExprStmt`/`IncDecStmt` already imposes.
+
+**`.tsx` gets its own grammar.** `<T>(x) => x` is a type assertion in TypeScript and an opening JSX
+tag in TSX, so upstream ships two parse tables and a `.tsx` file read by the TypeScript tables is a
+sequence of syntax errors. The grammar is therefore chosen by file extension and not by the
+component's language.
+
+**A tree carrying a syntax error is refused, not partly mutated.** tree-sitter recovers and returns
+a tree either way, and a mutant taken from a misreading has a byte range an author cannot tell from
+a real one. `ErrUnparsed` says so; an empty mutant set would render as a component whose suite
+killed everything.
+
+**Rust's inline test module is excluded from the tree, not from the path.** Rust puts unit tests in
+a `#[cfg(test)] mod tests` inside the file they test, which no path rule can see; mutating one
+reports an assertion nobody asserts as a survivor an author can answer only by declaring it
+equivalent, and a gate that fires on ordinary work is one that gets switched off. The attribute is a
+*preceding sibling* of the module in the tree, so the rule reads the tree's own order rather than
+looking inside the module, and it compares the attribute with its whitespace removed — `#[cfg( test
+)]` is recognised and `#[cfg(feature = "test")]` is not. A module behind a broader condition,
+`#[cfg(all(test, unix))]`, is **not** recognised and is mutated: that is the direction this has to
+fail in, since a form the rule does not know about produces survivors an author can see and answer,
+where a looser match would silently stop mutating code that ships. `tests/` and `benches/` are
+recognised by path as well, being whole files. TypeScript needs none of this and has the conventions
+every runner lydite ships supports: a `.test.` or `.spec.` infix, and a `__tests__` directory.
+
+**The golden fixtures are what hold the grammars.** `internal/mutation/testdata/` carries a Rust, a
+TypeScript and a TSX fixture beside the exact mutant set each produces — offsets, operators and
+replaced text, because a count alone passes on tables that have started reading a different node. A
+grammar bump changes which mutants exist, and this repository declares no Rust component, so
+`TestTheGoldenMutantsAreUnchanged` in `go test` is the only place its own CI can see that change
+before it reaches a consumer. Regenerate with
+`go test ./internal/mutation -run Golden -update`, and read the diff: it is the record of what the
+bump changed.
+
+`internal/mutation/sites.go` holds the two rules every generator owes whatever tree it walked — the
+line bound, and which mutants a declaration covers. One collector rather than one per language,
+because both rules are about the bargain rather than about the grammar, and the mutant a drifted
+copy silently excluded is one nobody would ever see reported.
+
 ### Rebuild, never in-process
 
 In-process was never available for Go: it compiles to a native test binary and has no bytecode
@@ -1909,7 +1976,53 @@ second run this exists to avoid — never a wrong verdict.
 concurrency slot, and a worker stages one mutant at a time and returns the build-only invocation
 and the phases. One worker per slot and never one per mutant — a tree copy, and for TypeScript a
 dependency install, is not affordable per mutant. Go needs no directory at all, since an overlay
-names the mutated file wherever it is written, and the same interface covers both.
+names the mutated file wherever it is written, and the same interface covers both. Opening one
+takes the run's context, because for a JavaScript component it is an `npm ci`: an interrupt that
+could not reach it would leave the run waiting on an install for a component it has stopped
+mutating.
+
+### Worker directories, and where containment is owed
+
+Cargo and every JavaScript runner read source from the filesystem and take no instruction about
+reading one file from somewhere else, so for Rust and TypeScript the mutated file has to exist as a
+file. `internal/mutation.Tree` is that: **one directory per concurrency slot**, reused with the
+original restored between mutants. Not one per mutant — a tree copy, and for a JavaScript workspace
+a dependency install, is not affordable that often. Mutating the component's own tree in place is
+faster than either and is rejected: an interrupt leaves mutated source in the tree lydite is
+measuring, which is a repository somebody then commits.
+
+**What gets copied is git's own file list** — tracked, plus untracked files git is not ignoring, the
+list `internal/orphan` already reads. That is what keeps `node_modules`, `target`, `dist` and `.git`
+out of the copy without lydite holding a second copy of a judgement `.gitignore` already states; the
+copy that drifts is the one that starts copying half a gigabyte of build output per slot. The
+runner's own `Prepare` then runs **in the worker**, once — a JavaScript workspace copied without its
+`node_modules` fails at import, naming the tests rather than the absent dependencies.
+
+**Writes are confined, not checked.** A worker holds a copy of a scanned repository, so it holds
+symlinks nobody vetted: a committed `evil -> /etc` makes `<worker>/evil/passwd` pass every prefix
+comparison a lexical check can make, and the write then follows the link out. `os.Root`, opened on
+the worker directory, refuses that at the syscall and leaves no window between resolving a path and
+writing to it. `checkPath` is lexical and says so in its own comment — it stops a name that cannot
+possibly be right from travelling this far, and establishes nothing about containment.
+`internal/download`'s `safeJoin` is deliberately **not** the model: it is lexical too, and is
+sufficient where it stands only because that code separately rejects absolute link targets,
+containment-checks resolved relative ones, and unpacks into a directory it created rather than one
+it was handed. `TestAWriteThatFollowsASymlinkOutOfTheWorkerIsRefused` asserts the syscall refused
+it, not merely that something failed.
+
+**Each mutant is applied to the component's own source rather than to the worker's copy**, so a
+worker whose previous mutant was somehow not restored cannot compound one mutant onto another — and
+a file that changed between generation and execution is refused by `Apply` rather than spliced at an
+offset that now holds something else.
+
+**A worker directory lives outside the component**, under the OS temporary directory: one inside the
+tree being measured is a directory the component's own `./...` would compile, its own coverage would
+report, and the orphan gate would see as source under no component.
+
+**Rust and TypeScript get one phase, not two.** Neither has a unit both cheaper than the component
+and derivable from a file path the way a Go package directory is: a crate needs its manifest read,
+and a JavaScript test file is related to the source it exercises by convention rather than by
+structure. A second phase that narrowed wrongly would cost the run it exists to save.
 
 ### One concurrency bound, and serial where services are shared
 

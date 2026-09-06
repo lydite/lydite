@@ -1,0 +1,174 @@
+[
+  {
+    "path": "rust.rs",
+    "line": 6,
+    "column": 23,
+    "operator": "arithmetic-operator",
+    "offset": 288,
+    "length": 1,
+    "original": "+",
+    "mutated": "-"
+  },
+  {
+    "path": "rust.rs",
+    "line": 7,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 310,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003c="
+  },
+  {
+    "path": "rust.rs",
+    "line": 7,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 310,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003e="
+  },
+  {
+    "path": "rust.rs",
+    "line": 8,
+    "column": 9,
+    "operator": "remove-statement",
+    "offset": 325,
+    "length": 11,
+    "original": "log(total);",
+    "mutated": ""
+  },
+  {
+    "path": "rust.rs",
+    "line": 9,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 352,
+    "length": 1,
+    "original": "0",
+    "mutated": "1"
+  },
+  {
+    "path": "rust.rs",
+    "line": 11,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 374,
+    "length": 2,
+    "original": "==",
+    "mutated": "!="
+  },
+  {
+    "path": "rust.rs",
+    "line": 12,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 398,
+    "length": 3,
+    "original": "100",
+    "mutated": "0"
+  },
+  {
+    "path": "rust.rs",
+    "line": 18,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 471,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003e"
+  },
+  {
+    "path": "rust.rs",
+    "line": 18,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 471,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003c"
+  },
+  {
+    "path": "rust.rs",
+    "line": 19,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 494,
+    "length": 4,
+    "original": "true",
+    "mutated": "false"
+  },
+  {
+    "path": "rust.rs",
+    "line": 21,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 519,
+    "length": 1,
+    "original": "\u003e",
+    "mutated": "\u003e=",
+    "reason": "the two spellings of this bound agree for every score"
+  },
+  {
+    "path": "rust.rs",
+    "line": 21,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 519,
+    "length": 1,
+    "original": "\u003e",
+    "mutated": "\u003c=",
+    "reason": "the two spellings of this bound agree for every score"
+  },
+  {
+    "path": "rust.rs",
+    "line": 22,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 615,
+    "length": 5,
+    "original": "false",
+    "mutated": "true"
+  },
+  {
+    "path": "rust.rs",
+    "line": 28,
+    "column": 28,
+    "operator": "arithmetic-operator",
+    "offset": 705,
+    "length": 1,
+    "original": "/",
+    "mutated": "*"
+  },
+  {
+    "path": "rust.rs",
+    "line": 28,
+    "column": 24,
+    "operator": "arithmetic-operator",
+    "offset": 701,
+    "length": 1,
+    "original": "*",
+    "mutated": "/"
+  },
+  {
+    "path": "rust.rs",
+    "line": 29,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 714,
+    "length": 13,
+    "original": "counter += 1;",
+    "mutated": ""
+  },
+  {
+    "path": "rust.rs",
+    "line": 30,
+    "column": 15,
+    "operator": "negate-conditional",
+    "offset": 742,
+    "length": 2,
+    "original": "!=",
+    "mutated": "=="
+  }
+]

@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -87,7 +86,7 @@ func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, []Unmatc
 		return nil, nil, err
 	}
 
-	g := &goGen{path: path, src: src, fset: fset, lines: lines, reasons: reasons}
+	g := &goGen{sites: sites{path: path, src: src, lines: lines, reasons: reasons}, fset: fset}
 	ast.Inspect(file, g.visit)
 	return g.out, g.resolve(), nil
 }
@@ -110,18 +109,9 @@ func goComments(fset *token.FileSet, file *ast.File) []annotation.Comment {
 }
 
 type goGen struct {
-	path    string
-	src     []byte
-	fset    *token.FileSet
-	lines   map[int]bool
-	reasons map[int]string
-	out     []Mutant
-	// spans is the line range of each mutant in out, at the same index, so a
-	// declaration can be matched against what each one actually replaces.
-	spans []lineSpan
+	sites
+	fset *token.FileSet
 }
-
-type lineSpan struct{ first, last int }
 
 // visit applies every operator that fits the node. It returns true always:
 // an operator matching an outer node does not stop an inner one from also
@@ -223,84 +213,14 @@ func (g *goGen) emitNode(op Operator, site, from, to token.Pos, mutated string) 
 	g.add(op, site, from, to, mutated)
 }
 
-// resolve attaches each declaration to the mutants it is about, and reports
-// the declarations that turned out to be about nothing.
+// add records one mutant, translating the Go positions into the byte offsets
+// and line numbers every generator's sites collector works in.
 //
-// A declaration covers the mutants whose replaced range contains its line and
-// whose range is the shortest of those. Position alone cannot tell what an
-// author meant, because one line holds mutants at several scopes: beside
-// `println(a < b)` sit two mutants of the comparison and one that deletes the
-// whole call. The shortest range is the innermost thing written at that line,
-// which is what somebody annotating a line is looking at — so a claim about an
-// operator acknowledges the operator, and deleting the call remains a mutant
-// they have not answered.
-//
-// Reaching by containment rather than by a window of lines is what lets a
-// declaration inside a multi-line statement work: it sits on no line the
-// statement opens or closes on, and it is still written inside it.
-//
-// The bound the referral bargain rests on is unchanged. Every line of a
-// mutant's range is a line the caller asked for, so a declaration inside one is
-// on a changed line, which internal/referral sees as added.
-func (g *goGen) resolve() []UnmatchedDeclaration {
-	var unmatched []UnmatchedDeclaration
-	for _, line := range sortedKeys(g.reasons) {
-		shortest := -1
-		for i, sp := range g.spans {
-			if line < sp.first || line > sp.last {
-				continue
-			}
-			if shortest < 0 || g.out[i].Length < shortest {
-				shortest = g.out[i].Length
-			}
-		}
-		if shortest < 0 {
-			unmatched = append(unmatched, UnmatchedDeclaration{Path: g.path, Line: line, Reason: g.reasons[line]})
-			continue
-		}
-		for i, sp := range g.spans {
-			if line >= sp.first && line <= sp.last && g.out[i].Length == shortest {
-				g.out[i].Reason = g.reasons[line]
-			}
-		}
-	}
-	return unmatched
-}
-
-func sortedKeys(m map[int]string) []int {
-	out := make([]int, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	return out
-}
-
-// add records one mutant, after establishing that it edits only requested
-// lines and that the range it claims holds what it says it does.
+// Ranges come from the syntax nodes themselves, never from the length of a
+// token's text: a raw string literal's value has its carriage returns
+// stripped, so a range measured from that text is short by one byte per line
+// and splices a mutant that cannot parse.
 func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
 	at, start, end := g.fset.Position(site), g.fset.Position(from), g.fset.Position(to)
-	// Every line the splice touches has to be one the caller asked for. A
-	// statement can span lines, and gating on its first alone deletes source
-	// outside the change.
-	for l := start.Line; l <= end.Line; l++ {
-		if !g.lines[l] {
-			return
-		}
-	}
-	lo, hi := start.Offset, end.Offset
-	if lo < 0 || hi > len(g.src) || lo > hi {
-		return
-	}
-	g.out = append(g.out, Mutant{
-		Path:     g.path,
-		Line:     at.Line,
-		Column:   at.Column,
-		Operator: op,
-		Offset:   lo,
-		Length:   hi - lo,
-		Original: string(g.src[lo:hi]),
-		Mutated:  mutated,
-	})
-	g.spans = append(g.spans, lineSpan{first: start.Line, last: end.Line})
+	g.sites.add(op, at.Line, at.Column, start.Offset, end.Offset, start.Line, end.Line, mutated)
 }

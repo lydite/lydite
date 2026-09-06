@@ -30,7 +30,7 @@ type fake struct {
 	live, peak int
 }
 
-func (f *fake) Worker(int) (Worker, error) {
+func (f *fake) Worker(context.Context, int) (Worker, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.workers++

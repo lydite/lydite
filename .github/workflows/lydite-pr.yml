@@ -76,9 +76,14 @@ jobs:
           go-version-file: source/cli/go.mod
           cache: true
 
+      # The same tags `.goreleaser.yml` builds a release with, so the dogfood
+      # runs the binary a consumer gets rather than a fatter one that happens
+      # to behave the same.
       - name: build lydite
         working-directory: source/cli
-        run: go build -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
+        env:
+          LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+        run: go build -tags "$LYDITE_BUILD_TAGS" -o "${RUNNER_TEMP}/lydite" ./cmd/lydite
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
