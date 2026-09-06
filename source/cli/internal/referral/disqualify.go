@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"lydite/lydite/internal/mutation"
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/pathmatch"
 )
 
@@ -43,9 +43,9 @@ var suppressionTokens = []string{
 	// A mutant declared equivalent is a survivor nobody can kill, asserted
 	// by its author and checkable by nobody. Killing it merges unattended;
 	// declaring it unkillable puts a human on the claim. The token is
-	// mutation's, imported rather than respelled, so the engine that honours
-	// it and the gate that refers it cannot come to disagree about its text.
-	mutation.AnnotationToken,
+	// imported rather than respelled, so the engine that honours it and the
+	// gate that refers it cannot come to disagree about its text.
+	annotation.Token,
 	"#nosec",
 	"//nolint",
 	"#[allow(",

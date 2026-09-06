@@ -1,9 +1,11 @@
 package mutation
 
 import (
-	"errors"
+	"strconv"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/annotation"
 )
 
 // Unviable and acknowledged mutants say nothing about the suite — one could
@@ -60,24 +62,12 @@ func TestSurvivorsAreFilteredAndOrderedForAReader(t *testing.T) {
 		if r.Outcome != Survived {
 			t.Fatalf("Survivors returned a %s outcome", r.Outcome)
 		}
-		lines = append(lines, r.Mutant.Path+":"+itoa(r.Mutant.Line)+":"+itoa(r.Mutant.Column))
+		lines = append(lines, r.Mutant.Path+":"+strconv.Itoa(r.Mutant.Line)+":"+strconv.Itoa(r.Mutant.Column))
 	}
 	want := []string{"a.go:2:1", "a.go:9:1", "a.go:9:2", "b.go:1:1"}
 	if strings.Join(lines, " ") != strings.Join(want, " ") {
 		t.Errorf("Survivors() = %v, want %v", lines, want)
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 // A mutant quotes source, which holds whatever the source holds — a newline
@@ -106,9 +96,6 @@ func TestStringQuotesAndClipsTheSourceItCarries(t *testing.T) {
 }
 
 func TestErrorsSayWhatIsWrongAndWhere(t *testing.T) {
-	if got := (ErrNoReason{Path: "a.go", Line: 7}).Error(); !strings.Contains(got, "a.go:7") || !strings.Contains(got, AnnotationToken) {
-		t.Errorf("ErrNoReason.Error() = %q, want the site and the token", got)
-	}
 	if got := (ErrPathEscapes{Path: "../x.go"}).Error(); !strings.Contains(got, "../x.go") {
 		t.Errorf("ErrPathEscapes.Error() = %q, want the path", got)
 	}
@@ -117,121 +104,101 @@ func TestErrorsSayWhatIsWrongAndWhere(t *testing.T) {
 	}
 }
 
-// A declaration on its own line is written above the statement it is about,
-// so it covers the line below. A trailing one is a claim about the code to its
-// left and says nothing about the next statement — carrying it down would
-// acknowledge mutants nobody declared, and an acknowledged mutant is never run
-// and never counted.
-func TestATrailingDeclarationDoesNotReachTheNextLine(t *testing.T) {
-	src := "package p\n\nfunc F(a, b int) bool {\n\tprintln(a) " + AnnotationToken + " printing is not observable\n\treturn a < b\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(8))
-	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
-	}
-	var sawLine4, sawLine5 bool
-	for _, m := range got {
-		switch m.Line {
-		case 4:
-			sawLine4 = true
-			if !m.Acknowledged() {
-				t.Errorf("%s: the trailing declaration must cover its own line", m)
-			}
-		case 5:
-			sawLine5 = true
-			if m.Acknowledged() {
-				t.Errorf("%s: acknowledged by a claim written about the line above", m)
-			}
-		}
-	}
-	if !sawLine4 || !sawLine5 {
-		t.Fatalf("fixture produced no mutants on both lines (line 4: %v, line 5: %v)", sawLine4, sawLine5)
-	}
-}
-
-func TestADeclarationOnItsOwnLineCoversTheStatementBelow(t *testing.T) {
-	src := "package p\n\nfunc F(a, b int) bool {\n\t" + AnnotationToken + " the caller guarantees a != b\n\treturn a < b\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+// A declaration is honoured for the mutants on its own line. Acknowledged
+// rather than suppressed, so the count still reports what was claimed.
+func TestADeclarationAcknowledgesTheMutantsOnItsLine(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b " + annotation.Token + " b is always a+1 here\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(6))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
 	if len(got) == 0 {
-		t.Fatal("no mutants; a declaration acknowledges rather than suppresses generation")
+		t.Fatal("no mutants; a declaration acknowledges rather than stopping generation")
 	}
 	for _, m := range got {
 		if !m.Acknowledged() {
-			t.Errorf("%s: a declaration on the preceding line must cover it", m)
+			t.Errorf("%s: not acknowledged by the declaration on its line", m)
 		}
-		if m.Reason != "the caller guarantees a != b" {
+		if m.Reason != "b is always a+1 here" {
 			t.Errorf("%s: reason = %q", m, m.Reason)
 		}
 	}
 }
 
-// Source that merely quotes the annotation has declared nothing. Reading one
-// out of a string literal acknowledges mutants silently, which is the one
-// direction this must never fail in.
-func TestATokenInsideALiteralDeclaresNothing(t *testing.T) {
-	cases := map[string]string{
-		"double-quoted": "\tprintln(\"" + AnnotationToken + " not a claim\")\n",
-		"raw string":    "\tprintln(`" + AnnotationToken + " not a claim`)\n",
+// A declaration already in the tree must not reach code a later change adds
+// beneath it. The mutant would be excluded and never run, while the change
+// itself adds no line holding the token — so nothing refers it and it merges
+// unread.
+func TestADeclarationDoesNotReachTheLineBelow(t *testing.T) {
+	src := "package p\n\nfunc F(n int) bool {\n\t" + annotation.Token + " bound is arbitrary\n\treturn n < 10\n}\n"
+	got, err := GenerateGo("a.go", []byte(src), map[int]bool{5: true})
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
 	}
-	for name, line := range cases {
-		src := "package p\n\nfunc F(a, b int) bool {\n" + line + "\treturn a < b\n}\n"
-		got, err := GenerateGo("x.go", []byte(src), allLines(8))
-		if err != nil {
-			t.Fatalf("%s: GenerateGo: %v", name, err)
-		}
-		var onLiteralLine, below bool
-		for _, m := range got {
-			switch m.Line {
-			case 4:
-				onLiteralLine = true
-			case 5:
-				below = true
-			}
-			if m.Acknowledged() {
-				t.Errorf("%s: %s acknowledged by a token inside a literal, reason %q", name, m, m.Reason)
-			}
-		}
-		if !onLiteralLine || !below {
-			t.Errorf("%s: fixture is not exercising both lines (literal line: %v, below: %v)", name, onLiteralLine, below)
+	if len(got) == 0 {
+		t.Fatal("fixture produced no mutant on the changed line")
+	}
+	for _, m := range got {
+		if m.Acknowledged() {
+			t.Errorf("%s: acknowledged by a declaration the change never touched, reason %q", m, m.Reason)
 		}
 	}
 }
 
-// A raw string can span lines, so a scan that resets its state at every
-// newline reads the code after the literal as if it were inside one.
-func TestAMultiLineRawStringDoesNotSwallowTheCodeAfterIt(t *testing.T) {
-	src := "package p\n\nfunc F(a, b int) bool {\n\tprintln(`one\n" + AnnotationToken + " not a claim\nthree`)\n\treturn a < b\n}\n"
+// The parser decides what a comment is, so none of these declares anything:
+// a token inside a string, inside a block comment, after an apostrophe in
+// prose, or after a string holding a line continuation.
+func TestOnlyARealLineCommentDeclares(t *testing.T) {
+	cases := map[string]string{
+		"double-quoted string":             "\tprintln(\"" + annotation.Token + " not a claim\")\n",
+		"raw string":                       "\tprintln(`" + annotation.Token + " not a claim`)\n",
+		"multi-line raw string":            "\tprintln(`one\n" + annotation.Token + " not a claim\nthree`)\n",
+		"block comment":                    "\t/* " + annotation.Token + " not a claim */\n",
+		"block comment with an apostrophe": "\t/* don't */\n",
+	}
+	for name, middle := range cases {
+		src := "package p\n\nfunc F(a, b int) bool {\n" + middle + "\treturn a < b\n}\n"
+		got, err := GenerateGo("x.go", []byte(src), allLines(12))
+		if err != nil {
+			t.Fatalf("%s: GenerateGo: %v", name, err)
+		}
+		var seen bool
+		for _, m := range got {
+			if m.Operator == ConditionalBoundary {
+				seen = true
+			}
+			if m.Acknowledged() {
+				t.Errorf("%s: %s acknowledged, reason %q", name, m, m.Reason)
+			}
+		}
+		if !seen {
+			t.Errorf("%s: fixture produced no comparison mutant, so it asserts nothing", name)
+		}
+	}
+}
+
+// A string holding a line continuation must not shift which line a later
+// declaration is attributed to.
+func TestALineContinuationDoesNotShiftADeclaration(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) bool {\n\ts := \"ab\" +\n\t\t\"cd\"\n\t_ = s\n\treturn a < b " + annotation.Token + " claimed\n}\n"
 	got, err := GenerateGo("x.go", []byte(src), allLines(10))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
 	var seen bool
 	for _, m := range got {
-		if m.Acknowledged() {
-			t.Errorf("%s: acknowledged by a token inside a multi-line raw string, reason %q", m, m.Reason)
+		if m.Operator != ConditionalBoundary {
+			continue
 		}
-		if m.Operator == ConditionalBoundary {
-			seen = true
-			if m.Line != 7 {
-				t.Errorf("%s: reported at line %d, want 7 — line counting lost track inside the literal", m, m.Line)
-			}
+		seen = true
+		if m.Line != 7 {
+			t.Errorf("%s: reported at line %d, want 7", m, m.Line)
+		}
+		if !m.Acknowledged() {
+			t.Errorf("%s: the declaration on its own line did not reach it", m)
 		}
 	}
 	if !seen {
-		t.Fatal("no mutant for the comparison after a multi-line raw string")
-	}
-}
-
-func TestABareDeclarationIsAnError(t *testing.T) {
-	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b " + AnnotationToken + "\n}\n"
-	_, err := GenerateGo("x.go", []byte(src), allLines(6))
-	var want ErrNoReason
-	if !errors.As(err, &want) {
-		t.Fatalf("a bare declaration was accepted; err = %v, want ErrNoReason", err)
-	}
-	if want.Line != 4 {
-		t.Errorf("ErrNoReason.Line = %d, want 4", want.Line)
+		t.Fatal("no comparison mutant")
 	}
 }

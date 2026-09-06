@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/mutation"
 )
 
 func parseOrFail(t *testing.T, yaml string) File {
@@ -405,7 +405,7 @@ func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 func TestTheEquivalentMutantAnnotationIsASuppression(t *testing.T) {
 	d := Disqualifications(Change{
 		Paths: []string{"src/a.go"},
-		Added: []DiffLine{{Path: "src/a.go", Text: "\treturn n < 10 " + mutation.AnnotationToken + " the caller bounds n"}},
+		Added: []DiffLine{{Path: "src/a.go", Text: "\treturn n < 10 " + annotation.Token + " the caller bounds n"}},
 	}, Disqualifiers{})
 	if len(d) != 1 || d[0].Kind != "suppression added" {
 		t.Fatalf("got %+v, want one \"suppression added\"", d)

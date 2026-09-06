@@ -15,17 +15,15 @@
 // restate what patch coverage already said about the same line.
 //
 // Equivalence is undecidable, so nothing here tries to detect it. An author
-// declares it with a "//lydite:equivalent <reason>" comment at the site, and
-// the declared mutant is generated, counted and never run. The same token is
-// one of internal/referral's suppression tokens, so a change carrying a fresh
-// declaration is referred: that is what stops the annotation being a way
-// around the gate rather than a way through it, and it is why the token is
-// stated here and imported there rather than spelled twice.
+// declares it with a "//lydite:equivalent <reason>" comment on the line, and
+// the declared mutant is generated, counted and never run. internal/annotation
+// holds that token and the rule for reading one, because internal/referral
+// recognises the same token as a suppression: killing the mutant merges
+// unattended, declaring it unkillable puts a human on the claim.
 // See docs/adr/0027-mutation-is-its-own-command.md.
 package mutation
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -127,8 +125,11 @@ func (e ErrStaleMutant) Error() string {
 }
 
 // Apply builds this mutant's source from the file it was generated from.
+//
+// The bounds are compared without summing the two, so an offset and a length
+// that overflow when added cannot wrap past the guard into the slice.
 func (m Mutant) Apply(src []byte) ([]byte, error) {
-	if m.Offset < 0 || m.Length < 0 || m.Offset+m.Length > len(src) {
+	if m.Offset < 0 || m.Length < 0 || m.Offset > len(src) || m.Length > len(src)-m.Offset {
 		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Want: m.Original, Got: ""}
 	}
 	if got := string(src[m.Offset : m.Offset+m.Length]); got != m.Original {
@@ -269,30 +270,6 @@ func Survivors(results []Result) []Result {
 	return out
 }
 
-// AnnotationToken is how an author declares a mutant equivalent. All three
-// languages spell a line comment "//", so one form covers them.
-//
-// internal/referral holds this same constant in its suppression set, which is
-// what refers a change that adds one.
-const AnnotationToken = "//lydite:equivalent"
-
-// ErrNoReason reports an annotation with nothing after it.
-//
-// It is an error rather than an ignored annotation, because an annotation
-// silently not honoured reads as the engine disregarding its author, who then
-// has a survivor they believe they have already answered. A reason is required
-// for the same cause the exemption set requires one: the annotation is the
-// entire risk record for a mutant nobody can kill, and a bare token is not
-// reviewable.
-type ErrNoReason struct {
-	Path string
-	Line int
-}
-
-func (e ErrNoReason) Error() string {
-	return fmt.Sprintf("%s:%d: %s needs a reason after it", e.Path, e.Line, AnnotationToken)
-}
-
 // ErrPathEscapes reports a source path that is not inside the component.
 type ErrPathEscapes struct{ Path string }
 
@@ -302,13 +279,16 @@ func (e ErrPathEscapes) Error() string {
 
 // checkPath refuses a path that does not name a file inside the component.
 //
-// A mutant's path is joined to a worker directory and written there, so a
-// path that is absolute or climbs out of the tree writes outside the directory
-// the executor owns. The invariant is established where the value is produced,
-// so no consumer has to remember to re-check it — the reason internal/download
-// keeps one path-traversal guard rather than a copy per caller.
+// It is lexical, and that is the whole of what it establishes: a path that is
+// absolute, empty, or climbs out of the tree never becomes a mutant. It does
+// not establish containment, which no check on a name alone can — a symlink
+// committed into the scanned repository leaves the directory through a path
+// that is lexically spotless. The write site resolves and re-checks against
+// the directory it owns, the way internal/download refuses an archive entry
+// that escapes its destination; this only stops a name that cannot possibly be
+// right from travelling that far.
 func checkPath(p string) error {
-	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+	if p == "" || p == "." || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return ErrPathEscapes{Path: p}
 	}
 	clean := filepath.ToSlash(filepath.Clean(p))
@@ -316,95 +296,4 @@ func checkPath(p string) error {
 		return ErrPathEscapes{Path: p}
 	}
 	return nil
-}
-
-// Annotations reads the equivalence declarations out of one file's source,
-// returning the reason by the line it covers.
-//
-// A declaration on a line of its own covers that line and the one below it, so
-// it can be written above the statement it is about. A trailing declaration
-// covers only the line it sits on: an author writing one has made a claim
-// about the code to its left and none at all about the next statement, and
-// carrying it down would acknowledge mutants nobody declared — silently, since
-// an acknowledged mutant is excluded from the denominator and never run.
-//
-// The scan tracks string, character and raw-string literals and skips a token
-// inside one, so source that merely quotes the annotation does not acknowledge
-// anything. It is textual rather than taken off a syntax tree because one
-// implementation serves three languages, and Go, Rust and TypeScript agree on
-// "//" and on how a string is escaped. Its limit is a language whose literals
-// do not: a token inside a TypeScript template literal is read as a comment.
-func Annotations(path string, src []byte) (map[int]string, error) {
-	out := map[int]string{}
-	line, lineStart := 1, 0
-
-	for i := 0; i < len(src); i++ {
-		switch src[i] {
-		case '\n':
-			line++
-			lineStart = i + 1
-		case '"', '\'':
-			i = skipQuoted(src, i, src[i])
-		case '`':
-			for j := i + 1; j < len(src); j++ {
-				if src[j] == '\n' {
-					line++
-					lineStart = j + 1
-				}
-				if src[j] == '`' {
-					i = j
-					break
-				}
-				i = j
-			}
-		case '/':
-			if i+1 >= len(src) || src[i+1] != '/' {
-				continue
-			}
-			end := lineEnd(src, i)
-			if !bytes.HasPrefix(src[i:end], []byte(AnnotationToken)) {
-				i = end - 1
-				continue
-			}
-			reason := strings.TrimSpace(string(src[i+len(AnnotationToken) : end]))
-			if reason == "" {
-				return nil, ErrNoReason{Path: path, Line: line}
-			}
-			out[line] = reason
-			if strings.TrimSpace(string(src[lineStart:i])) == "" {
-				out[line+1] = reason
-			}
-			i = end - 1
-		}
-	}
-	// A declaration on its own line hands its reason down, but a line with a
-	// declaration of its own keeps it: the nearer claim is the one its author
-	// wrote about that code.
-	return out, nil
-}
-
-// skipQuoted returns the index of the closing quote, or the last byte before
-// the line ends — neither Go, Rust nor TypeScript lets an ordinary string span
-// a newline, so an unterminated one is a broken file rather than a literal
-// that swallows the rest of the source.
-func skipQuoted(src []byte, start int, quote byte) int {
-	for i := start + 1; i < len(src); i++ {
-		switch src[i] {
-		case '\\':
-			i++
-		case '\n':
-			return i - 1
-		case quote:
-			return i
-		}
-	}
-	return len(src) - 1
-}
-
-// lineEnd returns the index one past the last byte of the line holding i.
-func lineEnd(src []byte, i int) int {
-	if n := bytes.IndexByte(src[i:], '\n'); n >= 0 {
-		return i + n
-	}
-	return len(src)
 }

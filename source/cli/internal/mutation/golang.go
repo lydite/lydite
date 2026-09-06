@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/coverage"
 )
 
@@ -75,13 +76,12 @@ func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, error) {
 		return nil, nil
 	}
 
-	reasons, err := Annotations(path, src)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+	reasons, err := annotation.Declarations(path, goComments(fset, file))
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +89,23 @@ func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, error) {
 	g := &goGen{path: path, src: src, fset: fset, lines: lines, reasons: reasons}
 	ast.Inspect(file, g.visit)
 	return g.out, nil
+}
+
+// goComments reports the file's comments as the Go parser sees them.
+//
+// The parser is the authority on what a comment is, so a token inside a block
+// comment, after an apostrophe in prose, or inside a string is not one — and a
+// line's number comes from the same fileset the mutants are located with, so
+// the two cannot drift. Only the line form can carry a declaration, and a
+// block comment is left to be recognised and rejected by its text.
+func goComments(fset *token.FileSet, file *ast.File) []annotation.Comment {
+	var out []annotation.Comment
+	for _, group := range file.Comments {
+		for _, c := range group.List {
+			out = append(out, annotation.Comment{Line: fset.Position(c.Slash).Line, Text: c.Text})
+		}
+	}
+	return out
 }
 
 type goGen struct {

@@ -157,6 +157,18 @@ func TestApplyRefusesSourceItDoesNotDescribe(t *testing.T) {
 	if _, err := m.Apply([]byte("ab")); !errors.As(err, &stale) {
 		t.Errorf("a range past the end of the source: err = %v, want ErrStaleMutant", err)
 	}
+	// Mutant is an ordinary struct, so a caller can build one directly. The
+	// guard exists for that caller, and a negative field must not reach the
+	// slice expression.
+	for _, bad := range []Mutant{
+		{Path: "x.go", Offset: -1, Length: 1, Original: "a"},
+		{Path: "x.go", Offset: 0, Length: -1, Original: "a"},
+		{Path: "x.go", Offset: 1<<62 + 1, Length: 1<<62 + 1, Original: "a"},
+	} {
+		if _, err := bad.Apply([]byte("abcdef")); !errors.As(err, &stale) {
+			t.Errorf("Apply with offset %d length %d: err = %v, want ErrStaleMutant", bad.Offset, bad.Length, err)
+		}
+	}
 }
 
 // An operator swap must never produce source the compiler cannot read: that
@@ -373,7 +385,7 @@ func F(a, b int) bool { return a < b }
 // every consumer to remember.
 func TestGenerateRefusesAPathOutsideTheComponent(t *testing.T) {
 	const src = "package p\n\nfunc F(a, b int) bool { return a < b }\n"
-	for _, path := range []string{"/etc/passwd", "../outside.go", "", "a/../../b.go"} {
+	for _, path := range []string{"/etc/passwd", "../outside.go", "", ".", "..", "a/../../b.go", "a/../.."} {
 		var escapes ErrPathEscapes
 		_, err := GenerateGo(path, []byte(src), allLines(5))
 		if !errors.As(err, &escapes) {
