@@ -5,6 +5,7 @@ import (
 	"path"
 	"strings"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/pathmatch"
 )
 
@@ -39,6 +40,12 @@ type Disqualification struct {
 // would veto the small suppression and wave the large one through.
 var suppressionTokens = []string{
 	"nosemgrep",
+	// A mutant declared equivalent is a survivor nobody can kill, asserted
+	// by its author and checkable by nobody. Killing it merges unattended;
+	// declaring it unkillable puts a human on the claim. The token is
+	// imported rather than respelled, so the engine that honours it and the
+	// gate that refers it cannot come to disagree about its text.
+	annotation.Marker,
 	"#nosec",
 	"//nolint",
 	"#[allow(",
