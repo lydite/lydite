@@ -311,6 +311,17 @@ parse rather than at build time, while a bare `go test` embeds everything and so
 could never see one missing. A build without the tags is correct and larger,
 which is the right way round: the failure is a fat binary, not a wrong verdict.
 
+**Workers do not in fact share a build cache**, and the sentence above saying
+they do is what shipped rather than what was built. `target/`, `node_modules`
+and `dist` are gitignored, so the copy excludes them and each worker starts
+cold — a full build per slot, not per mutant. Each toolchain's package cache
+*is* shared, since `~/.cargo/registry` and `~/.npm` sit outside the copy, so
+dependencies are fetched once; compilation is what repeats. Closing it means
+one `CARGO_TARGET_DIR` for every worker, which cargo serialises on with a lock:
+N cold builds traded for one build at a time, and which is faster is a property
+of the crate. Recorded rather than decided, because this repository declares no
+Rust component and cannot measure it.
+
 **A worker directory is a copy of git's own file list.** Tracked, plus untracked
 files git is not ignoring — the list `internal/orphan` already reads. That is
 what keeps `node_modules`, `target` and `dist` out of the copy without lydite

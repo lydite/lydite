@@ -2028,6 +2028,17 @@ offset that now holds something else.
 tree being measured is a directory the component's own `./...` would compile, its own coverage would
 report, and the orphan gate would see as source under no component.
 
+**Workers do not share a build cache, and ADR 0027 says they do.** `target/`, `node_modules` and
+`dist` are gitignored, so the copy excludes them and each worker starts cold — a full `cargo build`
+or `npm ci` per slot rather than per mutant. What *is* shared is each toolchain's own package cache,
+since `~/.cargo/registry` and `~/.npm` sit outside the copy, so dependencies are fetched once however
+many workers there are; it is compilation that repeats. Closing it means pointing every worker at one
+`CARGO_TARGET_DIR`, which cargo serialises on with a lock — so it trades N cold builds for one build
+at a time, and which is faster is a property of the crate rather than something to guess at. It is
+stated rather than chosen because this repository declares no Rust component and so cannot measure
+it; the proving ground ([#95](https://github.com/lydite/lydite/issues/95)) is where a number could
+come from.
+
 **Rust and TypeScript get one phase, not two.** Neither has a unit both cheaper than the component
 and derivable from a file path the way a Go package directory is: a crate needs its manifest read,
 and a JavaScript test file is related to the source it exercises by convention rather than by
