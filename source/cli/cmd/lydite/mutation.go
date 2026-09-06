@@ -431,7 +431,18 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 
 	env := childEnv(tc, c, inv)
 	baselineStarted := time.Now()
-	if res := executil.RunOutput(ctx, dir, env, log.out, inv.Name, inv.Args...); !res.Ok() {
+	// Under the run's slots, because a baseline is a suite execution exactly
+	// as a mutant is. Counting only mutants would let three components in
+	// their baseline run beside a fourth executing four mutants — seven
+	// suites in flight under `--concurrency 4`, which is what one bound
+	// exists to prevent.
+	var res executil.Result
+	if !slots.Run(ctx, func() {
+		res = executil.RunOutput(ctx, dir, env, log.out, inv.Name, inv.Args...)
+	}) {
+		return unmeasuredRow(label, "the run was interrupted before this component's baseline suite ran"), out
+	}
+	if !res.Ok() {
 		return detailed(unmeasuredRow(label,
 			"the baseline suite did not pass, so nothing can be concluded about what a mutant would change"),
 			log, tail(res.Output)...), out

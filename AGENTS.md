@@ -2028,9 +2028,12 @@ structure. A second phase that narrowed wrongly would cost the run it exists to 
 
 A component stays one scheduler item, so its compose stack is started and torn down inside that
 item exactly as `lydite test` does, and two components publishing one host port are serialised
-there. Its **mutants** dispatch against slots shared by the whole run, so `--concurrency` means
-suite executions in flight in `lydite mutation` exactly as it does in `lydite test`. Two
-independent bounds would multiply into components times mutants, which is the quadratic
+there. Its **mutants** dispatch against slots shared by the whole run — and so does each
+component's own **baseline**, because a baseline is a suite execution exactly as a mutant is. A
+bound counting only mutants would let three components in their baseline run beside a fourth
+executing four mutants, which is seven suites in flight under `--concurrency 4`. With both counted,
+`--concurrency` means suite executions in flight in `lydite mutation` exactly as it does in `lydite
+test`. Two independent bounds would multiply into components times mutants, which is the quadratic
 oversubscription `defaultConcurrency` is a constant rather than `NumCPU` to avoid.
 
 **A component declaring compose services runs its mutants strictly serially.** ADR 0016 rejects

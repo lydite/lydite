@@ -128,6 +128,23 @@ func NewSlots(n int) *Slots {
 // that could run that many suites, and small enough to allocate.
 const unbounded = 1 << 20
 
+// Run holds a slot for the duration of fn, and reports whether it ran at all —
+// false means the run was cancelled while waiting for one.
+//
+// Exported because a component's *baseline* is a suite execution too, and it
+// is run by the command rather than by the executor. Without it the bound
+// counts only mutants: three components in their baseline beside one running
+// four mutants is seven suites in flight under `--concurrency 4`, which is the
+// oversubscription the single bound exists to prevent.
+func (s *Slots) Run(ctx context.Context, fn func()) bool {
+	if !s.acquire(ctx) {
+		return false
+	}
+	defer s.release()
+	fn()
+	return true
+}
+
 // acquire takes a slot, or reports that the run was cancelled while waiting.
 func (s *Slots) acquire(ctx context.Context) bool {
 	if s == nil {

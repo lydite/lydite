@@ -294,3 +294,58 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// A component's baseline is a suite execution exactly as a mutant is, and the
+// bound counts both. Without that, three components in their baseline beside a
+// fourth executing four mutants is seven suites in flight under a bound of
+// four — the oversubscription one bound exists to prevent.
+func TestSlotsBoundWhateverHoldsThem(t *testing.T) {
+	s := NewSlots(2)
+	var live, peak, mu = 0, 0, sync.Mutex{}
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Run(t.Context(), func() {
+				mu.Lock()
+				live++
+				if live > peak {
+					peak = live
+				}
+				mu.Unlock()
+				time.Sleep(20 * time.Millisecond)
+				mu.Lock()
+				live--
+				mu.Unlock()
+			})
+		}()
+	}
+	wg.Wait()
+	if peak > 2 {
+		t.Errorf("%d slots were held at once under a bound of 2", peak)
+	}
+	if peak < 2 {
+		t.Errorf("only %d slot was ever held, so the bound was never reached and this proves nothing", peak)
+	}
+}
+
+// A run cancelled while something waits for a slot never runs it, and says so
+// rather than running it late.
+func TestARunCancelledWhileWaitingForASlotDoesNotRun(t *testing.T) {
+	s := NewSlots(1)
+	if !s.acquire(t.Context()) {
+		t.Fatal("the first slot was not free")
+	}
+	defer s.release()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ran := false
+	if s.Run(ctx, func() { ran = true }) {
+		t.Error("Run reported that it ran on a cancelled context")
+	}
+	if ran {
+		t.Error("the work ran after the run was cancelled")
+	}
+}

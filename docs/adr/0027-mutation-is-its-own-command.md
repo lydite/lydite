@@ -258,8 +258,11 @@ reader to skim past it.
 **Mutants are bounded by `--concurrency`, which is one number.** A component
 stays one scheduler item, so its compose stack is started and torn down inside
 that item as it already is; its mutants dispatch against the same limiter, and
-`--concurrency` means suite executions in flight in `lydite mutation` exactly as
-it does in `lydite test`. Two bounds would multiply into N components times M
+so does its own baseline — a baseline is a suite execution exactly as a mutant
+is, and a bound counting only mutants would let three components in their
+baseline run beside a fourth executing four. With both counted, `--concurrency`
+means suite executions in flight in `lydite mutation` exactly as it does in
+`lydite test`. Two bounds would multiply into N components times M
 mutants, which is the quadratic oversubscription `defaultConcurrency` is a
 constant rather than `NumCPU` to avoid. Serial-where-services is asked of
 `scheduler.Conflicts` with two of the component's mutants as items: they carry
