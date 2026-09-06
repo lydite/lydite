@@ -208,6 +208,94 @@ fold already fails a declared component with no row. Loud, and by machinery that
 exists. The reported timings are what make a later budget a measured decision
 rather than a guess.
 
+## What the executor settled
+
+The measurements below are of this repository, on one machine, and are recorded
+because ADR 0016's operator catalogue and this document's refusal of a runtime
+budget both rest on cost being known rather than assumed.
+
+**The test cache is load-bearing, and `-count=1` must never be passed.** Go's
+plain variant is `go test ./...` with no `-count=1`, so a mutant's overlay
+changes the build hash of the mutated package and its dependents and of nothing
+else — exactly the right set re-runs and the rest is served from cache.
+Mutation gets incremental test selection for free without lydite implementing
+any. Measured over five distinct mutants of one leaf package: 1.67s each
+(0.55s build-only, 1.12s test) against 79s with the cache disabled. Adding
+`-count=1` would multiply the cost of mutation by roughly fifty.
+
+**Per-mutant cost is bimodal, and the discriminator is which suite the mutated
+package's dependents hold.** Not how many dependents there are: a mutant in a
+package imported only by fast packages costs 1.67s, and one in a package
+imported by this repository's slowest suite costs 76s, nearly all of which is
+that one suite: it alone accounts for 73s of the 79s the module takes uncached.
+A mutant is therefore cheap or nearly a whole suite, with little between.
+
+**A mutant is run against its own package first, and against the rest only if
+it survives there.** A mutant its own package's tests kill is killed, and
+nothing further can change that answer; a mutant that survives them has to be
+held against every test that could kill it, because a mutant in a library is
+routinely killed only by its caller's tests. Ordering the two turns the
+expensive case from 76s into 2.36s for a killed mutant and costs a survivor
+nothing, since the second run reads the first's cached result for the package
+they share. Kills are the common outcome in a tested repository, so this is the
+common path.
+
+**A component whose baseline suite fails is `unmeasured` and does not vote.**
+The row says the suite did not pass. Failing instead would report one broken
+suite as two red gates, the second naming a cause its author clears by fixing
+the first. The cost is stated rather than hidden: a component flaky enough to
+fail here and pass in the test matrix leaves mutation silently having examined
+nothing, and the amber glyph is the only thing that separates that from a pass.
+
+**A component declaring `mutation: false` gets one `context` row.** Present, so
+[ADR 0026](0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md)'s
+completeness rule holds with no exception and the fold needs no second copy of
+the opt-out rule to know which absences are legitimate. It is `context` and not
+`unmeasured` because the amber tag is for a gate that could not run, and
+spending it on a decision the repository stated deliberately is what teaches a
+reader to skim past it.
+
+**Mutants are bounded by `--concurrency`, which is one number.** A component
+stays one scheduler item, so its compose stack is started and torn down inside
+that item as it already is; its mutants dispatch against the same limiter, and
+`--concurrency` means suite executions in flight in `lydite mutation` exactly as
+it does in `lydite test`. Two bounds would multiply into N components times M
+mutants, which is the quadratic oversubscription `defaultConcurrency` is a
+constant rather than `NumCPU` to avoid. Serial-where-services is asked of
+`scheduler.Conflicts` with two of the component's mutants as items: they carry
+its published ports so they conflict, and a component publishing none holds no
+directory either, so they do not.
+
+**The per-mutant timeout is derived from the measured baseline.** A multiple of
+the component's own observed baseline elapsed time, with a floor for suites too
+fast to measure, and `--timeout` overriding. The refusal of a runtime budget
+above is a refusal to cap work at an invented number; a timeout that multiplies
+something this run measured is not that, and without one `TimedOut` is an
+outcome nothing can produce.
+
+**The fold emits a `mutation` summary row, never `mutation(repo)`.** There is no
+repository-wide figure only the fold can compute: `survived == 0` for every
+component is `survived == 0` for the repository, so a gating row could only
+restate the conjunction of the rows above it. The summary row is `context`,
+gates nothing, and carries the counts and elapsed time that make a later budget
+a measured decision.
+
+**Worker directories are per concurrency slot, and they owe containment.** One
+directory per slot rather than per mutant — a tree copy and, for TypeScript, a
+dependency install per mutant is not affordable — reused with the mutated file
+restored between mutants. Mutating the component's own tree in place is
+rejected: it is faster than either and an interrupt leaves mutated source in the
+tree lydite is measuring. `checkPath` is lexical and says so, so every write
+into a worker directory resolves the joined path and refuses a result outside
+the worker root, as `internal/download`'s `safeJoin` does.
+
+**A golden-mutant test holds the grammars.** Rust and TypeScript are parsed
+through a pre-1.0 dependency whose grammar tables are regenerated on a schedule,
+and a bump changes which mutants exist. This repository has no Rust component,
+so its own CI cannot otherwise see that change and it would reach a consumer
+unobserved. Committed fixtures assert the exact mutant set — offsets, operators,
+replaced text — in `go test`, which is what the merge gate blocks on.
+
 ## Considered and rejected
 
 **Delegating Rust and TypeScript to `cargo-mutants` and Stryker.** The original
@@ -257,6 +345,7 @@ the score by exactly the mutants the generator produced badly.
   the only place the three-language claim is falsifiable at all: this repository
   has no Rust component, so a Rust engine validated only here would merge with
   its argv asserted and never once executed.
-- Whether to run mutants in-process or by rebuilding remains open and is to be
-  benchmarked. `-overlay` shortens the odds for rebuilding: only the mutated
-  package recompiles, and the build cache holds the rest.
+- Mutants are run by rebuilding. In-process was never available for Go: it
+  compiles to a native test binary and has no bytecode layer to rewrite in a
+  live process, so the real choice was `-overlay` against copying trees.
+  `-overlay` wins and is why `Apply` returns bytes.
