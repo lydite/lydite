@@ -845,3 +845,29 @@ func TestSomethingUnrelatedIsBroken(t *testing.T) {
 		t.Error("the row carries nothing of what the suite printed")
 	}
 }
+
+// A report path joins onto the component's directory, so an empty one names
+// the directory itself — and clearing it is asking to remove the component.
+// Both the caller and the floor refuse it, because the caller is the one that
+// can say something useful and the floor is what stops a caller that forgets.
+func TestAnEmptyReportPathIsRefusedRatherThanCleared(t *testing.T) {
+	dir := t.TempDir()
+	if err := clearReport(dir, ""); err == nil {
+		t.Error("clearing an empty report path was allowed")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the component's directory was removed: %v", err)
+	}
+	// An empty directory is the case a bare os.Remove would actually succeed
+	// on, so it is the one worth asserting.
+	empty := filepath.Join(t.TempDir(), "component")
+	if err := os.Mkdir(empty, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearReport(empty, ""); err == nil {
+		t.Error("clearing an empty report path was allowed for an empty directory")
+	}
+	if _, err := os.Stat(empty); err != nil {
+		t.Errorf("an empty component directory was removed: %v", err)
+	}
+}

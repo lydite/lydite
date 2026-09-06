@@ -717,6 +717,13 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 // one of them. It is the property the measurement depends on: what is read
 // back was written by the run that just finished.
 func clearReport(dir, report string) error {
+	// An empty report path joins to the component's directory itself, and
+	// what follows would then try to remove it. Every caller is expected to
+	// have refused that case already and to say something useful about it;
+	// this is the floor, so a caller that forgets cannot delete a component.
+	if report == "" {
+		return errors.New("no coverage report path to clear")
+	}
 	path := filepath.Join(dir, filepath.FromSlash(report))
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err

@@ -407,6 +407,17 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 		return unmeasuredRow(label, "this change touches no source this component is written in"), out
 	}
 
+	// A runner whose instrumented variant names no report can supply no
+	// executed lines, and mutation needs those as much as it needs a passing
+	// baseline. Reported rather than attempted: `clearReport` joins the
+	// report path onto the component's directory, so an empty one names the
+	// directory itself, and asking it to clear that is asking to remove the
+	// component.
+	if inv.CoverageReport == "" {
+		return unmeasuredRow(label,
+			"the runner's instrumented variant names no coverage report, so there are no executed lines to mutate"), out
+	}
+
 	dir := filepath.Join(opts.root, filepath.FromSlash(c.Dir))
 	if err := clearReport(dir, inv.CoverageReport); err != nil {
 		return failure(label, log, err.Error(), "not runnable", ""), out
