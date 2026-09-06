@@ -285,9 +285,17 @@ directory per slot rather than per mutant — a tree copy and, for TypeScript, a
 dependency install per mutant is not affordable — reused with the mutated file
 restored between mutants. Mutating the component's own tree in place is
 rejected: it is faster than either and an interrupt leaves mutated source in the
-tree lydite is measuring. `checkPath` is lexical and says so, so every write
-into a worker directory resolves the joined path and refuses a result outside
-the worker root, as `internal/download`'s `safeJoin` does.
+tree lydite is measuring. `checkPath` is lexical and says so, and a lexical
+check is not enough here: a worker directory is a copy of a scanned repository,
+so it holds symlinks nobody vetted, and a committed `evil -> /etc` makes
+`<worker>/evil/passwd` pass every prefix comparison before the write follows it
+out. Writes are therefore *confined* rather than checked — `os.Root`, opened on
+the worker directory, which refuses an escape at the syscall instead of in a
+string, and leaves no window between resolving a path and writing to it.
+`internal/download`'s `safeJoin` is deliberately not the model: it is lexical
+too, and is sufficient there only because that code separately rejects absolute
+link targets, containment-checks resolved relative ones, and unpacks into a
+directory it created rather than one it was handed.
 
 **A golden-mutant test holds the grammars.** Rust and TypeScript are parsed
 through a pre-1.0 dependency whose grammar tables are regenerated on a schedule,

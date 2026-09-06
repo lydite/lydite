@@ -6,6 +6,13 @@ caller of either is a test. This step gives them one, and closes
 [#19](https://github.com/lydite/lydite/issues/19) and
 [#18](https://github.com/lydite/lydite/issues/18).
 
+**[ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md) supersedes this
+file wherever the two differ.** The benchmark step 1 asks for has been run and
+its numbers are recorded there, and every question under "Decisions for
+`challenge`" below has since been answered there. Read that ADR's "What the
+executor settled" section first; this file is the prompt the session began from,
+kept as written.
+
 ## Setup
 
 You are in a `gt`-powered bare repo at
@@ -75,10 +82,12 @@ suite — five review rounds found defects in it that no compiler could see.
    Isolation there is a worker directory rather than an overlay, and that is the
    step that owes containment. `checkPath` is lexical and says so: a symlink
    committed into the scanned repository leaves the component through a path
-   that is lexically spotless, so every write into a worker directory resolves
-   the joined path and refuses a result outside the worker root, the shape
-   `internal/download`'s `safeJoin` already has. The same obligation covers the
-   overlay keys step 1 builds, since those are paths too.
+   that is lexically spotless, and a worker directory is a copy of a scanned
+   repository, so it holds exactly those. Writes are confined rather than
+   prefix-checked — `os.Root` on the worker directory refuses an escape at the
+   syscall. `internal/download`'s `safeJoin` is lexical and is not the model.
+   The same obligation covers the overlay keys step 1 builds, since those are
+   paths too.
 5. **The proving ground's planted survivors** — a function whose test calls it
    and asserts nothing, beside a properly tested neighbour, in each of the three
    languages, with `.github/assert-proving-ground.py` requiring the first to
@@ -124,20 +133,21 @@ suite — five review rounds found defects in it that no compiler could see.
   `go list -deps` when a low-level package gains an import.
 - **New surface inside a repair commit is where defects survive.** Every round,
   the findings clustered on the parts that were not themselves repairs.
-- **Sandbox:** push over HTTPS with a `gh` token, supplied through a credential
-  helper rather than in the URL — a token in the remote lands in the process
-  argument list, in shell history, and in git's own error text on a failed push:
-  `git -c credential.helper='!f(){ echo username=x-access-token; echo
-  password=$GH_TOKEN; };f' push https://github.com/lydite/lydite.git
-  <branch>:<branch>`. `gh auth setup-git` once, then a plain `git push`, does the
-  same job. `git fetch` over the configured SSH remote also worked, so the older
-  note that SSH is wholly blocked is at least too broad; pushing over SSH was not
-  retried. There is no container runtime, so anything touching the proving ground
-  is validated by CI on the PR. `--gate-coverage`, `--affected`, `scan
-  --diff-base auto` and `review --base auto` cannot resolve a merge-base locally
-  — clone into the scratch directory with a `file://` origin. `lydite test
-  record` pushes to `origin/lydite`; use a scratch clone unless you mean it.
-  Every PR here is referred and needs `/lydite clear`; a push voids it.
+- **Sandbox:** push over HTTPS, never with the token in the URL — a token in the
+  remote lands in the process argument list, in shell history, and in git's own
+  error text on a failed push. `gh auth setup-git` once, then a plain
+  `git push origin <branch>:<branch>`, is the form to use: it scopes the
+  credential to the hosts gh configures. A one-shot `-c credential.helper=`
+  keeps the value off argv too, but answers whatever host git asks about in that
+  invocation, so it is the fallback rather than the default. `git fetch` over the
+  configured SSH remote also worked, so the older note that SSH is wholly blocked
+  is at least too broad; pushing over SSH was not retried. There is no container
+  runtime, so anything touching the proving ground is validated by CI on the PR.
+  `--gate-coverage`, `--affected`, `scan --diff-base auto` and `review --base
+  auto` cannot resolve a merge-base locally — clone into the scratch directory
+  with a `file://` origin. `lydite test record` pushes to `origin/lydite`; use a
+  scratch clone unless you mean it. Every PR here is referred and needs
+  `/lydite clear`; a push voids it.
 
 ## Decisions for `challenge`, not for a guess
 
