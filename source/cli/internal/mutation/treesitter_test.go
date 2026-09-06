@@ -300,3 +300,26 @@ func TestOnlyRequestedLinesAreMutated(t *testing.T) {
 var update = flag.Bool("update", false, "rewrite the golden mutant sets in testdata")
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }
+
+// The error names the file and what was wrong with it, because a caller's only
+// alternative is to report a component whose suite appears to have killed
+// everything.
+func TestAnUnparsedFileSaysWhichAndWhy(t *testing.T) {
+	err := ErrUnparsed{Path: "src/lib.rs", Reason: "the tree carries a syntax error"}
+	got := err.Error()
+	if !strings.Contains(got, "src/lib.rs") || !strings.Contains(got, "syntax error") {
+		t.Errorf("Error() = %q, want it to name the file and the reason", got)
+	}
+}
+
+// A language lydite parses no source for is an error rather than an empty
+// mutant set: the two are indistinguishable to a caller and mean opposite
+// things.
+func TestALanguageWithNoGeneratorIsRefused(t *testing.T) {
+	if _, _, err := GenerateTreeSitter("cobol", "a.cbl", []byte("x"), nil); err == nil {
+		t.Error("a language with no grammar produced no error")
+	}
+	if _, _, err := Generate("cobol", "a.cbl", []byte("x"), nil); err == nil {
+		t.Error("the dispatcher accepted a language with no generator")
+	}
+}

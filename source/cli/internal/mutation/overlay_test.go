@@ -66,13 +66,12 @@ func TestTheOverlayNamesTheMutatedFileAndTheTreeIsNotTouched(t *testing.T) {
 	var doc overlay
 	read(t, file, &doc)
 	original := filepath.Join(g.Dir, "internal", "a", "a.go")
-	abs, err := filepath.Abs(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replacement, ok := doc.Replace[abs]
+	// Keyed on the path with its symlinks followed, which is the form the go
+	// command reads source through — see
+	// TestTheOverlayNamesTheFileTheCompilerWillRead.
+	replacement, ok := doc.Replace[filepath.Join(resolved(g.Dir), "internal", "a", "a.go")]
 	if !ok {
-		t.Fatalf("the overlay replaces %v, not %s", keysOf(doc.Replace), abs)
+		t.Fatalf("the overlay replaces %v, not the resolved form of %s", keysOf(doc.Replace), original)
 	}
 	got, err := os.ReadFile(replacement) // #nosec G304 -- a path this test just wrote
 	if err != nil {
@@ -251,4 +250,44 @@ func keysOf(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The go command reads source through resolved paths and matches an overlay on
+// the path it read. A key naming the same file by an unresolved route matches
+// nothing, the compiler reads the original, and *every mutant survives* — the
+// gate failing correct code, silently, because a survivor is indistinguishable
+// from a test that does not assert.
+//
+// It is the common case rather than an exotic one: macOS puts /tmp behind a
+// symlink, so any component under a temporary tree is reached through one.
+func TestTheOverlayNamesTheFileTheCompilerWillRead(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "component")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("this filesystem does not support symlinks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a.go"), []byte(goSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The component reached through the link, which is what a caller hands us.
+	g := Go{Dir: link}
+	_, staged := stage(t, g, negated("a.go", goSrc))
+
+	var doc overlay
+	read(t, overlayPath(t, staged.Build), &doc)
+	resolvedReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(resolvedReal, "a.go")
+	if _, ok := doc.Replace[want]; !ok {
+		t.Errorf("the overlay replaces %v, want %s — the path the compiler resolves to",
+			keysOf(doc.Replace), want)
+	}
+	// And the commands run in the same resolved directory, so the path the
+	// overlay names and the path the go command builds are one answer.
+	if staged.Dir != resolvedReal {
+		t.Errorf("the suite would run in %s, want %s", staged.Dir, resolvedReal)
+	}
 }

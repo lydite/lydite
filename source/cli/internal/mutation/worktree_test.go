@@ -257,3 +257,49 @@ func contents(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// A path git lists and the filesystem does not is a file deleted since the
+// listing. It is not this worker's problem, and refusing to open would fail
+// the component over a race with the author's editor.
+func TestAFileGitListsAndTheTreeNoLongerHoldsIsSkipped(t *testing.T) {
+	tree := component(t, map[string]string{"src/less.ts": tsSrc})
+	tree.Files = append(tree.Files, "src/deleted.ts")
+	w, err := tree.Worker(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("a deleted file failed the worker: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+	staged, err := w.Stage(lessThan(tsSrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(staged.Dir, "src", "less.ts")); err != nil {
+		t.Errorf("the file that is there was not copied: %v", err)
+	}
+}
+
+// A file the copy cannot reproduce meaningfully — a socket, a fifo, a gitlink —
+// is skipped rather than refused. Failing a whole component over one would be
+// a gate firing on ordinary work.
+func TestAFileThatIsNotSourceIsSkippedRatherThanRefused(t *testing.T) {
+	tree := component(t, map[string]string{"src/less.ts": tsSrc})
+	if err := os.Mkdir(filepath.Join(tree.Dir, "submodule"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	tree.Files = append(tree.Files, "submodule")
+	w, err := tree.Worker(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("an unreproducible entry failed the worker: %v", err)
+	}
+	_ = w.Close()
+}
+
+// A path that cannot name a file inside the component never becomes part of a
+// worker either, so a listing carrying one fails before anything is copied.
+func TestAWorkerRefusesAListingThatEscapes(t *testing.T) {
+	tree := component(t, map[string]string{"src/less.ts": tsSrc})
+	tree.Files = append(tree.Files, "../outside.ts")
+	if _, err := tree.Worker(t.Context(), 0); err == nil {
+		t.Error("a listing naming a path outside the component was copied")
+	}
+}

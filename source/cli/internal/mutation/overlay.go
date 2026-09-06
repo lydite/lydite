@@ -52,12 +52,45 @@ func (g Go) Worker(_ context.Context, n int) (Worker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening a worker directory for mutation: %w", err)
 	}
-	return &goWorker{backend: g, dir: dir}, nil
+	return &goWorker{backend: g, dir: dir, component: resolved(g.Dir)}, nil
+}
+
+// resolved is a directory with every symlink in it followed.
+//
+// The go command reads source through resolved paths, and an overlay is
+// matched on the path it read — so a key naming the same file by an
+// unresolved route matches nothing, the compiler reads the original, and
+// *every mutant survives*. That is the worst failure available here: the gate
+// fails correct code, and it does so silently, because a survivor is
+// indistinguishable from a test that does not assert. It bites wherever a
+// component is reached through a link — macOS puts /tmp behind one, so a
+// temporary tree is the common case rather than an exotic one.
+//
+// A path that cannot be resolved is used as it stands. It is a path this
+// process was handed and has been reading from; failing the component over a
+// resolution it does not strictly need would be worse than the mismatch this
+// is avoiding, which the staged mutant's own Original check would catch
+// anyway.
+func resolved(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return real
 }
 
 type goWorker struct {
 	backend Go
 	dir     string
+	// component is backend.Dir with its symlinks followed: the form the go
+	// command reads source through, and therefore the only form an overlay
+	// key can be written in. Every command runs there too, so the path the
+	// overlay names and the path the compiler resolves are one answer.
+	component string
 	// staged is what Stage wrote, so Release removes what is there rather
 	// than what a second copy of the naming rule says should be.
 	staged []string
@@ -79,7 +112,7 @@ func (w *goWorker) Stage(m Mutant) (Staged, error) {
 	if err := checkPath(m.Path); err != nil {
 		return Staged{}, err
 	}
-	original := filepath.Join(w.backend.Dir, filepath.FromSlash(m.Path))
+	original := filepath.Join(w.component, filepath.FromSlash(m.Path))
 	src, err := os.ReadFile(original) // #nosec G304 -- the path is a component-relative source file, checked above to name one inside the component
 	if err != nil {
 		return Staged{}, err
@@ -103,11 +136,7 @@ func (w *goWorker) Stage(m Mutant) (Staged, error) {
 	// Absolute on both sides. The go command resolves a relative entry
 	// against its own working directory, which is the component's here and
 	// the worker's nowhere.
-	origAbs, err := filepath.Abs(original)
-	if err != nil {
-		return Staged{}, err
-	}
-	doc, err := json.Marshal(overlay{Replace: map[string]string{origAbs: source}})
+	doc, err := json.Marshal(overlay{Replace: map[string]string{original: source}})
 	if err != nil {
 		return Staged{}, err
 	}
@@ -119,7 +148,7 @@ func (w *goWorker) Stage(m Mutant) (Staged, error) {
 
 	flag := "-overlay=" + file
 	staged := Staged{
-		Dir:    w.backend.Dir,
+		Dir:    w.component,
 		Build:  withFlag(w.backend.Build, flag),
 		Phases: []runner.Invocation{withFlag(w.backend.Suite, flag)},
 	}
