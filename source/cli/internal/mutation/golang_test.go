@@ -385,7 +385,13 @@ func F(a, b int) bool { return a < b }
 // every consumer to remember.
 func TestGenerateRefusesAPathOutsideTheComponent(t *testing.T) {
 	const src = "package p\n\nfunc F(a, b int) bool { return a < b }\n"
-	for _, path := range []string{"/etc/passwd", "../outside.go", "", ".", "..", "a/../../b.go", "a/../.."} {
+	// Every spelling that resolves to the component directory or above it,
+	// not only the spelling its author would think of first.
+	for _, path := range []string{
+		"/etc/passwd", "../outside.go", "",
+		".", "./", ".//", "a/..", "a/b/../..", "./x/..",
+		"..", "a/../../b.go", "a/../..",
+	} {
 		var escapes ErrPathEscapes
 		_, err := GenerateGo(path, []byte(src), allLines(5))
 		if !errors.As(err, &escapes) {

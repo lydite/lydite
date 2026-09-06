@@ -120,8 +120,12 @@ type ErrStaleMutant struct {
 }
 
 func (e ErrStaleMutant) Error() string {
-	return fmt.Sprintf("%s: bytes [%d,%d) are %q, not the %q this mutant replaces",
-		e.Path, e.Offset, e.Offset+e.Length, e.Got, e.Want)
+	// The two are reported rather than summed, for the reason Apply compares
+	// them without summing: a pair that overflows is exactly what this
+	// describes, and an upper bound that has wrapped negative is a diagnostic
+	// nobody can act on.
+	return fmt.Sprintf("%s: %d bytes at offset %d are %q, not the %q this mutant replaces",
+		e.Path, e.Length, e.Offset, e.Got, e.Want)
 }
 
 // Apply builds this mutant's source from the file it was generated from.
@@ -280,19 +284,25 @@ func (e ErrPathEscapes) Error() string {
 // checkPath refuses a path that does not name a file inside the component.
 //
 // It is lexical, and that is the whole of what it establishes: a path that is
-// absolute, empty, or climbs out of the tree never becomes a mutant. It does
-// not establish containment, which no check on a name alone can — a symlink
-// committed into the scanned repository leaves the directory through a path
-// that is lexically spotless. The write site resolves and re-checks against
-// the directory it owns, the way internal/download refuses an archive entry
-// that escapes its destination; this only stops a name that cannot possibly be
-// right from travelling that far.
+// absolute, empty, or names the component directory rather than a file in it
+// never becomes a mutant. It does not establish containment, which no check on
+// a name alone can — a symlink committed into the scanned repository leaves the
+// directory through a path that is lexically spotless. Containment is therefore
+// owed by whatever writes a mutant out: it must resolve the joined path and
+// refuse a result outside the directory it owns, as internal/download's
+// safeJoin does for an archive entry. This only stops a name that cannot
+// possibly be right from travelling that far.
 func checkPath(p string) error {
-	if p == "" || p == "." || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return ErrPathEscapes{Path: p}
 	}
+	// Every test is against the cleaned path, because a name has many
+	// spellings and only one of them is the obvious one: "a/..", "./" and
+	// "a/b/../.." all name the component directory as surely as "." does,
+	// and a check against the raw text catches whichever spelling its author
+	// happened to think of.
 	clean := filepath.ToSlash(filepath.Clean(p))
-	if clean == ".." || strings.HasPrefix(clean, "../") {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return ErrPathEscapes{Path: p}
 	}
 	return nil

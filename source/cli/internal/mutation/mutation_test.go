@@ -195,10 +195,83 @@ func TestALineContinuationDoesNotShiftADeclaration(t *testing.T) {
 			t.Errorf("%s: reported at line %d, want 7", m, m.Line)
 		}
 		if !m.Acknowledged() {
-			t.Errorf("%s: the declaration on its own line did not reach it", m)
+			t.Errorf("%s: the trailing declaration did not reach it", m)
 		}
 	}
 	if !seen {
 		t.Fatal("no comparison mutant")
+	}
+}
+
+// A mutant over a statement spanning lines is reported at the line it opens
+// on, which is not where an author writing a trailing declaration puts one.
+// Every line in the span is one the caller asked for, so honouring a
+// declaration anywhere in it keeps the bargain referral relies on.
+func TestADeclarationAnywhereInAMultiLineStatementCoversIt(t *testing.T) {
+	src := "package p\n\nfunc F(a int) {\n\tprintln(\n\t\ta,\n\t) " + annotation.Token + " printing is not observable\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != RemoveStatement {
+			continue
+		}
+		seen = true
+		if !m.Acknowledged() {
+			t.Errorf("%s: the declaration on the statement's closing line did not reach it", m)
+		}
+	}
+	if !seen {
+		t.Fatal("no remove-statement mutant for the multi-line call")
+	}
+}
+
+// A declaration inside a statement's span still cannot reach past it: the
+// span is bounded by the lines the caller asked for.
+func TestADeclarationDoesNotReachPastTheStatementItIsIn(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) bool {\n\tprintln(\n\t\ta,\n\t) " + annotation.Token + " printing is not observable\n\treturn a < b\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(9))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != ConditionalBoundary {
+			continue
+		}
+		seen = true
+		if m.Acknowledged() {
+			t.Errorf("%s: acknowledged by a declaration belonging to the statement above", m)
+		}
+	}
+	if !seen {
+		t.Fatal("no comparison mutant on the line after the call")
+	}
+}
+
+// The span is a floor and a ceiling both. A declaration written beneath a
+// statement belongs to whatever comes next, and reaching down to it would
+// acknowledge a mutant its author never claimed — the same silent exemption as
+// reaching up, arriving from the other direction.
+func TestADeclarationBelowAStatementDoesNotCoverIt(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b\n\t" + annotation.Token + " belongs to nothing above it\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(7))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != ConditionalBoundary {
+			continue
+		}
+		seen = true
+		if m.Acknowledged() {
+			t.Errorf("%s: acknowledged by a declaration written below it, reason %q", m, m.Reason)
+		}
+	}
+	if !seen {
+		t.Fatal("no comparison mutant on the line above the declaration")
 	}
 }

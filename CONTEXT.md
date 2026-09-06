@@ -36,9 +36,10 @@ A **Mutant** the suite did not notice: the code was changed and every test still
 _Avoid_: "escaped mutant", "missed mutant" — other tools' vocabulary for the same thing. Also "uncaught", which reads as an exception.
 
 **Equivalent mutant**:
-A **Survivor** no test could ever kill, because the change it makes is unobservable — a deleted log line, an arithmetic rewrite with identical results over the reachable domain. Equivalence is undecidable in general, so lydite never tries to detect one: the author declares it, in a `//lydite:equivalent <reason>` comment at the site, and the declaration clears the gate.
+A **Survivor** no test could ever kill, because the change it makes is unobservable — a deleted log line, an arithmetic rewrite with identical results over the reachable domain. Equivalence is undecidable in general, so lydite never tries to detect one: the author declares it, in a `//lydite:equivalent <reason>` comment on the line the mutant is on, and the declaration clears the gate.
 _Note_: the declaration is a suppression, and therefore a **Disqualifier**. Killing the mutant merges unattended; declaring it unkillable is referred. So the author always has a way forward and never a way around, and the annotation can add a referral but can never remove one — the rule ADR 0014 sets for anything an author asserts about their own change.
 _Note_: it lives in the source rather than in a central list because any registry must key a mutant by file, line and operator, and every edit above the site would silently invalidate the claim or transfer it to a different mutant. A reason is required for the same reason an **Exemption** requires one: the annotation is the entire risk record for a mutant nobody can kill.
+_Note_: a declaration covers its own line and, for a statement spanning several, any line that statement occupies — never a neighbouring one. Reaching further would let a declaration already in the tree acknowledge code a later change adds beneath it, which is excluded from the run and never counted while the change adds no line carrying the token, so nothing refers it and it merges unread.
 _Avoid_: "false positive" — the mutant is real and really survived. What is claimed is that killing it is impossible, not that generating it was a mistake.
 
 **Unviable mutant**:

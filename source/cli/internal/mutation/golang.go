@@ -217,6 +217,23 @@ func (g *goGen) emitNode(op Operator, site, from, to token.Pos, mutated string) 
 	g.add(op, site, from, to, mutated)
 }
 
+// reasonFor returns the declaration covering a mutant spanning first to last.
+//
+// A mutant is reported at its site, which for a statement spanning lines is
+// the line it opens on — not where an author writing a trailing declaration
+// would put one. Every line in the span is a line the caller asked for, so a
+// declaration on any of them is a declaration on a changed line, which
+// internal/referral sees as added; the bargain holds exactly as it does for a
+// mutant confined to one line.
+func (g *goGen) reasonFor(first, last int) string {
+	for l := first; l <= last; l++ {
+		if r, ok := g.reasons[l]; ok {
+			return r
+		}
+	}
+	return ""
+}
+
 // add records one mutant, after establishing that it edits only requested
 // lines and that the range it claims holds what it says it does.
 func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
@@ -242,6 +259,6 @@ func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
 		Length:   hi - lo,
 		Original: string(g.src[lo:hi]),
 		Mutated:  mutated,
-		Reason:   g.reasons[at.Line],
+		Reason:   g.reasonFor(start.Line, end.Line),
 	})
 }
