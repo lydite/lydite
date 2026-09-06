@@ -336,6 +336,15 @@ directory is: a crate needs its manifest read, and a JavaScript test file is
 related to the source it exercises by convention rather than by structure. A
 second phase that narrowed wrongly would cost the run it exists to save.
 
+**An overlay is keyed on the resolved path.** The go command reads source
+through resolved paths and matches an overlay on the path it read, so a key
+naming the same file by an unresolved route matches nothing and every mutant
+survives — the gate failing correct code, silently, since a survivor is
+indistinguishable from a test that does not assert. It is recorded here rather
+than left to the code because the failure is invisible in every signal a
+reviewer has: the build is clean, the lint is clean, the run is green, and the
+verdict is wrong.
+
 **A golden-mutant test holds the grammars.** Rust and TypeScript are parsed
 through a pre-1.0 dependency whose grammar tables are regenerated on a schedule,
 and a bump changes which mutants exist. This repository has no Rust component,

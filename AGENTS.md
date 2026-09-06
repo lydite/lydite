@@ -1950,6 +1950,15 @@ trees. The overlay wins, and that is why `Mutant.Apply` returns bytes rather tha
 nothing edits the component's own tree, so an interrupt cannot leave mutated source in the
 repository lydite is measuring.
 
+**The overlay is keyed on the path with its symlinks followed, and every command runs in that same
+resolved directory.** The go command reads source through resolved paths and matches an overlay on
+the path it read, so a key naming the same file by an unresolved route matches nothing: the compiler
+reads the original and *every mutant survives*. That is the worst failure available here — the gate
+fails correct code, silently, because a survivor is indistinguishable from a test that does not
+assert. It is the common case rather than an exotic one, since macOS puts `/tmp` behind a symlink,
+so any component under a temporary tree is reached through one.
+`TestTheOverlayNamesTheFileTheCompilerWillRead` is what holds it.
+
 **The suite is never given `-count=1`, and that is load-bearing.** An overlay changes the build
 hash of the mutated package and its dependents and of nothing else, so exactly the right set
 re-runs and the rest is served from the test cache: mutation gets incremental test selection
