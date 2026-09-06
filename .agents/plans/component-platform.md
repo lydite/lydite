@@ -46,7 +46,7 @@ is now written on every run, which is the document a merge step would read.
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
 | 7 | #58 | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done — #54 |
 | 8 | #61 #48 | `lydite test plan` and `lydite test merge`, both workflows sharded, the coverage gate end to end | `pr8-plan-and-merge.md` | done — see [ADR 0026](../../docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md) |
-| 9 | #93 | `internal/mutation`: the mutant, its outcomes, and the Go generator | `pr9-mutation.md` | done — #94, see [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md) |
+| 9 | #93 | `internal/mutation`: the mutant, its outcomes, and the Go generator | `pr9-mutation.md` | done — #94, see [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md). The prompt was written for the whole slice and names #19 and #18; those are row 10. |
 | 10 | #19 #18 | The executor and `lydite mutation`; Rust and TypeScript | `pr10-mutation-executor.md` | in progress |
 
 Steps 1–5 were built before the epic existed and have no issue of their own; the
