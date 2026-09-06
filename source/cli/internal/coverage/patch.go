@@ -2,8 +2,10 @@ package coverage
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -327,8 +329,19 @@ func isGeneratedGoFile(path string) bool {
 		return false
 	}
 	defer func() { _ = f.Close() }()
+	return isGeneratedGo(f)
+}
 
-	scanner := bufio.NewScanner(f)
+// IsGeneratedGoSource is the same question asked of source already in hand,
+// which is the form a mutation run needs: it has read the file to parse it,
+// and opening it a second time would let the two answers disagree about a
+// file rewritten in between.
+func IsGeneratedGoSource(src []byte) bool { return isGeneratedGo(bytes.NewReader(src)) }
+
+// isGeneratedGo is the one implementation of the rule. Both entry points read
+// through it so a file and its bytes cannot be classified differently.
+func isGeneratedGo(r io.Reader) bool {
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
