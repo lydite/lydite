@@ -46,7 +46,8 @@ is now written on every run, which is the document a merge step would read.
 | 6 | #36 | Coverage onto components; `coverage.source` removed | `pr6-coverage-on-components.md` | done — see [ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md) |
 | 7 | #58 | Scan onto components; `internal/detect` deleted; per-component toolchains | `pr7-scan-on-components.md` | done — #54 |
 | 8 | #61 #48 | `lydite test plan` and `lydite test merge`, both workflows sharded, the coverage gate end to end | `pr8-plan-and-merge.md` | done — see [ADR 0026](../../docs/adr/0026-a-shard-reports-what-it-owns-and-the-fold-decides-completeness.md) |
-| 9 | #18 #19 | Mutation, on top of all of the above | `pr9-mutation.md` | not started |
+| 9 | #93 | `internal/mutation`: the mutant, its outcomes, and the Go generator | `pr9-mutation.md` | done — #94, see [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md) |
+| 10 | #19 #18 | The executor and `lydite mutation`; Rust and TypeScript | `pr10-mutation-executor.md` | in progress |
 
 Steps 1–5 were built before the epic existed and have no issue of their own; the
 PR that delivered each is named above, and backfilling them would be a record
@@ -100,7 +101,14 @@ Argued in ADR 0016. Listed so they are not reopened by accident.
   and not a check. The scheduler runs inside a shard, so a job holding several
   components is the case that keeps the port lock exercised. See
   [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md).
-- Mutation is built for all three languages, not delegated.
+- Mutation is built for all three languages, not delegated. It is its own
+  command rather than a phase of `lydite test`, because it builds the plain
+  variant once per mutant where coverage builds the instrumented one once — so
+  the two share a checkout and not a compilation. The operator catalogue is
+  fixed and not configurable: conditional boundaries, negated conditionals,
+  arithmetic operators, removed statements and replaced return values. See
+  [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md), and
+  `pr10-mutation-executor.md` for the slice that runs them.
 - Configuration lives under `.lydite/`. `coverage.source` is removed, along with
   the report-path keys that existed to locate a report some other job produced.
 - Coverage is measured per component, from the runner's instrumented variant.
@@ -198,8 +206,6 @@ Decided in the challenge interview and recorded in
 
 ## Still open
 
-- Mutation's operator catalogue — how far past binary operators and boolean
-  literals, given each operator multiplies runtime. Belongs with step 9.
 - Two questions the schema raised on first contact with a repository, both for
   step 1 to settle. `cargo-llvm-cov-nextest` is listed as a runner name beside
   `cargo-nextest`, but instrumentation is a *derived variant* and Rust's
