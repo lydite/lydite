@@ -16,14 +16,18 @@
 //
 // Equivalence is undecidable, so nothing here tries to detect it. An author
 // declares it with a "//lydite:equivalent <reason>" comment at the site, and
-// the declared mutant is generated, counted and never run. That it is also a
-// suppression, and therefore refers the change through internal/referral, is
-// what stops the annotation being a way around the gate rather than a way
-// through it. See docs/adr/0027-mutation-is-its-own-command.md.
+// the declared mutant is generated, counted and never run. The same token is
+// one of internal/referral's suppression tokens, so a change carrying a fresh
+// declaration is referred: that is what stops the annotation being a way
+// around the gate rather than a way through it, and it is why the token is
+// stated here and imported there rather than spelled twice.
+// See docs/adr/0027-mutation-is-its-own-command.md.
 package mutation
 
 import (
+	"bytes"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -65,28 +69,34 @@ var Operators = []Operator{
 	ReplaceReturn,
 }
 
-// Mutant is one change at one site, carrying the whole mutated file rather
-// than a patch.
+// Mutant is one change at one site, held as the byte range it replaces rather
+// than as a copy of the resulting file.
 //
-// The source is carried because that is what the isolation strategies consume:
-// Go hands it to `go build -overlay`, which compiles it without the tree ever
-// being written, and the other two write it into a worker directory. A patch
-// would have to be applied by something, and the thing that applied it would
-// be a second place a mutant could be got wrong.
+// A file yields many mutants and they differ from each other in a few bytes,
+// so carrying a whole file per mutant multiplies one source by the number of
+// sites in it and holds every copy for as long as the list lives. Apply builds
+// the mutated file at the moment the isolation strategy needs it — Go hands
+// that to `go build -overlay` and the other two write it into a worker
+// directory — and one at a time is all either ever needs.
 type Mutant struct {
-	// Path is the mutated file, relative to the component directory.
+	// Path is the mutated file, relative to the component directory, and is
+	// checked to be so: it locates a file the executor writes, and a name
+	// that becomes a path is a path.
 	Path string
 	// Line and Column locate the site in the original file. They are the
-	// author's coordinates, not the mutated file's, because they exist to
-	// be printed at somebody who is looking at their own code.
+	// author's coordinates, so they can be printed at somebody looking at
+	// their own code.
 	Line, Column int
 	// Operator is what was applied.
 	Operator Operator
-	// Original and Mutated are the exact text replaced and its replacement,
-	// so a report can say what was done without a diff.
+	// Offset and Length are the byte range of the original file this mutant
+	// replaces. Length is zero for no operator in the catalogue, since every
+	// one of them rewrites or deletes existing text.
+	Offset, Length int
+	// Original is the exact text in that range, and Mutated is what replaces
+	// it. Apply checks the first against the source it is given, so a mutant
+	// can never be spliced into a file it was not generated from.
 	Original, Mutated string
-	// Source is the complete mutated file.
-	Source []byte
 	// Reason is the text of the //lydite:equivalent annotation covering this
 	// site, and is empty for every mutant that is not acknowledged.
 	Reason string
@@ -97,10 +107,61 @@ type Mutant struct {
 // answer, and running it would only reproduce the survival already claimed.
 func (m Mutant) Acknowledged() bool { return m.Reason != "" }
 
+// ErrStaleMutant reports that a mutant was applied to source it does not
+// describe — the file changed between generation and execution, or a caller
+// paired a mutant with the wrong file.
+//
+// It is an error rather than a best-effort splice because the alternative is
+// silent: the bytes at that offset would be replaced anyway, producing a
+// mutant nobody generated whose outcome is then reported against the operator
+// named here.
+type ErrStaleMutant struct {
+	Path           string
+	Offset, Length int
+	Want, Got      string
+}
+
+func (e ErrStaleMutant) Error() string {
+	return fmt.Sprintf("%s: bytes [%d,%d) are %q, not the %q this mutant replaces",
+		e.Path, e.Offset, e.Offset+e.Length, e.Got, e.Want)
+}
+
+// Apply builds this mutant's source from the file it was generated from.
+func (m Mutant) Apply(src []byte) ([]byte, error) {
+	if m.Offset < 0 || m.Length < 0 || m.Offset+m.Length > len(src) {
+		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Want: m.Original, Got: ""}
+	}
+	if got := string(src[m.Offset : m.Offset+m.Length]); got != m.Original {
+		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Want: m.Original, Got: got}
+	}
+	out := make([]byte, 0, len(src)-m.Length+len(m.Mutated))
+	out = append(out, src[:m.Offset]...)
+	out = append(out, m.Mutated...)
+	out = append(out, src[m.Offset+m.Length:]...)
+	return out, nil
+}
+
+// displayLimit bounds how much replaced text a mutant prints. A removed
+// statement can be a whole multi-line call, and a report row is one line.
+const displayLimit = 48
+
 // String locates a mutant the way a compiler locates an error, so a survivor
 // in a log can be opened.
+//
+// The replaced text is quoted and truncated. It is source, so it holds
+// whatever the source holds — including a newline, and text shaped like one of
+// lydite's own status rows — and an unquoted copy of it could begin a line in
+// a report that a reader would take for a verdict.
 func (m Mutant) String() string {
-	return fmt.Sprintf("%s:%d:%d: %s (%s -> %s)", m.Path, m.Line, m.Column, m.Operator, m.Original, m.Mutated)
+	return fmt.Sprintf("%s:%d:%d: %s (%s -> %s)",
+		m.Path, m.Line, m.Column, m.Operator, clip(m.Original), clip(m.Mutated))
+}
+
+func clip(s string) string {
+	if len(s) > displayLimit {
+		return fmt.Sprintf("%q...", s[:displayLimit])
+	}
+	return fmt.Sprintf("%q", s)
 }
 
 // Outcome is what running one mutant established.
@@ -210,6 +271,9 @@ func Survivors(results []Result) []Result {
 
 // AnnotationToken is how an author declares a mutant equivalent. All three
 // languages spell a line comment "//", so one form covers them.
+//
+// internal/referral holds this same constant in its suppression set, which is
+// what refers a change that adds one.
 const AnnotationToken = "//lydite:equivalent"
 
 // ErrNoReason reports an annotation with nothing after it.
@@ -229,37 +293,118 @@ func (e ErrNoReason) Error() string {
 	return fmt.Sprintf("%s:%d: %s needs a reason after it", e.Path, e.Line, AnnotationToken)
 }
 
+// ErrPathEscapes reports a source path that is not inside the component.
+type ErrPathEscapes struct{ Path string }
+
+func (e ErrPathEscapes) Error() string {
+	return fmt.Sprintf("%s: source path is absolute or escapes the component directory", e.Path)
+}
+
+// checkPath refuses a path that does not name a file inside the component.
+//
+// A mutant's path is joined to a worker directory and written there, so a
+// path that is absolute or climbs out of the tree writes outside the directory
+// the executor owns. The invariant is established where the value is produced,
+// so no consumer has to remember to re-check it — the reason internal/download
+// keeps one path-traversal guard rather than a copy per caller.
+func checkPath(p string) error {
+	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+		return ErrPathEscapes{Path: p}
+	}
+	clean := filepath.ToSlash(filepath.Clean(p))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return ErrPathEscapes{Path: p}
+	}
+	return nil
+}
+
 // Annotations reads the equivalence declarations out of one file's source,
 // returning the reason by the line it covers.
 //
-// An annotation covers the line it sits on and the line it precedes, so both
-// a trailing comment and one written above the statement work. There is no
-// file-level or function-level form: `mutation: false` in the declaration is
-// already the coarse control and it lives where its history is the review
-// record, whereas a broad in-code escape would be a second coarse control in
-// a place with no such record.
+// A declaration on a line of its own covers that line and the one below it, so
+// it can be written above the statement it is about. A trailing declaration
+// covers only the line it sits on: an author writing one has made a claim
+// about the code to its left and none at all about the next statement, and
+// carrying it down would acknowledge mutants nobody declared — silently, since
+// an acknowledged mutant is excluded from the denominator and never run.
 //
-// The scan is textual and deliberately so. It runs before parsing, so a file
-// that does not parse still reports its annotations, and it is one
-// implementation for three languages rather than three that agree until one
-// learns a comment form the others have not.
+// The scan tracks string, character and raw-string literals and skips a token
+// inside one, so source that merely quotes the annotation does not acknowledge
+// anything. It is textual rather than taken off a syntax tree because one
+// implementation serves three languages, and Go, Rust and TypeScript agree on
+// "//" and on how a string is escaped. Its limit is a language whose literals
+// do not: a token inside a TypeScript template literal is read as a comment.
 func Annotations(path string, src []byte) (map[int]string, error) {
 	out := map[int]string{}
-	for i, line := range strings.Split(string(src), "\n") {
-		idx := strings.Index(line, AnnotationToken)
-		if idx < 0 {
-			continue
-		}
-		reason := strings.TrimSpace(line[idx+len(AnnotationToken):])
-		if reason == "" {
-			return nil, ErrNoReason{Path: path, Line: i + 1}
-		}
-		// One-indexed: the line the comment is on, and the next one, so a
-		// declaration written above its statement covers it.
-		out[i+1] = reason
-		if _, taken := out[i+2]; !taken {
-			out[i+2] = reason
+	line, lineStart := 1, 0
+
+	for i := 0; i < len(src); i++ {
+		switch src[i] {
+		case '\n':
+			line++
+			lineStart = i + 1
+		case '"', '\'':
+			i = skipQuoted(src, i, src[i])
+		case '`':
+			for j := i + 1; j < len(src); j++ {
+				if src[j] == '\n' {
+					line++
+					lineStart = j + 1
+				}
+				if src[j] == '`' {
+					i = j
+					break
+				}
+				i = j
+			}
+		case '/':
+			if i+1 >= len(src) || src[i+1] != '/' {
+				continue
+			}
+			end := lineEnd(src, i)
+			if !bytes.HasPrefix(src[i:end], []byte(AnnotationToken)) {
+				i = end - 1
+				continue
+			}
+			reason := strings.TrimSpace(string(src[i+len(AnnotationToken) : end]))
+			if reason == "" {
+				return nil, ErrNoReason{Path: path, Line: line}
+			}
+			out[line] = reason
+			if strings.TrimSpace(string(src[lineStart:i])) == "" {
+				out[line+1] = reason
+			}
+			i = end - 1
 		}
 	}
+	// A declaration on its own line hands its reason down, but a line with a
+	// declaration of its own keeps it: the nearer claim is the one its author
+	// wrote about that code.
 	return out, nil
+}
+
+// skipQuoted returns the index of the closing quote, or the last byte before
+// the line ends — neither Go, Rust nor TypeScript lets an ordinary string span
+// a newline, so an unterminated one is a broken file rather than a literal
+// that swallows the rest of the source.
+func skipQuoted(src []byte, start int, quote byte) int {
+	for i := start + 1; i < len(src); i++ {
+		switch src[i] {
+		case '\\':
+			i++
+		case '\n':
+			return i - 1
+		case quote:
+			return i
+		}
+	}
+	return len(src) - 1
+}
+
+// lineEnd returns the index one past the last byte of the line holding i.
+func lineEnd(src []byte, i int) int {
+	if n := bytes.IndexByte(src[i:], '\n'); n >= 0 {
+		return i + n
+	}
+	return len(src)
 }

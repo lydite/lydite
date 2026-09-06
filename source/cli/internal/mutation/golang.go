@@ -35,7 +35,7 @@ var negate = map[token.Token]token.Token{
 // syntax tree, so a swap on a string expression produces a mutant that does
 // not compile. That is an unviable mutant, which is reported as one and
 // excluded from the denominator rather than scored — the accepted cost of a
-// tree without types, recorded in ADR 0016.
+// tree without types, which ADR 0016 records.
 var arithmetic = map[token.Token]token.Token{
 	token.ADD: token.SUB,
 	token.SUB: token.ADD,
@@ -50,14 +50,19 @@ var arithmetic = map[token.Token]token.Token{
 // The lines are the intersection of the change and what coverage reports as
 // executed, computed by the caller: a mutant outside the change is work
 // nobody asked for, and one on an uncovered line cannot be killed by
-// construction.
+// construction. The restriction covers every line a mutant *edits*, not only
+// the line it is reported at, so a statement spanning lines outside the set is
+// left alone rather than deleted in full.
 //
-// Mutants are spliced at byte offsets rather than printed from a rewritten
-// tree. go/printer reformats the whole file, so every mutant would differ
-// from its original in places the operator never touched — which makes a
-// compile error hard to attribute, and makes two mutants of one file differ
-// from each other for reasons that are not the mutation.
+// Each mutant records the byte range it replaces rather than a rewritten copy
+// of the file. Ranges come from the syntax nodes themselves, never from the
+// length of a token's text: a raw string literal's value has its carriage
+// returns stripped, so a range measured from that text is short by one byte
+// per line and splices a mutant that cannot parse.
 func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, error) {
+	if err := checkPath(path); err != nil {
+		return nil, err
+	}
 	// A test file's own code is not the code under test. Mutating an
 	// assertion asks whether the suite notices its own tests changing,
 	// which is a question with no useful answer.
@@ -105,9 +110,9 @@ func (g *goGen) visit(n ast.Node) bool {
 	case *ast.ReturnStmt:
 		g.returns(node)
 	case *ast.ExprStmt:
-		g.remove(node.Pos(), node.End())
+		g.emitNode(RemoveStatement, node.Pos(), node.Pos(), node.End(), "")
 	case *ast.IncDecStmt:
-		g.remove(node.Pos(), node.End())
+		g.emitNode(RemoveStatement, node.Pos(), node.Pos(), node.End(), "")
 	}
 	return true
 }
@@ -115,13 +120,13 @@ func (g *goGen) visit(n ast.Node) bool {
 // binary emits the operator swaps that apply to one binary expression.
 func (g *goGen) binary(node *ast.BinaryExpr) {
 	if to, ok := boundary[node.Op]; ok {
-		g.emit(ConditionalBoundary, node.OpPos, node.Op.String(), to.String())
+		g.emitToken(ConditionalBoundary, node.OpPos, node.Op, to.String())
 	}
 	if to, ok := negate[node.Op]; ok {
-		g.emit(NegateConditional, node.OpPos, node.Op.String(), to.String())
+		g.emitToken(NegateConditional, node.OpPos, node.Op, to.String())
 	}
 	if to, ok := arithmetic[node.Op]; ok {
-		g.emit(ArithmeticOperator, node.OpPos, node.Op.String(), to.String())
+		g.emitToken(ArithmeticOperator, node.OpPos, node.Op, to.String())
 	}
 }
 
@@ -140,13 +145,13 @@ func (g *goGen) returns(node *ast.ReturnStmt) {
 		case *ast.Ident:
 			switch v.Name {
 			case "true":
-				g.emit(ReplaceReturn, v.Pos(), "true", "false")
+				g.emitNode(ReplaceReturn, v.Pos(), v.Pos(), v.End(), "false")
 			case "false":
-				g.emit(ReplaceReturn, v.Pos(), "false", "true")
+				g.emitNode(ReplaceReturn, v.Pos(), v.Pos(), v.End(), "true")
 			}
 		case *ast.BasicLit:
 			if to, ok := substitute(v); ok {
-				g.emit(ReplaceReturn, v.Pos(), v.Value, to)
+				g.emitNode(ReplaceReturn, v.Pos(), v.Pos(), v.End(), to)
 			}
 		}
 	}
@@ -154,6 +159,12 @@ func (g *goGen) returns(node *ast.ReturnStmt) {
 
 // substitute picks a different value of the same literal kind, so the mutant
 // still compiles wherever the original did.
+//
+// It decides on the literal's *value* and never on its spelling. `0.`, `0e0`
+// and `0.0` are one number written three ways, and a rule keyed on the text
+// replaces two of them with a third spelling of the same value — a mutant
+// nothing can kill, which is then reported as a survivor and fails the gate on
+// correct code.
 func substitute(lit *ast.BasicLit) (string, bool) {
 	switch lit.Kind {
 	case token.INT:
@@ -162,12 +173,12 @@ func substitute(lit *ast.BasicLit) (string, bool) {
 		}
 		return "0", true
 	case token.FLOAT:
-		if lit.Value == "0.0" || lit.Value == "0" {
+		if f, err := strconv.ParseFloat(lit.Value, 64); err == nil && f == 0 {
 			return "1.0", true
 		}
 		return "0.0", true
 	case token.STRING:
-		if lit.Value == `""` {
+		if s, err := strconv.Unquote(lit.Value); err == nil && s == "" {
 			return `"lydite"`, true
 		}
 		return `""`, true
@@ -175,50 +186,45 @@ func substitute(lit *ast.BasicLit) (string, bool) {
 	return "", false
 }
 
-// remove deletes a whole statement.
-//
-// Only expression statements and increment/decrement statements are removed,
-// and that is the operator's whole reach in Go. Deleting an assignment or a
-// declaration takes the identifier's only definition with it, so the mutant
-// does not compile and is reported unviable — a compilation spent to learn
-// nothing about the suite. A dropped call or a dropped `i++` compiles wherever
-// the original did, and is exactly the change a test that asserts nothing
-// fails to notice.
-func (g *goGen) remove(from, to token.Pos) {
-	text := string(g.src[g.fset.Position(from).Offset:g.fset.Position(to).Offset])
-	g.emitRange(RemoveStatement, from, from, to, text, "")
+// emitToken records a mutant replacing an operator token. An operator has no
+// escapes, so its text measures its source exactly — unlike a literal, whose
+// value is not its source. What holds that is the mutant carrying the bytes it
+// actually replaced, so a range measured wrongly reports an Original that is
+// not the operator.
+func (g *goGen) emitToken(op Operator, pos token.Pos, tok token.Token, mutated string) {
+	g.add(op, pos, pos, pos+token.Pos(len(tok.String())), mutated)
 }
 
-// emit records a mutant replacing the token at pos.
-func (g *goGen) emit(op Operator, pos token.Pos, from, to string) {
-	g.emitRange(op, pos, pos, pos+token.Pos(len(from)), from, to)
+// emitNode records a mutant replacing a node's own source range.
+func (g *goGen) emitNode(op Operator, site, from, to token.Pos, mutated string) {
+	g.add(op, site, from, to, mutated)
 }
 
-// emitRange records a mutant replacing the bytes of [from, to), located at
-// site for the reader.
-func (g *goGen) emitRange(op Operator, site, from, to token.Pos, original, mutated string) {
-	at := g.fset.Position(site)
-	if !g.lines[at.Line] {
-		return
+// add records one mutant, after establishing that it edits only requested
+// lines and that the range it claims holds what it says it does.
+func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
+	at, start, end := g.fset.Position(site), g.fset.Position(from), g.fset.Position(to)
+	// Every line the splice touches has to be one the caller asked for. A
+	// statement can span lines, and gating on its first alone deletes source
+	// outside the change.
+	for l := start.Line; l <= end.Line; l++ {
+		if !g.lines[l] {
+			return
+		}
 	}
-	lo, hi := g.fset.Position(from).Offset, g.fset.Position(to).Offset
+	lo, hi := start.Offset, end.Offset
 	if lo < 0 || hi > len(g.src) || lo > hi {
 		return
 	}
-
-	out := make([]byte, 0, len(g.src)-(hi-lo)+len(mutated))
-	out = append(out, g.src[:lo]...)
-	out = append(out, mutated...)
-	out = append(out, g.src[hi:]...)
-
 	g.out = append(g.out, Mutant{
 		Path:     g.path,
 		Line:     at.Line,
 		Column:   at.Column,
 		Operator: op,
-		Original: original,
+		Offset:   lo,
+		Length:   hi - lo,
+		Original: string(g.src[lo:hi]),
 		Mutated:  mutated,
-		Source:   out,
 		Reason:   g.reasons[at.Line],
 	})
 }

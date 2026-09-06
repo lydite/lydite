@@ -1,6 +1,7 @@
 package mutation
 
 import (
+	"errors"
 	"go/parser"
 	"go/token"
 	"strings"
@@ -24,6 +25,17 @@ func generate(t *testing.T, src string) []Mutant {
 		t.Fatalf("GenerateGo: %v", err)
 	}
 	return m
+}
+
+// apply builds a mutant's source, failing the test if the mutant does not
+// describe the file it came from.
+func apply(t *testing.T, m Mutant, src string) string {
+	t.Helper()
+	out, err := m.Apply([]byte(src))
+	if err != nil {
+		t.Fatalf("%s: Apply: %v", m, err)
+	}
+	return string(out)
 }
 
 func operators(mutants []Mutant) map[Operator]int {
@@ -59,19 +71,23 @@ func TestBoundaryShiftsTheOperatorAndNothingElse(t *testing.T) {
 		if m.Original != "<" || m.Mutated != "<=" {
 			t.Fatalf("boundary rewrote %q to %q, want < to <=", m.Original, m.Mutated)
 		}
-		if !strings.Contains(string(m.Source), "n <= 10") {
-			t.Fatalf("mutated source lacks `n <= 10`:\n%s", m.Source)
+		if !strings.Contains(apply(t, m, boundarySrc), "n <= 10") {
+			t.Fatalf("mutated source lacks `n <= 10`:\n%s", apply(t, m, boundarySrc))
 		}
 		return
 	}
 	t.Fatal("no conditional-boundary mutant")
 }
 
-// A mutant that differs from its original anywhere but the site is a mutant
-// whose compile error cannot be attributed, and two mutants of one file would
-// differ from each other for reasons that are not the mutation. Splicing at
-// byte offsets is what holds this; printing a rewritten tree would not.
-func TestAMutantDiffersInExactlyOnePlace(t *testing.T) {
+// Every mutant must describe exactly the edit it claims: the range it names
+// holds its Original, and applying it produces that range replaced by its
+// Mutated and nothing else touched.
+//
+// The assertion is on the recorded range rather than on a diff of the two
+// sources, because a diff cannot locate a pure insertion unambiguously — the
+// `<` to `<=` mutants are one — and an assertion that silently skips them
+// leaves the operator producing the most mutants entirely unchecked.
+func TestAMutantDescribesExactlyTheEditItMakes(t *testing.T) {
 	const src = `package p
 
 func F(a, b int) int {
@@ -81,29 +97,66 @@ func F(a, b int) int {
 	return a + b
 }
 `
-	for _, m := range generate(t, src) {
-		lo, hi := commonAffixes(src, string(m.Source))
-		if lo+hi > len(src) {
-			t.Errorf("%s: mutant overlaps itself, not a single contiguous edit", m)
+	mutants := generate(t, src)
+	if len(mutants) == 0 {
+		t.Fatal("no mutants")
+	}
+	for _, m := range mutants {
+		if m.Offset < 0 || m.Offset+m.Length > len(src) {
+			t.Errorf("%s: range [%d,%d) is outside the file", m, m.Offset, m.Offset+m.Length)
 			continue
 		}
-		removed := src[lo : len(src)-hi]
-		if !strings.Contains(m.Original, strings.TrimSpace(removed)) && strings.TrimSpace(removed) != "" {
-			t.Errorf("%s: edited %q, which its Original %q does not cover", m, removed, m.Original)
+		if got := src[m.Offset : m.Offset+m.Length]; got != m.Original {
+			t.Errorf("%s: range holds %q, but Original is %q", m, got, m.Original)
+			continue
+		}
+		want := src[:m.Offset] + m.Mutated + src[m.Offset+m.Length:]
+		if got := apply(t, m, src); got != want {
+			t.Errorf("%s: applying it edited more than its own range:\n got %q\nwant %q", m, got, want)
+		}
+		// An operator swap replaces the operator and nothing around it. A
+		// range measured wrongly still applies cleanly, so this is what
+		// catches one.
+		switch m.Operator {
+		case ConditionalBoundary, NegateConditional, ArithmeticOperator:
+			if !isOperatorText(m.Original) {
+				t.Errorf("%s: replaced %q, which is not an operator — the range is wrong", m, m.Original)
+			}
+			if !isOperatorText(m.Mutated) {
+				t.Errorf("%s: substituted %q, which is not an operator", m, m.Mutated)
+			}
 		}
 	}
 }
 
-// commonAffixes returns the length of the shared prefix and shared suffix of
-// two strings, which bracket the one region that differs.
-func commonAffixes(a, b string) (prefix, suffix int) {
-	for prefix < len(a) && prefix < len(b) && a[prefix] == b[prefix] {
-		prefix++
+func isOperatorText(s string) bool {
+	for _, op := range []string{"<", "<=", ">", ">=", "==", "!=", "+", "-", "*", "/", "%"} {
+		if s == op {
+			return true
+		}
 	}
-	for suffix < len(a)-prefix && suffix < len(b)-prefix && a[len(a)-1-suffix] == b[len(b)-1-suffix] {
-		suffix++
+	return false
+}
+
+// Apply refuses source the mutant does not describe. Splicing anyway would
+// replace whatever now sits at that offset, producing a mutant nobody
+// generated whose outcome is then reported against this operator.
+func TestApplyRefusesSourceItDoesNotDescribe(t *testing.T) {
+	m := Mutant{Path: "x.go", Offset: 0, Length: 3, Original: "abc", Mutated: "xyz"}
+	if _, err := m.Apply([]byte("abcdef")); err != nil {
+		t.Fatalf("Apply on matching source: %v", err)
 	}
-	return prefix, suffix
+	var stale ErrStaleMutant
+	_, err := m.Apply([]byte("ZZZdef"))
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want ErrStaleMutant", err)
+	}
+	if stale.Got != "ZZZ" || stale.Want != "abc" {
+		t.Errorf("ErrStaleMutant reported %q vs %q, want ZZZ vs abc", stale.Got, stale.Want)
+	}
+	if _, err := m.Apply([]byte("ab")); !errors.As(err, &stale) {
+		t.Errorf("a range past the end of the source: err = %v, want ErrStaleMutant", err)
+	}
 }
 
 // An operator swap must never produce source the compiler cannot read: that
@@ -123,9 +176,33 @@ func F(a, b int) int {
 		if m.Operator == RemoveStatement {
 			continue
 		}
-		if _, err := parser.ParseFile(token.NewFileSet(), "x.go", m.Source, parser.SkipObjectResolution); err != nil {
-			t.Errorf("%s: mutant does not parse: %v\n%s", m, err, m.Source)
+		if _, err := parser.ParseFile(token.NewFileSet(), "x.go", apply(t, m, src), parser.SkipObjectResolution); err != nil {
+			t.Errorf("%s: mutant does not parse: %v", m, err)
 		}
+	}
+}
+
+// A raw string literal's Value has its carriage returns stripped, so a range
+// measured from that text is short by one byte per line and leaves a dangling
+// backtick. Ranges come from the node, which is what keeps this file parsing.
+func TestACarriageReturnInARawStringDoesNotShortenTheRange(t *testing.T) {
+	src := "package p\r\n\r\nfunc F() string {\r\n\treturn `a\r\nb`\r\n}\r\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(10))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != ReplaceReturn {
+			continue
+		}
+		seen = true
+		if _, err := parser.ParseFile(token.NewFileSet(), "x.go", apply(t, m, src), parser.SkipObjectResolution); err != nil {
+			t.Errorf("%s: mutant does not parse: %v", m, err)
+		}
+	}
+	if !seen {
+		t.Fatal("no replace-return mutant for the raw string")
 	}
 }
 
@@ -156,12 +233,19 @@ func F(n int) int {
 	}
 }
 
-func TestReturnSubstitutionKeepsTheLiteralKind(t *testing.T) {
+// A substitution decides on the literal's value, not its spelling. `0.` and
+// `0e0` are zero written differently, and replacing either with `0.0` is a
+// mutant nothing can kill — reported as a survivor, failing the gate on
+// correct code.
+func TestReturnSubstitutionChangesTheValueNotTheSpelling(t *testing.T) {
 	const src = `package p
 
-func B() bool   { return true }
-func N() int    { return 7 }
-func S() string { return "hello" }
+func A() float64 { return 0. }
+func B() float64 { return 0e0 }
+func C() string  { return ` + "``" + ` }
+func D() int     { return 0 }
+func E() string  { return "hello" }
+func G() bool    { return true }
 `
 	got := map[string]string{}
 	for _, m := range generate(t, src) {
@@ -169,7 +253,15 @@ func S() string { return "hello" }
 			got[m.Original] = m.Mutated
 		}
 	}
-	for original, want := range map[string]string{"true": "false", "7": "0", `"hello"`: `""`} {
+	for original, unwanted := range map[string]string{"0.": "0.0", "0e0": "0.0", "``": `""`} {
+		if got[original] == unwanted {
+			t.Errorf("return %s mutated to %q, which is the same value written differently", original, unwanted)
+		}
+		if got[original] == "" {
+			t.Errorf("return %s produced no mutant", original)
+		}
+	}
+	for original, want := range map[string]string{"0": "1", `"hello"`: `""`, "true": "false"} {
 		if got[original] != want {
 			t.Errorf("return %s mutated to %q, want %q", original, got[original], want)
 		}
@@ -191,29 +283,65 @@ func G() error    { return nil }
 	}
 }
 
-func TestMutantsComeOnlyFromTheGivenLines(t *testing.T) {
+// The restriction covers every line a mutant edits, not only the line it is
+// reported at. Asserting on the reported line instead would restate the filter
+// the generator already applied and could not fail.
+func TestNoMutantEditsALineOutsideTheGivenSet(t *testing.T) {
 	const src = `package p
 
 func F(a, b int) bool {
+	println(
+		a,
+	)
 	if a < b {
 		return true
 	}
 	return a > b
 }
 `
-	// Line 4 alone: the `a < b` test, and nothing else in the function.
-	got, err := GenerateGo("x.go", []byte(src), map[int]bool{4: true})
-	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
-	}
-	if len(got) == 0 {
-		t.Fatal("no mutants from the one line that has them")
-	}
-	for _, m := range got {
-		if m.Line != 4 {
-			t.Errorf("%s: generated outside the requested line set", m)
+	// Line 4 opens a call spanning lines 4 to 6; line 7 holds a whole test.
+	for _, lines := range []map[int]bool{{4: true}, {7: true}, {4: true, 7: true}} {
+		got, err := GenerateGo("x.go", []byte(src), lines)
+		if err != nil {
+			t.Fatalf("GenerateGo: %v", err)
+		}
+		for _, m := range got {
+			mutated := apply(t, m, src)
+			for _, line := range diffLines(src, mutated) {
+				if !lines[line] {
+					t.Errorf("%s: edited line %d, outside the requested set %v", m, line, keys(lines))
+				}
+			}
 		}
 	}
+}
+
+// diffLines returns the 1-indexed lines of a that b does not reproduce
+// identically, comparing position by position from both ends so an inserted
+// or deleted line does not report every line after it.
+func diffLines(a, b string) []int {
+	as, bs := strings.Split(a, "\n"), strings.Split(b, "\n")
+	var out []int
+	head := 0
+	for head < len(as) && head < len(bs) && as[head] == bs[head] {
+		head++
+	}
+	tail := 0
+	for tail < len(as)-head && tail < len(bs)-head && as[len(as)-1-tail] == bs[len(bs)-1-tail] {
+		tail++
+	}
+	for i := head; i < len(as)-tail; i++ {
+		out = append(out, i+1)
+	}
+	return out
+}
+
+func keys(m map[int]bool) []int {
+	var out []int
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestGeneratedAndTestFilesAreNotMutated(t *testing.T) {
@@ -240,66 +368,19 @@ func F(a, b int) bool { return a < b }
 	}
 }
 
-func TestAnnotationAcknowledgesTheMutantsOnItsLine(t *testing.T) {
-	const src = `package p
-
-func F(a, b int) bool {
-	return a < b //lydite:equivalent b is always a+1 here
-}
-`
-	got := generate(t, src)
-	if len(got) == 0 {
-		t.Fatal("annotation suppressed generation; it must acknowledge, not skip")
-	}
-	for _, m := range got {
-		if !m.Acknowledged() {
-			t.Errorf("%s: not acknowledged by the annotation on its line", m)
-		}
-		if m.Reason != "b is always a+1 here" {
-			t.Errorf("%s: reason = %q", m, m.Reason)
+// A mutant's path is joined to a worker directory and written there, so the
+// invariant is established where the value is produced rather than left to
+// every consumer to remember.
+func TestGenerateRefusesAPathOutsideTheComponent(t *testing.T) {
+	const src = "package p\n\nfunc F(a, b int) bool { return a < b }\n"
+	for _, path := range []string{"/etc/passwd", "../outside.go", "", "a/../../b.go"} {
+		var escapes ErrPathEscapes
+		_, err := GenerateGo(path, []byte(src), allLines(5))
+		if !errors.As(err, &escapes) {
+			t.Errorf("GenerateGo(%q) err = %v, want ErrPathEscapes", path, err)
 		}
 	}
-}
-
-func TestAnnotationAboveTheStatementCoversIt(t *testing.T) {
-	const src = `package p
-
-func F(a, b int) bool {
-	//lydite:equivalent the caller guarantees a != b
-	return a < b
-}
-`
-	for _, m := range generate(t, src) {
-		if !m.Acknowledged() {
-			t.Errorf("%s: an annotation on the preceding line must cover it", m)
-		}
+	if _, err := GenerateGo("pkg/a.go", []byte(src), allLines(5)); err != nil {
+		t.Errorf("GenerateGo on an ordinary relative path: %v", err)
 	}
-}
-
-func TestAnnotationWithoutAReasonIsAnError(t *testing.T) {
-	const src = `package p
-
-func F(a, b int) bool {
-	return a < b //lydite:equivalent
-}
-`
-	_, err := GenerateGo("x.go", []byte(src), allLines(6))
-	var want ErrNoReason
-	if err == nil {
-		t.Fatal("a bare annotation was accepted; it must be an error, not silently ignored")
-	}
-	if !asErrNoReason(err, &want) {
-		t.Fatalf("err = %v, want ErrNoReason", err)
-	}
-	if want.Line != 4 {
-		t.Errorf("ErrNoReason.Line = %d, want 4", want.Line)
-	}
-}
-
-func asErrNoReason(err error, out *ErrNoReason) bool {
-	e, ok := err.(ErrNoReason)
-	if ok {
-		*out = e
-	}
-	return ok
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/mutation"
 )
 
 func parseOrFail(t *testing.T, yaml string) File {
@@ -377,13 +378,14 @@ func TestFileHeaderPathDropsGitsPadding(t *testing.T) {
 // veto the small suppression and wave the large one through.
 func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 	cases := map[string]string{
-		"#![allow(clippy::all)]":       "suppression added",
-		"#[expect(dead_code)]":         "suppression added",
-		"#![expect(dead_code)]":        "suppression added",
-		"// @ts-nocheck":               "suppression added",
-		"func f() { //nolint:errcheck": "suppression added",
-		"//go:build ignore":            "test disabled",
-		"// +build ignore":             "test disabled",
+		"#![allow(clippy::all)]":                             "suppression added",
+		"#[expect(dead_code)]":                               "suppression added",
+		"#![expect(dead_code)]":                              "suppression added",
+		"// @ts-nocheck":                                     "suppression added",
+		"func f() { //nolint:errcheck":                       "suppression added",
+		"//go:build ignore":                                  "test disabled",
+		"// +build ignore":                                   "test disabled",
+		"\treturn a < b //lydite:equivalent b is always a+1": "suppression added",
 	}
 	for line, want := range cases {
 		d := Disqualifications(Change{
@@ -393,6 +395,20 @@ func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 		if len(d) != 1 || d[0].Kind != want {
 			t.Errorf("%q: got %+v, want one %q", line, d, want)
 		}
+	}
+}
+
+// Declaring a mutant equivalent is an assertion about code nobody can check,
+// so it buys a human rather than an unattended merge. The engine that honours
+// the annotation and the gate that refers it read one constant, so a change to
+// its text cannot leave one of them recognising something the other does not.
+func TestTheEquivalentMutantAnnotationIsASuppression(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths: []string{"src/a.go"},
+		Added: []DiffLine{{Path: "src/a.go", Text: "\treturn n < 10 " + mutation.AnnotationToken + " the caller bounds n"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Fatalf("got %+v, want one \"suppression added\"", d)
 	}
 }
 
