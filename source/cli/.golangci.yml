@@ -4,13 +4,19 @@
 # `staticcheck`, so enabling `staticcheck` covers the gosimple checks too.
 version: "2"
 
-# The tags a release builds with. Without them the linter analyses the
-# all-grammars build of gotreesitter, which is not the code that ships.
-build-tags:
-  - grammar_subset
-  - grammar_subset_rust
-  - grammar_subset_typescript
-  - grammar_subset_tsx
+run:
+  # The tags a release builds with. Without them the linter analyses the
+  # all-grammars build of gotreesitter, which is not the code that ships.
+  #
+  # Under `run:`, which is where the v2 schema puts it. A top-level key is
+  # refused by `golangci-lint config verify` — which is what the CI action
+  # runs and a bare `golangci-lint run` does not, so a misplaced key lints
+  # clean locally and fails the build stage.
+  build-tags:
+    - grammar_subset
+    - grammar_subset_rust
+    - grammar_subset_typescript
+    - grammar_subset_tsx
 
 linters:
   enable:
