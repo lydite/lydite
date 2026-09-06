@@ -45,7 +45,7 @@ var suppressionTokens = []string{
 	// declaring it unkillable puts a human on the claim. The token is
 	// imported rather than respelled, so the engine that honours it and the
 	// gate that refers it cannot come to disagree about its text.
-	annotation.Token,
+	annotation.Marker,
 	"#nosec",
 	"//nolint",
 	"#[allow(",

@@ -20,9 +20,14 @@ import (
 	"strings"
 )
 
-// Token is how an author declares a mutant equivalent. Go, Rust and
-// TypeScript all spell a line comment "//", so one token covers them.
-const Token = "//lydite:equivalent"
+// Marker is how an author declares a mutant equivalent. Go, Rust and
+// TypeScript all spell a line comment "//", so one form covers them.
+//
+// Named for what it is rather than called a token, which gosec reserves for
+// credentials: G101 matches the identifier, so a constant of that name holding
+// any string at all is reported as a hardcoded secret. ui.Marker is the same
+// kind of thing under the same name.
+const Marker = "//lydite:equivalent"
 
 // Comment is one comment as a language's own parser reports it: the line it
 // starts on, and its text including the introducer.
@@ -50,7 +55,7 @@ type ErrNoReason struct {
 }
 
 func (e ErrNoReason) Error() string {
-	return fmt.Sprintf("%s:%d: %s needs a reason after it", e.Path, e.Line, Token)
+	return fmt.Sprintf("%s:%d: %s needs a reason after it", e.Path, e.Line, Marker)
 }
 
 // Declarations returns the reason declared on each line, keyed by that line.
@@ -69,7 +74,7 @@ func (e ErrNoReason) Error() string {
 func Declarations(path string, comments []Comment) (map[int]string, error) {
 	out := map[int]string{}
 	for _, c := range comments {
-		rest, ok := strings.CutPrefix(c.Text, Token)
+		rest, ok := strings.CutPrefix(c.Text, Marker)
 		if !ok {
 			continue
 		}

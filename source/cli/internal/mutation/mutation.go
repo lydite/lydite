@@ -300,7 +300,7 @@ type UnmatchedDeclaration struct {
 }
 
 func (u UnmatchedDeclaration) String() string {
-	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Token)
+	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Marker)
 }
 
 // ErrPathEscapes reports a source path that is not inside the component.
