@@ -21,11 +21,10 @@ func TestADeclarationIsReadWithItsReason(t *testing.T) {
 	}
 }
 
-// A declaration covers the line it is written on and no other. Carrying it
-// down would let a declaration already in the tree acknowledge code a later
-// change adds beneath it — excluded from the run and never counted, while the
-// change adds no line holding the token, so nothing refers it.
-func TestADeclarationCoversItsOwnLineOnly(t *testing.T) {
+// A declaration is keyed to the line it is written on, and one line yields one
+// key. How far a caller lets it reach from there is the caller's rule; what is
+// fixed here is that this function invents no second line for it.
+func TestADeclarationIsKeyedToTheLineItIsWrittenOn(t *testing.T) {
 	got, err := Declarations("a.go", []Comment{{Line: 4, Text: Token + " bound is arbitrary"}})
 	if err != nil {
 		t.Fatalf("Declarations: %v", err)

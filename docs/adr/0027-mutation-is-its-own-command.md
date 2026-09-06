@@ -97,9 +97,14 @@ Nothing can be concluded about tests that were not passing before the mutation.
 An equivalent mutant is one no test could kill, because the change it makes is
 unobservable. Equivalence is undecidable in general, so lydite never tries to
 detect one: the author declares it, in a `//lydite:equivalent <reason>` comment
-on the line the mutant is on — and, for a statement spanning several, on any
-line that statement occupies. All three languages spell a line comment `//`, so
-one form covers them.
+on the line the mutant is reported at, or — for a statement spanning several
+lines — on the line that statement closes on, where a trailing declaration is
+written. All three languages spell a line comment `//`, so one form covers them.
+
+It covers neither the lines between nor a neighbouring statement's. A
+declaration beside an inner expression is a claim about that expression, and
+reaching it from the enclosing statement would acknowledge deleting a whole
+call on the strength of a reason about one operator inside it.
 
 It reaches no further, and that bound is what makes the composition below hold
 rather than merely usually hold. A declaration already in the tree that covered

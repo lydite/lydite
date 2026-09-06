@@ -53,16 +53,19 @@ func (e ErrNoReason) Error() string {
 	return fmt.Sprintf("%s:%d: %s needs a reason after it", e.Path, e.Line, Token)
 }
 
-// Declarations returns the reason declared for each line, keyed by that line.
+// Declarations returns the reason declared on each line, keyed by that line.
 //
-// A declaration covers the line it is written on and no other. Carrying it to
-// the next line would let a declaration already in the tree acknowledge code a
-// later change adds beneath it: the mutant would be excluded and never run,
-// while the change itself adds no line holding the token, so nothing refers it
-// and it merges unread. Confined to its own line the bargain holds by
-// construction — a mutant exists only on a changed line, so a declaration that
-// acknowledges one is itself on a changed line, and internal/referral sees that
-// line as added.
+// A declaration belongs to the line it is written on. How far one reaches from
+// there is the caller's rule, because only the caller knows what a mutant
+// occupies — but every caller owes the same bound: a declaration must never
+// reach a line an author was not writing about. One that reached further would
+// let a declaration already in the tree acknowledge code a later change adds
+// nearby, and that mutant is excluded and never run while the change itself
+// adds no line holding the token, so nothing refers it and it merges unread.
+// Kept to lines the author wrote beside the mutant, the bargain holds by
+// construction: a mutant exists only on a changed line, so a declaration that
+// acknowledges one sits on a changed line, which internal/referral sees as
+// added.
 func Declarations(path string, comments []Comment) (map[int]string, error) {
 	out := map[int]string{}
 	for _, c := range comments {

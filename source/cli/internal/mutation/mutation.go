@@ -15,7 +15,7 @@
 // restate what patch coverage already said about the same line.
 //
 // Equivalence is undecidable, so nothing here tries to detect it. An author
-// declares it with a "//lydite:equivalent <reason>" comment on the line, and
+// declares it with a "//lydite:equivalent <reason>" comment beside it, and
 // the declared mutant is generated, counted and never run. internal/annotation
 // holds that token and the rule for reading one, because internal/referral
 // recognises the same token as a suppression: killing the mutant merges
@@ -116,14 +116,23 @@ func (m Mutant) Acknowledged() bool { return m.Reason != "" }
 type ErrStaleMutant struct {
 	Path           string
 	Offset, Length int
-	Want, Got      string
+	// Size is the length of the source the mutant was applied to, and is
+	// what separates a range that does not fit from one that does and holds
+	// something else. Reporting a content mismatch for a range the file is
+	// too short to contain describes the wrong problem.
+	Size      int
+	Want, Got string
 }
 
 func (e ErrStaleMutant) Error() string {
-	// The two are reported rather than summed, for the reason Apply compares
-	// them without summing: a pair that overflows is exactly what this
-	// describes, and an upper bound that has wrapped negative is a diagnostic
-	// nobody can act on.
+	// Offset and length are reported rather than summed, for the reason Apply
+	// compares them without summing: a pair that overflows is exactly what
+	// this describes, and an upper bound that has wrapped negative is a
+	// diagnostic nobody can act on.
+	if e.Offset < 0 || e.Length < 0 || e.Offset > e.Size || e.Length > e.Size-e.Offset {
+		return fmt.Sprintf("%s: %d bytes at offset %d lie outside the %d bytes of this source",
+			e.Path, e.Length, e.Offset, e.Size)
+	}
 	return fmt.Sprintf("%s: %d bytes at offset %d are %q, not the %q this mutant replaces",
 		e.Path, e.Length, e.Offset, e.Got, e.Want)
 }
@@ -134,10 +143,10 @@ func (e ErrStaleMutant) Error() string {
 // that overflow when added cannot wrap past the guard into the slice.
 func (m Mutant) Apply(src []byte) ([]byte, error) {
 	if m.Offset < 0 || m.Length < 0 || m.Offset > len(src) || m.Length > len(src)-m.Offset {
-		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Want: m.Original, Got: ""}
+		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Size: len(src), Want: m.Original}
 	}
 	if got := string(src[m.Offset : m.Offset+m.Length]); got != m.Original {
-		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Want: m.Original, Got: got}
+		return nil, ErrStaleMutant{Path: m.Path, Offset: m.Offset, Length: m.Length, Size: len(src), Want: m.Original, Got: got}
 	}
 	out := make([]byte, 0, len(src)-m.Length+len(m.Mutated))
 	out = append(out, src[:m.Offset]...)

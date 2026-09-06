@@ -99,8 +99,19 @@ func TestErrorsSayWhatIsWrongAndWhere(t *testing.T) {
 	if got := (ErrPathEscapes{Path: "../x.go"}).Error(); !strings.Contains(got, "../x.go") {
 		t.Errorf("ErrPathEscapes.Error() = %q, want the path", got)
 	}
-	if got := (ErrStaleMutant{Path: "a.go", Offset: 2, Length: 3, Want: "abc", Got: "xyz"}).Error(); !strings.Contains(got, `"xyz"`) || !strings.Contains(got, `"abc"`) {
+	mismatch := ErrStaleMutant{Path: "a.go", Offset: 2, Length: 3, Size: 20, Want: "abc", Got: "xyz"}
+	if got := mismatch.Error(); !strings.Contains(got, `"xyz"`) || !strings.Contains(got, `"abc"`) {
 		t.Errorf("ErrStaleMutant.Error() = %q, want both texts", got)
+	}
+	// A range the source is too short to hold describes a different problem
+	// from one that fits and holds something else, and reporting the second
+	// for the first says the file's content is wrong when its length is.
+	outside := ErrStaleMutant{Path: "a.go", Offset: 99, Length: 3, Size: 6, Want: "abc"}
+	if got := outside.Error(); strings.Contains(got, `are ""`) {
+		t.Errorf("ErrStaleMutant.Error() = %q, want it to name the range rather than empty content", got)
+	}
+	if got := outside.Error(); !strings.Contains(got, "outside") || !strings.Contains(got, "6") {
+		t.Errorf("ErrStaleMutant.Error() = %q, want the source length", got)
 	}
 }
 
@@ -273,5 +284,60 @@ func TestADeclarationBelowAStatementDoesNotCoverIt(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("no comparison mutant on the line above the declaration")
+	}
+}
+
+// A declaration beside an inner expression is a claim about that expression.
+// Reaching it from the enclosing statement would acknowledge deleting a whole
+// call on the strength of a reason about one operator inside it — never run,
+// never counted, and the gate green over a survivor nobody claimed.
+func TestADeclarationInsideAStatementDoesNotCoverTheStatement(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) {\n\tprintln(\n\t\ta < b, " + annotation.Token + " the comparison is unobservable\n\t)\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var sawCall, sawInner bool
+	for _, m := range got {
+		switch m.Operator {
+		case RemoveStatement:
+			sawCall = true
+			if m.Acknowledged() {
+				t.Errorf("%s: the whole call was acknowledged by a claim about an inner expression", m)
+			}
+		case ConditionalBoundary:
+			sawInner = true
+			if !m.Acknowledged() {
+				t.Errorf("%s: the declaration beside it did not reach it", m)
+			}
+		}
+	}
+	if !sawCall || !sawInner {
+		t.Fatalf("fixture is not exercising both (call: %v, inner: %v)", sawCall, sawInner)
+	}
+}
+
+// A multi-line statement can be declared on the line it opens on as readily as
+// on the line it closes on, and a mutant over it is reported at the first. Both
+// are lines the author wrote beside this statement and neither belongs to
+// anything else.
+func TestADeclarationOnAStatementsOpeningLineCoversIt(t *testing.T) {
+	src := "package p\n\nfunc F(a int) {\n\tprintln( " + annotation.Token + " printing is not observable\n\t\ta,\n\t)\n}\n"
+	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != RemoveStatement {
+			continue
+		}
+		seen = true
+		if !m.Acknowledged() {
+			t.Errorf("%s: the declaration on the statement's opening line did not reach it", m)
+		}
+	}
+	if !seen {
+		t.Fatal("no remove-statement mutant for the multi-line call")
 	}
 }

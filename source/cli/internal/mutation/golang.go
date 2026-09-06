@@ -217,21 +217,22 @@ func (g *goGen) emitNode(op Operator, site, from, to token.Pos, mutated string) 
 	g.add(op, site, from, to, mutated)
 }
 
-// reasonFor returns the declaration covering a mutant spanning first to last.
+// reasonFor returns the declaration covering a mutant reported at site whose
+// replaced range ends on last.
 //
-// A mutant is reported at its site, which for a statement spanning lines is
-// the line it opens on — not where an author writing a trailing declaration
-// would put one. Every line in the span is a line the caller asked for, so a
-// declaration on any of them is a declaration on a changed line, which
-// internal/referral sees as added; the bargain holds exactly as it does for a
-// mutant confined to one line.
-func (g *goGen) reasonFor(first, last int) string {
-	for l := first; l <= last; l++ {
-		if r, ok := g.reasons[l]; ok {
-			return r
-		}
+// Two lines, and deliberately not the span between them. A mutant is reported
+// at its site, which for a statement spanning lines is the line it opens on,
+// while an author writing a trailing declaration puts it on the line that
+// statement closes on — so both have to be read. The lines in between belong to
+// the sub-expressions written there: a declaration beside an inner comparison
+// is a claim about that comparison, and letting it reach the enclosing
+// statement would acknowledge deleting the whole call on the strength of a
+// reason about one operator inside it.
+func (g *goGen) reasonFor(site, last int) string {
+	if r, ok := g.reasons[site]; ok {
+		return r
 	}
-	return ""
+	return g.reasons[last]
 }
 
 // add records one mutant, after establishing that it edits only requested
@@ -259,6 +260,6 @@ func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
 		Length:   hi - lo,
 		Original: string(g.src[lo:hi]),
 		Mutated:  mutated,
-		Reason:   g.reasonFor(start.Line, end.Line),
+		Reason:   g.reasonFor(at.Line, end.Line),
 	})
 }
