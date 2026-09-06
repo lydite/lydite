@@ -1,0 +1,57 @@
+# The 46 survivors lydite mutation reported against its own engine.
+#
+# Measured on run 34048688519, at commit 8308480, over the 1,276 new covered Go
+# lines PR #96 added to the cli component: 378 mutants generated, 314 in the
+# denominator, 268 killed, 46 survived, 64 unviable, 5 timed out, 54m10s.
+#
+# LINE NUMBERS ARE FROM THAT COMMIT. 61bf378 landed afterwards and shifted
+# cmd/lydite/mutation.go by exactly eleven lines; every other file still lines up.
+# This is an inventory of what survived, not a map of where it is — re-run to
+# get current positions.
+#
+cmd/lydite/fold.go:108:20: replace-return ("false" -> "true")
+cmd/lydite/fold.go:112:21: replace-return ("false" -> "true")
+cmd/lydite/fold.go:171:54: conditional-boundary (">" -> ">=")
+cmd/lydite/fold.go:184:20: replace-return ("false" -> "true")
+cmd/lydite/fold.go:199:19: negate-conditional ("==" -> "!=")
+cmd/lydite/merge.go:143:2: remove-statement ("carryUnhandled(rep, inputs, func(label string) b"... -> "")
+cmd/lydite/merge.go:163:12: negate-conditional ("==" -> "!=")
+cmd/lydite/merge.go:163:42: negate-conditional ("==" -> "!=")
+cmd/lydite/mutation.go:194:2: remove-statement ("cmd.Flags().BoolVar(&onlyAffected, \"affected\", f"... -> "")
+cmd/lydite/mutation.go:201:2: remove-statement ("cmd.Flags().DurationVar(&timeout, \"timeout\", 0,\n"... -> "")
+cmd/lydite/mutation.go:203:2: remove-statement ("cmd.Flags().BoolVar(&stream, \"stream\", false, \"m"... -> "")
+cmd/lydite/mutation.go:424:24: negate-conditional ("==" -> "!=")
+cmd/lydite/mutation.go:547:49: conditional-boundary (">" -> ">=")
+cmd/lydite/mutation.go:636:10: replace-return ("\"\"" -> "\"lydite\"")
+cmd/lydite/mutation.go:673:22: negate-conditional ("!=" -> "==")
+cmd/lydite/mutation.go:689:22: negate-conditional ("!=" -> "==")
+cmd/lydite/mutation.go:695:13: negate-conditional ("!=" -> "==")
+cmd/lydite/mutation.go:710:16: conditional-boundary (">" -> ">=")
+cmd/lydite/mutation.go:713:20: conditional-boundary (">" -> ">=")
+cmd/lydite/mutation.go:716:16: conditional-boundary (">" -> ">=")
+cmd/lydite/mutation.go:767:13: negate-conditional ("!=" -> "==")
+cmd/lydite/mutation.go:78:4: remove-statement ("streamDiagnostics(asJSON)" -> "")
+cmd/lydite/mutation.go:90:5: remove-statement ("stop()" -> "")
+cmd/lydite/mutation_merge.go:112:11: replace-return ("true" -> "false")
+cmd/lydite/mutation_merge.go:52:4: remove-statement ("streamDiagnostics(asJSON)" -> "")
+internal/mutation/executor.go:121:7: conditional-boundary ("<=" -> "<")
+internal/mutation/executor.go:199:13: conditional-boundary ("<" -> "<=")
+internal/mutation/executor.go:199:13: negate-conditional ("<" -> ">=")
+internal/mutation/executor.go:202:13: conditional-boundary (">" -> ">=")
+internal/mutation/executor.go:215:29: negate-conditional ("!=" -> "==")
+internal/mutation/executor.go:263:30: negate-conditional ("!=" -> "==")
+internal/mutation/executor.go:380:15: negate-conditional ("==" -> "!=")
+internal/mutation/executor.go:380:39: negate-conditional ("!=" -> "==")
+internal/mutation/executor.go:405:16: conditional-boundary (">" -> ">=")
+internal/mutation/overlay.go:171:34: negate-conditional ("!=" -> "==")
+internal/mutation/sites.go:49:18: conditional-boundary (">" -> ">=")
+internal/mutation/sites.go:49:37: conditional-boundary (">" -> ">=")
+internal/mutation/sites.go:49:8: conditional-boundary ("<" -> "<=")
+internal/mutation/sites.go:92:16: conditional-boundary ("<" -> "<=")
+internal/mutation/sites.go:92:39: conditional-boundary ("<" -> "<=")
+internal/mutation/sites.go:96:15: conditional-boundary ("<" -> "<=")
+internal/mutation/treesitter.go:476:25: conditional-boundary (">=" -> ">")
+internal/mutation/treesitter.go:476:58: conditional-boundary ("<=" -> "<")
+internal/mutation/worktree.go:168:9: negate-conditional ("!=" -> "==")
+internal/mutation/worktree.go:171:38: negate-conditional ("!=" -> "==")
+internal/mutation/worktree.go:231:12: negate-conditional ("!=" -> "==")
