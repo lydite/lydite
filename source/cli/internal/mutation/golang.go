@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -60,35 +61,35 @@ var arithmetic = map[token.Token]token.Token{
 // length of a token's text: a raw string literal's value has its carriage
 // returns stripped, so a range measured from that text is short by one byte
 // per line and splices a mutant that cannot parse.
-func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, error) {
+func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, []UnmatchedDeclaration, error) {
 	if err := checkPath(path); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// A test file's own code is not the code under test. Mutating an
 	// assertion asks whether the suite notices its own tests changing,
 	// which is a question with no useful answer.
 	if strings.HasSuffix(path, "_test.go") {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Generated code is not written by the author being asked to kill the
 	// mutant, and regenerating it discards the assertion they would add.
 	if coverage.IsGeneratedGoSource(src) {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reasons, err := annotation.Declarations(path, goComments(fset, file))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	g := &goGen{path: path, src: src, fset: fset, lines: lines, reasons: reasons}
 	ast.Inspect(file, g.visit)
-	return g.out, nil
+	return g.out, g.resolve(), nil
 }
 
 // goComments reports the file's comments as the Go parser sees them.
@@ -115,7 +116,12 @@ type goGen struct {
 	lines   map[int]bool
 	reasons map[int]string
 	out     []Mutant
+	// spans is the line range of each mutant in out, at the same index, so a
+	// declaration can be matched against what each one actually replaces.
+	spans []lineSpan
 }
+
+type lineSpan struct{ first, last int }
 
 // visit applies every operator that fits the node. It returns true always:
 // an operator matching an outer node does not stop an inner one from also
@@ -217,22 +223,57 @@ func (g *goGen) emitNode(op Operator, site, from, to token.Pos, mutated string) 
 	g.add(op, site, from, to, mutated)
 }
 
-// reasonFor returns the declaration covering a mutant reported at site whose
-// replaced range ends on last.
+// resolve attaches each declaration to the mutants it is about, and reports
+// the declarations that turned out to be about nothing.
 //
-// Two lines, and deliberately not the span between them. A mutant is reported
-// at its site, which for a statement spanning lines is the line it opens on,
-// while an author writing a trailing declaration puts it on the line that
-// statement closes on — so both have to be read. The lines in between belong to
-// the sub-expressions written there: a declaration beside an inner comparison
-// is a claim about that comparison, and letting it reach the enclosing
-// statement would acknowledge deleting the whole call on the strength of a
-// reason about one operator inside it.
-func (g *goGen) reasonFor(site, last int) string {
-	if r, ok := g.reasons[site]; ok {
-		return r
+// A declaration covers the mutants whose replaced range contains its line and
+// whose range is the shortest of those. Position alone cannot tell what an
+// author meant, because one line holds mutants at several scopes: beside
+// `println(a < b)` sit two mutants of the comparison and one that deletes the
+// whole call. The shortest range is the innermost thing written at that line,
+// which is what somebody annotating a line is looking at — so a claim about an
+// operator acknowledges the operator, and deleting the call remains a mutant
+// they have not answered.
+//
+// Reaching by containment rather than by a window of lines is what lets a
+// declaration inside a multi-line statement work: it sits on no line the
+// statement opens or closes on, and it is still written inside it.
+//
+// The bound the referral bargain rests on is unchanged. Every line of a
+// mutant's range is a line the caller asked for, so a declaration inside one is
+// on a changed line, which internal/referral sees as added.
+func (g *goGen) resolve() []UnmatchedDeclaration {
+	var unmatched []UnmatchedDeclaration
+	for _, line := range sortedKeys(g.reasons) {
+		shortest := -1
+		for i, sp := range g.spans {
+			if line < sp.first || line > sp.last {
+				continue
+			}
+			if shortest < 0 || g.out[i].Length < shortest {
+				shortest = g.out[i].Length
+			}
+		}
+		if shortest < 0 {
+			unmatched = append(unmatched, UnmatchedDeclaration{Path: g.path, Line: line, Reason: g.reasons[line]})
+			continue
+		}
+		for i, sp := range g.spans {
+			if line >= sp.first && line <= sp.last && g.out[i].Length == shortest {
+				g.out[i].Reason = g.reasons[line]
+			}
+		}
 	}
-	return g.reasons[last]
+	return unmatched
+}
+
+func sortedKeys(m map[int]string) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // add records one mutant, after establishing that it edits only requested
@@ -260,6 +301,6 @@ func (g *goGen) add(op Operator, site, from, to token.Pos, mutated string) {
 		Length:   hi - lo,
 		Original: string(g.src[lo:hi]),
 		Mutated:  mutated,
-		Reason:   g.reasonFor(at.Line, end.Line),
 	})
+	g.spans = append(g.spans, lineSpan{first: start.Line, last: end.Line})
 }

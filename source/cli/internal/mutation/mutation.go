@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"lydite/lydite/internal/annotation"
 )
 
 // Operator is one kind of deliberate change.
@@ -281,6 +283,24 @@ func Survivors(results []Result) []Result {
 		return a.Column < b.Column
 	})
 	return out
+}
+
+// UnmatchedDeclaration is an equivalence declaration that covered no mutant.
+//
+// Its author believes they have answered a survivor, and nothing they can see
+// says otherwise: the comment is well formed, it carries a reason, and the
+// mutant it was meant for is generated and run anyway. Reporting it is the same
+// stance ErrNoReason takes on a declaration with no reason — an author who
+// wrote one is owed an answer about it, and silence reads as the engine
+// disregarding them.
+type UnmatchedDeclaration struct {
+	Path   string
+	Line   int
+	Reason string
+}
+
+func (u UnmatchedDeclaration) String() string {
+	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Token)
 }
 
 // ErrPathEscapes reports a source path that is not inside the component.

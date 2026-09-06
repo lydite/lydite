@@ -20,7 +20,7 @@ func allLines(n int) map[int]bool {
 
 func generate(t *testing.T, src string) []Mutant {
 	t.Helper()
-	m, err := GenerateGo("x.go", []byte(src), allLines(strings.Count(src, "\n")+1))
+	m, _, err := GenerateGo("x.go", []byte(src), allLines(strings.Count(src, "\n")+1))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -199,7 +199,7 @@ func F(a, b int) int {
 // backtick. Ranges come from the node, which is what keeps this file parsing.
 func TestACarriageReturnInARawStringDoesNotShortenTheRange(t *testing.T) {
 	src := "package p\r\n\r\nfunc F() string {\r\n\treturn `a\r\nb`\r\n}\r\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(10))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(10))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -313,7 +313,7 @@ func F(a, b int) bool {
 `
 	// Line 4 opens a call spanning lines 4 to 6; line 7 holds a whole test.
 	for _, lines := range []map[int]bool{{4: true}, {7: true}, {4: true, 7: true}} {
-		got, err := GenerateGo("x.go", []byte(src), lines)
+		got, _, err := GenerateGo("x.go", []byte(src), lines)
 		if err != nil {
 			t.Fatalf("GenerateGo: %v", err)
 		}
@@ -371,7 +371,7 @@ func F(a, b int) bool { return a < b }
 
 func F(a, b int) bool { return a < b }
 `
-	got, err := GenerateGo("x_test.go", []byte(test), allLines(10))
+	got, _, err := GenerateGo("x_test.go", []byte(test), allLines(10))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -393,12 +393,12 @@ func TestGenerateRefusesAPathOutsideTheComponent(t *testing.T) {
 		"..", "a/../../b.go", "a/../..",
 	} {
 		var escapes ErrPathEscapes
-		_, err := GenerateGo(path, []byte(src), allLines(5))
+		_, _, err := GenerateGo(path, []byte(src), allLines(5))
 		if !errors.As(err, &escapes) {
 			t.Errorf("GenerateGo(%q) err = %v, want ErrPathEscapes", path, err)
 		}
 	}
-	if _, err := GenerateGo("pkg/a.go", []byte(src), allLines(5)); err != nil {
+	if _, _, err := GenerateGo("pkg/a.go", []byte(src), allLines(5)); err != nil {
 		t.Errorf("GenerateGo on an ordinary relative path: %v", err)
 	}
 }

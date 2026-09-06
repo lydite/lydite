@@ -97,14 +97,23 @@ Nothing can be concluded about tests that were not passing before the mutation.
 An equivalent mutant is one no test could kill, because the change it makes is
 unobservable. Equivalence is undecidable in general, so lydite never tries to
 detect one: the author declares it, in a `//lydite:equivalent <reason>` comment
-on the line the mutant is reported at, or — for a statement spanning several
-lines — on the line that statement closes on, where a trailing declaration is
-written. All three languages spell a line comment `//`, so one form covers them.
+beside the mutant. All three languages spell a line comment `//`, so one form
+covers them.
 
-It covers neither the lines between nor a neighbouring statement's. A
-declaration beside an inner expression is a claim about that expression, and
-reaching it from the enclosing statement would acknowledge deleting a whole
-call on the strength of a reason about one operator inside it.
+Which mutants it covers is decided by what each one replaces, not by where each
+is reported: the declaration covers the mutants whose replaced text contains its
+line, and of those the ones replacing the least. Position alone cannot say what
+an author meant, because one line holds mutants at several scopes — beside
+`println(a < b)` sit two mutants of the comparison and one that deletes the
+whole call. The innermost is what somebody annotating that line is looking at,
+so a claim about an operator acknowledges the operator and leaves the deletion a
+mutant they have not answered. Deciding by containment is also what lets a
+declaration written inside a multi-line statement work, since it sits on no line
+that statement opens or closes on.
+
+A declaration that covers no mutant is reported. Its author believes they have
+answered a survivor and nothing they can see says otherwise, which is the
+failure a required reason already exists to prevent, arriving one step later.
 
 It reaches no further, and that bound is what makes the composition below hold
 rather than merely usually hold. A declaration already in the tree that covered

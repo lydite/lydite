@@ -119,7 +119,7 @@ func TestErrorsSayWhatIsWrongAndWhere(t *testing.T) {
 // rather than suppressed, so the count still reports what was claimed.
 func TestADeclarationAcknowledgesTheMutantsOnItsLine(t *testing.T) {
 	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b " + annotation.Token + " b is always a+1 here\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(6))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(6))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestADeclarationAcknowledgesTheMutantsOnItsLine(t *testing.T) {
 // unread.
 func TestADeclarationDoesNotReachTheLineBelow(t *testing.T) {
 	src := "package p\n\nfunc F(n int) bool {\n\t" + annotation.Token + " bound is arbitrary\n\treturn n < 10\n}\n"
-	got, err := GenerateGo("a.go", []byte(src), map[int]bool{5: true})
+	got, _, err := GenerateGo("a.go", []byte(src), map[int]bool{5: true})
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestOnlyARealLineCommentDeclares(t *testing.T) {
 	}
 	for name, middle := range cases {
 		src := "package p\n\nfunc F(a, b int) bool {\n" + middle + "\treturn a < b\n}\n"
-		got, err := GenerateGo("x.go", []byte(src), allLines(12))
+		got, _, err := GenerateGo("x.go", []byte(src), allLines(12))
 		if err != nil {
 			t.Fatalf("%s: GenerateGo: %v", name, err)
 		}
@@ -192,7 +192,7 @@ func TestOnlyARealLineCommentDeclares(t *testing.T) {
 // declaration is attributed to.
 func TestALineContinuationDoesNotShiftADeclaration(t *testing.T) {
 	src := "package p\n\nfunc F(a, b int) bool {\n\ts := \"ab\" +\n\t\t\"cd\"\n\t_ = s\n\treturn a < b " + annotation.Token + " claimed\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(10))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(10))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -214,13 +214,12 @@ func TestALineContinuationDoesNotShiftADeclaration(t *testing.T) {
 	}
 }
 
-// A mutant over a statement spanning lines is reported at the line it opens
-// on, which is not where an author writing a trailing declaration puts one.
-// Every line in the span is one the caller asked for, so honouring a
-// declaration anywhere in it keeps the bargain referral relies on.
-func TestADeclarationAnywhereInAMultiLineStatementCoversIt(t *testing.T) {
+// A statement spanning lines can be declared on the line it closes on, which
+// is where a trailing declaration goes and is not where the mutant over it is
+// reported.
+func TestADeclarationOnAStatementsClosingLineCoversIt(t *testing.T) {
 	src := "package p\n\nfunc F(a int) {\n\tprintln(\n\t\ta,\n\t) " + annotation.Token + " printing is not observable\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(8))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -243,7 +242,7 @@ func TestADeclarationAnywhereInAMultiLineStatementCoversIt(t *testing.T) {
 // span is bounded by the lines the caller asked for.
 func TestADeclarationDoesNotReachPastTheStatementItIsIn(t *testing.T) {
 	src := "package p\n\nfunc F(a, b int) bool {\n\tprintln(\n\t\ta,\n\t) " + annotation.Token + " printing is not observable\n\treturn a < b\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(9))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(9))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -268,7 +267,7 @@ func TestADeclarationDoesNotReachPastTheStatementItIsIn(t *testing.T) {
 // reaching up, arriving from the other direction.
 func TestADeclarationBelowAStatementDoesNotCoverIt(t *testing.T) {
 	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b\n\t" + annotation.Token + " belongs to nothing above it\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(7))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(7))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -290,10 +289,12 @@ func TestADeclarationBelowAStatementDoesNotCoverIt(t *testing.T) {
 // A declaration beside an inner expression is a claim about that expression.
 // Reaching it from the enclosing statement would acknowledge deleting a whole
 // call on the strength of a reason about one operator inside it — never run,
-// never counted, and the gate green over a survivor nobody claimed.
+// never counted, and the gate green over a survivor nobody claimed. The
+// innermost mutant at the line is the one an author annotating that line is
+// looking at, and it wins whether or not the statement spans several lines.
 func TestADeclarationInsideAStatementDoesNotCoverTheStatement(t *testing.T) {
 	src := "package p\n\nfunc F(a, b int) {\n\tprintln(\n\t\ta < b, " + annotation.Token + " the comparison is unobservable\n\t)\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(8))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -323,7 +324,7 @@ func TestADeclarationInsideAStatementDoesNotCoverTheStatement(t *testing.T) {
 // anything else.
 func TestADeclarationOnAStatementsOpeningLineCoversIt(t *testing.T) {
 	src := "package p\n\nfunc F(a int) {\n\tprintln( " + annotation.Token + " printing is not observable\n\t\ta,\n\t)\n}\n"
-	got, err := GenerateGo("x.go", []byte(src), allLines(8))
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(8))
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
@@ -339,5 +340,95 @@ func TestADeclarationOnAStatementsOpeningLineCoversIt(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("no remove-statement mutant for the multi-line call")
+	}
+}
+
+// One line holds mutants at several scopes, and position alone cannot say
+// which one an author meant. The innermost is what somebody annotating that
+// line is looking at, so a claim about an operator acknowledges the operator
+// and leaves deleting the whole call a mutant they have not answered.
+func TestASingleLineClaimCoversTheInnermostMutant(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) {\n\tprintln(a < b) " + annotation.Token + " the comparison is unobservable\n}\n"
+	got, _, err := GenerateGo("x.go", []byte(src), allLines(6))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	var sawCall, sawInner bool
+	for _, m := range got {
+		switch m.Operator {
+		case RemoveStatement:
+			sawCall = true
+			if m.Acknowledged() {
+				t.Errorf("%s: deleting the whole call was acknowledged by a claim about one operator in it", m)
+			}
+		case ConditionalBoundary, NegateConditional:
+			sawInner = true
+			if !m.Acknowledged() {
+				t.Errorf("%s: the declaration beside it did not reach it", m)
+			}
+		}
+	}
+	if !sawCall || !sawInner {
+		t.Fatalf("fixture is not exercising both scopes (call: %v, inner: %v)", sawCall, sawInner)
+	}
+}
+
+// A declaration written inside a statement is written inside it whichever line
+// it lands on, so reach is decided by what a mutant replaces rather than by a
+// window of lines around where it is reported.
+func TestADeclarationOnAnInteriorLineCoversTheStatement(t *testing.T) {
+	src := "package p\n\nfunc F(a int) {\n\tprintln(\n\t\ta, " + annotation.Token + " printing is not observable\n\t)\n}\n"
+	got, unmatched, err := GenerateGo("x.go", []byte(src), allLines(8))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if len(unmatched) != 0 {
+		t.Errorf("declaration reported as covering nothing: %v", unmatched)
+	}
+	var seen bool
+	for _, m := range got {
+		if m.Operator != RemoveStatement {
+			continue
+		}
+		seen = true
+		if !m.Acknowledged() {
+			t.Errorf("%s: the declaration written inside it did not reach it", m)
+		}
+	}
+	if !seen {
+		t.Fatal("no remove-statement mutant for the multi-line call")
+	}
+}
+
+// An author who wrote a declaration is owed an answer about it. One covering
+// no mutant leaves them believing a survivor is already answered, and nothing
+// they can see says otherwise — the stance ErrNoReason takes on a declaration
+// with no reason.
+func TestADeclarationCoveringNoMutantIsReported(t *testing.T) {
+	src := "package p\n\nfunc F() {\n\t" + annotation.Token + " nothing on this line\n}\n"
+	_, unmatched, err := GenerateGo("x.go", []byte(src), allLines(6))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if len(unmatched) != 1 {
+		t.Fatalf("unmatched = %v, want one", unmatched)
+	}
+	if unmatched[0].Line != 4 || unmatched[0].Reason != "nothing on this line" {
+		t.Errorf("unmatched[0] = %+v, want line 4 with its reason", unmatched[0])
+	}
+	if got := unmatched[0].String(); !strings.Contains(got, "x.go:4") || !strings.Contains(got, annotation.Token) {
+		t.Errorf("String() = %q, want the site and the token", got)
+	}
+}
+
+// A declaration that did cover something is not reported as covering nothing.
+func TestAMatchedDeclarationIsNotReported(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) bool {\n\treturn a < b " + annotation.Token + " b is always a+1 here\n}\n"
+	_, unmatched, err := GenerateGo("x.go", []byte(src), allLines(6))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if len(unmatched) != 0 {
+		t.Errorf("unmatched = %v, want none", unmatched)
 	}
 }
