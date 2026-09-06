@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/annotation"
+	"lydite/lydite/internal/runner"
 )
 
 // Operator is one kind of deliberate change.
@@ -335,4 +336,32 @@ func checkPath(p string) error {
 		return ErrPathEscapes{Path: p}
 	}
 	return nil
+}
+
+// ErrNoGenerator reports a language lydite parses no source for.
+//
+// It is an error rather than an empty mutant set, because the two are
+// indistinguishable to a caller and mean opposite things: no mutants is a
+// change nothing could be asked about, and no generator is a component lydite
+// examined nothing of. The second must never render as the first.
+type ErrNoGenerator struct{ Lang runner.Lang }
+
+func (e ErrNoGenerator) Error() string {
+	return fmt.Sprintf("lydite generates no mutants for %s yet", e.Lang)
+}
+
+// Generate produces every mutant for one file, restricted to the given
+// 1-indexed lines, in whichever language the component's runner implies.
+//
+// One entry point rather than a caller that switches on the language, so a
+// language gained here is gained by every caller at once — and so the rule
+// that a language with no generator is an error rather than a silent zero has
+// one statement.
+func Generate(lang runner.Lang, path string, src []byte, lines map[int]bool) ([]Mutant, []UnmatchedDeclaration, error) {
+	switch lang {
+	case runner.Go:
+		return GenerateGo(path, src, lines)
+	default:
+		return nil, nil, ErrNoGenerator{Lang: lang}
+	}
 }

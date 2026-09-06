@@ -57,6 +57,10 @@ source/cli/internal/typescript/   # pinned Biome, the only TS linter (see Linter
 source/cli/internal/golang/       # gosec, govulncheck (installed into a version-keyed GOBIN dir)
 source/cli/internal/semgrep/      # pinned Semgrep, installed via pipx
 source/cli/internal/coverage/     # reads a component's coverage report (see Coverage below)
+source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
+                                  #   (see Mutation below)
+source/cli/internal/annotation/   # the equivalence declaration: the token, and how a comment
+                                  #   carrying one is read. A leaf, so referral can link it
 source/cli/internal/gitstate/     # the base branch, and lydite branch read/write (see Coverage below)
 source/cli/internal/executil/     # shared external-command runner every scanner package uses
 source/cli/.golangci.yml          # lint config (v2 schema)
@@ -89,8 +93,9 @@ scripts/install.sh                # curl|sh installer shipped with every release
 
 ## Status
 
-All seven subcommands (`scan`, `test`, `review`, `publish`, `clearance`, `version`, `update`) are
-fully implemented, plus `test plan`, `test merge` and `test record` — every check
+All eight subcommands (`scan`, `test`, `mutation`, `review`, `publish`, `clearance`, `version`,
+`update`) are fully implemented, plus `test plan`, `test merge`, `test record` and
+`mutation merge` — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
 `internal/<lang>` package's doc comment for why). `update` follows the same pattern as `inforge`'s
@@ -135,7 +140,10 @@ merge gate still covers.
 
 **Both lydite workflows shard.** `lydite-pr.yml` is `setup` → `plan` → `test` (a matrix, each job
 running `--affected --component <slice> --gate-coverage` under `contents: read`) → `merge` →
-`publish`. `lydite-baseline.yml` is `plan` → `measure` (the same matrix without `--affected`, since
+`publish`. `plan`'s output feeds a second matrix beside it — `mutation` → `mutation-merge`, each
+job running `--affected --component <slice>` under the same read-only token — because a shard is
+the same conflict closure whichever command consumes it, and mutation shares a checkout with the
+coverage gate and not a compilation. `lydite-baseline.yml` is `plan` → `measure` (the same matrix without `--affected`, since
 ADR 0016 requires the default-branch run to be complete) → one `record` job, which is the only job
 in either workflow granted `contents: write` and runs nothing from the repository. Each shard
 uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`: `publish`
@@ -1796,6 +1804,164 @@ actually fixes a stacked pull request is a caller passing the branch it targets,
 `lydite/actions` does: every job it runs takes `--base-branch` from `github.base_ref`, on
 `pull_request` events and never on a push.
 
+## Mutation: `lydite mutation`
+
+Coverage measures execution. A test that calls a function and asserts nothing scores full marks on
+every line it touches, which is exactly the test something optimising for a green pipeline
+produces. A mutant is one deliberate change to one line, and the suite is asked whether anything
+fails. `lydite mutation` is that question, per component, over the lines this change touched. See
+[ADR 0027](docs/adr/0027-mutation-is-its-own-command.md).
+
+**It is a peer of `scan`, `test` and `review`, not a flag on `lydite test`.** ADR 0016 puts every
+check for one component in one job because they share a compilation; mutation does not — the
+coverage gate builds the instrumented variant once, and mutation builds the plain variant once per
+mutant. A flag would have made each test job serially longer by the most expensive thing lydite
+runs. It waits on nothing either: a mutant against an already-red suite is meaningless, so a run
+needs a passing baseline before it mutates anything, and the instrumented variant is both that
+baseline and where the executed lines come from. So the mutation matrix runs *beside* the test
+matrix and duplicates one instrumented run per component, which on a matrix costs wall-clock
+nothing and machine time once.
+
+**Mutants come from the change, and only from lines coverage reports as executed.** There is no
+whole-repository mode: it would run for hours on any mature codebase, which makes it a mode nobody
+runs, and it would give the catalogue and the gate a second scope to be reasoned about against. A
+mutant on an uncovered line cannot be killed by construction, and reporting one restates what patch
+coverage already said about the same line. Half of that bound is knowable before anything runs, so
+a component the change does not touch pays for no baseline, no compose stack and no setup command —
+which on the default branch is every component.
+
+**Mutation has no baseline and writes nothing to the `lydite` branch.** There is no per-tree
+quantity to record and nothing to compare against last time; the gate is absolute the way
+`coverage.floor` is. `lydite test record` is untouched, and the single `gitstate.WriteBaseline`
+call site stays the one place a baseline is written.
+
+**Four outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run
+exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. A mutant
+whose run **hangs** counts as killed, because an infinite loop is a behaviour change something
+noticed. An **unviable** mutant — one that does not compile — is excluded from the denominator
+entirely and never counted as killed: it is evidence about the generator rather than about the
+tests, and scoring it as a kill inflates the score silently and permanently. Telling it from a kill
+is the whole reason a runner derives a build-only variant, since both exit non-zero. A component
+whose **baseline suite fails** is `unmeasured`, not zero-killed — failing would report one broken
+suite as two red gates whose second names a cause its author clears by fixing the first.
+
+**A component declaring `mutation: false` gets one `context` row.** Present, so ADR 0026's
+completeness rule holds with no exception and the fold needs no second copy of the opt-out rule to
+know which absences are legitimate. `context` and not `unmeasured`, because the amber tag is for a
+gate that could not run and spending it on a decision the repository stated is what teaches a
+reader to skim past it.
+
+### The acknowledgement lives in the source
+
+An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
+to detect one: the author declares it in a `//lydite:equivalent <reason>` comment **beside** the
+mutant. All three languages spell a line comment `//`, so one form covers them. The declaration
+covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
+least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
+call, and the innermost is what somebody annotating that line is looking at. Deciding by
+containment is also what lets a declaration written inside a multi-line statement work. A
+declaration that covers no mutant is named on stderr: its author believes they have answered a
+survivor and nothing they can see says otherwise.
+
+The reason is required, and its absence is an error rather than a silent non-honouring. What counts
+as a comment is each language's own parser to say, never a scan of the bytes: one scan would have
+to lex three languages correctly to be right once. `internal/annotation` holds the token and the
+rule, and is a **leaf** — `internal/referral` decides what merges unread and must not link a
+language parser to obtain one string.
+
+The composition is the point. The annotation is a suppression, and `internal/referral` reads
+suppressions off the diff, so declaring a mutant equivalent clears the gate *and* refers the
+change. Kill the mutant and merge unattended; declare it unkillable and a human reads the claim.
+The bound that makes it structural rather than usually-true: a mutant exists only on a changed
+line, so a declaration acknowledging one is itself on a changed line, which referral sees as added.
+
+### Rebuild, never in-process
+
+In-process was never available for Go: it compiles to a native test binary and has no bytecode
+layer to rewrite in a live process, so the real choice was `go build -overlay` against copying
+trees. The overlay wins, and that is why `Mutant.Apply` returns bytes rather than writing them —
+nothing edits the component's own tree, so an interrupt cannot leave mutated source in the
+repository lydite is measuring.
+
+**The suite is never given `-count=1`, and that is load-bearing.** An overlay changes the build
+hash of the mutated package and its dependents and of nothing else, so exactly the right set
+re-runs and the rest is served from the test cache: mutation gets incremental test selection
+without lydite implementing any. Measured over five distinct mutants of one leaf package in this
+repository, 1.67s each against 79s with the cache disabled — `-count=1` would multiply the cost of
+mutation by roughly fifty.
+
+**A mutant runs against its own package first, and against the closure only if it survives there.**
+A mutant its own package's tests kill is killed, and nothing wider could change that; a mutant that
+survives them has to be held against every test that could kill it, because a mutant in a library
+is routinely killed only by its caller's tests. Ordering the two turns the expensive kill in this
+repository from 76s into 2.36s and costs a survivor nothing, since the second run reads the first's
+cached result for the package they share. Per-mutant cost is **bimodal**, and the discriminator is
+not how many dependents a package has but whether the repository's slowest suite is among them: 5
+dependents cost 1.67s and 8 cost 76s, of which 73 is one suite.
+
+The narrowing rewrites the package patterns in the component's own argv and leaves every other
+argument alone, so a flag and its separately written value survive. What makes that safe rather
+than merely usually right is that **the narrowed run is never authoritative**: a mutant it fails to
+kill is run again against the unnarrowed phase, so the worst a misread argument can cost is the
+second run this exists to avoid — never a wrong verdict.
+
+`internal/mutation`'s `Backend` is the language-agnostic seam: it opens one **worker** per
+concurrency slot, and a worker stages one mutant at a time and returns the build-only invocation
+and the phases. One worker per slot and never one per mutant — a tree copy, and for TypeScript a
+dependency install, is not affordable per mutant. Go needs no directory at all, since an overlay
+names the mutated file wherever it is written, and the same interface covers both.
+
+### One concurrency bound, and serial where services are shared
+
+A component stays one scheduler item, so its compose stack is started and torn down inside that
+item exactly as `lydite test` does, and two components publishing one host port are serialised
+there. Its **mutants** dispatch against slots shared by the whole run, so `--concurrency` means
+suite executions in flight in `lydite mutation` exactly as it does in `lydite test`. Two
+independent bounds would multiply into components times mutants, which is the quadratic
+oversubscription `defaultConcurrency` is a constant rather than `NumCPU` to avoid.
+
+**A component declaring compose services runs its mutants strictly serially.** ADR 0016 rejects
+sharing a running service between concurrent suites — two suites against one database truncate each
+other's tables — and eight mutants against one stack is that exactly; it would surface as mutants
+surviving at random, so the score would vary run to run, which is worse than a slow one. The
+question is asked of `scheduler.Conflicts` with two of the component's mutants as items rather than
+of the port list directly, so the predicate that decides what may run beside what has one
+implementation: they carry the component's published ports so they conflict exactly when it
+publishes one, and they carry no directory, because a mutant is not a second tree.
+
+### The timeout is derived, and there is no runtime budget
+
+Nothing caps how long a run takes. A budget shipped now would be an invented number and every way
+of exceeding one is bad: capping and passing is a gate that silently checked less, capping and
+failing punishes a change for its size, and capping to `unmeasured` gives a busy repository a
+permanently amber row. A run genuinely too large dies as a CI job timeout, the shard produces no
+document, and the fold already fails a declared component with no row.
+
+The **per-mutant** timeout is a different thing, and is a multiple of what this run measured: three
+times the component's own observed baseline, with a 60-second floor for a suite too fast to measure
+and `--timeout` overriding. Without one, `TimedOut` is an outcome nothing can produce.
+
+### The fold
+
+`lydite mutation merge` folds a matrix of shards, through the same implementation `lydite test
+merge` uses: every shard reports exactly the components it was responsible for, so a declared
+component with no row is a shard whose job died and one with two rows is two jobs running the same
+work. That rule lives in `cmd/lydite/fold.go` with two consumers rather than in two copies that
+agree until one learns something.
+
+**The fold emits a `mutation` summary row, never `mutation(repo)`.** There is no repository-wide
+figure only a fold can compute — `survived == 0` for every component is `survived == 0` for the
+repository — so a gating row could only restate the conjunction of the rows above it. It is
+`context`, gates nothing, and carries the counts and the elapsed time that make a later budget a
+measured decision rather than a guess. A run responsible for only part of the declaration emits no
+summary row, for the reason it emits no `coverage(repo)`.
+
+It reads each component's score back out of the row the run rendered, because a report's rows carry
+rendered prose and mutation writes no measurements document beside them — the same trade
+`foldedScheduleRow` already makes for `max N concurrent`. `TestTheFoldReadsBackTheScoreARunRendered`
+is what holds the renderer and the reader together, since a wording change would otherwise be a
+fold that silently stops counting.
+
 ## Output grammar and `--json`
 
 Every command renders through `internal/ui`, which implements the specification in
@@ -1996,7 +2162,8 @@ body rather than by author, because the author is whoever's token posted it.
 
 Every gate lydite has reports to a job log; the **Surface** is where the verdict reaches the
 person whose change it is about. There is exactly one: a standing pull-request comment carrying
-the referral, the scan and the suites as one collapsible section each. See
+the referral, the scan, the suites and the mutants as one collapsible section
+each. See
 [ADR 0023](docs/adr/0023-one-standing-comment-rendered-by-the-cli.md) for the surface and
 [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) for the identity.
 

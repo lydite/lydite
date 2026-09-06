@@ -29,6 +29,7 @@ var concerns = []struct {
 	{"review", "referral"},
 	{"scan", "scan"},
 	{"test", "test"},
+	{"mutation", "mutation"},
 }
 
 // newPublishCmd renders the standing pull-request comment from the documents

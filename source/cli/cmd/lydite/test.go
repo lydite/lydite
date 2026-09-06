@@ -195,7 +195,7 @@ the component's to declare.`,
 				// affected` is emitted by the one shard that owns a.
 				skipped = make(map[string]ui.Row, len(res.Skipped))
 				for _, c := range intersect(res.Skipped, own) {
-					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: "test(" + c.Name + ")", Value: "not affected"}
+					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: testLabel(c.Name), Value: "not affected"}
 				}
 				ordered = own
 			}
@@ -239,12 +239,12 @@ the component's to declare.`,
 						Value:  "no components declared in " + component.FileName,
 					})
 				}
-				return renderTestReport(cmd, rep, dir, asJSON, noColor)
+				return renderReport(cmd, rep, dir, asJSON, noColor)
 			}
 
 			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep)
 			addCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
-			return renderTestReport(cmd, rep, dir, asJSON, noColor)
+			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
 	// A subcommand beside a runnable command: cobra resolves subcommands
@@ -294,6 +294,15 @@ the component's to declare.`,
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	return cmd
 }
+
+// testLabel is how every row about one component's suite is named.
+//
+// Labelled rather than bare, so every component produces exactly one
+// test(<name>) row whether it ran or not, and so a component called `watch`,
+// `select`, `orphans` or `schedule` cannot take a gate row's label. Nothing
+// forbids those names, and a consumer keying rows by label would silently lose
+// the gate.
+func testLabel(name string) string { return "test(" + name + ")" }
 
 // defaultConcurrency is how many components run at once when nothing says
 // otherwise.
@@ -373,7 +382,7 @@ type componentPlan struct {
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
 func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report) []measurement {
-	plans := planComponents(ctx, root, selected, stream)
+	plans := planComponents(ctx, root, selected, "test", stream)
 	for _, p := range plans {
 		defer p.log.Close()
 	}
@@ -396,7 +405,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 		// and a check that could not run must never read as one that did.
 		rows[i] = ui.Row{
 			Status: ui.StatusUnmeasured,
-			Label:  "test(" + p.c.Name + ")",
+			Label:  testLabel(p.c.Name),
 			Value:  "not run",
 			Detail: []string{"the run ended before this component started"},
 		}
@@ -472,12 +481,11 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 		byName[r.Label] = r
 	}
 	for _, c := range ordered {
-		label := "test(" + c.Name + ")"
 		if r, ok := skipped[c.Name]; ok {
 			rep.Add(r)
 			continue
 		}
-		if r, ok := byName[label]; ok {
+		if r, ok := byName[testLabel(c.Name)]; ok {
 			rep.Add(r)
 		}
 	}
@@ -502,7 +510,7 @@ func itemFor(p componentPlan) scheduler.Item {
 // when something actually declares services: a component that declares none
 // needs no runtime, so a repository without services still runs on a machine
 // with no container engine at all.
-func planComponents(ctx context.Context, root string, selected []component.Component, stream bool) []componentPlan {
+func planComponents(ctx context.Context, root string, selected []component.Component, kind string, stream bool) []componentPlan {
 	width := 0
 	for _, c := range selected {
 		if len(c.Name) > width {
@@ -532,7 +540,7 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 
 	plans := make([]componentPlan, len(selected))
 	for i, c := range selected {
-		p := componentPlan{c: c, log: openLog(root, c.Name, stream, width), ready: true}
+		p := componentPlan{c: c, log: openLog(root, c.Name, kind+".log", stream, width), ready: true}
 		if !c.Compose.Declared() {
 			plans[i] = p
 			continue
@@ -564,12 +572,12 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 				// one outcome worse than not running it.
 				p.row = ui.Row{
 					Status: ui.StatusUnmeasured,
-					Label:  "test(" + c.Name + ")",
+					Label:  kind + "(" + c.Name + ")",
 					Value:  "not run",
 					Detail: []string{"the run ended before this component started"},
 				}
 			} else {
-				p.row = failure("test("+c.Name+")", p.log, err.Error(), "services not started", "")
+				p.row = failure(kind+"("+c.Name+")", p.log, err.Error(), "services not started", "")
 			}
 			plans[i] = p
 			continue
@@ -634,7 +642,7 @@ func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, lim
 // nobody was told.
 func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, tc *toolchain.Env, instrument bool) (row ui.Row, m measurement) {
 	c, log := p.c, p.log
-	label := "test(" + c.Name + ")"
+	label := testLabel(c.Name)
 	m = unmeasuredComponent(c, "the component did not run")
 
 	variant := runner.Plain
@@ -759,10 +767,14 @@ type componentLog struct {
 	mirror *prefixWriter
 }
 
-// openLog creates the component's log. A log that cannot be created is not a
-// reason to skip the component, so it degrades to capture-only: the tail under
-// a failing row still names the cause, which is most of what the file is for.
-func openLog(root, name string, stream bool, width int) *componentLog {
+// openLog creates the component's log, named for the command writing it: one
+// component runs under `lydite test` and under `lydite mutation` alike, and a
+// single file would have whichever ran second overwrite the other's output.
+//
+// A log that cannot be created is not a reason to skip the component, so it
+// degrades to capture-only: the tail under a failing row still names the
+// cause, which is most of what the file is for.
+func openLog(root, name, file string, stream bool, width int) *componentLog {
 	l := &componentLog{out: io.Discard, name: name, width: width}
 	dir := filepath.Join(root, runner.ReportDir, name)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -770,7 +782,7 @@ func openLog(root, name string, stream bool, width int) *componentLog {
 		return l.streamed(stream)
 	}
 	ignoreReports(filepath.Join(root, runner.ReportDir))
-	path := filepath.Join(dir, "test.log")
+	path := filepath.Join(dir, file)
 	f, err := os.Create(path) // #nosec G304 -- the path is lydite's own report directory under the scan root, built from a validated component name
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lydite: %s: %v\n", name, err)
@@ -1255,8 +1267,9 @@ func orphanRow(ctx context.Context, dir string, file component.File) ui.Row {
 	}
 }
 
-// renderTestReport renders and returns the verdict as an exit code.
-func renderTestReport(cmd *cobra.Command, rep *ui.Report, root string, asJSON, noColor bool) error {
+// renderReport writes the run's document, renders the terminal or JSON
+// report, and returns the verdict as an exit code.
+func renderReport(cmd *cobra.Command, rep *ui.Report, root string, asJSON, noColor bool) error {
 	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {
