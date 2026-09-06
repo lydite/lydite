@@ -297,6 +297,42 @@ too, and is sufficient there only because that code separately rejects absolute
 link targets, containment-checks resolved relative ones, and unpacks into a
 directory it created rather than one it was handed.
 
+**The grammar blobs are selected by build tag, and the binary is 15MB rather
+than 33MB.** gotreesitter embeds all 206 of its grammars by default, which is
+20MB of parse tables in a tool that parses three languages. `grammar_subset`
+turns the wildcard embed off and each `grammar_subset_<lang>` tag turns one blob
+back on. The tags are in `.goreleaser.yml`, in both lydite workflows and in
+`ci-test.yml` — and `ci-test.yml` runs the *suite* under them, because with
+`grammar_subset` set a language whose own tag is missing fails at its first
+parse rather than at build time, while a bare `go test` embeds everything and so
+could never see one missing. A build without the tags is correct and larger,
+which is the right way round: the failure is a fat binary, not a wrong verdict.
+
+**A worker directory is a copy of git's own file list.** Tracked, plus untracked
+files git is not ignoring — the list `internal/orphan` already reads. That is
+what keeps `node_modules`, `target` and `dist` out of the copy without lydite
+holding a second copy of a judgement `.gitignore` already states, and the copy
+that drifts is the one that starts copying half a gigabyte of build output per
+slot. The runner's own `Prepare` then runs in the worker, once, which is what
+makes the copy affordable at all.
+
+**Rust's inline test module is excluded from the tree, not from the path.** Rust
+puts unit tests in a `#[cfg(test)] mod tests` inside the file they test, and no
+path rule can see one. Mutating it reports an assertion nobody asserts as a
+survivor whose only answer is an equivalence declaration, and a gate that fires
+on ordinary work is one that gets switched off. The attribute is a preceding
+sibling of the module in the tree, so the rule reads the tree's own order. A
+module behind a broader condition — `#[cfg(all(test, unix))]` — is not
+recognised and is mutated, which is the direction this has to fail in: a form
+the rule does not know about produces survivors an author can see and answer,
+where a looser match would silently stop mutating code that ships.
+
+**Rust and TypeScript get one phase where Go gets two.** Neither has a unit both
+cheaper than the component and derivable from a file path the way a Go package
+directory is: a crate needs its manifest read, and a JavaScript test file is
+related to the source it exercises by convention rather than by structure. A
+second phase that narrowed wrongly would cost the run it exists to save.
+
 **A golden-mutant test holds the grammars.** Rust and TypeScript are parsed
 through a pre-1.0 dependency whose grammar tables are regenerated on a schedule,
 and a bump changes which mutants exist. This repository has no Rust component,
@@ -305,6 +341,24 @@ unobserved. Committed fixtures assert the exact mutant set — offsets, operator
 replaced text — in `go test`, which is what the merge gate blocks on.
 
 ## Considered and rejected
+
+**Taking gotreesitter's default all-grammars build.** Nothing to forget and one
+uniform `go build`, at the cost of nearly quadrupling lydite's download for every
+consumer and every CI job that installs it. Rejected for the size; the build tags
+are documented in three places and `ci-test.yml` executes the shape that ships.
+
+**Vendoring the three grammar blobs into this repository.** It looks like the
+smallest option and is not: the blobs are 365KB between them, and the 13MB is the
+runtime and the grammar/scanner Go code, which both approaches link. The external
+scanners live in the `grammars` package, so lydite imports it either way — and
+importing it is what drags in the wildcard embed unless a build tag turns it off.
+So it needs the same tag, saves 0.4MB, and buys three committed blobs Dependabot
+would never bump.
+
+**Hard-linking the component's tree into a worker instead of copying it.** Cheap
+even for a `node_modules`, and unsafe: a suite that writes to a fixture in place
+writes through the link into the tree lydite is measuring, which is a worse
+version of the failure worker directories exist to prevent.
 
 **Delegating Rust and TypeScript to `cargo-mutants` and Stryker.** The original
 scope for those two languages, and the cost argument for it is real: the pin
