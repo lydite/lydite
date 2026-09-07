@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -945,7 +946,7 @@ func crapSummaryRow(scorable int, scored, carried []gitstate.CRAPEntry) (ui.Row,
 		return unmeasuredRow("crap", fmt.Sprintf("none of its %d component(s) produced a score", scorable)), true
 	}
 	above, worst := 0, 0.0
-	for _, e := range append(append([]gitstate.CRAPEntry{}, scored...), carried...) {
+	for _, e := range slices.Concat(scored, carried) {
 		above += e.Above
 		worst = math.Max(worst, e.Worst)
 	}
@@ -954,14 +955,16 @@ func crapSummaryRow(scorable int, scored, carried []gitstate.CRAPEntry) (ui.Row,
 	// component this run did not reach still has a score and leaving it out
 	// would make the number swing with whatever a change happened to touch.
 	// Named, because a figure that does not say how much of it this run
-	// measured is indistinguishable from one that measured everything.
-	value := fmt.Sprintf("%d function(s) above %d across %d of %d component(s), worst %.1f",
-		above, crap.Threshold, len(scored)+len(carried), scorable, worst)
+	// measured is indistinguishable from one that measured everything — and
+	// said nothing about when there is nothing to say, since "0 carried
+	// forward" on every complete run is a clause readers learn to skip.
+	inherited := ""
 	if len(carried) > 0 {
-		value = fmt.Sprintf("%d function(s) above %d across %d of %d component(s), %d carried forward, worst %.1f",
-			above, crap.Threshold, len(scored)+len(carried), scorable, len(carried), worst)
+		inherited = fmt.Sprintf(", %d carried forward", len(carried))
 	}
-	return ui.Row{Status: ui.StatusContext, Label: "crap", Value: value}, true
+	return ui.Row{Status: ui.StatusContext, Label: "crap",
+		Value: fmt.Sprintf("%d function(s) above %d across %d of %d component(s)%s, worst %.1f",
+			above, crap.Threshold, len(scored)+len(carried), scorable, inherited, worst)}, true
 }
 
 // crapSummaryOf is that figure over a run's own measurements. `lydite test

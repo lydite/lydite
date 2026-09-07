@@ -244,6 +244,11 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 	if row.Status != ui.StatusContext {
 		t.Errorf("crap = %+v, want context — every component's own row carries the gate", row)
 	}
+	// A run that carried nothing says nothing about carrying: "0 carried
+	// forward" on every complete run is a clause readers learn to skip.
+	if strings.Contains(row.Value, "carried forward") {
+		t.Errorf("crap = %q, want no carry clause on a run that carried nothing", row.Value)
+	}
 
 	// A repository lydite can score nothing of gets no row at all: that is a
 	// property of the metric, not a gap this run left.
