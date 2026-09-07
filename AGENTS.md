@@ -147,6 +147,21 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
+**A mutation slot costs more than a test slot, and CI bounds it lower.** `--concurrency` means
+suite executions in flight in both commands, but a slot in `lydite test` is an already-compiled
+suite while a slot in `lydite mutation` is a *compile* as well — an overlay changes the build hash,
+so every mutant rebuilds the mutated package and its dependents. This repository's `cli` component
+declares `-race` over a package graph carrying all 206 of gotreesitter's grammars, which is the
+heaviest build it has, and four of those at once exhausts a 16GB hosted runner. `lydite-pr.yml`
+passes `--concurrency 2` to `mutation` and leaves `test` on the default.
+
+**The failure has a signature worth recognising**, because it does not look like a failing gate: the
+step reports exit 143, and every `if: always()` step and post-step after it is `skipped`. Those run
+on a failure and on a cancellation alike, so a run where they do not is a runner that went away
+rather than a job that failed — and on a hosted runner that is the OOM killer taking the agent. A
+job timeout, a cancelled workflow and a superseded `concurrency` group all leave the post-steps
+intact.
+
 **The mutation job streams, and the test matrix does not.** A mutation run prints nothing for as
 long as it takes — every mutant's line goes to the component's log, and that log reaches a reader
 through an artifact the job uploads on its way out. A job that is killed never gets there, so the

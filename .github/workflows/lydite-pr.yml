@@ -378,10 +378,21 @@ jobs:
       # for. The test matrix keeps its output captured: a suite's log is
       # thousands of passing lines, and a CI log carrying all of them buries
       # the one component that failed.
+      #
+      # --concurrency 2, because a slot costs more here than it does in the
+      # test matrix and the default is set for that one. A slot in `lydite
+      # test` is an already-compiled suite; a slot in `lydite mutation` is a
+      # *compile* as well, since an overlay changes the build hash — and this
+      # repository's `cli` component declares `-race` over a package graph
+      # carrying all 206 of gotreesitter's grammars, which is the heaviest
+      # build it has. Four of those at once exhausts a 16GB runner: the agent
+      # is killed, the step reports 143, and every `if: always()` step and
+      # post-step after it is skipped, which is the signature of a runner
+      # that went away rather than a job that failed.
       - name: lydite mutation
         env:
           COMPONENTS: ${{ matrix.shard.components }}
-        run: lydite mutation --dir . --affected --component "$COMPONENTS" --stream
+        run: lydite mutation --dir . --affected --component "$COMPONENTS" --stream --concurrency 2
 
       # Under its own prefix, so `publish` never reads a shard's document as a
       # `mutation` section of its own: there would be one per shard, each
