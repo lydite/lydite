@@ -276,7 +276,7 @@ func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: "go-test"}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "the suite failed")}
 
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, nil, true, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 	if len(doc.Components) != 0 || doc.Reason == "" {
 		t.Errorf("doc = %+v, want no components and a reason", doc)
 	}
@@ -425,7 +425,7 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 		Producer:  measured.Producer,
 	}
 	tree := candidate.Tree
-	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Baseline{"svc": higher}); err != nil {
+	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": higher}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +451,7 @@ func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
 		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
 		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
 	}
-	doc := measurementsFrom("tree", record, record, nil, baseline, true, nil)
+	doc := measurementsFrom("tree", record, record, nil, nil, baseline, true, nil)
 	if doc.Components["same"].Base == nil {
 		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
 	}
@@ -478,7 +478,7 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 	unrun := unmeasuredComponent(decl.Components[1], "the component was not selected for this run")
 	unrun.Unselected = true
 	_, value := candidateThisTree(context.Background(), cmd, root, decl,
-		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, true, nil, 0.1)
+		[]measurement{measured("api", runner.Go, 1, 2), unrun}, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 	if !strings.HasPrefix(value, "1 of 2 component(s)") {
 		t.Errorf("record row = %q, want it to name the declaration's count as well as its own", value)
 	}
@@ -494,7 +494,7 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	record := gitstate.Baseline{"api": producing(90, 100, "go")}
 	measured := gitstate.Baseline{"api": producing(89, 100, "go")}
-	doc := measurementsFrom("tree", record, measured, nil, nil, true, nil)
+	doc := measurementsFrom("tree", record, measured, nil, nil, nil, true, nil)
 
 	e := doc.Components["api"]
 	if e.LineCount != (coverage.LineCount{Covered: 90, Total: 100}) {
@@ -508,7 +508,7 @@ func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	}
 	// An entry that never dipped carries nothing extra: the two agree, and a
 	// second copy of one number is one that can disagree with the first.
-	plain := measurementsFrom("tree", record, record, nil, nil, true, nil)
+	plain := measurementsFrom("tree", record, record, nil, nil, nil, true, nil)
 	if plain.Components["api"].Unanchored != nil {
 		t.Error("an entry that was not anchored still carries a second copy of its counts")
 	}
@@ -542,7 +542,7 @@ func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
 		unmeasuredComponent(decl.Components[1], "the coverage report lists no coverable line"),
 	}
 
-	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, nil, nil, true, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 
 	if _, ok := doc.Components["api"]; !ok {
 		t.Errorf("the run discarded the component it measured: %+v", doc)

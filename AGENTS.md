@@ -65,6 +65,7 @@ source/cli/internal/typescript/   # pinned Biome, the only TS linter (see Linter
 source/cli/internal/golang/       # gosec, govulncheck (installed into a version-keyed GOBIN dir)
 source/cli/internal/semgrep/      # pinned Semgrep, installed via pipx
 source/cli/internal/coverage/     # reads a component's coverage report (see Coverage below)
+source/cli/internal/crap/         # the CRAP index per Go function, from that report (see Complexity)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
                                   #   (see Mutation below)
 source/cli/internal/annotation/   # the equivalence declaration: the token, and how a comment
@@ -1830,6 +1831,90 @@ actually fixes a stacked pull request is a caller passing the branch it targets,
 `lydite/actions` does: every job it runs takes `--base-branch` from `github.base_ref`, on
 `pull_request` events and never on a push.
 
+## Complexity: the CRAP index
+
+Coverage measures execution and nothing else — a test that calls a function and asserts nothing
+scores full marks on every line it touches. Mutation answers that half; complexity is the other,
+and `internal/crap` is it: `comp² × (1 − cov)³ + comp` per function, scored from the per-line hits
+`internal/coverage` already parsed. No second run and no second artefact, the same rule the patch
+gate follows. See [ADR 0028](docs/adr/0028-crap-gates-the-delta-above-the-threshold.md).
+
+**The gate is the delta of the count above 30, per component.** A change may not raise how many of
+a component's functions sit above the threshold. Absolute would fail every repository on the day
+it upgrades, over debt it has always had — the rule `coverage.floor` follows by defaulting to `0`.
+Diff-scoping was rejected too, and that is the less obvious half: a change can push a function
+over the threshold **without touching it**, by complicating a call site or deleting the test that
+covered it, which is the blind spot aggregate coverage exists to cover. It is a **Gate** in
+CONTEXT.md's sense — the author clears it by testing the function or taking it apart, both of
+which are the work you wanted.
+
+**The worst value is recorded and never gated.** It and the count are the two ledger scalars
+[#26](https://github.com/lydite/lydite/issues/26) needs. A change taking the worst function from
+400 to 380 has improved nothing anybody can act on, and one adding a well-tested complex function
+raises it without adding a thing to fix.
+
+**There is no repository-wide gate**, because the per-component rule is strictly stricter: a change
+adding a function above the threshold to one component and removing one from another fails there
+and nets to zero over the repository. The `crap` row a whole run and `lydite test merge` emit is
+`context` and carries the scalars summed, over a denominator of the components CRAP could apply to.
+
+**Go alone, and that is a property of the language.** lydite is Go and walks `go/ast` in-process —
+no tool, no pin, no install, no staleness risk. Rust and TypeScript have no equivalent in hand and
+are [#17](https://github.com/lydite/lydite/issues/17), which is research; a `lang`-shaped
+abstraction invented from one implementation is an abstraction fitted to Go. Every other component
+gets one **`context`** row naming the limit — present, because a component silently absent reads as
+one that scored clean, and context rather than amber because nothing about that repository could
+make the row green. A Go component whose score could not be taken is the opposite, and is amber.
+
+**Complexity is counted the way gocyclo and cyclop count it**: one, plus every `if`, `for` and
+`range`, every non-default `case`, every communicating `select` clause, and every `&&` and `||`.
+A number lydite reports and a number a developer gets from either agree, which is most of what
+makes a threshold arguable. A closure counts towards the function that declares it, because the
+coverage half of the score is that function's whole line span and contains the closure's lines —
+excluding its branches would score one span's coverage against another span's complexity.
+
+**Generated files are excluded by reuse and not by a second rule.** The hit map bounds what is
+scored, and `ParseGoProfile` has already dropped generated files and the blank and comment lines a
+Go profile's block spans sweep up. A function the report knows no line of is not scored at all,
+never scored 0% — the `0/0` that `coverage.LineCount.Measured` keeps out of every other figure.
+
+### Its own baseline document
+
+`crap/v1/<tree>.json` on the `lydite` branch, beside and never inside `v4/<tree>.json`. An object
+of component name to `{above, worst, producer}`.
+
+- **A wider `v4` entry was rejected, and the trap is the point.** An entry written before the field
+  reads back with it at its zero value, so the delta becomes `current − 0` — the absolute count,
+  failing every repository on the day it upgrades. That is what the delta exists to prevent,
+  arriving through the mechanism meant to prevent it. Widening forces a `v5`, and a `v5` costs
+  every consumer a full **coverage** cache miss for a **CRAP** feature.
+- **Separate documents, one writer.** `gitstate.WriteBaseline` stages every metric's document in
+  one commit, so the single call site stays the only place a baseline reaches the branch and a
+  tree's state cannot half-land.
+- **A CRAP miss does not measure the base tree.** Every repository has a coverage baseline and no
+  CRAP one the first time it runs a lydite that computes CRAP, and re-measuring the base tree for
+  a metric that would gate nothing on that run charges all of them for it. The components report
+  `new` and gate nothing for one change, which is the shape a changed producer already has. A
+  *coverage* miss does measure, and that measurement answers both metrics at once.
+- **The entry carries its producer**, for the reason a coverage entry does: a toolchain that counts
+  statements differently moves every function's coverage, so a difference is a change of definition
+  and reports `new`.
+- **The threshold is not stored and not configurable.** 30 is the value the definition names, and a
+  knob added before anyone has asked is a knob whose default is the only value anyone uses. Moving
+  it changes what the stored count means, so it is a bump of the metric's directory rather than a
+  field beside the number.
+- **A score rides on a coverage entry and never travels alone.** It is derived from the coverage
+  report, and `missingFromRecord` asks only whether a component has an entry — so a score-only
+  entry would satisfy the completeness check for a component whose coverage nobody measured. The
+  carry-forward rule is coverage's, asked again: only a component affected selection did not run.
+- **No tolerance, deliberately.** Two measurements of one tree differ only if what is measured
+  changed, so there is no sub-tenth noise to absorb — and a tolerance over an integer count would
+  be a free function above the threshold per merge.
+
+`--gate-coverage` is what turns the comparison on, so the flag named for coverage now gates two
+metrics. What it means is "read the recorded state and compare against it", and the recorded state
+is one document per metric.
+
 ## Mutation: `lydite mutation`
 
 Coverage measures execution. A test that calls a function and asserts nothing scores full marks on
@@ -2605,7 +2690,7 @@ never needed would make every release depend on remembering a step — the same
 failure the major-alias move in that workflow was automated away to prevent.
 Write one when the release carries what a commit subject cannot: a change in
 what an existing number or verdict *means*, an upgrade step consumers must take,
-or a new major. `docs/release-notes/v2.0.0.md` is the worked example, and the
+or a new major. `docs/release-notes/v0.2.0.md` is the worked example, and the
 file has to be on `main` before the tag is pushed — the workflow reads it out of
 the tagged tree.
 

@@ -2,6 +2,7 @@ package gitstate
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +138,7 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	run(writer, "commit", "-m", "coverage baseline for concurrent")
 	run(writer, "push", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "stalerace", Baseline{"api": entry(30, 100)}); err != nil {
+	if err := WriteBaseline(ctx, clone, "stalerace", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}); err != nil {
 		t.Fatalf("WriteBaseline over a stale tracking ref: %v", err)
 	}
 
@@ -170,7 +171,7 @@ func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
 	run(clone, "remote", "add", "origin", origin)
 	run(clone, "fetch", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "rejected", Baseline{"api": entry(30, 100)}); err == nil {
+	if err := WriteBaseline(ctx, clone, "rejected", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}); err == nil {
 		t.Error("WriteBaseline returned nil even though the push was rejected and the baseline never landed")
 	}
 }
@@ -278,7 +279,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 	}
 
 	// Only a commit-keyed entry, as written before this change.
-	if err := WriteBaseline(ctx, repo, head, Baseline{"api": entry(11, 100)}); err != nil {
+	if err := WriteBaseline(ctx, repo, head, Snapshot{Coverage: Baseline{"api": entry(11, 100)}}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err := ReadBaseline(ctx, repo, tree, head)
@@ -291,7 +292,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 
 	// Now a tree-keyed entry as well: it must win, because it is the one a
 	// pull request records and the one a later main commit shares.
-	if err := WriteBaseline(ctx, repo, tree, Baseline{"api": entry(77, 100)}); err != nil {
+	if err := WriteBaseline(ctx, repo, tree, Snapshot{Coverage: Baseline{"api": entry(77, 100)}}); err != nil {
 		t.Fatal(err)
 	}
 	got, hit, err = ReadBaseline(ctx, repo, tree, head)
@@ -571,4 +572,78 @@ func TestAnUnreadableBaselineIsAMissRatherThanAnError(t *testing.T) {
 // gate, and nothing here is a gate.
 func entry(covered, total int) Entry {
 	return Entry{LineCount: coverage.LineCount{Covered: covered, Total: total}}
+}
+
+// The metrics land in one commit and read back independently. One commit
+// because they describe the same tree and are recorded by the same job, so two
+// pushes would double the retry loop and leave a window where the branch holds
+// half a measurement. Independently because a repository upgrading to a lydite
+// that computes CRAP has a coverage baseline and no CRAP one, and a miss there
+// must not cost it the coverage baseline it already has.
+func TestEveryMetricLandsInOneCommitAndMissesOnItsOwn(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	origin := seedStateBranch(t, ctx, map[string]string{"coverageonly": `{"api":{"covered":10,"total":100}}`})
+
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+
+	// The tree the seed recorded coverage for has no CRAP entry, which is
+	// every repository's state the first time it runs a lydite that computes
+	// one.
+	if _, hit, err := ReadBaseline(ctx, clone, "coverageonly"); err != nil || !hit {
+		t.Fatalf("the coverage baseline = (hit=%v, %v), want a hit", hit, err)
+	}
+	if got, hit, err := ReadCRAP(ctx, clone, "coverageonly"); err != nil || hit {
+		t.Errorf("the CRAP baseline = (%v, hit=%v, %v), want a miss of its own", got, hit, err)
+	}
+
+	before := revCount(t, ctx, clone)
+	if err := WriteBaseline(ctx, clone, "both", Snapshot{
+		Coverage: Baseline{"api": entry(30, 100)},
+		CRAP:     CRAPBaseline{"api": {Above: 2, Worst: 156.25, Producer: "go1.26.6"}},
+	}); err != nil {
+		t.Fatalf("WriteBaseline: %v", err)
+	}
+	if got := revCount(t, ctx, clone) - before; got != 1 {
+		t.Errorf("the write added %d commits to %s, want 1 carrying both documents", got, BranchName)
+	}
+	if got, hit, err := ReadCRAP(ctx, clone, "both"); err != nil || !hit ||
+		got["api"] != (CRAPEntry{Above: 2, Worst: 156.25, Producer: "go1.26.6"}) {
+		t.Errorf("the CRAP baseline = (%v, hit=%v, %v), want what was written", got, hit, err)
+	}
+	if got, hit, _ := ReadBaseline(ctx, clone, "both"); !hit || got["api"] != entry(30, 100) {
+		t.Errorf("the coverage baseline = (%v, hit=%v), want what was written beside it", got, hit)
+	}
+
+	// A metric with nothing to record writes no document, rather than an
+	// empty object every reader treats as a miss anyway — which for a
+	// repository lydite computes no CRAP for would be one such file per tree,
+	// forever.
+	if err := WriteBaseline(ctx, clone, "nocrap", Snapshot{Coverage: Baseline{"api": entry(40, 100)}}); err != nil {
+		t.Fatalf("WriteBaseline: %v", err)
+	}
+	verify := t.TempDir()
+	run(verify, "clone", "-b", BranchName, origin, ".")
+	if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(CRAPStatePath("nocrap")))); err == nil {
+		t.Errorf("%s was written for a snapshot holding no CRAP entry", CRAPStatePath("nocrap"))
+	}
+}
+
+// revCount is how many commits the remote's state branch carries.
+func revCount(t *testing.T, ctx context.Context, dir string) int {
+	t.Helper()
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+		t.Fatalf("fetch: %v", r.Err)
+	}
+	r := executil.RunQuiet(ctx, dir, "git", "rev-list", "--count", "origin/"+BranchName)
+	if !r.Ok() {
+		t.Fatalf("rev-list: %v", r.Err)
+	}
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(r.Output), "%d", &n); err != nil {
+		t.Fatalf("rev-list output %q: %v", r.Output, err)
+	}
+	return n
 }

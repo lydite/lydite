@@ -812,11 +812,11 @@ func TestRecordingMergesRatherThanSkipping(t *testing.T) {
 		t.Error("a component the declaration no longer has kept its entry")
 	}
 	// A merge that changes nothing must not push.
-	if !sameCounts(merged, merged) {
-		t.Error("sameCounts says an identical baseline differs")
+	if !sameEntries(merged, merged) {
+		t.Error("sameEntries says an identical baseline differs")
 	}
-	if sameCounts(merged, existing) {
-		t.Error("sameCounts says a changed baseline is identical")
+	if sameEntries(merged, existing) {
+		t.Error("sameEntries says a changed baseline is identical")
 	}
 }
 
@@ -1439,11 +1439,11 @@ func TestTheSelfBasePathAnchorsAgainstThePreviousCommit(t *testing.T) {
 	run("commit", "-m", "second")
 
 	got := previousTreeBaseline(context.Background(), root)
-	if len(got) == 0 {
+	if len(got.Coverage) == 0 {
 		t.Fatal("no anchor found for the commit immediately before")
 	}
-	if got["svc"] != first["svc"] {
-		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got["svc"], first["svc"])
+	if got.Coverage["svc"] != first["svc"] {
+		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got.Coverage["svc"], first["svc"])
 	}
 }
 

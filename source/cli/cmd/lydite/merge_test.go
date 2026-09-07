@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -624,4 +625,58 @@ func countRows(t *testing.T, out, label string) int {
 		}
 	}
 	return n
+}
+
+// The fold carries each shard's own crap row and emits the figure over the
+// repository, which is the two ledger scalars summed. A shard cannot emit it:
+// each sums its own components, so two shards would publish two answers to a
+// question about the repository — the reason coverage(repo) belongs here too.
+//
+// It is composed from the shards' scalars and not from their rendered rows: a
+// report's rows carry prose, so folding them could not recover a number.
+func TestMergeSumsTheScoresNoShardCanAnswerFor(t *testing.T) {
+	root := mergeRepo(t)
+	shard := func(name string, above int, worst float64) string {
+		t.Helper()
+		return shardDir(t,
+			[]ui.Row{
+				{Status: ui.StatusPass, Label: "orphans", Value: "none in 2 source file(s)"},
+				{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
+				{Status: ui.StatusPass, Label: "schedule", Value: "1 component(s), max 1 concurrent"},
+				{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+				{Status: ui.StatusPass, Label: "coverage(" + name + ")", Value: "measured"},
+				{Status: ui.StatusPass, Label: "crap(" + name + ")",
+					Value: fmt.Sprintf("%d function(s) above 30, worst %.1f, baseline %d", above, worst, above)},
+			},
+			&measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{
+				name: {
+					Entry: gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go"},
+					Base:  &gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go"},
+					CRAP:  &gitstate.CRAPEntry{Above: above, Worst: worst, Producer: "go"},
+				},
+			}})
+	}
+	out, err := runMergeCmd(t, root, shard("a", 3, 41.5), shard("b", 2, 156.3))
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	// Each shard's own row survives, exactly once.
+	for _, label := range []string{"crap(a)", "crap(b)"} {
+		if got := jsonRowByLabel(t, out, label); got.Status != "pass" {
+			t.Errorf("%s = %+v, want the shard's own row carried", label, got)
+		}
+		if n := strings.Count(out, `"`+label+`"`); n != 1 {
+			t.Errorf("%s appears %d times", label, n)
+		}
+	}
+	got := jsonRowByLabel(t, out, "crap")
+	if got.Status != "context" {
+		t.Errorf("crap = %+v, want a context row — every component's own row carries the gate", got)
+	}
+	if !strings.Contains(got.Value, "5 function(s) above 30 across 2 of 2 component(s)") {
+		t.Errorf("crap = %q, want both shards' counts summed", got.Value)
+	}
+	if !strings.Contains(got.Value, "worst 156.3") {
+		t.Errorf("crap = %q, want the worst across the repository", got.Value)
+	}
 }

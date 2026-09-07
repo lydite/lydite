@@ -155,7 +155,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// a name in it that the tree does not declare is a component nothing can
 	// ever measure again — the same thing an entry left behind by a deleted
 	// component is, and it is dropped for the same reason.
-	record := declaredOnly(decl, folded.baseline())
+	record := declaredOnly(decl, folded.snapshot())
 
 	// The tolerance is read from the tree being recorded, because it is that
 	// tree's own statement of how much measurement noise it accepts.
@@ -167,7 +167,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// Merged onto whatever this tree already holds, never skipped because it
 	// holds something: a re-run that measured more than the last one must not
 	// be refused for finding an entry there.
-	if existing, hit, _ := gitstate.ReadBaseline(ctx, dir, head); hit {
+	if existing := existingSnapshot(ctx, dir, head); len(existing.Coverage) > 0 {
 		// Anchored against what this tree already holds, not only against
 		// what the measuring run compared with. The same tree is the same
 		// content, so a difference between two measurements of it is the
@@ -176,12 +176,21 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		// replaces the anchored high-water entry with a raw dipped one,
 		// handing the next change a lowered number to gate against. That is
 		// the per-merge ratchet withToleratedDipsRestored exists to prevent.
-		record = withToleratedDipsRestored(record, existing, cfg.Coverage.Tolerance)
+		//
+		// No CRAP equivalent, and none is wanted: the score is a count of
+		// functions, so two measurements of one tree differ only if what is
+		// measured changed. There is no sub-tenth noise for a tolerance to
+		// absorb, and a tolerance over an integer count would be a free
+		// function above the threshold per merge.
+		record.Coverage = withToleratedDipsRestored(record.Coverage, existing.Coverage, cfg.Coverage.Tolerance)
 		merged := declaredOnly(decl, existing)
-		for name, e := range record {
-			merged[name] = e
+		for name, e := range record.Coverage {
+			merged.Coverage[name] = e
 		}
-		if len(merged) == len(existing) && sameCounts(merged, existing) {
+		for name, e := range record.CRAP {
+			merged.CRAP[name] = e
+		}
+		if sameSnapshot(merged, existing) {
 			rep.Add(ui.Row{Status: ui.StatusPass, Label: "record",
 				Value: shortSHA(head) + " already holds this measurement"})
 			return nil
@@ -199,8 +208,33 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		return nil
 	}
 	rep.Add(ui.Row{Status: ui.StatusPass, Label: "record",
-		Value: fmt.Sprintf("%d component(s) recorded for %s", len(record), shortSHA(head))})
+		Value: fmt.Sprintf("%d component(s) recorded for %s", len(record.Coverage), shortSHA(head))})
 	return nil
+}
+
+// existingSnapshot is what the branch already holds for this tree, across every
+// metric, so a recording merges onto it rather than replacing it.
+//
+// A read that fails is an empty snapshot rather than an error: the question is
+// only whether there is something to merge onto, and a run that cannot answer
+// it records what it measured — which is the state the tree would have been
+// left in had nothing been there.
+func existingSnapshot(ctx context.Context, dir, tree string) gitstate.Snapshot {
+	var out gitstate.Snapshot
+	if baseline, hit, err := gitstate.ReadBaseline(ctx, dir, tree); err == nil && hit {
+		out.Coverage = baseline
+	}
+	if scores, hit, err := gitstate.ReadCRAP(ctx, dir, tree); err == nil && hit {
+		out.CRAP = scores
+	}
+	return out
+}
+
+// sameSnapshot reports whether two snapshots hold the same entries under every
+// metric, so a run that would rewrite a tree's state byte for byte does not
+// push to do it.
+func sameSnapshot(a, b gitstate.Snapshot) bool {
+	return sameEntries(a.Coverage, b.Coverage) && sameEntries(a.CRAP, b.CRAP)
 }
 
 // measurementsIn reads one document per named directory, adding a row for each
@@ -276,11 +310,19 @@ func unmeasurableByDeclaration(c component.Component) bool {
 // key. A component the declaration no longer holds dies with it rather than
 // leaving a tail of entries nobody can measure, and a name a document
 // invented never arrives.
-func declaredOnly(decl component.File, b gitstate.Baseline) gitstate.Baseline {
-	out := make(gitstate.Baseline, len(b))
-	for name, e := range b {
+func declaredOnly(decl component.File, snap gitstate.Snapshot) gitstate.Snapshot {
+	out := gitstate.Snapshot{
+		Coverage: make(gitstate.Baseline, len(snap.Coverage)),
+		CRAP:     make(gitstate.CRAPBaseline, len(snap.CRAP)),
+	}
+	for name, e := range snap.Coverage {
 		if declares(decl, name) {
-			out[name] = e
+			out.Coverage[name] = e
+		}
+	}
+	for name, e := range snap.CRAP {
+		if declares(decl, name) {
+			out.CRAP[name] = e
 		}
 	}
 	return out
