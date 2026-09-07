@@ -58,6 +58,11 @@ jobs:
         with:
           go-version-file: source/cli/go.mod
           cache: true
+          # Named: the module is at source/cli, and setup-go looks for the
+          # dependency file at the workspace root. Without it every restore
+          # misses and the job re-downloads the module graph — a slower run and
+          # never a red one, which is how it goes unnoticed.
+          cache-dependency-path: source/cli/go.sum
 
       # lydite installs the pinned cargo-nextest itself, and building it from
       # source is ~7 minutes. Cached, that is a one-time cost per pin bump
@@ -228,6 +233,11 @@ jobs:
         with:
           go-version-file: source/cli/go.mod
           cache: true
+          # Named: the module is at source/cli, and setup-go looks for the
+          # dependency file at the workspace root. Without it every restore
+          # misses and the job re-downloads the module graph — a slower run and
+          # never a red one, which is how it goes unnoticed.
+          cache-dependency-path: source/cli/go.sum
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -458,6 +468,11 @@ jobs:
         with:
           go-version-file: source/cli/go.mod
           cache: true
+          # Named: the module is at source/cli, and setup-go looks for the
+          # dependency file at the workspace root. Without it every restore
+          # misses and the job re-downloads the module graph — a slower run and
+          # never a red one, which is how it goes unnoticed.
+          cache-dependency-path: source/cli/go.sum
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
