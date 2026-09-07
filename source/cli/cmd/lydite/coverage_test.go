@@ -1669,3 +1669,71 @@ func TestANarrowedGatedRunPublishesNoFigureOverTheRepository(t *testing.T) {
 		t.Errorf("an unnarrowed run published no figure over the repository: %v", whole.Rows())
 	}
 }
+
+// A composed figure counts the components it could have covered, never the
+// ones nothing could ever measure. A raw-command component contributes to
+// neither side of any comparison, so counting it renders a complete run as
+// `1 of 2 component(s)` — the "N of M" shape that exists so a partial run
+// cannot read as a repository-wide pass, saying the opposite of what happened.
+// The floor row beside it already draws the distinction, and two rows in one
+// report disagreeing about the same repository is worse than either being
+// wrong alone.
+func TestAComposedDenominatorExcludesWhatNothingCouldMeasure(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "docs", Dir: "docs", Command: []string{"make"}},
+	}}
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasurableComponent(decl.Components[1], "the component declares a raw command, which has no instrumented variant"),
+	}
+	cfg := config.Default()
+	cfg.Coverage.Floor = 50
+
+	rep := ui.NewReport("test")
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components, ms, cfg,
+		coverageOptions{Instrument: true})
+	rows := rowsOf(rep)
+	if got := rows[repoLabel("coverage")].Value; !strings.Contains(got, "1 of 1 component(s)") {
+		t.Errorf("coverage(repo) = %q, want 1 of 1 — the raw-command component is not a gap", got)
+	}
+	// The two rows have to agree, which is the whole of what makes either
+	// readable: one saying 1 of 2 beside one saying 1 of 1 signals that
+	// something went ungated when nothing did.
+	if got := rows["floor"].Value; !strings.Contains(got, "1 of 1 component(s)") {
+		t.Errorf("floor = %q, want it to agree with coverage(repo)", got)
+	}
+}
+
+// A base tree's measurement names every component it failed to measure, and
+// says nothing about one nothing could ever measure. That absence is permanent
+// and expected — recordingBlockedBy already exempts it, and floorRows already
+// excludes it — so warning about it prints what reads as a measurement failure
+// on every baseline computation, forever, about a state the repository stated
+// on purpose.
+func TestABaseTreesUnmeasurableComponentIsNotAFailedMeasurement(t *testing.T) {
+	decl := []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "docs", Dir: "docs", Command: []string{"make"}},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}
+	ms := []measurement{
+		measured("api", runner.Go, 9, 10),
+		unmeasurableComponent(decl[1], "the component declares a raw command, which has no instrumented variant"),
+		unmeasuredComponent(decl[2], "no container runtime"),
+	}
+	var warnings strings.Builder
+	out := baseTreeBaseline(&warnings, "abcdef1234567890", ms, map[string][]string{"web": {"docker: not found"}})
+
+	if _, ok := out["api"]; !ok || len(out) != 1 {
+		t.Errorf("baseline = %v, want the one measured component", out)
+	}
+	if got := warnings.String(); strings.Contains(got, "docs") {
+		t.Errorf("warnings = %q, want nothing about a component nothing could ever measure", got)
+	}
+	// The component that genuinely failed there is still named, with the tail
+	// that is the only account of it outliving the worktree.
+	if got := warnings.String(); !strings.Contains(got, "web") || !strings.Contains(got, "docker: not found") {
+		t.Errorf("warnings = %q, want the failed component and its tail", got)
+	}
+}

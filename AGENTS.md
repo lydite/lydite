@@ -1631,6 +1631,14 @@ components against the base tree's four, so every narrowed run would read as a r
 of the component it did not run. A figure whose baseline does not cover every component in it is
 reported as `new` rather than compared.
 
+**Its denominator counts what could have been measured**, so a component nothing could ever
+measure — a raw `command:`, a runner naming no report — is in neither number. `N of M` exists so a
+partial run cannot read as a repository-wide pass, and an `M` counting one renders a complete run
+as `1 of 2` while the `floor` row beside it says `1 of 1`: two rows in one report disagreeing about
+the same repository, and the coverage row signalling a gap nothing left. The same distinction keeps
+a base-tree measurement from warning about one on every cache miss, forever, about a state the
+declaration states on purpose.
+
 **A tolerated dip does not lower the baseline.** `coverage.tolerance` absorbs sub-tenth measurement
 noise; recording a dipped number verbatim would turn it into an unbounded downward ratchet, each
 change dipping by up to the tolerance and the next one measured from the lower floor. Within-tolerance
