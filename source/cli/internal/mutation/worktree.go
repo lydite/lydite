@@ -9,12 +9,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 
 	"lydite/lydite/internal/runner"
 )
 
-// Tree isolates a component's mutants in a copy of its own directory, for a
+// Tree isolates a component's mutants in a copy of the scan root, with the
+// component's own commands run at its directory inside that copy, for a
 // toolchain with no equivalent of Go's build overlay.
 //
 // Cargo and every JavaScript runner read source from the filesystem and take
@@ -29,11 +29,30 @@ import (
 // per mutant, so a worker is reused with the mutated file restored between
 // them.
 type Tree struct {
-	// Dir is the component's directory, absolute. It is read and never
-	// written: every mutant is applied to the source as it stands here, so a
-	// worker whose previous mutant was not restored cannot compound.
-	Dir string
-	// Files are the component-relative paths to copy, in any order.
+	// Root is the scan root: the tree a worker is a copy of. It is read and
+	// never written — every mutant is applied to the source as it stands
+	// here, so a worker whose previous mutant was not restored cannot
+	// compound.
+	Root string
+	// Component is the component's directory relative to Root, in slash
+	// form, and "." for one rooted at the scan root. Every command runs
+	// there inside the worker, and a mutant's own path is relative to it.
+	Component string
+	// Files are the scan-root-relative paths to copy, in any order.
+	//
+	// The whole scan root and not the component alone. A component's build
+	// routinely reads a file above its own directory — a workspace importing
+	// a generated spec, a crate embedding a VERSION with include_str! — and
+	// a worker holding the component alone fails to compile every one of
+	// those mutants. That reports them unviable, which makes the component
+	// `unmeasured`, which does not vote: the gate then examines nothing and
+	// the run is green.
+	//
+	// The scan root and not the enclosing repository, which is a real bound
+	// rather than an oversight: git lists the files under the directory it
+	// is asked about, and a component's dir cannot escape the scan root. A
+	// build reaching above the root lydite was pointed at is one lydite
+	// cannot see, and its mutants are unviable for that reason.
 	//
 	// The caller supplies git's own list — tracked, plus untracked files git
 	// is not ignoring — which is the list internal/orphan already reads.
@@ -62,6 +81,9 @@ type Tree struct {
 	Parent string
 }
 
+// dir is the component's own directory in the tree the copy is taken from.
+func (t Tree) dir() string { return filepath.Join(t.Root, filepath.FromSlash(t.Component)) }
+
 // Worker copies the tree once and prepares it.
 func (t Tree) Worker(ctx context.Context, n int) (Worker, error) {
 	dir, err := os.MkdirTemp(t.Parent, fmt.Sprintf("lydite-mutation-%d-", n))
@@ -69,18 +91,22 @@ func (t Tree) Worker(ctx context.Context, n int) (Worker, error) {
 		return nil, fmt.Errorf("opening a worker directory for mutation: %w", err)
 	}
 	w := &treeWorker{tree: t, dir: dir}
-	if err := w.populate(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, err
-	}
+	// Before the copy, not after it. populate writes every file the worker
+	// holds, and those writes are owed the same containment a mutant's is —
+	// a root opened afterwards would confine the one write that was never in
+	// doubt and none of the ones that are.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 	w.root = root
+	if err := w.populate(); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
 	if t.Prepare != nil {
-		if err := t.Prepare(ctx, dir); err != nil {
+		if err := t.Prepare(ctx, filepath.Join(dir, filepath.FromSlash(t.Component))); err != nil {
 			_ = w.Close()
 			return nil, fmt.Errorf("preparing the worker directory: %w", err)
 		}
@@ -108,7 +134,7 @@ type treeWorker struct {
 	original []byte
 }
 
-// populate copies the component's files into the worker.
+// populate copies the scan root's files into the worker.
 func (w *treeWorker) populate() error {
 	for _, rel := range w.tree.Files {
 		if err := w.copy(rel); err != nil {
@@ -123,14 +149,22 @@ func (w *treeWorker) populate() error {
 //
 // A symlink is copied because the tree may need it — a JavaScript workspace's
 // bin shims, a Rust crate linked in from a sibling — and copying the target
-// instead would change what the build sees. It is safe to have one here
-// precisely because every later write goes through os.Root, which refuses to
-// follow one out of the worker.
+// instead would change what the build sees.
+//
+// Every write here goes through the worker's os.Root, for the reason Stage's
+// does. The tree being copied is a scanned repository, so it holds symlinks
+// nobody vetted: a committed `evil -> /etc` beside a listed `evil/passwd`
+// makes the destination path lexically spotless while the open follows the
+// link out and truncates a file outside the worker. checkPath cannot see
+// that, and says so in its own comment. A link the root refuses is one whose
+// target leaves the worker, and the component fails with that path named
+// rather than compiling against a tree quietly missing a file its build
+// reads.
 func (w *treeWorker) copy(rel string) error {
 	if err := checkPath(rel); err != nil {
 		return err
 	}
-	from := filepath.Join(w.tree.Dir, filepath.FromSlash(rel))
+	from := filepath.Join(w.tree.Root, filepath.FromSlash(rel))
 	info, err := os.Lstat(from)
 	if err != nil {
 		// A path git lists and the filesystem does not is a file deleted
@@ -141,8 +175,10 @@ func (w *treeWorker) copy(rel string) error {
 		}
 		return err
 	}
-	to := filepath.Join(w.dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+	// Slash-separated, because os.Root names are always slash-separated
+	// whatever the platform's separator is.
+	to := path.Clean(rel)
+	if err := w.root.MkdirAll(path.Dir(to), 0o750); err != nil {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
@@ -150,7 +186,7 @@ func (w *treeWorker) copy(rel string) error {
 		if err != nil {
 			return err
 		}
-		return os.Symlink(target, to)
+		return w.root.Symlink(target, to)
 	}
 	if !info.Mode().IsRegular() {
 		// A socket, a device node or a fifo is not source and cannot be
@@ -159,12 +195,12 @@ func (w *treeWorker) copy(rel string) error {
 		// firing on ordinary work.
 		return nil
 	}
-	src, err := os.Open(from) // #nosec G304 -- a component-relative source path, checked above to name a file inside the component
+	src, err := os.Open(from) // #nosec G304 -- a path git listed under the scan root, checked lexically above; this reads the tree being measured and writes nothing
 	if err != nil {
 		return err
 	}
 	defer func() { _ = src.Close() }()
-	dst, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm()) // #nosec G304 -- a path inside the worker directory this process just created
+	dst, err := w.root.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -186,7 +222,7 @@ func (w *treeWorker) Stage(m Mutant) (Staged, error) {
 	if err := checkPath(m.Path); err != nil {
 		return Staged{}, err
 	}
-	src, err := os.ReadFile(filepath.Join(w.tree.Dir, filepath.FromSlash(m.Path))) // #nosec G304 -- a component-relative source path, checked above to name a file inside the component
+	src, err := os.ReadFile(filepath.Join(w.tree.dir(), filepath.FromSlash(m.Path))) // #nosec G304 -- a component-relative source path, checked above to name a file inside the component
 	if err != nil {
 		return Staged{}, err
 	}
@@ -197,13 +233,15 @@ func (w *treeWorker) Stage(m Mutant) (Staged, error) {
 	// Through the root, so a path that leaves the worker — by traversal, or
 	// by following a symlink the scanned repository committed — is refused at
 	// the syscall rather than by a comparison of strings.
-	name := path.Clean(m.Path)
+	// Joined onto the component's own directory, because a mutant's path is
+	// relative to the component and the worker holds the whole repository.
+	name := path.Join(w.tree.Component, path.Clean(m.Path))
 	if err := w.root.WriteFile(name, mutated, 0o600); err != nil {
 		return Staged{}, err
 	}
 	w.staged, w.original = name, src
 	return Staged{
-		Dir:   w.dir,
+		Dir:   filepath.Join(w.dir, filepath.FromSlash(w.tree.Component)),
 		Build: w.tree.Build,
 		// One phase. Neither cargo nor a JavaScript runner has a unit that is
 		// both cheaper than the component and derivable from a file path the
@@ -233,26 +271,4 @@ func (w *treeWorker) Close() error {
 	}
 	errs = append(errs, os.RemoveAll(w.dir))
 	return errors.Join(errs...)
-}
-
-// ComponentFiles narrows a repository-wide file listing to one component's own
-// files, as paths relative to it.
-//
-// The listing is git's, in scan-root-relative form, which is what
-// internal/orphan and internal/gitdiff already work in; a worker copy needs
-// the same paths one level down. A path outside the component is not this
-// component's to copy.
-func ComponentFiles(dir string, files []string) []string {
-	prefix := path.Clean(dir)
-	out := make([]string, 0, len(files))
-	for _, f := range files {
-		if prefix == "." {
-			out = append(out, f)
-			continue
-		}
-		if rel, ok := strings.CutPrefix(f, prefix+"/"); ok {
-			out = append(out, rel)
-		}
-	}
-	return out
 }

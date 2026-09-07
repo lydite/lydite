@@ -33,11 +33,20 @@ jobs:
     name: proving ground
     runs-on: ubuntu-latest
     steps:
+      # No step here uses git as an authenticated client: the probes commit
+      # locally and push only to a bare repository under $RUNNER_TEMP, and
+      # both repositories are public, so the merge-base lydite resolves needs
+      # no credential. The job runs a foreign repository's suites and setup
+      # shell, so the token has no business surviving in .git/config where
+      # that code can read it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lydite/proving-ground
+          persist-credentials: false
           path: proving-ground
           # --affected resolves a merge-base against origin/main, which a
           # shallow checkout cannot reach. lydite refuses rather than quietly
@@ -196,11 +205,20 @@ jobs:
     name: proving ground — coverage gate
     runs-on: ubuntu-latest
     steps:
+      # No step here uses git as an authenticated client: the probes commit
+      # locally and push only to a bare repository under $RUNNER_TEMP, and
+      # both repositories are public, so the merge-base lydite resolves needs
+      # no credential. The job runs a foreign repository's suites and setup
+      # shell, so the token has no business surviving in .git/config where
+      # that code can read it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lydite/proving-ground
+          persist-credentials: false
           path: proving-ground
           # Every gate here resolves a merge-base, which a shallow checkout
           # cannot reach.
@@ -386,6 +404,312 @@ jobs:
           path: |
             proving-ground/.lydite-reports/
             reports-*/
+          if-no-files-found: ignore
+
+  # The mutation engine, end to end, against a real repository: mutants
+  # generated from a change, built, run and scored, in all three languages.
+  #
+  # `go test` holds the generators against golden fixtures, which pin which
+  # mutants exist for a given source and say nothing about what becomes of one.
+  # Everything after generation — the overlay, the worker directory, the
+  # build-only phase that tells an unviable mutant from a killed one, the score
+  # — is exercised here or nowhere, and for Rust it cannot be exercised
+  # anywhere else: this repository declares no Rust component, so that engine
+  # would otherwise merge with its argv asserted and never once executed.
+  #
+  # The fixture is synthesised onto a branch rather than committed to the
+  # proving ground, and that is forced rather than tidy. Mutants come only from
+  # lines in the change, so a survivor sitting on the default branch is in no
+  # later run's diff: it would generate nothing, and the assertion would pass
+  # forever having checked nothing.
+  #
+  # Its own runner and its own local bare origin, because mutation is
+  # diff-scoped always and a merge-base has to resolve against something.
+  proving-ground-mutation:
+    name: proving ground — mutation
+    runs-on: ubuntu-latest
+    # A mutant is a suite run, and each component pays a cold build in every
+    # worker directory on top of that. The same bound `lydite-pr.yml`'s
+    # mutation matrix carries, for the same reason: nothing inside lydite caps
+    # how long a run takes, so one genuinely too large dies here.
+    timeout-minutes: 60
+    steps:
+      # No step here uses git as an authenticated client: the probes commit
+      # locally and push only to a bare repository under $RUNNER_TEMP, and
+      # both repositories are public, so the merge-base lydite resolves needs
+      # no credential. The job runs a foreign repository's suites and setup
+      # shell, so the token has no business surviving in .git/config where
+      # that code can read it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: lydite/proving-ground
+          persist-credentials: false
+          path: proving-ground
+          # Mutation resolves a merge-base always, and refuses rather than
+          # mutating the whole repository, so a shallow checkout fails this
+          # job with exactly the message a consumer would get.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/cli/go.mod
+          cache: true
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-tools-${{ runner.os }}-${{ hashFiles('source/cli/internal/**/Cargo.toml', 'source/cli/internal/**/go.mod', 'source/cli/internal/**/requirements.txt') }}
+          restore-keys: lydite-tools-${{ runner.os }}-
+
+      # The toolchains' own package caches, which the sibling jobs do not need
+      # and this one does. A worker directory excludes `target/` and
+      # `node_modules` — they are gitignored, so the copy leaves them behind —
+      # and every worker therefore starts cold. What is shared between workers
+      # is exactly this: the registry and the npm cache sit outside the copy,
+      # so with them warm a cold worker resolves nothing over the network and
+      # only compiles. Keyed on the proving ground's own lockfiles, so a bump
+      # over there misses rather than building against a stale resolution.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.npm
+          key: proving-ground-deps-${{ runner.os }}-${{ hashFiles('proving-ground/rust/Cargo.lock', 'proving-ground/web/package-lock.json') }}
+          restore-keys: proving-ground-deps-${{ runner.os }}-
+
+      - name: build lydite
+        working-directory: source/cli
+        run: go build -o /tmp/lydite ./cmd/lydite
+
+      # A local bare origin, the base commit as `main`, and a probe branch
+      # planting two functions per component: one a test calls without
+      # asserting anything, and one identical function a test asserts every
+      # case of. Identical bodies produce identical mutants, so the run below
+      # has to survive exactly half of what it scored — and which half is what
+      # separates an engine that ran its mutants from one that reported a
+      # number.
+      #
+      # Nothing leaves this runner. The Go package name is read from a file
+      # already there rather than written down here: nothing in this repository
+      # pins what lydite/proving-ground calls that package, and a hardcoded one
+      # turns a rename over there into a compilation failure reported against
+      # lydite.
+      - name: base and probe
+        run: |
+          set -euo pipefail
+          for path in \
+            proving-ground/go/sdk \
+            proving-ground/rust/crates/tally-core/src \
+            proving-ground/web/packages/ui/src; do
+            if [ ! -d "$path" ]; then
+              echo "$path is not in the checkout: the probe plants a survivor and its neighbour there, and lydite/proving-ground has moved or renamed it" >&2
+              exit 1
+            fi
+          done
+          git init --bare --quiet --initial-branch=main "$RUNNER_TEMP/mutation-origin.git"
+          git -C proving-ground config user.email ci@lydite.invalid
+          git -C proving-ground config user.name "lydite ci"
+          git -C proving-ground remote set-url origin "$RUNNER_TEMP/mutation-origin.git"
+          git -C proving-ground push --quiet origin HEAD:refs/heads/main
+          git -C proving-ground switch --quiet -c mutation-probe
+
+          pkg=$(awk '/^package /{print $2; exit}' proving-ground/go/sdk/counters.go)
+          if [ -z "$pkg" ]; then
+            echo "could not read the package name from proving-ground/go/sdk/counters.go" >&2
+            exit 1
+          fi
+          cat > proving-ground/go/sdk/mutation_probe.go <<GO
+          package $pkg
+
+          // MutationProbe is called by a test that asserts nothing, so every mutant
+          // of it survives.
+          func MutationProbe(a, b int) int {
+          	if a > b {
+          		return a + b
+          	}
+          	return a - b
+          }
+          GO
+          cat > proving-ground/go/sdk/mutation_neighbour.go <<GO
+          package $pkg
+
+          // MutationNeighbour is the same expression under a test that asserts every
+          // case of it, so every mutant of it is killed.
+          func MutationNeighbour(a, b int) int {
+          	if a > b {
+          		return a + b
+          	}
+          	return a - b
+          }
+          GO
+          cat > proving-ground/go/sdk/mutation_probe_test.go <<GO
+          package $pkg
+
+          import "testing"
+
+          func TestMutationProbe(t *testing.T) {
+          	MutationProbe(3, 1)
+          	MutationProbe(1, 3)
+          	MutationProbe(2, 2)
+          }
+
+          func TestMutationNeighbour(t *testing.T) {
+          	for _, c := range []struct{ a, b, want int }{
+          		{3, 1, 4},
+          		{1, 3, -2},
+          		{2, 2, 0},
+          	} {
+          		if got := MutationNeighbour(c.a, c.b); got != c.want {
+          			t.Fatalf("MutationNeighbour(%d, %d) = %d, want %d", c.a, c.b, got, c.want)
+          		}
+          	}
+          }
+          GO
+
+          cat > proving-ground/rust/crates/tally-core/src/mutation_probe.rs <<'RS'
+          //! Called by a test that asserts nothing, so every mutant of it survives.
+
+          pub fn mutation_probe(a: i64, b: i64) -> i64 {
+              if a > b { a + b } else { a - b }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::mutation_probe;
+
+              #[test]
+              fn nothing_is_asserted() {
+                  mutation_probe(3, 1);
+                  mutation_probe(1, 3);
+                  mutation_probe(2, 2);
+              }
+          }
+          RS
+          cat > proving-ground/rust/crates/tally-core/src/mutation_neighbour.rs <<'RS'
+          //! The same expression under a test that asserts every case of it, so every
+          //! mutant of it is killed.
+
+          pub fn mutation_neighbour(a: i64, b: i64) -> i64 {
+              if a > b { a + b } else { a - b }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::mutation_neighbour;
+
+              #[test]
+              fn every_case_is_asserted() {
+                  assert_eq!(mutation_neighbour(3, 1), 4);
+                  assert_eq!(mutation_neighbour(1, 3), -2);
+                  assert_eq!(mutation_neighbour(2, 2), 0);
+              }
+          }
+          RS
+          cat >> proving-ground/rust/crates/tally-core/src/lib.rs <<'RS'
+
+          pub mod mutation_neighbour;
+          pub mod mutation_probe;
+          RS
+
+          cat > proving-ground/web/packages/ui/src/mutation-probe.ts <<'TS'
+          export function mutationProbe(a: number, b: number): number {
+            if (a > b) {
+              return a + b;
+            }
+            return a - b;
+          }
+          TS
+          cat > proving-ground/web/packages/ui/src/mutation-neighbour.ts <<'TS'
+          export function mutationNeighbour(a: number, b: number): number {
+            if (a > b) {
+              return a + b;
+            }
+            return a - b;
+          }
+          TS
+          cat > proving-ground/web/packages/ui/src/mutation-probe.test.ts <<'TS'
+          import { expect, it } from "vitest";
+
+          import { mutationNeighbour } from "./mutation-neighbour.js";
+          import { mutationProbe } from "./mutation-probe.js";
+
+          it("calls the probe and asserts nothing about it", () => {
+            mutationProbe(3, 1);
+            mutationProbe(1, 3);
+            mutationProbe(2, 2);
+          });
+
+          it("asserts every case of the neighbour", () => {
+            expect(mutationNeighbour(3, 1)).toBe(4);
+            expect(mutationNeighbour(1, 3)).toBe(-2);
+            expect(mutationNeighbour(2, 2)).toBe(0);
+          });
+          TS
+
+          # The planted files alone, never `add -A`: a stray artefact swept
+          # into the commit would widen selection, and the assertions would
+          # then fail on the harness rather than on lydite.
+          git -C proving-ground add \
+            go/sdk/mutation_probe.go \
+            go/sdk/mutation_neighbour.go \
+            go/sdk/mutation_probe_test.go \
+            rust/crates/tally-core/src/lib.rs \
+            rust/crates/tally-core/src/mutation_probe.rs \
+            rust/crates/tally-core/src/mutation_neighbour.rs \
+            web/packages/ui/src/mutation-probe.ts \
+            web/packages/ui/src/mutation-neighbour.ts \
+            web/packages/ui/src/mutation-probe.test.ts
+          git -C proving-ground commit --quiet -m "mutation probe"
+
+      # `--affected` mirrors how `lydite-pr.yml` runs this, and buys the
+      # negative half of the assertion: the probe plants nothing under `api`,
+      # and a run that mutated every component satisfies every claim about the
+      # engine and none about selection composing with it.
+      #
+      # The per-mutant budget is stated rather than derived. The derived one is
+      # a multiple of the component's own instrumented baseline, and the first
+      # mutant in each worker directory pays a cold build the baseline did not
+      # — so a timeout here would score a survivor as killed and turn this
+      # assertion red for a reason that is not about the engine. That is the
+      # case `--timeout` exists for.
+      - name: lydite mutation (proving ground)
+        run: |
+          status=0
+          /tmp/lydite mutation --dir proving-ground --affected --timeout 10m --json > mutation.json || status=$?
+          echo "lydite mutation exited $status"
+          cat mutation.json
+          # An error rather than a verdict writes no document at all, and the
+          # assertion would then die parsing an empty file instead of showing
+          # what lydite said. The message is on stderr, already in this log.
+          if [ ! -s mutation.json ]; then
+            echo "lydite mutation produced no report; see its error above" >&2
+            exit 1
+          fi
+          python3 .github/assert-proving-ground.py --mutation mutation.json proving-ground
+          # The process, not the document. The assertion above reads the
+          # report's own `exit` field, which is what ui.Report.ExitCode
+          # rendered — it says the document is self-consistent and nothing
+          # about what the binary handed back to the shell. CI reads the
+          # status, so a main.go that stopped turning a ui.ExitError into a
+          # non-zero exit would leave every row red, the document saying 1,
+          # and the gate passing for every consumer. Exactly 1: 0 is a pass
+          # and 2 is a referral, and a survivor is neither.
+          if [ "$status" -ne 1 ]; then
+            echo "lydite mutation exited $status; a survivor must fail the run with 1" >&2
+            exit 1
+          fi
+
+      - name: collect component logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-mutation-logs
+          path: proving-ground/.lydite-reports/
           if-no-files-found: ignore
 
   # The single job the branch-protection ruleset actually requires. Individual

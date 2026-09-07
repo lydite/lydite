@@ -330,6 +330,36 @@ that drifts is the one that starts copying half a gigabyte of build output per
 slot. The runner's own `Prepare` then runs in the worker, once, which is what
 makes the copy affordable at all.
 
+**The list is the scan root's and not the component's**, and the component's
+commands run at its own directory inside the copy. Narrowing it to the
+component was the shape first built, and it is wrong for a reason worth
+recording: a component's build routinely reads a file above itself — an npm
+workspace importing a generated spec, a crate embedding a root `VERSION` with
+`include_str!` — and a worker without those files compiles no mutant at all.
+The consequence is the worst one available here rather than a visible failure.
+An unviable mutant is excluded from the denominator by design, so every mutant
+unviable makes the component `unmeasured`, `unmeasured` does not vote, and the
+run reports a pass having examined nothing. Nothing inside lydite's own suite
+can see it — Go needs no worker directory, and this repository declares no Rust
+component — which is the argument for the planted-survivor probe in
+`ci-end2end.yml` rather than an argument about coverage of a particular line.
+The copy is the scan root's size rather than one component's, bounded by the
+same `.gitignore` judgement above and paid once per slot rather than once per
+mutant. That is the price of a worker that compiles at all. It stops at the
+scan root and does not climb to the enclosing repository: git lists the files
+under the directory it is asked about, a component's `dir` cannot escape that
+root, and a build reaching above it is reaching outside what lydite was
+pointed at.
+
+**Every write into a worker is confined by its `os.Root`, and that includes the
+copy.** `Stage` had it and `populate` did not, which left the containment the
+package claims resting on `checkPath` — a lexical check whose own comment says
+it establishes nothing of the kind. A committed `evil -> /etc` beside a listed
+`evil/passwd` is a destination path that is lexically spotless and an open that
+follows the link out; reproduced against a worker, the file outside was
+truncated. The root is opened before the copy for that reason. Hard-linking
+instead of copying remains rejected below, and for an unrelated reason.
+
 **Rust's inline test module is excluded from the tree, not from the path.** Rust
 puts unit tests in a `#[cfg(test)] mod tests` inside the file they test, and no
 path rule can see one. Mutating it reports an assertion nobody asserts as a

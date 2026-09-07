@@ -165,6 +165,16 @@ how a dead runner is exercised without one dying. It is the only job whose failu
 caught: `lydite-baseline.yml` runs `lydite test record` too, but on pushes to the default branch
 alone, where a baseline nothing writes costs a slower run rather than a red one.
 
+`ci-end2end.yml`'s `proving ground — mutation` job is the equivalent for the mutation engine, and it
+needs one thing the others do not. A green `lydite mutation` says "nothing survived", which is what
+an engine generating nothing reports too — so the probe plants two identical functions per
+component, calls one from a test that asserts nothing and asserts every case of the other, and
+requires every survivor to be in the first file and none in the second. The fixture is synthesised
+onto a branch rather than committed to the proving ground: mutants come only from lines in the
+change, so a survivor sitting on the default branch is in no later run's diff and the assertion
+would pass forever having checked nothing. Rust and TypeScript run there or nowhere — Go needs no
+worker directory, and this repository declares no Rust component.
+
 `lydite scan --dir .` there is dogfooding rather than a formality: it is the only job that
 exercises the scan/report path end to end against a real repository, and it caught a real bug
 once (see the git history around the `go-version: "1.26.5"` pin below).
@@ -2016,6 +2026,29 @@ out of the copy without lydite holding a second copy of a judgement `.gitignore`
 copy that drifts is the one that starts copying half a gigabyte of build output per slot. The
 runner's own `Prepare` then runs **in the worker**, once — a JavaScript workspace copied without its
 `node_modules` fails at import, naming the tests rather than the absent dependencies.
+
+**A worker holds the whole scan root, and the component's commands run at its own directory inside
+the copy.** A component's build routinely reads a file above itself — the proving ground's npm
+workspace imports a `docs/openapi.json` two levels up, and its `tally-cli` crate embeds the root
+`VERSION` with `include_str!` — so a copy narrowed to the component fails to compile every one of
+its mutants. The cost of getting that wrong is the worst shape available: an unviable mutant is
+excluded from the denominator, so the component reports `unmeasured`, which does not vote, and the
+run is green having examined nothing. Nothing in `go test` or in any run against this repository can
+see that failure — Go needs no worker directory at all, and lydite declares no Rust component — so
+`ci-end2end.yml`'s mutation probe is the only thing that catches it.
+
+**The scan root and not the enclosing repository**, which is a real bound rather than an oversight:
+`gitdiff.Tracked` asks git for the files under the directory it is given, and that is `--dir`. A
+component's `dir` cannot escape the scan root, so nothing lydite is responsible for sits above it —
+but a build that reaches further up is one lydite was not pointed at, and its mutants are unviable
+for that reason. A repository whose components read files above `--dir` is scanned from the root
+that contains them.
+
+**Every write into a worker goes through its `os.Root`, the copy included.** The copy is where the
+containment is hardest to see and easiest to lose: `checkPath` is lexical, so a listing naming a
+path beneath a committed symlink is spotless, and an unconfined open follows the link and truncates
+a file outside the worker. The root is therefore opened before the copy rather than after it — one
+opened afterwards confines the one write that was never in doubt and none of the ones that are.
 
 **Writes are confined, not checked.** A worker holds a copy of a scanned repository, so it holds
 symlinks nobody vetted: a committed `evil -> /etc` makes `<worker>/evil/passwd` pass every prefix

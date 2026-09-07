@@ -379,8 +379,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, out
 	}
-	backend, err := backendFor(lang, filepath.Join(opts.root, filepath.FromSlash(c.Dir)), build, suite,
-		mutation.ComponentFiles(c.Dir, opts.files),
+	backend, err := backendFor(lang, opts.root, c.Dir, build, suite, opts.files,
 		func(ctx context.Context, dir string) error {
 			// The runner's own preparation, in the worker rather than in the
 			// component: a JavaScript workspace copied without its
@@ -499,21 +498,32 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 // A language with no backend is unmeasured with the reason said out loud,
 // never skipped: a component silently absent from a mutation report reads as
 // one whose suite killed everything.
-func backendFor(lang runner.Lang, dir string, build, suite runner.Invocation, files []string, prep func(context.Context, string) error) (mutation.Backend, error) {
+func backendFor(lang runner.Lang, root, dir string, build, suite runner.Invocation, files []string, prep func(context.Context, string) error) (mutation.Backend, error) {
 	switch lang {
 	case runner.Go:
 		// Go needs no worker directory at all: an overlay names the mutated
 		// file wherever it is written, so every other path resolves in the
 		// component's own tree and nothing is copied.
-		return mutation.Go{Dir: dir, Build: build, Suite: suite}, nil
+		return mutation.Go{Dir: filepath.Join(root, filepath.FromSlash(dir)), Build: build, Suite: suite}, nil
 	case runner.Rust, runner.TypeScript:
-		// A component whose files git lists none of has nothing to copy, and
+		// A scan root whose files git lists none of has nothing to copy, and
 		// a worker holding an empty tree would report every mutant unviable
 		// with a compiler error nobody could act on.
+		//
+		// It asks about the scan root rather than about this component's own
+		// subtree, and the weaker question is the one worth asking: a mutant
+		// exists only for a file in the change, which is therefore tracked,
+		// therefore listed and therefore copied — so a worker whose component
+		// directory holds nothing is not reachable from a run that has a
+		// mutant to stage.
 		if len(files) == 0 {
-			return nil, errors.New("git lists no file under this component, so there is nothing to copy into a worker directory")
+			return nil, errors.New("git lists no file under the scan root, so there is nothing to copy into a worker directory")
 		}
-		return mutation.Tree{Dir: dir, Files: files, Build: build, Suite: suite, Prepare: prep}, nil
+		// The scan root, with the component's commands run at its own
+		// directory inside the copy: a component's build routinely reads a
+		// file above itself, and a worker holding the component alone makes
+		// every one of its mutants unviable.
+		return mutation.Tree{Root: root, Component: path.Clean(dir), Files: files, Build: build, Suite: suite, Prepare: prep}, nil
 	default:
 		return nil, fmt.Errorf("lydite has no mutation backend for %s yet", lang)
 	}
