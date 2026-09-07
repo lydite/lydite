@@ -561,3 +561,44 @@ func f(n int) int {
 		t.Errorf("excluded = %d, want nothing excluded by a declaration that documents no function", rep.Excluded)
 	}
 }
+
+// A function excluded from coverage is excluded from the score and counted
+// there too. Its lines are already gone from the hit map, so it would score
+// nothing measurable and drop out in silence — uncounted, which is the one
+// thing the excluded count exists to prevent.
+func TestAFunctionExcludedFromCoverageIsCountedHereToo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "a.go", `package a
+
+// provision fetches a toolchain.
+//
+// [lydite:exclude_from_coverage][the proving ground exercises this end to end]
+func provision(n int) int {
+	if n > 1 {
+		n++
+	}
+	return n
+}
+
+func scored(n int) int {
+	return n
+}
+`)
+	// The hit map is what internal/coverage would hand over: the declared
+	// function's lines are already gone from it.
+	hits := covering(20, 1)
+	for line := 5; line <= 11; line++ {
+		delete(hits, line)
+	}
+	rep, err := Measure(root, coverage.LineHits{"a.go": hits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Excluded != 1 {
+		t.Errorf("excluded = %d, want the coverage-declared function counted", rep.Excluded)
+	}
+	if rep.Scored != 1 {
+		t.Errorf("scored = %d, want only the undeclared function", rep.Scored)
+	}
+}

@@ -1889,6 +1889,62 @@ scored, and `ParseGoProfile` has already dropped generated files and the blank a
 Go profile's block spans sweep up. A function the report knows no line of is not scored at all,
 never scored 0% — the `0/0` that `coverage.LineCount.Measured` keeps out of every other figure.
 
+### A function says which gate it is not evidence for
+
+Every gate that reports per-site findings can be right about the code and wrong about what the code
+is for. `internal/annotation` is where an author says which, in one grammar:
+`[lydite:exclude_from_<gate>][<reason>]`, over `mutation`, `crap` and `coverage`.
+
+**The gate is inside the token, and the two coverage-shaped gates take separate declarations.** A
+function whose coverage is taken in another process has not thereby become unmutable, and a score
+that is not evidence says nothing about whether the lines ran. `[lydite:exclude_from_coverage]`
+drops a function's lines from **both sides** of every coverage figure — out of the numerator so
+nothing claims to have covered them, and out of the denominator so an author's own statement is not
+reported back as a hole they have to fill, which is the reading that would make the declaration
+worth nothing. `[lydite:exclude_from_crap]` drops a function from the score alone: it keeps its
+coverage, and its complexity is simply not held against it.
+
+**The reason is required and delimited.** Required for the cause the exemption set requires one:
+the declaration is the entire risk record for a finding nobody can clear, and a bare token is not
+reviewable. Delimited because that is what lets it wrap — an undelimited reason is capped by
+whatever line length a repository's linter enforces, and joining the next comment line instead
+needs a rule for when that line is a continuation and when it is prose. The bracket also survives
+godoc: `//lydite:…` with no space is a *directive*, and godoc strips a directive line but not its
+continuations, so a wrapped reason lost its first line and leaked the rest into the rendered
+documentation.
+
+**A declaration covers the function whose doc comment holds it, and nothing else.** That is where a
+claim about a function belongs, it is the one comment group a language's own parser already
+attaches to a declaration, and it is the only placement that cannot silently widen — a rule that
+also read a trailing comment on the `func` line would let a declaration written for one function
+acknowledge the next after an edit moved a blank line. `coverage.DeclaredExclusions` is the one
+implementation, in `internal/coverage` because `internal/crap` already imports it and the reverse
+would be a cycle; `internal/annotation` stays a leaf that answers what a comment *says* rather than
+what a language's syntax attaches it to, so `internal/referral` keeps linking neither a parser nor
+this.
+
+**Two numbers keep it honest.** Every `crap` row carries how many functions were excluded, because
+a repository can annotate its way to nothing above the threshold and that count is what makes it
+visible when one does — and a coverage declaration is counted there too, since the lines it removes
+are already gone from the hit map and the function would otherwise drop out of the score in
+silence. A declaration that documents no function is named on stderr, the rule a mutation
+declaration already follows; the commonest cause is one written inside a body, where it reads
+perfectly and does nothing.
+
+**It composes with referral for free.** `internal/referral` reads the shared `[lydite:exclude_from_`
+prefix rather than a list of tokens — a list goes stale the first time a gate is added, silently,
+in the one place where a missed suppression means a change merges unread. Adding a declaration is
+an added line carrying a suppression, so the change is referred and a human reads the claim.
+
+**lydite's own nine are the shell-out boundary**: `provisionGo`, `provisionNode`, `downloadGo`,
+`downloadNode`, `ensureExecutable`, `ensureNPMToolchain`, `lintDirBiome`, `rust.ensure` and
+`cargotool.Install`. Every one provisions, installs or invokes a foreign toolchain, which is the
+code `internal/runner`'s doc already says is asserted as argv rather than executed — "a unit test
+that shells out to a foreign toolchain tests the machine it runs on" — and which `ci-end2end`'s
+proving ground exercises in a different process that contributes no coverage to any profile. Two of
+them say something narrower and worth reading: `downloadGo` and `downloadNode` are reached only on
+a machine with no suitable toolchain, which no runner lydite tests on is.
+
 ### Its own baseline document
 
 `crap/v1/<tree>.json` on the `lydite` branch, beside and never inside `v4/<tree>.json`. An object

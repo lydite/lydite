@@ -76,6 +76,9 @@ func named(name string, r executil.Result) executil.Result {
 // invoked as `cargo <name> ...`, but a `--root`-installed binary is named
 // plainly `cargo-<name>` and must be run directly (not via `cargo <name>`,
 // which only finds cargo-* binaries already on PATH).
+//
+// [lydite:exclude_from_coverage][the proving ground installs the pinned cargo subcommands on a bare
+// checkout; a unit test here would run the machine's own cargo]
 func ensure(ctx context.Context, env []string, name, version string) (string, error) {
 	tool := cargotool.Tool{Name: name, Version: version}
 	bin, err := tool.Binary()

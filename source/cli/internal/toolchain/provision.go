@@ -37,6 +37,9 @@ const goBootstrapMin = "v1.21"
 // failure AGENTS.md records against wardnet's CI, worked around there by
 // pinning `go-version` in every workflow. An explicit GOTOOLCHAIN fixes it at
 // the source instead of in each consumer's YAML.
+//
+// [lydite:exclude_from_coverage][the proving ground provisions a bare checkout end to end; a unit
+// test here would resolve the machine's own Go rather than lydite's code]
 func provisionGo(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
 	if req.Unpinned() {
 		if present {
@@ -138,6 +141,10 @@ type goRelease struct {
 // downloadGo fetches a Go toolchain tarball into staging, taking the expected
 // SHA-256 from Go's own release index rather than from anything alongside the
 // download.
+//
+// [lydite:exclude_from_coverage][reached only on a machine carrying no Go at all or one older than
+// 1.21, which no runner lydite tests on is; exercising it means downloading
+// a toolchain, and a test that did would measure nodejs.org's availability]
 func downloadGo(ctx context.Context, version, staging string) error {
 	index, err := download.Fetch(ctx, "https://go.dev/dl/?mode=json&include=all")
 	if err != nil {
@@ -239,6 +246,9 @@ func provisionRust(ctx context.Context, req Requirement, ambient string, present
 // one ecosystem lydite downloads and unpacks itself, from nodejs.org, with
 // the digest read from that release's SHASUMS256.txt rather than from the
 // archive.
+//
+// [lydite:exclude_from_coverage][the proving ground provisions a bare checkout end to end; a unit
+// test here would resolve the machine's own Node rather than lydite's code]
 func provisionNode(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
 	if req.Unpinned() {
 		if present {
@@ -283,6 +293,11 @@ func nodeReleaseName(version string) string {
 // purely because Go's standard library can decompress gzip and cannot
 // decompress xz; taking the xz would mean either a new dependency or shelling
 // out to a tar binary that may not exist on a minimal image.
+//
+// [lydite:exclude_from_coverage][
+// reached only when the declared engines.node is not already satisfied,
+// which no runner lydite tests on leaves unsatisfied; exercising it means
+// downloading a toolchain, and a test that did would measure nodejs.org]
 func downloadNode(ctx context.Context, version, staging string) error {
 	base := "https://nodejs.org/dist/" + version
 	name := fmt.Sprintf("node-%s-%s-%s.tar.gz", version, nodeOS(), nodeArch())
@@ -360,6 +375,10 @@ func absentOrOld(ambient string, present bool) string {
 // preserved by extractTarGz, but a tarball produced with a restrictive umask
 // can still land a bin/ entry without the execute bit, which then fails at
 // use with a bare "permission denied".
+//
+// [lydite:exclude_from_coverage][
+// it runs against a toolchain the step above it has just unpacked, so
+// the proving ground reaches it and a unit test here would chmod a fixture]
 func ensureExecutable(binDir string) {
 	entries, err := os.ReadDir(binDir)
 	if err != nil {

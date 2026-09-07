@@ -250,10 +250,7 @@ type updateCheckState struct {
 // known. It contacts GitHub at most once per updateCheckTTL, never in CI,
 // non-interactive, or from-source ("dev") runs, and stays silent on any failure.
 func maybeNudgeUpdate() {
-	if version == "dev" || os.Getenv("CI") != "" {
-		return
-	}
-	if fi, err := os.Stderr.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+	if !nudgeWanted(version, os.Getenv("CI"), os.Stderr) {
 		return
 	}
 	cacheDir, err := os.UserCacheDir()
@@ -261,29 +258,73 @@ func maybeNudgeUpdate() {
 		return
 	}
 	path := filepath.Join(cacheDir, "lydite", "update-check.json")
-
-	var st updateCheckState
-	if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is built from os.UserCacheDir(), not user input
-		_ = json.Unmarshal(data, &st)
-	}
-	if time.Since(st.CheckedAt) >= updateCheckTTL {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		latest, err := latestReleaseVersion(ctx, http.DefaultClient)
-		// Record the attempt even when the check fails (offline, blocked) —
-		// otherwise every invocation past the TTL re-pays the network timeout.
-		st.CheckedAt = time.Now()
-		if err == nil {
-			st.Latest = latest
-		}
-		if data, err := json.Marshal(st); err == nil {
-			if err := os.MkdirAll(filepath.Dir(path), 0o750); err == nil {
-				_ = os.WriteFile(path, data, 0o600)
-			}
-		}
-	}
+	st := refreshedUpdateCheck(readUpdateCheck(path), http.DefaultClient)
+	writeUpdateCheck(path, st)
 	if updateAvailable(st.Latest, version) {
 		_, _ = fmt.Fprintf(os.Stderr, "\nlydite v%s is available (you have v%s) — run 'lydite update'\n",
 			st.Latest, version)
 	}
+}
+
+// nudgeWanted reports whether this run is one a person is watching and could
+// act on.
+//
+// A from-source build has no release to compare against, CI has nobody reading
+// stderr, and a redirected stream is being parsed by something that did not ask
+// for a notice. Taken as arguments rather than read here so the rule can be
+// asserted without a build tag, an environment variable and a terminal.
+func nudgeWanted(version, ci string, stderr *os.File) bool {
+	if version == "dev" || ci != "" {
+		return false
+	}
+	fi, err := stderr.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// readUpdateCheck loads the cached check, and answers with the zero value for
+// anything it cannot read: an absent, unreadable or malformed cache is a check
+// that has not happened, which is exactly what the zero CheckedAt means.
+func readUpdateCheck(path string) updateCheckState {
+	var st updateCheckState
+	data, err := os.ReadFile(path) // #nosec G304 -- path is built from os.UserCacheDir(), not user input
+	if err != nil {
+		return st
+	}
+	_ = json.Unmarshal(data, &st)
+	return st
+}
+
+// refreshedUpdateCheck asks the remote for the latest release when the cached
+// answer is older than the TTL, and returns what the cache should now hold.
+//
+// The attempt is recorded even when the check fails (offline, blocked) —
+// otherwise every invocation past the TTL re-pays the network timeout. The
+// previous answer is kept in that case rather than cleared, since a failed
+// check is no evidence that the release it named has gone.
+func refreshedUpdateCheck(st updateCheckState, client *http.Client) updateCheckState {
+	if time.Since(st.CheckedAt) < updateCheckTTL {
+		return st
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	latest, err := latestReleaseVersion(ctx, client)
+	st.CheckedAt = time.Now()
+	if err == nil {
+		st.Latest = latest
+	}
+	return st
+}
+
+// writeUpdateCheck saves the check, and gives up quietly on any failure: the
+// cache is an optimisation, and a run that cannot write it is a run that
+// re-checks next time rather than one that has anything to report.
+func writeUpdateCheck(path string, st updateCheckState) {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o600)
 }

@@ -61,6 +61,9 @@ type Tool struct {
 // that does not match all still end up with the pinned version — slowly, and
 // having said so, rather than not at all. progress is where the source build's
 // output goes; the download is quiet because there is nothing to watch.
+//
+// [lydite:exclude_from_coverage][the proving ground installs these on a bare checkout; a unit test
+// here would either run the machine's own cargo or download a release]
 func (t Tool) Install(ctx context.Context, env []string, progress io.Writer) error {
 	if t.Installed() {
 		return nil

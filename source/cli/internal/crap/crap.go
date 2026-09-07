@@ -285,10 +285,24 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("parsing %s to score its functions: %w", file, err)
 	}
-	// The same rule the coverage gate reads, asked for this gate: a
-	// declaration names one gate, so a function whose coverage is taken in
-	// another process has not thereby become unscorable and the reverse.
+	// Both gates' declarations, and the union of them.
+	//
+	// A CRAP declaration is the direct statement: this score is not evidence.
+	// A coverage one reaches here because the lines it excludes are already
+	// gone from the hit map, so the function scores nothing measurable and
+	// would drop out silently — uncounted, which is the one thing the excluded
+	// count exists to prevent. Read here it is excluded *and* counted, so
+	// neither token takes a function out of the figure without saying so.
+	//
+	// Only the CRAP declarations are held to covering a function, because only
+	// they are this gate's to diagnose: a coverage declaration that documents
+	// nothing is the coverage gate's warning to give, and giving it twice
+	// would have one typo reported by two gates.
 	declared, err := coverage.DeclaredExclusions(fset, parsed, file, annotation.CRAP)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	uncovered, err := coverage.DeclaredExclusions(fset, parsed, file, annotation.Coverage)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -303,7 +317,9 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored
 		if !ok || fn.Body == nil {
 			continue
 		}
-		if _, ok := declared.Funcs[fn]; ok {
+		_, byScore := declared.Funcs[fn]
+		_, byCoverage := uncovered.Funcs[fn]
+		if byScore || byCoverage {
 			excluded++
 			continue
 		}

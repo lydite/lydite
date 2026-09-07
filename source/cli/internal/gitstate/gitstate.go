@@ -557,45 +557,12 @@ func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte)
 	// via refspec below.
 	staging := "lydite-staging-" + filepath.Base(tmp)
 
-	branchExists := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok()
-	if branchExists {
-		// Refresh origin/<BranchName> right before staging on it: the tracking
-		// ref left behind by the job's checkout (or a prior ReadBaseline) can
-		// be minutes stale, and a staging branch built on a stale ref pushes
-		// non-fast-forward and is rejected.
-		if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
-			return fmt.Errorf("fetch %s: %w", BranchName, r.Err)
-		}
-		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
-			return fmt.Errorf("worktree add %s: %w", BranchName, r.Err)
-		}
-	} else {
-		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
-			return fmt.Errorf("worktree add (detached): %w", r.Err)
-		}
-		if r := executil.RunQuiet(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
-			return fmt.Errorf("checkout --orphan %s: %w", staging, r.Err)
-		}
-		if r := executil.RunQuiet(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
-			return fmt.Errorf("clear orphan worktree: %w", r.Err)
-		}
+	if err := stageBranch(ctx, dir, tmp, staging); err != nil {
+		return err
 	}
-
-	// Sorted, so the `git add` arguments and therefore the commit are the
-	// same whatever order the map iterated in.
-	rels := make([]string, 0, len(files))
-	for rel := range files {
-		rels = append(rels, rel)
-	}
-	sort.Strings(rels)
-	for _, rel := range rels {
-		path := filepath.Join(tmp, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, files[rel], 0o600); err != nil {
-			return err
-		}
+	rels, err := writeDocuments(tmp, files)
+	if err != nil {
+		return err
 	}
 	if r := executil.RunQuiet(ctx, tmp, "git", append([]string{"add"}, rels...)...); !r.Ok() {
 		return fmt.Errorf("git add: %w", r.Err)
@@ -620,4 +587,54 @@ func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte)
 		return fmt.Errorf("git push: %w", r.Err)
 	}
 	return nil
+}
+
+// stageBranch checks the state branch out into the throwaway worktree, or
+// starts it when the remote has none yet.
+//
+// The fetch is not an optimisation: the tracking ref left behind by the job's
+// checkout (or by a prior read) can be minutes stale, and a staging branch
+// built on a stale ref pushes non-fast-forward and is rejected. Every attempt
+// therefore refreshes immediately before staging on it.
+func stageBranch(ctx context.Context, dir, tmp, staging string) error {
+	if !executil.RunQuiet(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok() {
+		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
+			return fmt.Errorf("worktree add (detached): %w", r.Err)
+		}
+		if r := executil.RunQuiet(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
+			return fmt.Errorf("checkout --orphan %s: %w", staging, r.Err)
+		}
+		if r := executil.RunQuiet(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
+			return fmt.Errorf("clear orphan worktree: %w", r.Err)
+		}
+		return nil
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+		return fmt.Errorf("fetch %s: %w", BranchName, r.Err)
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
+		return fmt.Errorf("worktree add %s: %w", BranchName, r.Err)
+	}
+	return nil
+}
+
+// writeDocuments lays every metric's document out in the worktree and returns
+// their paths, sorted — so the `git add` arguments, and therefore the commit,
+// are the same whatever order the map iterated in.
+func writeDocuments(tmp string, files map[string][]byte) ([]string, error) {
+	rels := make([]string, 0, len(files))
+	for rel := range files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		path := filepath.Join(tmp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, files[rel], 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return rels, nil
 }

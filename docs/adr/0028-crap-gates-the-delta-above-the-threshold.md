@@ -128,6 +128,45 @@ it would change what the stored count means, which is a change to what is
 measured — and so a bump of the metric's directory rather than a field beside the
 number.
 
+## A function says which gate it is not evidence for
+
+A gate that cannot be told "this finding is not about my code" is a gate that
+gets switched off. Mutation already had one, spelled `//lydite:equivalent` —
+mutation-testing jargon whose meaning depended on already knowing the term, and
+a token that could not be extended without either reusing a name that says
+mutation or spelling a second one a second way.
+
+Both become `[lydite:exclude_from_<gate>][<reason>]`. The gate is inside the
+token because the gates ask different questions about the same function: one
+whose coverage is taken in another process has not thereby become unmutable,
+and a score that is not evidence says nothing about whether the lines ran. So
+`coverage` and `crap` take separate declarations, and a repository that means
+both writes both.
+
+`exclude_from_coverage` removes a function's lines from **both sides** of every
+coverage figure. Out of the numerator, so nothing claims to have covered them;
+out of the denominator, because counting them as uncovered reports the author's
+own statement back as a hole they have to fill — which is the reading that makes
+an exclusion worth nothing.
+
+The reason is delimited rather than running to the end of its line, and that is
+what lets it wrap. An undelimited reason is capped by whatever line length a
+repository's linter enforces, and joining the next comment line instead needs a
+rule for when that line is a continuation and when it is prose. The bracket also
+survives godoc, which strips a `//lydite:`-style directive line but not its
+continuations — so a wrapped reason lost its first line and leaked the rest into
+the rendered documentation.
+
+**What stops a repository annotating its way to clean** is that the count is
+published. Every `crap` row says how many functions were excluded, and a
+coverage declaration is counted there too, because the lines it removes are
+already gone from the hit map and the function would otherwise leave the score
+in silence. A declaration that documents no function is named on stderr rather
+than dropped — its author believes they have answered a finding, and the
+commonest cause is one written inside a body, where it reads perfectly and does
+nothing. And every declaration is a suppression `internal/referral` recognises,
+so a change that adds one is referred and a human reads the claim.
+
 ## Consequences
 
 - `lydite test` scores every Go component it measures, and `--gate-coverage`
@@ -142,3 +181,6 @@ number.
   gates.
 - Rust and TypeScript components carry a `context` row saying lydite scores Go
   alone, until #17 says otherwise.
+- The exclusion is Go-only for the same reason the score is: it is read out of
+  a Go doc comment by `go/ast`. A Rust or TypeScript function has no way to say
+  this yet, and needs none while neither is scored.

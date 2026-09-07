@@ -106,68 +106,84 @@ func ExtractTarGz(data []byte, dest string, stripComponents int) error {
 		if err != nil {
 			return err
 		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return err
-			}
-			// Remove any existing entry before writing. Opening with O_CREATE
-			// follows an existing symlink and writes through it, so an
-			// archive that plants a symlink and then writes a regular file at
-			// the same name would write wherever the link points. Since dest
-			// is a directory this function just created, anything already at
-			// target came from this same archive — dropping it is safe and is
-			// what stops that two-step.
-			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			n, err := writeFile(target, tr, hdr.FileInfo().Mode(), maxArchiveBytes-written)
-			if err != nil {
-				return err
-			}
-			written += n
-			if written >= maxArchiveBytes {
-				return fmt.Errorf("archive exceeds %d bytes; refusing to continue", maxArchiveBytes)
-			}
-		case tar.TypeSymlink:
-			// Node's tarball ships symlinks (npm/npx into lib/node_modules),
-			// so they cannot simply be skipped — but they are the sharpest
-			// edge in an archive and need two separate checks.
-			//
-			// An absolute target is rejected outright rather than
-			// containment-checked, because the obvious check does not work on
-			// one: filepath.Join("bin", "/etc/passwd") is "bin/etc/passwd",
-			// so joining a link target against its own directory silently
-			// reinterprets an absolute path as a relative one and every
-			// escape passes. A toolchain tarball has no legitimate use for an
-			// absolute symlink anyway — it would point outside the install
-			// either way.
-			if path.IsAbs(filepath.ToSlash(hdr.Linkname)) {
-				return fmt.Errorf("archive entry %q is a symlink to the absolute path %q", rel, hdr.Linkname)
-			}
-			// A relative target still has to land inside dest once resolved
-			// against the link's own directory. Slash semantics throughout:
-			// tar names are slash-separated regardless of host.
-			if _, err := safeJoin(dest, path.Join(path.Dir(filepath.ToSlash(rel)), filepath.ToSlash(hdr.Linkname))); err != nil {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return err
-			}
-			_ = os.Remove(target)
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return err
-			}
-		default:
-			// Character devices, FIFOs and hard links have no business in a
-			// toolchain tarball; skipping is safer than materialising them.
-			continue
+		n, err := extractEntry(hdr, tr, dest, rel, target, maxArchiveBytes-written)
+		if err != nil {
+			return err
+		}
+		written += n
+		if written >= maxArchiveBytes {
+			return fmt.Errorf("archive exceeds %d bytes; refusing to continue", maxArchiveBytes)
 		}
 	}
+}
+
+// extractEntry materialises one archive entry at target, and returns how many
+// bytes it wrote so the caller can hold the archive to its total.
+//
+// Separated from the loop above because the loop's job is the budget and the
+// entry's job is what the entry is: three kinds of thing, each with its own
+// safety argument, sharing nothing but the path they were handed. rel is the
+// entry's name after stripping, which the symlink check resolves against.
+func extractEntry(hdr *tar.Header, r io.Reader, dest, rel, target string, budget int64) (int64, error) {
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		return 0, os.MkdirAll(target, 0o750)
+	case tar.TypeReg:
+		return extractRegular(hdr, r, target, budget)
+	case tar.TypeSymlink:
+		return 0, extractSymlink(hdr, dest, rel, target)
+	default:
+		// Character devices, FIFOs and hard links have no business in a
+		// toolchain tarball; skipping is safer than materialising them.
+		return 0, nil
+	}
+}
+
+// extractRegular writes one file, replacing whatever is already at its path.
+//
+// Removing first is the load-bearing part. Opening with O_CREATE follows an
+// existing symlink and writes through it, so an archive that plants a symlink
+// and then writes a regular file at the same name would write wherever the link
+// points. Since dest is a directory this function's caller just created,
+// anything already at target came from this same archive — dropping it is safe
+// and is what stops that two-step.
+func extractRegular(hdr *tar.Header, r io.Reader, target string, budget int64) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		return 0, err
+	}
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return writeFile(target, r, hdr.FileInfo().Mode(), budget)
+}
+
+// extractSymlink materialises one link, which is the sharpest edge in an
+// archive and needs two separate checks.
+//
+// Node's tarball ships symlinks (npm/npx into lib/node_modules), so they cannot
+// simply be skipped.
+//
+// An absolute target is rejected outright rather than containment-checked,
+// because the obvious check does not work on one: filepath.Join("bin",
+// "/etc/passwd") is "bin/etc/passwd", so joining a link target against its own
+// directory silently reinterprets an absolute path as a relative one and every
+// escape passes. A toolchain tarball has no legitimate use for an absolute
+// symlink anyway — it would point outside the install either way.
+func extractSymlink(hdr *tar.Header, dest, rel, target string) error {
+	if path.IsAbs(filepath.ToSlash(hdr.Linkname)) {
+		return fmt.Errorf("archive entry %q is a symlink to the absolute path %q", rel, hdr.Linkname)
+	}
+	// A relative target still has to land inside dest once resolved against
+	// the link's own directory. Slash semantics throughout: tar names are
+	// slash-separated regardless of host.
+	if _, err := safeJoin(dest, path.Join(path.Dir(filepath.ToSlash(rel)), filepath.ToSlash(hdr.Linkname))); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		return err
+	}
+	_ = os.Remove(target)
+	return os.Symlink(hdr.Linkname, target)
 }
 
 // writeFile streams one archive entry to disk, bounded by remaining.
