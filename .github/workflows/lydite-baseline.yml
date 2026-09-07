@@ -143,6 +143,20 @@ jobs:
           key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
           restore-keys: lydite-${{ runner.os }}-
 
+      # The same graph the pull-request matrix caches, and for the same reason:
+      # without it this job downloads the toolchain go.mod names and compiles
+      # every dependency from cold before it measures anything. It is also
+      # what fills the entry the pull-request jobs read, since this workflow
+      # runs on the default branch, where a cache entry is visible to every
+      # branch rather than only to its own.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('source/cli/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
       # On the default branch HEAD is its own merge-base, so nothing is
       # compared: this measures the tree and leaves what it measured in
       # .lydite-reports/. The next pull request's merge-base is this commit, so

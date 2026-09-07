@@ -147,6 +147,22 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
+**The mutation job streams, and the test matrix does not.** A mutation run prints nothing for as
+long as it takes — every mutant's line goes to the component's log, and that log reaches a reader
+through an artifact the job uploads on its way out. A job that is killed never gets there, so the
+whole run is lost and nothing says how far it had come, which is exactly the case `--stream` exists
+for. The test matrix keeps its output captured for the reason `internal/ui` gives: a suite's log is
+thousands of passing lines, and a CI log carrying all of them buries the one component that failed.
+
+**Both workflows cache the Go build graph, and not only `~/.cache/lydite`.** `~/.cache/go-build`
+and `~/go/pkg/mod` hold the toolchain `go.mod` names, the modules and the compiled dependencies;
+without them every job downloads and compiles the whole graph from cold on every run, and mutation
+pays that before its first mutant — the one job whose budget is a suite run repeated a hundred
+times. The key is `go.sum` and never the commit: a per-commit key writes a multi-gigabyte entry on
+every push and evicts the rest of the repository's cache to hold copies of one graph. The entry the
+pull-request jobs read is filled by `lydite-baseline.yml`, since a cache written on the default
+branch is visible to every branch and one written on a branch is not.
+
 **Both lydite workflows shard.** `lydite-pr.yml` is `setup` → `plan` → `test` (a matrix, each job
 running `--affected --component <slice> --gate-coverage` under `contents: read`) → `merge` →
 `publish`. `plan`'s output feeds a second matrix beside it — `mutation` → `mutation-merge`, each
