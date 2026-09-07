@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -342,7 +343,7 @@ func ungatedComponentRows(rep *ui.Report, ms []measurement) {
 // it, which does distinguish the two.
 func ungatedComposedRow(label string, ms []measurement, carried map[string]bool, in func(measurement) bool) ui.Row {
 	lines, measured, carriedN := composed(ms, carried, in)
-	total := count(ms, in)
+	total := gateable(ms, in)
 	if !lines.Measured() {
 		return unmeasuredRow(label, fmt.Sprintf("none of its %d component(s) produced a measurement", total))
 	}
@@ -661,20 +662,7 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 		}
 	}
 
-	out := gitstate.Baseline{}
-	for _, m := range ms {
-		if m.Measured() {
-			out[m.Name] = m.entry()
-			continue
-		}
-		// Named on stderr rather than dropped in silence, and the tail with
-		// it: the worktree holding the log is removed on the way out, so this
-		// is the only account of the failure that outlives this function.
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: the base tree at %s could not be measured for component %q: %s\n", shortSHA(base), m.Name, m.Why)
-		for _, line := range tails[m.Name] {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", line)
-		}
-	}
+	out := baseTreeBaseline(cmd.ErrOrStderr(), base, ms, tails)
 	// The same predicate a run applies to what it records, over the same two
 	// things: the measurements, and what came of them. Returned empty rather
 	// than partial, so the caller's existing refusal to cache an empty
@@ -684,6 +672,37 @@ func measureBaseTree(ctx context.Context, cmd *cobra.Command, dir, base string, 
 		return nil, nil
 	}
 	return out, nil
+}
+
+// baseTreeBaseline is what a base-tree run measured, and the account of what it
+// did not.
+//
+// A component nothing could ever measure is neither: its absence is permanent
+// and expected rather than a gap this run created, so warning about it would
+// print what reads as a measurement failure on every baseline computation,
+// forever, about a state the repository stated on purpose. recordingBlockedBy
+// already exempts it and floorRows already excludes it; this is the third
+// place the same distinction has to be drawn.
+//
+// Everything else that produced no measurement is named on stderr rather than
+// dropped in silence, and the tail with it: the worktree holding the log is
+// removed on the way out, so this is the only account of the failure that
+// outlives the measurement.
+func baseTreeBaseline(w io.Writer, base string, ms []measurement, tails map[string][]string) gitstate.Baseline {
+	out := gitstate.Baseline{}
+	for _, m := range ms {
+		switch {
+		case m.Measured():
+			out[m.Name] = m.entry()
+		case m.Unmeasurable:
+		default:
+			_, _ = fmt.Fprintf(w, "warning: the base tree at %s could not be measured for component %q: %s\n", shortSHA(base), m.Name, m.Why)
+			for _, line := range tails[m.Name] {
+				_, _ = fmt.Fprintf(w, "  %s\n", line)
+			}
+		}
+	}
+	return out
 }
 
 // componentRow gates one component against its own baseline entry.
@@ -772,7 +791,7 @@ func notCompared(missing, reinstrumented []string) string {
 // the component it did not run.
 func composedRow(label string, current []measurement, carried map[string]bool, baseline gitstate.Baseline, in func(measurement) bool, tolerance float64) ui.Row {
 	lines, measured, carriedN := composed(current, carried, in)
-	total := count(current, in)
+	total := gateable(current, in)
 	if !lines.Measured() {
 		return unmeasuredRow(label, "no component in it produced a measurement")
 	}
@@ -1393,10 +1412,21 @@ func composed(ms []measurement, carried map[string]bool, in func(measurement) bo
 	return lines, fresh, old
 }
 
-func count(ms []measurement, in func(measurement) bool) int {
+// gateable counts the components a composed figure could have been composed
+// from: every one the predicate selects, minus those nothing could ever
+// measure.
+//
+// The exclusion is what makes the denominator readable. `N of M` exists so a
+// partial run cannot read as a repository-wide pass, so an M that counts a
+// raw-command component renders a complete run as `1 of 2` — signalling that
+// something went ungated when nothing did, and contradicting the floor row
+// beside it, which draws the same distinction. A component nothing could ever
+// measure contributes to neither side of any comparison; its absence is
+// permanent and expected rather than a gap one run created.
+func gateable(ms []measurement, in func(measurement) bool) int {
 	n := 0
 	for _, m := range ms {
-		if in(m) {
+		if in(m) && !m.Unmeasurable {
 			n++
 		}
 	}
