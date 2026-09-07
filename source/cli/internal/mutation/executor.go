@@ -195,13 +195,11 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 		return results, nil
 	}
 
-	workers := opts.Workers
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(pending) {
-		workers = len(pending)
-	}
+	// One worker at least, and never more than there are mutants to stage: a
+	// worker is a tree copy in every language but Go. A clamp rather than two
+	// conditionals, because a conditional whose boundary assigns the value
+	// already held is a branch nothing can be asked about.
+	workers := min(max(opts.Workers, 1), len(pending))
 
 	queue := make(chan int)
 	var wg sync.WaitGroup
@@ -402,8 +400,5 @@ const detailLines = 20
 // puts the error rather than the invocation that led to it.
 func lastLines(output string) string {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if len(lines) > detailLines {
-		lines = lines[len(lines)-detailLines:]
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines[max(0, len(lines)-detailLines):], "\n")
 }

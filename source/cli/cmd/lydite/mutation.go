@@ -87,7 +87,7 @@ a suppression, declaring one refers the change to a human.`,
 			defer stop()
 			go func() {
 				<-ctx.Done()
-				stop()
+				stop() //lydite:equivalent its only effect is to restore the default disposition for the second interrupt, and a test that observed that would be a test signalling the test binary to death
 			}()
 
 			limit, err := resolveConcurrency(concurrency)
@@ -555,10 +555,9 @@ func budget(baseline, override time.Duration) time.Duration {
 	if override > 0 {
 		return override
 	}
-	if derived := baseline * budgetFactor; derived > minimumBudget {
-		return derived
-	}
-	return minimumBudget
+	// The floor as a clamp: a conditional whose boundary returns what the
+	// other arm returns is a branch nothing can be asked about.
+	return max(baseline*budgetFactor, minimumBudget)
 }
 
 // budgetFactor is how much longer than the baseline a mutant may take.
@@ -644,7 +643,7 @@ func componentRelative(dir, file string) (string, error) {
 	}
 	rel, ok := strings.CutPrefix(file, clean+"/")
 	if !ok {
-		return "", fmt.Errorf("%s is not inside %s", file, dir)
+		return "", fmt.Errorf("%s is not inside %s", file, dir) //lydite:equivalent the one caller abandons the file when the error is non-nil, so no path reads the string beside it and no test can be shown a different one
 	}
 	return rel, nil
 }

@@ -40,13 +40,19 @@ type lineSpan struct{ first, last int }
 // Every line the splice touches has to be one the caller asked for. A
 // statement can span lines, and gating on its first alone deletes source
 // outside the change.
+//
+// The range has to be a real one, so an empty one is refused along with an
+// out-of-bounds one. A mutant replaces something: a range replacing nothing is
+// an insertion, which no operator in the catalogue performs, and one that
+// reached Apply would splice its replacement in beside source it never
+// described.
 func (s *sites) add(op Operator, line, column, lo, hi, first, last int, mutated string) {
 	for l := first; l <= last; l++ {
 		if !s.lines[l] {
 			return
 		}
 	}
-	if lo < 0 || hi > len(s.src) || lo > hi {
+	if lo < 0 || hi > len(s.src) || lo >= hi {
 		return
 	}
 	s.out = append(s.out, Mutant{
@@ -84,21 +90,22 @@ func (s *sites) add(op Operator, line, column, lo, hi, first, last int, mutated 
 func (s *sites) resolve() []UnmatchedDeclaration {
 	var unmatched []UnmatchedDeclaration
 	for _, line := range sortedKeys(s.reasons) {
-		shortest := -1
+		var inside []int
 		for i, sp := range s.spans {
-			if line < sp.first || line > sp.last {
-				continue
-			}
-			if shortest < 0 || s.out[i].Length < shortest {
-				shortest = s.out[i].Length
+			if line >= sp.first && line <= sp.last {
+				inside = append(inside, i)
 			}
 		}
-		if shortest < 0 {
+		if len(inside) == 0 {
 			unmatched = append(unmatched, UnmatchedDeclaration{Path: s.path, Line: line, Reason: s.reasons[line]})
 			continue
 		}
-		for i, sp := range s.spans {
-			if line >= sp.first && line <= sp.last && s.out[i].Length == shortest {
+		shortest := s.out[inside[0]].Length
+		for _, i := range inside[1:] {
+			shortest = min(shortest, s.out[i].Length)
+		}
+		for _, i := range inside {
+			if s.out[i].Length == shortest {
 				s.out[i].Reason = s.reasons[line]
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
@@ -490,18 +492,27 @@ func TestARepositoryDeclaringNoComponentIsReported(t *testing.T) {
 // report the run had already computed.
 func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {
 	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	// The message and not merely that something failed. A flag the command
+	// never registered is refused by cobra as unknown, which is also an
+	// error — so a test asserting only that one occurred passes over a run
+	// that lost the flag entirely.
 	for _, c := range []struct {
 		name string
 		args []string
+		says string
 	}{
-		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}},
-		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}},
-		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}},
-		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}},
+		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}, `--concurrency`},
+		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}, "at least 1"},
+		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}, "--timeout must not be negative"},
+		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}, "nope"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if _, _, err := runMutationCmd(t, c.args...); err == nil {
-				t.Error("the flag was accepted")
+			_, _, err := runMutationCmd(t, c.args...)
+			if err == nil {
+				t.Fatal("the flag was accepted")
+			}
+			if !strings.Contains(err.Error(), c.says) {
+				t.Errorf("the run failed with %q, want it to say %q", err, c.says)
 			}
 		})
 	}
@@ -665,17 +676,39 @@ func gitRepoWithOrigin(t *testing.T, files map[string]string) string {
 // have.
 func goModuleRepo(t *testing.T, added, addedTest string) string {
 	t.Helper()
+	return goModuleRepoWith(t, goModuleDecl, "", nil, added, addedTest)
+}
+
+// goModuleDecl is the one component the fixture declares unless a test needs
+// another.
+const goModuleDecl = "components:\n  - name: app\n    dir: .\n    runner: go-test\n    args: [\"./...\"]\n"
+
+// goModuleRepoWith is goModuleRepo over a declaration of the test's choosing,
+// with the module under dir — empty for the scan root — and extra files
+// committed alongside it.
+func goModuleRepoWith(t *testing.T, decl, dir string, extra map[string]string, added, addedTest string) string {
+	t.Helper()
+	at := func(rel string) string {
+		if dir == "" {
+			return rel
+		}
+		return dir + "/" + rel
+	}
 	// The base already holds well-tested code, so the mutants this run
 	// generates come from the change alone. A fixture whose whole file is new
 	// measures the base as well, which is the diff scope not being applied.
-	root := gitRepoWithOrigin(t, map[string]string{
-		".lydite/components.yml": "components:\n  - name: app\n    dir: .\n    runner: go-test\n    args: [\"./...\"]\n",
-		"go.mod":                 "module fixture\n\ngo 1.26.4\n",
-		"paths/paths.go":         baseSource,
-		"paths/paths_test.go":    baseSuite,
-	})
-	write(t, root, "paths/paths.go", baseSource+added)
-	write(t, root, "paths/paths_test.go", baseSuite+addedTest)
+	files := map[string]string{
+		".lydite/components.yml":  decl,
+		at("go.mod"):              "module fixture\n\ngo 1.26.4\n",
+		at("paths/paths.go"):      baseSource,
+		at("paths/paths_test.go"): baseSuite,
+	}
+	for name, body := range extra {
+		files[name] = body
+	}
+	root := gitRepoWithOrigin(t, files)
+	write(t, root, at("paths/paths.go"), baseSource+added)
+	write(t, root, at("paths/paths_test.go"), baseSuite+addedTest)
 	for _, args := range [][]string{{"checkout", "--quiet", "-b", "change"}, {"add", "-A"},
 		{"commit", "--quiet", "-m", "the change under test"}} {
 		cmd := exec.Command("git", args...)
@@ -869,5 +902,311 @@ func TestAnEmptyReportPathIsRefusedRatherThanCleared(t *testing.T) {
 	}
 	if _, err := os.Stat(empty); err != nil {
 		t.Errorf("an empty component directory was removed: %v", err)
+	}
+}
+
+// Every mutant in the run and outside the denominator is named, and one that
+// is not there is not mentioned. An aside reading "0 did not compile" on every
+// clean component is what teaches a reader to skim the line that exists to be
+// noticed.
+func TestTheAsideNamesOnlyTheMutantsThatAreThere(t *testing.T) {
+	if got := aside(mutation.Summary{Killed: 9, Survived: 1}); got != "" {
+		t.Errorf("the aside of a run with nothing outside its denominator is %q, want nothing", got)
+	}
+	for _, c := range []struct {
+		name string
+		s    mutation.Summary
+		want string
+	}{
+		{"unviable", mutation.Summary{Killed: 1, Unviable: 2}, "2 did not compile"},
+		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent"},
+		{"timed out", mutation.Summary{Killed: 1, TimedOut: 3}, "3 timed out"},
+		{"all three", mutation.Summary{Unviable: 1, Acknowledged: 2, TimedOut: 3},
+			"1 did not compile, 2 declared equivalent, 3 timed out"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := aside(c.s); got != c.want {
+				t.Errorf("aside = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// What hangs under a row: the mutants outside the denominator when there are
+// any, and the log when there is one. Both are conditional, and a row that
+// carried an empty line or a path to nothing would say it either way.
+func TestARowCarriesAnAsideAndALogOnlyWhenItHasThem(t *testing.T) {
+	survivor := []mutation.Result{{
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}}
+	logged, unlogged := testLog(t), &componentLog{}
+	if logged.Rel == "" {
+		t.Fatal("the fixture log names no path, so this proves nothing")
+	}
+
+	// A passing row with nothing outside its denominator says nothing more.
+	row := mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 3}, nil, time.Second)
+	if len(row.Detail) != 0 {
+		t.Errorf("a clean passing row carries %v", row.Detail)
+	}
+	// ...and with something outside it, exactly that.
+	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 3, Unviable: 2}, nil, time.Second)
+	if len(row.Detail) != 1 || row.Detail[0] != "2 did not compile" {
+		t.Errorf("a passing row's detail is %v, want the aside alone", row.Detail)
+	}
+
+	// A failing row names every survivor, then the aside if there is one,
+	// then what to do, then the log.
+	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 1, Survived: 1}, survivor, time.Second)
+	if joined := strings.Join(row.Detail, "\n"); strings.Contains(joined, "did not compile") ||
+		strings.Contains(joined, "declared equivalent") {
+		t.Errorf("a failing row with nothing outside its denominator carries an aside: %v", row.Detail)
+	}
+	if !hasDetail(row, "full output: "+logged.Rel) {
+		t.Errorf("a failing row does not name its log: %v", row.Detail)
+	}
+	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 1, Survived: 1, Unviable: 2}, survivor, time.Second)
+	if !hasDetail(row, "2 did not compile") {
+		t.Errorf("a failing row does not name what is outside its denominator: %v", row.Detail)
+	}
+
+	// A run whose log could not be opened names no log rather than a path to
+	// nothing, on a failing row and on an unmeasured one alike.
+	row = mutationRow(mutationLabel("app"), unlogged, mutation.Summary{Killed: 1, Survived: 1}, survivor, time.Second)
+	for _, d := range row.Detail {
+		if strings.HasPrefix(d, "full output:") {
+			t.Errorf("a row with no log carries %q", d)
+		}
+	}
+	if row.Log != "" {
+		t.Errorf("a row with no log names %q", row.Log)
+	}
+	unmeasured := mutationRow(mutationLabel("app"), logged, mutation.Summary{Unviable: 2}, nil, time.Second)
+	if unmeasured.Status != ui.StatusUnmeasured {
+		t.Fatalf("a run with an empty denominator is %q, want unmeasured", unmeasured.Status)
+	}
+	if !hasDetail(unmeasured, "full output: "+logged.Rel) || unmeasured.Log != logged.Rel {
+		t.Errorf("an unmeasured row does not name its log: %+v", unmeasured)
+	}
+	if got := mutationRow(mutationLabel("app"), unlogged, mutation.Summary{Unviable: 2}, nil, time.Second); got.Log != "" {
+		t.Errorf("an unmeasured row with no log names %q", got.Log)
+	}
+}
+
+func hasDetail(row ui.Row, want string) bool {
+	for _, d := range row.Detail {
+		if d == want {
+			return true
+		}
+	}
+	return false
+}
+
+// Under --json stdout carries the document, so a tool's live output must go to
+// stderr: findings interleaved into the document make it unparseable, and
+// anything automated reads the document and never the terminal.
+//
+// executil's stream target is a package global the command sets and nothing
+// reads back, so this asks it to write and looks at where the writing landed.
+func TestUnderJSONAToolsLiveOutputGoesToStderr(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components: []\n")
+	const probe = "lydite-stream-probe"
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"mutation", []string{"mutation", "--json", "--dir", root}},
+		{"mutation merge", []string{"mutation", "merge", "--json", "--dir", root, "--reports", mutationShard(t)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			executil.StreamTo(os.Stdout)
+			t.Cleanup(func() { executil.StreamTo(os.Stdout) })
+			got := capturedStderr(t, func() {
+				cmd := newRootCmd()
+				cmd.SetOut(&bytes.Buffer{})
+				cmd.SetErr(&bytes.Buffer{})
+				cmd.SetArgs(c.args)
+				_ = cmd.Execute()
+				executil.Run(t.Context(), root, "sh", "-c", "echo "+probe)
+			})
+			if !strings.Contains(got, probe) {
+				t.Errorf("a tool's live output went to stdout, which is where the document is; stderr held:\n%s", got)
+			}
+		})
+	}
+}
+
+// capturedStderr runs during with the process's own stderr replaced, which is
+// the only way to see what a command wrote there rather than to the writer
+// cobra was given. One test at a time: os.Stderr is process-wide.
+func capturedStderr(t *testing.T, during func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan string, 1)
+	go func() {
+		out, _ := io.ReadAll(r)
+		read <- string(out)
+	}()
+	defer func() { _ = r.Close() }()
+	saved := os.Stderr
+	os.Stderr = w
+	// Restored however during ends. A t.Fatal inside it exits this goroutine,
+	// and a process left writing its diagnostics into a closed pipe takes
+	// every test after this one with it.
+	func() {
+		defer func() {
+			os.Stderr = saved
+			_ = w.Close()
+		}()
+		during()
+	}()
+	return <-read
+}
+
+// Each declared component takes exactly one row in the fold. The labels the
+// fold produces itself are how it tells a row it replaced from one it has
+// never seen, so a component label it stopped recognising is added twice —
+// once by the fold and once as a row nobody handled — which is what a consumer
+// keying rows by label cannot survive.
+func TestEachComponentTakesOneRowInTheMutationFold(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "1 of 1 mutant(s) killed in 1s"}),
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "1 of 1 mutant(s) killed in 1s"}))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v", err)
+	}
+	for _, name := range []string{"a", "b"} {
+		n := 0
+		for _, r := range doc.Rows {
+			if r.Label == mutationLabel(name) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s takes %d rows in the fold, want one", mutationLabel(name), n)
+		}
+	}
+}
+
+// killsItsMutants is the suite for the change under test, written so nothing
+// survives: a run that ends green is what lets a teardown failure be the only
+// thing that could fail the component.
+const killsItsMutants = `
+func TestDeeper(t *testing.T) {
+	if !Deeper("a/b", "a") {
+		t.Error("a/b is deeper than a")
+	}
+	if Deeper("a", "a") {
+		t.Error("a is not deeper than itself")
+	}
+}
+`
+
+// Of the components this run is responsible for, --affected mutates only
+// those the change could have broken. A deselected one is reported rather
+// than dropped, so every declared component takes exactly one row whether it
+// ran or not.
+func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
+	root := goModuleRepoWith(t,
+		"components:\n  - name: app\n    dir: app\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: web\n    dir: web\n    runner: vitest\n",
+		"app",
+		map[string]string{"web/app.ts": "export const version = 1\n"},
+		deeper, killsItsMutants)
+
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--affected")
+	if err != nil {
+		t.Fatalf("an affected run failed: %v\n%+v", err, doc.Rows)
+	}
+	web, ok := rowNamed(doc, mutationLabel("web"))
+	if !ok {
+		t.Fatalf("the deselected component took no row: %+v", doc.Rows)
+	}
+	if web.Status != ui.StatusUnmeasured || web.Value != "not affected" {
+		t.Errorf("web = %+v, want unmeasured/not affected", web)
+	}
+	app, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok || app.Status != ui.StatusPass {
+		t.Fatalf("app = %+v, want the component the change touched to have run", app)
+	}
+	sel, ok := rowNamed(doc, "select")
+	if !ok {
+		t.Fatal("an affected run emitted no select row, so nothing says how much of the declaration it covered")
+	}
+	if !strings.Contains(sel.Value, "1 of 2 affected") {
+		t.Errorf("select = %q, want 1 of 2 affected", sel.Value)
+	}
+}
+
+// A teardown that failed has left state the next run inherits, so it fails a
+// component that otherwise passed — and never masks a failure that already
+// happened, because the earlier one is what its author has to act on.
+func TestAFailingTeardownFailsAPassingComponentAndMasksNothing(t *testing.T) {
+	decl := goModuleDecl + "    teardown: [\"echo the teardown could not run >&2; exit 1\"]\n"
+
+	green := goModuleRepoWith(t, decl, "", nil, deeper, killsItsMutants)
+	doc, _, err := runMutationCmd(t, "--dir", green, "--base-branch", "main")
+	if err == nil {
+		t.Fatalf("a teardown that failed left a passing component: %+v", doc.Rows)
+	}
+	row, _ := rowNamed(doc, mutationLabel("app"))
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want the teardown failure", row)
+	}
+	if !strings.Contains(row.Value, "teardown") {
+		t.Errorf("value = %q, want it to name the teardown", row.Value)
+	}
+
+	// The same teardown over a component that was already not measurable
+	// keeps the earlier answer.
+	red := goModuleRepoWith(t, decl, "", nil, deeper, `
+func TestSomethingUnrelatedIsBroken(t *testing.T) {
+	Deeper("a/b", "a")
+	t.Fatal("this suite was already red")
+}
+`)
+	doc, _, _ = runMutationCmd(t, "--dir", red, "--base-branch", "main")
+	row, _ = rowNamed(doc, mutationLabel("app"))
+	if !strings.Contains(row.Value, "baseline suite did not pass") {
+		t.Errorf("value = %q, want the failure the author has to act on first", row.Value)
+	}
+}
+
+// --stream mirrors each component's output to stderr as well as to its log.
+// It is for the case a captured file cannot serve — a suite that hangs prints
+// nothing until it is killed — so the mirror has to be the process's own
+// stderr rather than a writer a caller passed in.
+func TestStreamMirrorsAComponentsOutputToStderr(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestSomethingUnrelatedIsBroken(t *testing.T) {
+	Deeper("a/b", "a")
+	t.Fatal("this suite was already red")
+}
+`)
+	streamed := capturedStderr(t, func() {
+		if _, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--stream"); err != nil {
+			t.Errorf("a streamed run failed: %v", err)
+		}
+	})
+	if !strings.Contains(streamed, "app |") {
+		t.Errorf("nothing was mirrored under the component's name:\n%s", streamed)
+	}
+	if !strings.Contains(streamed, "this suite was already red") {
+		t.Errorf("the mirror carries none of what the suite printed:\n%s", streamed)
+	}
+
+	quiet := capturedStderr(t, func() {
+		if _, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main"); err != nil {
+			t.Errorf("an unstreamed run failed: %v", err)
+		}
+	})
+	if strings.Contains(quiet, "app |") {
+		t.Errorf("a run that was not asked to stream mirrored anyway:\n%s", quiet)
 	}
 }

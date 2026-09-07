@@ -303,3 +303,51 @@ func TestAWorkerRefusesAListingThatEscapes(t *testing.T) {
 		t.Error("a listing naming a path outside the component was copied")
 	}
 }
+
+// A worker is a copy, and a copy that produced empty files is a component
+// whose every suite fails for a reason nothing in the report names. Nothing
+// else here reads a copied file back: the mutated one is written by Stage and
+// the original is put back from the component's own tree, so both are bytes
+// this package supplied rather than bytes the copy carried.
+func TestAWorkerHoldsTheComponentsOwnBytes(t *testing.T) {
+	const manifest = "{\n  \"name\": \"less\"\n}\n"
+	tree := component(t, map[string]string{"src/less.ts": tsSrc, "package.json": manifest})
+	w, err := tree.Worker(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+
+	staged, err := w.Stage(lessThan(tsSrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := contents(t, filepath.Join(staged.Dir, "package.json")); got != manifest {
+		t.Errorf("the copied manifest is %q, want the component's own %q", got, manifest)
+	}
+	info, err := os.Stat(filepath.Join(staged.Dir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() == 0 {
+		t.Error("the copy is unreadable, so the runner cannot read what it was given")
+	}
+}
+
+// Close is total. It is what Worker calls when preparing the tree fails, and
+// a worker that never opened a root still holds a directory somebody has to
+// remove — so the root is closed if there is one and the directory goes
+// either way.
+func TestAWorkerWithNoRootIsStillClosed(t *testing.T) {
+	dir := t.TempDir() + "/worker"
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	w := &treeWorker{dir: dir}
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing a worker that never opened a root: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the worker directory outlived a worker with no root: %v", err)
+	}
+}

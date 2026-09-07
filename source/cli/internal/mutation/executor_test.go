@@ -1,7 +1,10 @@
 package mutation
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -21,6 +24,10 @@ func shell(script string) runner.Invocation {
 // fake stages whatever the test says each mutant compiles and runs as.
 type fake struct {
 	plan func(m Mutant) Staged
+	// closeErr and releaseErr are what a worker's own housekeeping fails
+	// with, which is the only way into either branch: both are real I/O on a
+	// real directory in every backend lydite ships.
+	closeErr, releaseErr error
 
 	mu      sync.Mutex
 	workers int
@@ -54,10 +61,10 @@ func (w *fakeWorker) Release() error {
 	w.f.mu.Lock()
 	defer w.f.mu.Unlock()
 	w.f.live--
-	return nil
+	return w.f.releaseErr
 }
 
-func (w *fakeWorker) Close() error { return nil }
+func (w *fakeWorker) Close() error { return w.f.closeErr }
 
 func outcomes(results []Result) []Outcome {
 	out := make([]Outcome, len(results))
@@ -347,5 +354,115 @@ func TestARunCancelledWhileWaitingForASlotDoesNotRun(t *testing.T) {
 	}
 	if ran {
 		t.Error("the work ran after the run was cancelled")
+	}
+}
+
+// A component's mutants are dispatched against as many workers as the bound
+// and the work allow, and nothing else asserted that more than one is ever
+// opened: every other assertion here is satisfied by a run that opened one.
+func TestAWorkerIsOpenedForEachMutantTheBoundAllows(t *testing.T) {
+	f := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 1")}}
+	}}
+	mutants := []Mutant{mutantAt(1), mutantAt(2), mutantAt(3)}
+	if _, err := Execute(t.Context(), f, mutants, Options{Workers: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if f.workers != 3 {
+		t.Errorf("%d worker(s) opened for 3 mutants under Workers: 3", f.workers)
+	}
+}
+
+// A bound of zero is no bound, exactly as a bound at or above unbounded is.
+// The alternative is a channel with no buffer, which nothing ever releases
+// into: the first acquire would block until the run was cancelled, and every
+// suite execution in the run would wait behind it.
+func TestABoundOfZeroIsNoBoundAtAll(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		if s := NewSlots(n); s != nil {
+			t.Errorf("NewSlots(%d) allocated a slot buffer nothing could release into", n)
+		}
+	}
+}
+
+// A worker holds a directory, and a run that could not put one back is a run
+// leaving state behind. Neither failure changes any mutant's outcome — the
+// evidence about the tests is already in — so it is said in the log rather
+// than scored, and a log that did not say it is the whole of the report.
+func TestWhatAWorkerFailsToTidySaysSoInTheLog(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fail  func(*fake)
+		about string
+	}{
+		{"closing", func(f *fake) { f.closeErr = errors.New("the directory is busy") }, "closing the worker"},
+		{"releasing", func(f *fake) { f.releaseErr = errors.New("the overlay is gone") }, "releasing the mutant"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fake{plan: func(Mutant) Staged {
+				return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 1")}}
+			}}
+			tc.fail(f)
+			var log bytes.Buffer
+			if _, err := Execute(t.Context(), f, []Mutant{mutantAt(1)}, Options{Workers: 1, Log: &log}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(log.String(), tc.about) {
+				t.Errorf("the log does not say what failed:\n%s", log.String())
+			}
+		})
+	}
+}
+
+// A line per mutant, and the compiler's own words under exactly one of them.
+// A mutant that did not compile is the one outcome whose cause is nowhere
+// else — a survivor is named in its row and a kill needs no explanation — so
+// every other outcome's line stands alone.
+func TestOnlyAMutantThatDidNotCompileHasItsDetailLogged(t *testing.T) {
+	f := &fake{plan: func(m Mutant) Staged {
+		if m.Line == 1 {
+			return Staged{
+				Build:  shell("echo 'a.go:3:2: undefined: x' >&2; exit 1"),
+				Phases: []runner.Invocation{shell("exit 0")},
+			}
+		}
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("echo 'FAIL: TestX'; exit 1")}}
+	}}
+	var log bytes.Buffer
+	results, err := Execute(t.Context(), f, []Mutant{mutantAt(1), mutantAt(2)}, Options{Workers: 1, Log: &log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Unviable || results[1].Outcome != Killed {
+		t.Fatalf("outcomes = %v, want one unviable and one killed", outcomes(results))
+	}
+	if !strings.Contains(log.String(), "undefined: x") {
+		t.Errorf("the compiler's own words are nowhere:\n%s", log.String())
+	}
+	if strings.Contains(log.String(), "FAIL: TestX") {
+		t.Errorf("a killed mutant put its suite's output in the log:\n%s", log.String())
+	}
+	if n := len(strings.Split(strings.TrimRight(log.String(), "\n"), "\n")); n != 3 {
+		t.Errorf("%d log line(s) for two mutants, want a line each and one detail:\n%s", n, log.String())
+	}
+}
+
+// The tail is what the compiler puts the error in, and a run whose output is
+// exactly as long as the tail keeps all of it.
+func TestTheTailIsTheEndOfTheOutputAndNothingIsLostAtItsLength(t *testing.T) {
+	line := func(n int) string { return fmt.Sprintf("line %d", n) }
+	var all []string
+	for i := 1; i <= detailLines+1; i++ {
+		all = append(all, line(i))
+	}
+	if got := lastLines(strings.Join(all[:detailLines], "\n")); got != strings.Join(all[:detailLines], "\n") {
+		t.Errorf("output of exactly %d lines was shortened to:\n%s", detailLines, got)
+	}
+	got := lastLines(strings.Join(all, "\n"))
+	if want := strings.Join(all[1:], "\n"); got != want {
+		t.Errorf("lastLines kept:\n%s\nwant the last %d lines", got, detailLines)
+	}
+	if strings.Contains(got, line(1)+"\n") {
+		t.Error("the first line of an over-long output survived, so the tail is not the end")
 	}
 }
