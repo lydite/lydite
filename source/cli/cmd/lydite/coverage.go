@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
@@ -181,7 +182,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	}
 	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
 		Lines: rep.Lines, Hits: rep.Hits, Producer: producerOf(root, c, tc)}
-	m.CRAP, m.CRAPWhy = score(root, m)
+	m.CRAP, m.CRAPWhy = score(os.Stderr, root, m)
 	return m
 }
 
@@ -194,7 +195,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 // complexity source for is not scored and says so, rather than being silently
 // absent — a component nobody scored and one that scored clean read identically
 // in a count of zero.
-func score(root string, m measurement) (crap.Report, string) {
+func score(w io.Writer, root string, m measurement) (crap.Report, string) {
 	if !m.scorable() {
 		return crap.Report{}, noComplexitySource(m)
 	}
@@ -202,7 +203,22 @@ func score(root string, m measurement) (crap.Report, string) {
 	if err != nil {
 		return crap.Report{}, err.Error()
 	}
+	// A declaration that covers no function is named rather than dropped, for
+	// the reason a mutation declaration covering no mutant is: its author
+	// believes they have answered a finding, and nothing they can see says
+	// otherwise. The commonest cause is a declaration written inside a
+	// function body rather than above it, where it reads perfectly and does
+	// nothing.
+	for _, where := range rep.Unused {
+		_, _ = fmt.Fprintf(w, "warning: %s: %s covers no function, so nothing is excluded by it\n",
+			where, annotation.Marker(annotation.CRAP))
+	}
+	// A component whose every scorable function is excluded is not clean; it
+	// is a component nothing was scored in, and it says so.
 	if !rep.Measured() {
+		if rep.Excluded > 0 {
+			return crap.Report{}, fmt.Sprintf("every function the coverage report describes is excluded (%d)", rep.Excluded)
+		}
 		return crap.Report{}, "the coverage report describes no function to score"
 	}
 	return rep, ""
@@ -893,8 +909,17 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) ui.Row {
 }
 
 // crapValue renders a score the way every row shows it.
+//
+// The excluded count rides on every row that has one, because a repository can
+// annotate its way to nothing above the threshold and this is the number that
+// makes it visible when one does. Absent when nothing was excluded, since a
+// trailing "0 excluded" on every clean row is a clause readers learn to skip.
 func crapValue(rep crap.Report) string {
-	return fmt.Sprintf("%d function(s) above %d, worst %.1f", rep.Above(), crap.Threshold, rep.Worst)
+	value := fmt.Sprintf("%d function(s) above %d, worst %.1f", rep.Above(), crap.Threshold, rep.Worst)
+	if rep.Excluded > 0 {
+		value += fmt.Sprintf(", %d excluded", rep.Excluded)
+	}
+	return value
 }
 
 // worstOffenders is how many functions a failing row names. Enough to act on,

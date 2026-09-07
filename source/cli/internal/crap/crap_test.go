@@ -329,7 +329,7 @@ func TestAFileThatCannotBeReadIsAnErrorNamingIt(t *testing.T) {
 // threshold or not, for a test whose subject is the walk rather than the gate.
 func functions(t *testing.T, root, file string) []Function {
 	t.Helper()
-	out, err := scoreFile(token.NewFileSet(), root, file, covering(400, 1))
+	out, _, _, err := scoreFile(token.NewFileSet(), root, file, covering(400, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func two(n int) int {
 	}
 	// The same function with nothing covered costs the square, which is what
 	// says the two are being told apart rather than both read as uncovered.
-	uncovered, err := scoreFile(token.NewFileSet(), root, "a.go", covering(400, 0))
+	uncovered, _, _, err := scoreFile(token.NewFileSet(), root, "a.go", covering(400, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,5 +461,103 @@ func TestTheFirstFailureIsTheSameFailureEveryRun(t *testing.T) {
 		if !strings.Contains(err.Error(), "a.go") {
 			t.Fatalf("err = %v, want the first file by name every time", err)
 		}
+	}
+}
+
+// A declared function is not scored, and the count of them rides on the report:
+// a repository can annotate its way to nothing above the threshold, and that
+// number is what makes it visible when one does.
+func TestADeclaredFunctionIsNotScoredAndIsCounted(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "a.go", `package a
+
+func tangled(n int) int {
+	if n > 1 {
+		n++
+	}
+	if n > 2 {
+		n++
+	}
+	if n > 3 {
+		n++
+	}
+	if n > 4 {
+		n++
+	}
+	if n > 5 {
+		n++
+	}
+	return n
+}
+
+// declared provisions something.
+//
+// [lydite:exclude_from_crap][the proving ground exercises this end to end; a
+// unit test here would run the machine's own toolchain]
+func declared(n int) int {
+	if n > 1 {
+		n++
+	}
+	if n > 2 {
+		n++
+	}
+	if n > 3 {
+		n++
+	}
+	if n > 4 {
+		n++
+	}
+	if n > 5 {
+		n++
+	}
+	if n > 6 {
+		n++
+	}
+	return n
+}
+`)
+	rep, err := Measure(root, coverage.LineHits{"a.go": covering(60, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Excluded != 1 {
+		t.Errorf("excluded = %d, want the declared function counted", rep.Excluded)
+	}
+	if rep.Scored != 1 || rep.Above() != 1 {
+		t.Fatalf("report = %+v, want only the undeclared function scored", rep)
+	}
+	if rep.Over[0].Name != "tangled" {
+		t.Errorf("over = %v, want the declared one left out", rep.Over[0].Name)
+	}
+	// And out of the worst value too: a score that is not evidence about the
+	// tests is not evidence about the repository's worst function either.
+	if rep.Worst != rep.Over[0].Value {
+		t.Errorf("worst = %v, want the scored function's %v", rep.Worst, rep.Over[0].Value)
+	}
+}
+
+// A declaration that documents no function is carried back so the run can name
+// it. Its author believes they have answered a score, and nothing they can see
+// says otherwise.
+func TestADeclarationCoveringNoFunctionIsCarriedBack(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "a.go", `package a
+
+func f(n int) int {
+	// [lydite:exclude_from_crap][written inside the body, where it does nothing]
+	return n
+}
+`)
+	rep, err := Measure(root, coverage.LineHits{"a.go": covering(10, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unused) != 1 || !strings.Contains(rep.Unused[0], "a.go:4") {
+		t.Errorf("unused = %v, want the declaration located", rep.Unused)
+	}
+	if rep.Excluded != 0 {
+		t.Errorf("excluded = %d, want nothing excluded by a declaration that documents no function", rep.Excluded)
 	}
 }

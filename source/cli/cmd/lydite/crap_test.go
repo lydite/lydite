@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -330,7 +331,7 @@ func TestAScoreThatCouldNotBeTakenCarriesItsReason(t *testing.T) {
 	m := measured("svc", runner.Go, 9, 10)
 	m.Hits = coverage.LineHits{"svc/lib.go": {1: 1, 2: 1, 3: 1}}
 
-	rep, why := score(root, m)
+	rep, why := score(io.Discard, root, m)
 	if rep.Measured() {
 		t.Errorf("report = %+v, want nothing scored", rep)
 	}

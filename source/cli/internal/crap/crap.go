@@ -36,6 +36,7 @@ import (
 	"slices"
 	"strings"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/coverage"
 )
 
@@ -77,6 +78,14 @@ type Report struct {
 	// covers no function at all is unmeasured rather than clean — the two
 	// read identically in a count of zero and mean opposite things.
 	Scored int
+	// Excluded is how many functions their author declared this score is not
+	// evidence about, and it is reported beside the count for that reason: a
+	// repository can annotate its way to nothing above the threshold, and this
+	// is the number that makes it visible when one does.
+	Excluded int
+	// Unused names each declaration that covers no function, so an author who
+	// believes they have answered a score is told when nothing they wrote did.
+	Unused []string
 	// Over is every function above Threshold, worst first. The functions
 	// rather than their number, because a failing row's job is to name the
 	// work: the author clears this gate by testing one of these or by taking
@@ -128,10 +137,12 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 	var rep Report
 	fset := token.NewFileSet()
 	for _, file := range files {
-		scored, err := scoreFile(fset, root, file, hits[file])
+		scored, excluded, unused, err := scoreFile(fset, root, file, hits[file])
 		if err != nil {
 			return Report{}, err
 		}
+		rep.Excluded += excluded
+		rep.Unused = append(rep.Unused, unused...)
 		for _, f := range scored {
 			rep.Scored++
 			rep.Worst = math.Max(rep.Worst, f.Value)
@@ -262,23 +273,38 @@ func complexity(fn *ast.FuncDecl) int {
 // row and a list of every function in it is a report nobody reads — but the
 // score exists for all of them, since Worst is over every function and not
 // over the offenders.
-func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) ([]Function, error) {
+func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored []Function, excluded int, unused []string, err error) {
 	path := filepath.Join(root, filepath.FromSlash(file))
 	src, err := os.ReadFile(path) // #nosec G304 -- the path comes from lydite's own coverage profile, under the scan root
 	if err != nil {
-		return nil, fmt.Errorf("reading %s to score its functions: %w", file, err)
+		return nil, 0, nil, fmt.Errorf("reading %s to score its functions: %w", file, err)
 	}
-	parsed, err := parser.ParseFile(fset, path, src, 0)
+	// With comments, because a function's doc comment is where its author says
+	// this score is not evidence about it.
+	parsed, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 	if err != nil {
-		return nil, fmt.Errorf("parsing %s to score its functions: %w", file, err)
+		return nil, 0, nil, fmt.Errorf("parsing %s to score its functions: %w", file, err)
 	}
-	var out []Function
+	// The same rule the coverage gate reads, asked for this gate: a
+	// declaration names one gate, so a function whose coverage is taken in
+	// another process has not thereby become unscorable and the reverse.
+	declared, err := coverage.DeclaredExclusions(fset, parsed, file, annotation.CRAP)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	for _, line := range declared.Unused {
+		unused = append(unused, fmt.Sprintf("%s:%d", file, line))
+	}
 	for _, decl := range parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		// A declaration with no body is an assembly or linkname stub. There
 		// is nothing to walk and nothing the profile records, so it is not a
 		// function that went untested.
 		if !ok || fn.Body == nil {
+			continue
+		}
+		if _, ok := declared.Funcs[fn]; ok {
+			excluded++
 			continue
 		}
 		start := fset.Position(fn.Pos()).Line
@@ -294,7 +320,7 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) ([]Func
 		f := Function{Name: name(fn), File: file, Line: start,
 			Complexity: complexity(fn), Lines: lines}
 		f.Value = Index(f.Complexity, lines)
-		out = append(out, f)
+		scored = append(scored, f)
 	}
-	return out, nil
+	return scored, excluded, unused, nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/tools/cover"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/executil"
 )
 
@@ -230,10 +231,23 @@ func goProfileLines(src GoModuleProfile, root string) (LineCount, error) {
 	}
 	var lines LineCount
 	for _, p := range profiles {
-		if isGeneratedGoFile(filepath.Join(root, filepath.FromSlash(goRelPath(p.FileName, src)))) {
+		abs := filepath.Join(root, filepath.FromSlash(goRelPath(p.FileName, src)))
+		if isGeneratedGoFile(abs) {
 			continue
 		}
+		// Out of the denominator as well as the numerator. A declaration says
+		// this suite does not measure the function, so counting its statements
+		// as uncovered would report the author's own statement as a hole they
+		// have to fill — which is the reading that makes an exclusion worth
+		// nothing.
+		excluded, err := excludedGoLines(abs, annotation.Coverage)
+		if err != nil {
+			return LineCount{}, err
+		}
 		for _, b := range p.Blocks {
+			if excluded[b.StartLine] {
+				continue
+			}
 			lines.Total += b.NumStmt
 			if b.Count > 0 {
 				lines.Covered += b.NumStmt
@@ -276,10 +290,19 @@ func ParseGoProfile(src GoModuleProfile, dir string) (LineHits, error) {
 			continue
 		}
 		skip := nonExecutableLines(abs)
+		// Lines a function's own author declared this suite does not measure.
+		// Dropped from the map rather than marked in it, so every reader —
+		// the patch gate, the aggregate, the complexity score — sees the same
+		// file it would see if those lines were not executable at all, and no
+		// reader needs a second rule about what a marked line means.
+		excluded, err := excludedGoLines(abs, annotation.Coverage)
+		if err != nil {
+			return nil, err
+		}
 		fileHits := map[int]int{}
 		for _, b := range p.Blocks {
 			for line := b.StartLine; line <= b.EndLine; line++ {
-				if skip[line] {
+				if skip[line] || excluded[line] {
 					continue
 				}
 				if count, seen := fileHits[line]; !seen || b.Count > count {
