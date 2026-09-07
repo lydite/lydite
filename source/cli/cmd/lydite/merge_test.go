@@ -476,3 +476,152 @@ func TestMergeRefusesADeclarationWithNoComponents(t *testing.T) {
 		t.Errorf("error = %v, want it to say there is nothing to fold", err)
 	}
 }
+
+// A row the fold has no rule for is carried through, once when the shards
+// agree about it and once per shard when they do not. Without that a shard's
+// own row disappears into a fold that reproduces everything else, which is a
+// run saying less than the runs it folds.
+func TestATestRowTheFoldHasNoRuleForIsCarried(t *testing.T) {
+	root := mergeRepo(t)
+	odd := ui.Row{Status: ui.StatusContext, Label: "toolchain", Value: "go 1.26.6"}
+	out, err := runMergeCmd(t, root, withRows(t, shardOf(t, "a", 5, 10), odd), withRows(t, shardOf(t, "b", 5, 10), odd))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v\n%s", err, out)
+	}
+	if got := countRows(t, out, "toolchain"); got != 1 {
+		t.Errorf("a row the shards agreed on appears %d time(s), want once", got)
+	}
+
+	out, _ = runMergeCmd(t, root, withRows(t, shardOf(t, "a", 5, 10), odd),
+		withRows(t, shardOf(t, "b", 5, 10), ui.Row{Status: ui.StatusContext, Label: "toolchain", Value: "go 1.25.0"}))
+	if got := countRows(t, out, "toolchain"); got != 2 {
+		t.Errorf("the shards disagreed and the fold kept %d row(s), want both", got)
+	}
+}
+
+// A whole-tree gate no shard wrote is a gate the fold has nothing to say
+// about, and an empty row under its label is a gate that did not run reading
+// as one that did.
+func TestAWholeTreeGateNoShardWroteTakesNoRow(t *testing.T) {
+	root := mergeRepo(t)
+	out, err := runMergeCmd(t, root, withoutRow(t, shardOf(t, "a", 5, 10), "orphans"),
+		withoutRow(t, shardOf(t, "b", 5, 10), "orphans"))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v\n%s", err, out)
+	}
+	if got := countRows(t, out, "orphans"); got != 0 {
+		t.Errorf("the fold emitted %d orphans row(s) over shards that wrote none", got)
+	}
+	// The gate every shard did write still folds to exactly one.
+	if got := countRows(t, out, "watch"); got != 1 {
+		t.Errorf("the watch row appears %d time(s), want once", got)
+	}
+}
+
+// No shard scheduled anything — every component was deselected. A single run
+// emits no schedule row in that state, and a fold inventing a green one would
+// be more assertive about the scheduler than the runs it folds.
+func TestAFoldOverShardsThatScheduledNothingEmitsNoScheduleRow(t *testing.T) {
+	root := mergeRepo(t)
+	out, err := runMergeCmd(t, root, withoutRow(t, shardOf(t, "a", 5, 10), "schedule"),
+		withoutRow(t, shardOf(t, "b", 5, 10), "schedule"))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v\n%s", err, out)
+	}
+	if got := countRows(t, out, "schedule"); got != 0 {
+		t.Errorf("the fold invented %d schedule row(s) over shards that scheduled nothing", got)
+	}
+}
+
+// The safety net under the reasoning that every shard's row is reproduced or
+// replaced. A shard that failed over something the fold carries no row for
+// must not fold into a pass — and this is the only thing that would notice.
+func TestAShardThatFailedOverNothingTheFoldCarriesIsReported(t *testing.T) {
+	root := mergeRepo(t)
+	failing := shardOf(t, "a", 5, 10)
+	setVerdict(t, failing, ui.VerdictFail)
+	out, err := runMergeCmd(t, root, failing, shardOf(t, "b", 5, 10))
+	if err == nil {
+		t.Fatalf("the fold passed over a shard that failed:\n%s", out)
+	}
+	if !strings.Contains(out, "reproduced no row explaining it") {
+		t.Errorf("the fold does not say which shard failed over nothing it carries:\n%s", out)
+	}
+}
+
+// withRows rewrites a shard's document with extra rows appended.
+func withRows(t *testing.T, dir string, extra ...ui.Row) string {
+	t.Helper()
+	doc := shardDoc(t, dir)
+	doc.Rows = append(doc.Rows, extra...)
+	writeShardDoc(t, dir, doc)
+	return dir
+}
+
+// withoutRow rewrites a shard's document with every row under label dropped.
+func withoutRow(t *testing.T, dir, label string) string {
+	t.Helper()
+	doc := shardDoc(t, dir)
+	var kept []ui.Row
+	for _, r := range doc.Rows {
+		if r.Label != label {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) == len(doc.Rows) {
+		t.Fatalf("the shard wrote no %s row, so dropping it proves nothing", label)
+	}
+	doc.Rows = kept
+	writeShardDoc(t, dir, doc)
+	return dir
+}
+
+// setVerdict rewrites a shard's verdict without touching its rows, which is
+// the one state a report cannot render itself into.
+func setVerdict(t *testing.T, dir string, v ui.Verdict) {
+	t.Helper()
+	doc := shardDoc(t, dir)
+	doc.Verdict = v
+	writeShardDoc(t, dir, doc)
+}
+
+func shardDoc(t *testing.T, dir string) ui.Document {
+	t.Helper()
+	f, err := os.Open(filepath.Join(dir, documentName("test"))) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	doc, err := ui.ReadDocument(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func writeShardDoc(t *testing.T, dir string, doc ui.Document) {
+	t.Helper()
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, documentName("test")), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countRows counts the rows under one label in a rendered --json fold.
+func countRows(t *testing.T, out, label string) int {
+	t.Helper()
+	var doc ui.Document
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("the fold emitted no document: %v\n%s", err, out)
+	}
+	n := 0
+	for _, r := range doc.Rows {
+		if r.Label == label {
+			n++
+		}
+	}
+	return n
+}

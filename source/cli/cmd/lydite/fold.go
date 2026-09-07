@@ -100,19 +100,24 @@ func rowsFor(inputs []shardInput, label string) []ui.Row {
 	return out
 }
 
-// collapse folds the rows under one label into the single row every shard
-// agreed on. disagreed says two shards wrote different ones.
-func collapse(inputs []shardInput, label string) (row ui.Row, ok, disagreed bool) {
-	found := rowsFor(inputs, label)
+// collapse returns the rows under one label and whether every shard that wrote
+// one wrote the same row.
+//
+// The rows rather than the single agreed one, because a caller that has to
+// show a disagreement needs all of them and would otherwise ask for them
+// again — and a second value saying "there is a row" would only restate the
+// length of the first.
+func collapse(inputs []shardInput, label string) (found []ui.Row, agreed bool) {
+	found = rowsFor(inputs, label)
 	if len(found) == 0 {
-		return ui.Row{}, false, false
+		return nil, true
 	}
 	for _, r := range found[1:] {
 		if !sameRow(r, found[0]) {
-			return ui.Row{}, false, true
+			return found, false
 		}
 	}
-	return found[0], true, false
+	return found, true
 }
 
 // sameRow compares two rows by everything a reader sees, so "the shards agree"
@@ -168,8 +173,11 @@ func foldedScheduleRow(inputs []shardInput) (ui.Row, bool) {
 				row.Status = ui.StatusFail
 			}
 			if m := maxConcurrent.FindStringSubmatch(r.Value); m != nil {
-				if n, err := strconv.Atoi(m[1]); err == nil && n > best {
-					best = n
+				// The largest any shard reached, written as a clamp: a
+				// conditional whose boundary assigns the value already held
+				// is a branch nothing can be asked about.
+				if n, err := strconv.Atoi(m[1]); err == nil {
+					best = max(best, n)
 				}
 			}
 			row.Detail = append(row.Detail, in.dir+": "+r.Value)
@@ -217,14 +225,14 @@ func uncarriedVerdicts(rep *ui.Report, inputs []shardInput) []string {
 func wholeTreeRows(rep *ui.Report, inputs []shardInput, labels []string) []string {
 	var problems []string
 	for _, label := range labels {
-		row, ok, disagreed := collapse(inputs, label)
-		if disagreed {
+		found, agreed := collapse(inputs, label)
+		if !agreed {
 			problems = append(problems, fmt.Sprintf(
 				"the shards disagree about %s, so they did not all see the same tree", label))
 			continue
 		}
-		if ok {
-			rep.Add(row)
+		if len(found) > 0 {
+			rep.Add(found[0])
 		}
 	}
 	return problems
@@ -276,15 +284,17 @@ func unhandledLabels(inputs []shardInput, folded func(string) bool) []string {
 // A row merge cannot arbitrate must not be silently reduced to one shard's copy.
 func carryUnhandled(rep *ui.Report, inputs []shardInput, folded func(string) bool) {
 	for _, label := range unhandledLabels(inputs, folded) {
-		row, ok, disagreed := collapse(inputs, label)
-		if disagreed {
-			for _, r := range rowsFor(inputs, label) {
-				rep.Add(r)
-			}
-			continue
+		found, agreed := collapse(inputs, label)
+		if agreed {
+			// One row carries them all. Sliced rather than indexed: every
+			// label here came from a row some shard wrote, so there is always
+			// one — but that invariant lives in unhandledLabels, and a fold
+			// that panicked when it stopped holding would be worse than one
+			// that carried nothing.
+			found = found[:min(len(found), 1)]
 		}
-		if ok {
-			rep.Add(row)
+		for _, r := range found {
+			rep.Add(r)
 		}
 	}
 }

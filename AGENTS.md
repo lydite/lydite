@@ -1871,6 +1871,16 @@ containment is also what lets a declaration written inside a multi-line statemen
 declaration that covers no mutant is named on stderr: its author believes they have answered a
 survivor and nothing they can see says otherwise.
 
+**It covers every mutant replacing that least amount, which for one operator is both its boundary
+shift and its negation.** So a line whose boundary cannot be observed and whose negation can is a
+line a declaration cannot honestly answer: it would acknowledge the killable mutant too, and stop
+counting a kill the tests are still making. Such a line is answered by leaving no comparison to
+shift: a clamp states itself as `min`/`max`, and a containment test whose edges only one node could
+ever reach becomes a walk that prunes that subtree instead — which is why `visit` skips a test module
+rather than `emit` filtering one out, and why `internal/mutation` and `cmd/lydite` write their clamps
+the way they do. This is the cost of deciding coverage by containment rather than by operator, and it
+falls on exactly one shape: a relational operator whose two ends are not equally observable.
+
 The reason is required, and its absence is an error rather than a silent non-honouring. What counts
 as a comment is each language's own parser to say, never a scan of the bytes: one scan would have
 to lex three languages correctly to be right once. `internal/annotation` holds the token and the

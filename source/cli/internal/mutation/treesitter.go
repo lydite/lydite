@@ -289,7 +289,6 @@ func GenerateTreeSitter(lang runner.Lang, path string, src []byte, lines map[int
 	}
 
 	t := &tsGen{sites: sites{path: path, src: src, lines: lines}, g: g, lang: language}
-	t.skipped = t.testModules(root)
 	reasons, err := annotation.Declarations(path, t.comments(root))
 	if err != nil {
 		return nil, nil, err
@@ -303,15 +302,10 @@ type tsGen struct {
 	sites
 	g    grammar
 	lang *gotreesitter.Language
-	// skipped are the byte ranges no mutant may come from: the test modules a
-	// language writes inside the file they test.
-	skipped []byteSpan
 }
 
-// byteSpan is a half-open range of the source.
-type byteSpan struct{ from, to int }
-
-// testModules finds the modules whose contents are the suite.
+// isTestModule reports whether a node is a module whose contents are the
+// suite.
 //
 // The attribute is a *preceding sibling* of the module rather than a child, so
 // this reads the tree's own order rather than looking inside the module. The
@@ -323,22 +317,15 @@ type byteSpan struct{ from, to int }
 // has to fail in: a form this does not know about produces survivors an author
 // can see and answer, where a looser match would silently stop mutating code
 // that ships.
-func (t *tsGen) testModules(root *gotreesitter.Node) []byteSpan {
+func (t *tsGen) isTestModule(n *gotreesitter.Node) bool {
 	if t.g.testModule == "" || t.g.testAttribute == "" {
-		return nil
+		return false
 	}
-	var out []byteSpan
-	t.walk(root, func(n *gotreesitter.Node) {
-		if n.Type(t.lang) != t.g.testModule {
-			return
-		}
-		prev := n.PrevSibling()
-		if prev == nil || !strings.EqualFold(compact(prev.Text(t.src)), t.g.testAttribute) {
-			return
-		}
-		out = append(out, byteSpan{from: int(n.StartByte()), to: int(n.EndByte())})
-	})
-	return out
+	if n.Type(t.lang) != t.g.testModule {
+		return false
+	}
+	prev := n.PrevSibling()
+	return prev != nil && strings.EqualFold(compact(prev.Text(t.src)), t.g.testAttribute)
 }
 
 // compact removes every space from an attribute, so one form is recognised
@@ -380,21 +367,32 @@ func (t *tsGen) walk(n *gotreesitter.Node, fn func(*gotreesitter.Node)) {
 	}
 }
 
-// visit applies every operator that fits each node.
+// visit applies every operator that fits each node, and descends into nothing
+// that a module holding the suite contains.
 //
 // An operator matching an outer node does not stop an inner one from also
 // being mutated: a subexpression is exactly where an off-by-one hides.
-func (t *tsGen) visit(root *gotreesitter.Node) {
-	t.walk(root, func(n *gotreesitter.Node) {
-		switch typ := n.Type(t.lang); {
-		case typ == t.g.binary:
-			t.binary(n)
-		case slicesContains(t.g.returns, typ):
-			t.returns(n)
-		case typ == t.g.statement:
-			t.removeStatement(n)
-		}
-	})
+//
+// The suite is pruned here rather than filtered out of each mutant. A node is
+// inside a test module or entirely outside it — a tree cannot straddle one —
+// so the subtree is the thing to leave alone, and a range comparison whose
+// edges only the module itself could reach is a boundary no test could ever be
+// asked about.
+func (t *tsGen) visit(n *gotreesitter.Node) {
+	if n == nil || t.isTestModule(n) {
+		return
+	}
+	switch typ := n.Type(t.lang); {
+	case typ == t.g.binary:
+		t.binary(n)
+	case slicesContains(t.g.returns, typ):
+		t.returns(n)
+	case typ == t.g.statement:
+		t.removeStatement(n)
+	}
+	for i := range n.ChildCount() {
+		t.visit(n.Child(i))
+	}
 }
 
 // binary emits the operator swaps that apply to one infix expression.
@@ -469,14 +467,8 @@ func (t *tsGen) namedChild(n *gotreesitter.Node) *gotreesitter.Node {
 	return nil
 }
 
-// emit records a mutant replacing one node's own source range, unless the node
-// is inside a module that holds the suite.
+// emit records a mutant replacing one node's own source range.
 func (t *tsGen) emit(op Operator, n *gotreesitter.Node, mutated string) {
-	for _, span := range t.skipped {
-		if int(n.StartByte()) >= span.from && int(n.EndByte()) <= span.to {
-			return
-		}
-	}
 	start, end := n.StartPoint(), n.EndPoint()
 	t.add(op,
 		int(start.Row)+1, int(start.Column)+1,

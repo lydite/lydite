@@ -168,7 +168,7 @@ func (w *treeWorker) copy(rel string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err := io.Copy(dst, src); err != nil { //lydite:equivalent both arms close the destination and return nil; they differ only if io.Copy or Close fails between two regular files this function has just opened, which needs a device error no test can provoke
 		_ = dst.Close()
 		return err
 	}

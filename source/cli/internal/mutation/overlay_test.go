@@ -291,3 +291,37 @@ func TestTheOverlayNamesTheFileTheCompilerWillRead(t *testing.T) {
 		t.Errorf("the suite would run in %s, want %s", staged.Dir, resolvedReal)
 	}
 }
+
+// Release is housekeeping and says so when it fails. An overlay left behind is
+// the next mutant's compiler input, so a removal that did not happen and was
+// not reported is a mutant built against the previous one's source — and every
+// outcome after it is evidence about the wrong change.
+func TestAReleaseThatCouldNotRemoveWhatItStagedSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.MkdirAll(filepath.Join(blocked, "child"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	w := &goWorker{dir: dir, staged: []string{blocked}}
+	err := w.Release()
+	if err == nil {
+		t.Fatal("a removal that did not happen was reported as a release that did")
+	}
+	if !strings.Contains(err.Error(), blocked) {
+		t.Errorf("the error is %q, want it to name %s", err, blocked)
+	}
+	if w.staged != nil {
+		t.Error("a failed release left the path staged, so the next one would try it again")
+	}
+}
+
+// A file that is already gone is the state Release is trying to reach, so it
+// is not a failure — a Stage that wrote nothing before it failed leaves
+// exactly that.
+func TestAReleaseOfSomethingAlreadyGoneIsNotAFailure(t *testing.T) {
+	w := &goWorker{dir: t.TempDir()}
+	w.staged = []string{filepath.Join(w.dir, "never-written.json")}
+	if err := w.Release(); err != nil {
+		t.Errorf("releasing a file nothing wrote: %v", err)
+	}
+}
