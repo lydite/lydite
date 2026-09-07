@@ -3,6 +3,7 @@ package mutation
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,28 +14,46 @@ import (
 
 const tsSrc = "export function less(x: number, y: number) {\n  return x < y\n}\n"
 
-// component writes a small tree and returns the Tree backend over it.
+// aboveTheComponent is a repository file the component's build reads from
+// outside its own directory, which is the shape a worker has to reproduce.
+const aboveTheComponent = "docs/openapi.json"
+
+// component writes a small repository with the component one level down, and
+// returns the Tree backend over it.
 func component(t *testing.T, files map[string]string) Tree {
 	t.Helper()
-	dir := t.TempDir()
-	var names []string
+	return componentAt(t, "web", files)
+}
+
+// componentAt is the same, with the component at a named directory, so the
+// degenerate "." — a component rooted at the scan root, where every join
+// collapses — is reachable from a test.
+func componentAt(t *testing.T, dir string, files map[string]string) Tree {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names := []string{aboveTheComponent}
+	write(aboveTheComponent, "{}\n")
 	for rel, body := range files {
-		path := filepath.Join(dir, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		names = append(names, rel)
+		write(path.Join(dir, rel), body)
+		names = append(names, path.Join(dir, rel))
 	}
 	slices.Sort(names)
 	return Tree{
-		Dir:    dir,
-		Files:  names,
-		Parent: t.TempDir(),
-		Build:  runner.Invocation{Name: "tsc", Args: []string{"--noEmit"}},
-		Suite:  runner.Invocation{Name: "npx", Args: []string{"vitest", "run"}},
+		Root:      root,
+		Component: dir,
+		Files:     names,
+		Parent:    t.TempDir(),
+		Build:     runner.Invocation{Name: "tsc", Args: []string{"--noEmit"}},
+		Suite:     runner.Invocation{Name: "npx", Args: []string{"vitest", "run"}},
 	}
 }
 
@@ -57,14 +76,14 @@ func TestAMutantIsWrittenIntoTheWorkerAndNotIntoTheComponent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if staged.Dir == tree.Dir {
+	if staged.Dir == tree.dir() {
 		t.Fatal("the suite would run in the component's own directory")
 	}
 	if got := contents(t, filepath.Join(staged.Dir, "src", "less.ts")); !strings.Contains(got, "x >= y") {
 		t.Errorf("the worker holds %q, want the mutant", got)
 	}
 	// The component's own tree is what an interrupt would leave behind.
-	if got := contents(t, filepath.Join(tree.Dir, "src", "less.ts")); got != tsSrc {
+	if got := contents(t, filepath.Join(tree.dir(), "src", "less.ts")); got != tsSrc {
 		t.Errorf("the component's own source was edited: %q", got)
 	}
 	// Everything else came across, or the build fails for a reason that has
@@ -118,10 +137,10 @@ func TestAWriteThatFollowsASymlinkOutOfTheWorkerIsRefused(t *testing.T) {
 
 	tree := component(t, map[string]string{"src/less.ts": tsSrc})
 	// A symlink the scanned repository committed, pointing out of the tree.
-	if err := os.Symlink(outside, filepath.Join(tree.Dir, "evil")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(tree.dir(), "evil")); err != nil {
 		t.Skipf("this filesystem does not support symlinks: %v", err)
 	}
-	tree.Files = append(tree.Files, "evil")
+	tree.Files = append(tree.Files, "web/evil")
 
 	w, err := tree.Worker(t.Context(), 0)
 	if err != nil {
@@ -132,7 +151,7 @@ func TestAWriteThatFollowsASymlinkOutOfTheWorkerIsRefused(t *testing.T) {
 	// A mutant whose path is lexically spotless and resolves outside the
 	// worker through that link.
 	escape := Mutant{Path: "evil/passwd", Offset: 0, Length: 8, Original: "original", Mutated: "mutated!"}
-	if err := os.WriteFile(filepath.Join(tree.Dir, "evil", "passwd"), []byte("original\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(tree.dir(), "evil", "passwd"), []byte("original\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err = w.Stage(escape)
@@ -172,7 +191,7 @@ func TestTheRunnerIsPreparedOncePerWorker(t *testing.T) {
 	prepared := 0
 	tree.Prepare = func(_ context.Context, dir string) error {
 		prepared++
-		if dir == tree.Dir {
+		if dir == tree.dir() {
 			t.Error("the runner was prepared in the component's own directory")
 		}
 		return nil
@@ -231,21 +250,103 @@ func TestCloseRemovesTheWorkerDirectory(t *testing.T) {
 	}
 }
 
-// The listing is git's, in scan-root-relative form; a worker copy needs the
-// same paths one level down, and a path outside the component is not this
-// component's to copy.
-func TestOnlyTheComponentsOwnFilesAreCopied(t *testing.T) {
-	files := []string{"source/cli/main.go", "source/web/app.ts", "README.md"}
-	if got := ComponentFiles("source/web", files); !slices.Equal(got, []string{"app.ts"}) {
-		t.Errorf("ComponentFiles(source/web) = %v, want [app.ts]", got)
+// A worker holds the repository and not the component alone, and the
+// component's commands run at its own directory inside the copy.
+//
+// A component's build routinely reads a file above itself — a workspace
+// importing a generated spec, a crate embedding a VERSION with include_str! —
+// and a copy narrowed to the component fails to compile every one of its
+// mutants. That reports them unviable, which makes the component
+// `unmeasured`, which does not vote: the gate examines nothing and the run is
+// green, which is the one failure mode a mutation gate must not have.
+func TestTheWorkerHoldsWhatTheComponentReadsFromAboveItself(t *testing.T) {
+	tree := component(t, map[string]string{"src/less.ts": tsSrc})
+	w, err := tree.Worker(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := ComponentFiles(".", files); !slices.Equal(got, files) {
-		t.Errorf("a component rooted at the scan root got %v, want every file", got)
+	defer func() { _ = w.Close() }()
+
+	staged, err := w.Stage(lessThan(tsSrc))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A component whose name is a prefix of another's directory takes none of
-	// that one's files: `web` and `web-admin` are separate trees.
-	if got := ComponentFiles("web", []string{"web-admin/app.ts"}); len(got) != 0 {
-		t.Errorf("ComponentFiles(web) took %v from web-admin", got)
+	// The commands run at the component, so a mutant's own path resolves the
+	// way its compiler resolves it.
+	if got := contents(t, filepath.Join(staged.Dir, "src", "less.ts")); !strings.Contains(got, "x >= y") {
+		t.Errorf("the component directory inside the worker holds %q, want the mutant", got)
+	}
+	above := filepath.Join(staged.Dir, "..", filepath.FromSlash(aboveTheComponent))
+	if _, err := os.Stat(above); err != nil {
+		t.Errorf("the worker is missing %s, which the component's build reads: %v", aboveTheComponent, err)
+	}
+}
+
+// A worker's own writes are confined, not merely checked, and the copy is
+// where that is hardest to see: checkPath is lexical, so a listing naming a
+// path beneath a committed symlink is spotless, and an unconfined open would
+// follow the link and truncate a file outside the worker. This asserts the
+// syscall refused it and the file outside is untouched — a test that passed
+// because the path looked wrong would prove nothing about containment.
+func TestACopyThatFollowsASymlinkOutOfTheWorkerIsRefused(t *testing.T) {
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "passwd")
+	if err := os.WriteFile(victim, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tree := component(t, map[string]string{"src/less.ts": tsSrc})
+	if err := os.Symlink(outside, filepath.Join(tree.dir(), "evil")); err != nil {
+		t.Skipf("this filesystem does not support symlinks: %v", err)
+	}
+	// The listing an index carrying a symlink and an entry beneath it yields,
+	// in the order git reports it: the link first, then the path through it.
+	tree.Files = append(tree.Files, "web/evil", "web/evil/passwd")
+
+	w, err := tree.Worker(t.Context(), 0)
+	if err == nil {
+		_ = w.Close()
+		t.Fatal("a listing that writes through a symlink out of the worker was copied")
+	}
+	if got := contents(t, victim); got != "original\n" {
+		t.Errorf("the file outside the worker was written: %q", got)
+	}
+}
+
+// Every join in this package collapses when a component is rooted at the scan
+// root, so the case is the one most likely to be got wrong and the least
+// likely to be noticed: the commands run at the worker itself, and a mutant's
+// path is already the path inside it.
+func TestAComponentRootedAtTheScanRoot(t *testing.T) {
+	tree := componentAt(t, ".", map[string]string{"src/less.ts": tsSrc})
+	var prepared string
+	tree.Prepare = func(_ context.Context, dir string) error {
+		prepared = dir
+		return nil
+	}
+	w, err := tree.Worker(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+
+	if tree.dir() != tree.Root {
+		t.Errorf("dir() is %q, want the scan root %q", tree.dir(), tree.Root)
+	}
+	staged, err := w.Stage(lessThan(tsSrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared != staged.Dir {
+		t.Errorf("the runner was prepared in %q and the suite runs in %q", prepared, staged.Dir)
+	}
+	if got := contents(t, filepath.Join(staged.Dir, "src", "less.ts")); !strings.Contains(got, "x >= y") {
+		t.Errorf("the worker holds %q, want the mutant", got)
+	}
+	// The file above the component is above the scan root too, so it is in no
+	// listing and the worker cannot hold it.
+	if _, err := os.Stat(filepath.Join(staged.Dir, filepath.FromSlash(aboveTheComponent))); err != nil {
+		t.Errorf("the worker is missing %s: %v", aboveTheComponent, err)
 	}
 }
 
@@ -263,7 +364,7 @@ func contents(t *testing.T, path string) string {
 // the component over a race with the author's editor.
 func TestAFileGitListsAndTheTreeNoLongerHoldsIsSkipped(t *testing.T) {
 	tree := component(t, map[string]string{"src/less.ts": tsSrc})
-	tree.Files = append(tree.Files, "src/deleted.ts")
+	tree.Files = append(tree.Files, "web/src/deleted.ts")
 	w, err := tree.Worker(t.Context(), 0)
 	if err != nil {
 		t.Fatalf("a deleted file failed the worker: %v", err)
@@ -283,10 +384,10 @@ func TestAFileGitListsAndTheTreeNoLongerHoldsIsSkipped(t *testing.T) {
 // a gate firing on ordinary work.
 func TestAFileThatIsNotSourceIsSkippedRatherThanRefused(t *testing.T) {
 	tree := component(t, map[string]string{"src/less.ts": tsSrc})
-	if err := os.Mkdir(filepath.Join(tree.Dir, "submodule"), 0o750); err != nil {
+	if err := os.Mkdir(filepath.Join(tree.dir(), "submodule"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	tree.Files = append(tree.Files, "submodule")
+	tree.Files = append(tree.Files, "web/submodule")
 	w, err := tree.Worker(t.Context(), 0)
 	if err != nil {
 		t.Fatalf("an unreproducible entry failed the worker: %v", err)
@@ -294,7 +395,7 @@ func TestAFileThatIsNotSourceIsSkippedRatherThanRefused(t *testing.T) {
 	_ = w.Close()
 }
 
-// A path that cannot name a file inside the component never becomes part of a
+// A path that cannot name a file inside the repository never becomes part of a
 // worker either, so a listing carrying one fails before anything is copied.
 func TestAWorkerRefusesAListingThatEscapes(t *testing.T) {
 	tree := component(t, map[string]string{"src/less.ts": tsSrc})

@@ -194,9 +194,9 @@ func TestAComponentThatOptedOutStillTakesARowAndRunsNothing(t *testing.T) {
 
 // Go needs no worker directory: an overlay names the mutated file wherever it
 // is written. Rust and TypeScript have no such instruction, so their mutants
-// run in a copy of the component's tree — and a component git lists no file
-// under has nothing to copy, which is said out loud rather than reported as a
-// component whose suite killed everything.
+// run in a copy of the repository — and one git lists no file in has nothing
+// to copy, which is said out loud rather than reported as a component whose
+// suite killed everything.
 func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
 	goComponent := component.Component{Name: "cli", Dir: ".", Runner: "go-test"}
 	web := component.Component{Name: "web", Dir: ".", Runner: "vitest"}
@@ -209,22 +209,37 @@ func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
 	}
 
 	none := func(context.Context, string) error { return nil }
-	backend, err := backendFor(runner.Go, t.TempDir(), runner.Invocation{}, runner.Invocation{}, nil, none)
+	backend, err := backendFor(runner.Go, t.TempDir(), "cli", runner.Invocation{}, runner.Invocation{}, nil, none)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := backend.(mutation.Go); !ok {
 		t.Errorf("Go got %T, want the overlay backend", backend)
 	}
-	backend, err = backendFor(runner.TypeScript, t.TempDir(), runner.Invocation{}, runner.Invocation{}, []string{"src/a.ts"}, none)
+	backend, err = backendFor(runner.TypeScript, t.TempDir(), "web", runner.Invocation{}, runner.Invocation{}, []string{"web/src/a.ts"}, none)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := backend.(mutation.Tree); !ok {
 		t.Errorf("TypeScript got %T, want the worker-directory backend", backend)
 	}
-	if _, err := backendFor(runner.Rust, t.TempDir(), runner.Invocation{}, runner.Invocation{}, nil, none); err == nil {
-		t.Error("a component git lists no file under was given a worker directory to copy nothing into")
+	if _, err := backendFor(runner.Rust, t.TempDir(), "rust", runner.Invocation{}, runner.Invocation{}, nil, none); err == nil {
+		t.Error("a scan root git lists no file under was given a worker directory to copy nothing into")
+	}
+
+	// A component rooted at the scan root is where every path join in the
+	// backend collapses, so it is the case least likely to be noticed and the
+	// one a `.`-rooted repository always takes.
+	backend, err = backendFor(runner.TypeScript, t.TempDir(), ".", runner.Invocation{}, runner.Invocation{}, []string{"src/a.ts"}, none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, ok := backend.(mutation.Tree)
+	if !ok {
+		t.Fatalf("a component at the scan root got %T, want the worker-directory backend", backend)
+	}
+	if tree.Component != "." {
+		t.Errorf("a component declared at %q became %q", ".", tree.Component)
 	}
 }
 

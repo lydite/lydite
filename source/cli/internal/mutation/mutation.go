@@ -304,24 +304,27 @@ func (u UnmatchedDeclaration) String() string {
 	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Marker)
 }
 
-// ErrPathEscapes reports a source path that is not inside the component.
+// ErrPathEscapes reports a source path that is not inside the tree it is
+// relative to — a component for a mutant's own path, the scan root for an
+// entry in the file listing a worker is copied from.
 type ErrPathEscapes struct{ Path string }
 
 func (e ErrPathEscapes) Error() string {
-	return fmt.Sprintf("%s: source path is absolute or escapes the component directory", e.Path)
+	return fmt.Sprintf("%s: source path is absolute or escapes the tree it is relative to", e.Path)
 }
 
-// checkPath refuses a path that does not name a file inside the component.
+// checkPath refuses a path that does not name a file inside the tree it is
+// relative to.
 //
 // It is lexical, and that is the whole of what it establishes: a path that is
-// absolute, empty, or names the component directory rather than a file in it
-// never becomes a mutant. It does not establish containment, which no check on
-// a name alone can — a symlink committed into the scanned repository leaves the
-// directory through a path that is lexically spotless. Containment is therefore
-// owed by whatever writes a mutant out: it must resolve the joined path and
-// refuse a result outside the directory it owns, as internal/download's
-// safeJoin does for an archive entry. This only stops a name that cannot
-// possibly be right from travelling that far.
+// absolute, empty, or names that tree's own directory rather than a file in it
+// never becomes a mutant and is never copied. It does not establish
+// containment, which no check on a name alone can — a symlink committed into
+// the scanned repository leaves the directory through a path that is lexically
+// spotless. Containment is therefore owed by whatever writes: every write into
+// a worker goes through its os.Root, which refuses at the syscall a path that
+// resolves outside. This only stops a name that cannot possibly be right from
+// travelling that far.
 func checkPath(p string) error {
 	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return ErrPathEscapes{Path: p}

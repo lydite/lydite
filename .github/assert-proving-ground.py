@@ -27,6 +27,12 @@ exclude path would then go unexercised with the job still green. So its
 presence in the checkout is asserted first. The pair — the file is there, and
 the gate stayed silent about it — is what says the exclude did the clearing.
 
+Mutation is held to the same standard and needs one thing more. A green
+`lydite mutation` says "nothing survived", which is what an engine generating
+nothing reports too — so the probe plants a function whose test asserts nothing
+beside an identical one whose test asserts every case, and requires a survivor
+in the first file and none in the second.
+
 It reads --json rather than the terminal report. A text-scraping consumer
 makes every refinement to the human surface a two-repository release, which
 is the coupling --json exists to remove.
@@ -114,6 +120,47 @@ FORBIDDEN_COVERAGE_UNITS = [
     "app",
     "shared",
 ]
+
+# The mutation probe plants two functions per component, one to a file, whose
+# bodies are identical: one comparison and two arithmetic operators, so the
+# generator produces the same mutants for each. A test calls one of them and
+# asserts nothing, and asserts every case of the other — so an engine that
+# generates, builds, runs and scores mutants survives exactly half of what it
+# produced, and which half is the whole claim.
+#
+# Counts alone are satisfied by an engine that produced two trivial mutants and
+# killed one, so every survivor is held to the file it can only have come from
+# and the neighbour's file must appear in none of them.
+#
+# The paths are relative to the component, because that is what a mutant
+# carries: it locates a file for a compiler pointed at the component, not for a
+# reader standing at the scan root.
+MUTATION_PROBES = [
+    ("sdk", "go/sdk", "mutation_probe.go", "mutation_neighbour.go"),
+    (
+        "tally",
+        "rust",
+        "crates/tally-core/src/mutation_probe.rs",
+        "crates/tally-core/src/mutation_neighbour.rs",
+    ),
+    (
+        "web",
+        "web",
+        "packages/ui/src/mutation-probe.ts",
+        "packages/ui/src/mutation-neighbour.ts",
+    ),
+]
+# The component the probe plants nothing under. A run that mutated every
+# component satisfies every claim about the engine and none about --affected
+# composing with it.
+MUTATION_UNAFFECTED = "api"
+
+# `path:line:column: operator ("original" -> "mutated")`, which is how a
+# survivor is printed and the only channel by which a report says where one is.
+# A path holds no colon, so the first field ends at the first one.
+SURVIVOR = re.compile(r"^(?P<path>[^:]+):\d+:\d+: [a-z-]+ \(")
+MUTATION_VALUE = re.compile(r"^(\d+) of (\d+) mutant\(s\) survived")
+MUTATION_SUMMARY = re.compile(r"^(\d+) of (\d+) mutant\(s\) killed across (\d+) component\(s\)")
 
 
 def concurrency(value: str) -> int | None:
@@ -797,6 +844,147 @@ def main_record(gated: str, recorded: str) -> int:
     return 0
 
 
+def main_mutation(path: str, checkout: str) -> int:
+    """Assert the engine generated, built, ran and scored mutants in each language.
+
+    `go test` holds the generators against golden fixtures, which say which
+    mutants exist for a given source and nothing about what becomes of one. A
+    green `lydite mutation` says only "nothing survived", which is exactly what
+    an engine generating nothing reports — so what is asserted here is a
+    survivor, in the file that has to hold it, beside a neighbour that has to
+    hold none.
+
+    Each component gets two identical functions in two files. Identical bodies
+    produce identical mutants, so a working engine scores twice what survived,
+    and every survivor names the file whose test asserts nothing. An engine
+    that stopped generating reports an unmeasured component; one that scoped
+    the diff or filtered coverage so that only one file reached it scores half
+    of what the pair produces; one that never ran a mutant reports survivors in
+    both files; and one that could not build them reports them unviable, which
+    is excluded from the denominator and would otherwise pass as amber.
+    """
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    rows = {r["label"]: r for r in doc["rows"]}
+    failures = []
+
+    for name, cdir, survivor, neighbour in MUTATION_PROBES:
+        # The planted files have to be in the checkout for anything below to
+        # mean something. A probe that never landed makes a change with no
+        # mutants in it, and a component with no mutants is `unmeasured` —
+        # amber where this expects red, for a reason that has nothing to do
+        # with the engine.
+        for rel in (survivor, neighbour):
+            if not os.path.isfile(os.path.join(checkout, cdir, rel)):
+                failures.append(
+                    f"{cdir}/{rel} is not in the checkout: the probe never planted it, so this run "
+                    "mutated nothing and every assertion about it is vacuous"
+                )
+
+        row = rows.get(f"mutation({name})")
+        if row is None:
+            failures.append(f"no mutation({name}) row, but the probe planted a survivor under {cdir}")
+            continue
+        detail = row.get("detail", [])
+        if row.get("status") != "fail":
+            failures.append(
+                f"mutation({name}) is {row.get('status')!r}: {row.get('value', '')} — a test calls "
+                f"{survivor}'s function and asserts nothing, so its mutants have to survive"
+            )
+            continue
+
+        # Both planted functions are the same expression, so a mutant that will
+        # not build or will not finish is a finding about the engine rather
+        # than about the fixture — and either one silently changes the
+        # denominator the symmetry below is read from.
+        for line in detail:
+            if "did not compile" in line or "timed out" in line:
+                failures.append(f"mutation({name}) reports {line!r}, and the two planted functions are identical")
+
+        value = MUTATION_VALUE.match(row.get("value", ""))
+        if value is None:
+            failures.append(f"mutation({name}) value {row.get('value')!r} names no survivor count")
+            continue
+        survived, scored = int(value.group(1)), int(value.group(2))
+
+        located = [m for m in (SURVIVOR.match(line) for line in detail) if m]
+        if len(located) != survived:
+            failures.append(
+                f"mutation({name}) reports {survived} survivor(s) and locates {len(located)}: an author's "
+                "next action is one assertion per survivor, so a truncated list is a second run to "
+                "discover the rest"
+            )
+        for m in located:
+            if m.group("path") != survivor:
+                failures.append(
+                    f"mutation({name}) reports a survivor in {m.group('path')}, and only {survivor} may "
+                    f"hold one — {neighbour} is the same expression under a test that asserts every "
+                    "case of it"
+                )
+        if scored != 2 * survived:
+            failures.append(
+                f"mutation({name}) scored {scored} mutant(s) against {survived} survivor(s): the two planted "
+                "functions are identical, so the generator produces the same mutants for each and "
+                "exactly half of them can survive"
+            )
+
+    row = rows.get(f"mutation({MUTATION_UNAFFECTED})")
+    if row is None:
+        failures.append(
+            f"no mutation({MUTATION_UNAFFECTED}) row: a component selection skipped must be reported "
+            "rather than dropped, or a reader cannot tell 'not affected' from 'not declared'"
+        )
+    elif row.get("status") != "unmeasured" or row.get("value") != "not affected":
+        failures.append(
+            f"mutation({MUTATION_UNAFFECTED}) is {row!r}, want an unmeasured 'not affected' row — the probe "
+            "plants nothing under it, and a run that mutated every component satisfies every claim "
+            "about the engine and none about --affected composing with it"
+        )
+
+    # A survivor has to fail the run and not merely colour a row. The gate is
+    # `Survived == 0` and `ui.Report.ExitCode` is what turns a red row into an
+    # exit code, so a document whose rows say fail and whose verdict says pass
+    # is a gate nothing enforces — and CI reads the exit code.
+    if doc.get("verdict") != "fail" or doc.get("exit") != 1:
+        failures.append(
+            f"the run's verdict is {doc.get('verdict')!r} and its exit code {doc.get('exit')!r}: every "
+            "component here holds a survivor, and a survivor is the only outcome that fails the gate"
+        )
+
+    summary = rows.get("mutation")
+    if summary is None:
+        failures.append("no `mutation` summary row: the run did not count itself")
+    else:
+        counted = MUTATION_SUMMARY.match(summary.get("value", ""))
+        if counted is None:
+            failures.append(f"mutation summary {summary.get('value')!r} names no counts")
+        else:
+            killed, scored, ran = (int(g) for g in counted.groups())
+            if ran != len(MUTATION_PROBES):
+                failures.append(
+                    f"the summary counts {ran} component(s), want {len(MUTATION_PROBES)} — one language "
+                    "silently mutating nothing is the failure this job exists to catch"
+                )
+            if scored != 2 * killed:
+                failures.append(
+                    f"the summary scored {scored} mutant(s) and killed {killed}: every component plants one "
+                    "function whose mutants survive beside an identical one whose mutants die"
+                )
+
+    for failure in failures:
+        print(f"proving ground mutation: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        "proving ground mutation: "
+        + "; ".join(
+            f"{name} survived only {survivor}" for name, _, survivor, _ in MUTATION_PROBES
+        )
+        + f"; {MUTATION_UNAFFECTED} was not affected"
+    )
+    return 0
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--plan":
         sys.exit(main_plan(sys.argv[2]))
@@ -812,6 +1000,8 @@ if __name__ == "__main__":
         sys.exit(main_incomplete(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--record":
         sys.exit(main_record(sys.argv[2], sys.argv[3]))
+    if sys.argv[1] == "--mutation":
+        sys.exit(main_mutation(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--affected":
         sys.exit(main_affected(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--scan":
