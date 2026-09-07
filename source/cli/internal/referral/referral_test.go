@@ -378,14 +378,14 @@ func TestFileHeaderPathDropsGitsPadding(t *testing.T) {
 // veto the small suppression and wave the large one through.
 func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 	cases := map[string]string{
-		"#![allow(clippy::all)]":                             "suppression added",
-		"#[expect(dead_code)]":                               "suppression added",
-		"#![expect(dead_code)]":                              "suppression added",
-		"// @ts-nocheck":                                     "suppression added",
-		"func f() { //nolint:errcheck":                       "suppression added",
-		"//go:build ignore":                                  "test disabled",
-		"// +build ignore":                                   "test disabled",
-		"\treturn a < b //lydite:equivalent b is always a+1": "suppression added",
+		"#![allow(clippy::all)]":       "suppression added",
+		"#[expect(dead_code)]":         "suppression added",
+		"#![expect(dead_code)]":        "suppression added",
+		"// @ts-nocheck":               "suppression added",
+		"func f() { //nolint:errcheck": "suppression added",
+		"//go:build ignore":            "test disabled",
+		"// +build ignore":             "test disabled",
+		"\treturn a < b // [lydite:exclude_from_mutation][b is always a+1]": "suppression added",
 	}
 	for line, want := range cases {
 		d := Disqualifications(Change{
@@ -405,7 +405,7 @@ func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 func TestTheEquivalentMutantAnnotationIsASuppression(t *testing.T) {
 	d := Disqualifications(Change{
 		Paths: []string{"src/a.go"},
-		Added: []DiffLine{{Path: "src/a.go", Text: "\treturn n < 10 " + annotation.Marker + " the caller bounds n"}},
+		Added: []DiffLine{{Path: "src/a.go", Text: "\treturn n < 10 // " + annotation.Marker(annotation.Mutation) + "[the caller bounds n]"}},
 	}, Disqualifiers{})
 	if len(d) != 1 || d[0].Kind != "suppression added" {
 		t.Fatalf("got %+v, want one \"suppression added\"", d)

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
@@ -844,8 +845,9 @@ func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 // mutant. The declared mutant is generated, counted and never run — and
 // because it is a suppression, internal/referral refers the change.
 func TestADeclaredMutantIsCountedAndNeverRun(t *testing.T) {
-	declared := "\nfunc Deeper(a, b string) bool {\n\treturn Depth(a) > Depth(b) " +
-		annotationMarker + " the two forms agree for every input this is called with\n}\n"
+	declared := "\nfunc Deeper(a, b string) bool {\n\treturn Depth(a) > Depth(b) // " +
+		annotation.Marker(annotation.Mutation) +
+		"[the two forms agree for every input this is called with]\n}\n"
 	root := goModuleRepo(t, declared, `
 func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 	Deeper("a/b", "a")

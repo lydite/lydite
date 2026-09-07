@@ -87,7 +87,7 @@ a suppression, declaring one refers the change to a human.`,
 			defer stop()
 			go func() {
 				<-ctx.Done()
-				stop() //lydite:equivalent its only effect is to restore the default disposition for the second interrupt, and a test that observed that would be a test signalling the test binary to death
+				stop() // [lydite:exclude_from_mutation][its only effect is to restore the default disposition for the second interrupt, and a test that observed that would be a test signalling the test binary to death]
 			}()
 
 			limit, err := resolveConcurrency(concurrency)
@@ -204,13 +204,14 @@ a suppression, declaring one refers the change to a human.`,
 	return cmd
 }
 
-// annotationMarker is the equivalence declaration an author writes. One
-// statement of the token, so the command's own help cannot drift from what
-// internal/annotation reads.
-const annotationMarker = annotation.Marker
+// annotationMarker is the declaration an author writes to say no test could
+// kill a mutant, in the form the help and a failing row quote it: the comment
+// introducer, the token, and where the reason goes. One statement of it, so the
+// command's own words cannot drift from what internal/annotation reads.
+var annotationMarker = "// " + annotation.Marker(annotation.Mutation) + "[<reason>]"
 
 // mutationMarker is that token as the help text quotes it.
-const mutationMarker = "`" + annotationMarker + "`"
+var mutationMarker = "`" + annotationMarker + "`"
 
 // mutationLabel is how every row about one component is named.
 //
@@ -653,7 +654,7 @@ func componentRelative(dir, file string) (string, error) {
 	}
 	rel, ok := strings.CutPrefix(file, clean+"/")
 	if !ok {
-		return "", fmt.Errorf("%s is not inside %s", file, dir) //lydite:equivalent the one caller abandons the file when the error is non-nil, so no path reads the string beside it and no test can be shown a different one
+		return "", fmt.Errorf("%s is not inside %s", file, dir) // [lydite:exclude_from_mutation][the one caller abandons the file when the error is non-nil, so no path reads the string beside it and no test can be shown a different one]
 	}
 	return rel, nil
 }
@@ -711,7 +712,7 @@ func mutationRow(label string, log *componentLog, s mutation.Summary, results []
 	}
 	row.Detail = append(row.Detail,
 		"write the assertion that fails when the code changes this way, or declare the mutant equivalent with "+
-			annotationMarker+" <reason> beside it")
+			annotationMarker+" beside it")
 	if log.Rel != "" {
 		row.Detail = append(row.Detail, "full output: "+log.Rel)
 	}

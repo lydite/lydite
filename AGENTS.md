@@ -1976,8 +1976,8 @@ reader to skim past it.
 ### The acknowledgement lives in the source
 
 An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
-to detect one: the author declares it in a `//lydite:equivalent <reason>` comment **beside** the
-mutant. All three languages spell a line comment `//`, so one form covers them. The declaration
+to detect one: the author declares it in a `[lydite:exclude_from_mutation][<reason>]` comment
+**beside** the mutant. All three languages spell a line comment `//`, so one form covers them. The declaration
 covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
 least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
 call, and the innermost is what somebody annotating that line is looking at. Deciding by
