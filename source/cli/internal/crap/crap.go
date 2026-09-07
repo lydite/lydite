@@ -137,13 +137,13 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 	var rep Report
 	fset := token.NewFileSet()
 	for _, file := range files {
-		scored, excluded, unused, err := scoreFile(fset, root, file, hits[file])
+		one, err := scoreFile(fset, root, file, hits[file])
 		if err != nil {
 			return Report{}, err
 		}
-		rep.Excluded += excluded
-		rep.Unused = append(rep.Unused, unused...)
-		for _, f := range scored {
+		rep.Excluded += one.excluded
+		rep.Unused = append(rep.Unused, one.unused...)
+		for _, f := range one.scored {
 			rep.Scored++
 			rep.Worst = math.Max(rep.Worst, f.Value)
 			if f.Value > Threshold {
@@ -268,22 +268,37 @@ func complexity(fn *ast.FuncDecl) int {
 	return n
 }
 
+// fileScore is what one file contributed: the functions it scored, how many it
+// did not because their author declared them, and any declaration that
+// documented no function.
+//
+// One value rather than three results beside an error, so a failure returns the
+// zero of it. Three zero literals on an error path are three values no caller
+// reads — every one of them free to be anything at all, and nothing able to
+// notice.
+type fileScore struct {
+	scored   []Function
+	excluded int
+	unused   []string
+}
+
 // scoreFile scores every function one file declares, above the threshold or
 // not. Measure keeps only those over it, because a component's report is one
 // row and a list of every function in it is a report nobody reads — but the
 // score exists for all of them, since Worst is over every function and not
 // over the offenders.
-func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored []Function, excluded int, unused []string, err error) {
+func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (fileScore, error) {
+	var out fileScore
 	path := filepath.Join(root, filepath.FromSlash(file))
 	src, err := os.ReadFile(path) // #nosec G304 -- the path comes from lydite's own coverage profile, under the scan root
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("reading %s to score its functions: %w", file, err)
+		return out, fmt.Errorf("reading %s to score its functions: %w", file, err)
 	}
 	// With comments, because a function's doc comment is where its author says
 	// this score is not evidence about it.
 	parsed, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("parsing %s to score its functions: %w", file, err)
+		return out, fmt.Errorf("parsing %s to score its functions: %w", file, err)
 	}
 	// Both gates' declarations, and the union of them.
 	//
@@ -300,14 +315,14 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored
 	// would have one typo reported by two gates.
 	declared, err := coverage.DeclaredExclusions(fset, parsed, file, annotation.CRAP)
 	if err != nil {
-		return nil, 0, nil, err
+		return out, err
 	}
 	uncovered, err := coverage.DeclaredExclusions(fset, parsed, file, annotation.Coverage)
 	if err != nil {
-		return nil, 0, nil, err
+		return out, err
 	}
 	for _, line := range declared.Unused {
-		unused = append(unused, fmt.Sprintf("%s:%d", file, line))
+		out.unused = append(out.unused, fmt.Sprintf("%s:%d", file, line))
 	}
 	for _, decl := range parsed.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -320,7 +335,7 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored
 		_, byScore := declared.Funcs[fn]
 		_, byCoverage := uncovered.Funcs[fn]
 		if byScore || byCoverage {
-			excluded++
+			out.excluded++
 			continue
 		}
 		start := fset.Position(fn.Pos()).Line
@@ -336,7 +351,7 @@ func scoreFile(fset *token.FileSet, root, file string, hits map[int]int) (scored
 		f := Function{Name: name(fn), File: file, Line: start,
 			Complexity: complexity(fn), Lines: lines}
 		f.Value = Index(f.Complexity, lines)
-		scored = append(scored, f)
+		out.scored = append(out.scored, f)
 	}
-	return scored, excluded, unused, nil
+	return out, nil
 }

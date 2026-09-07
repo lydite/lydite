@@ -329,11 +329,11 @@ func TestAFileThatCannotBeReadIsAnErrorNamingIt(t *testing.T) {
 // threshold or not, for a test whose subject is the walk rather than the gate.
 func functions(t *testing.T, root, file string) []Function {
 	t.Helper()
-	out, _, _, err := scoreFile(token.NewFileSet(), root, file, covering(400, 1))
+	out, err := scoreFile(token.NewFileSet(), root, file, covering(400, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return out
+	return out.scored
 }
 
 // The threshold is exclusive: a function sitting exactly on it is not counted.
@@ -402,12 +402,12 @@ func two(n int) int {
 	}
 	// The same function with nothing covered costs the square, which is what
 	// says the two are being told apart rather than both read as uncovered.
-	uncovered, _, _, err := scoreFile(token.NewFileSet(), root, "a.go", covering(400, 0))
+	uncovered, err := scoreFile(token.NewFileSet(), root, "a.go", covering(400, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uncovered[0].Value != 6 {
-		t.Errorf("value = %v, want 6 — complexity 2 with nothing covered", uncovered[0].Value)
+	if uncovered.scored[0].Value != 6 {
+		t.Errorf("value = %v, want 6 — complexity 2 with nothing covered", uncovered.scored[0].Value)
 	}
 }
 

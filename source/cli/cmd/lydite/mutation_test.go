@@ -193,6 +193,32 @@ func TestAComponentThatOptedOutStillTakesARowAndRunsNothing(t *testing.T) {
 	}
 }
 
+// A component the change touches no source of is refused before anything is
+// prepared, started or run. Half of what bounds a mutant is knowable from the
+// diff alone, so the baseline suite, the compose stack and the setup commands
+// are pure cost there — and on the default branch, where HEAD is its own
+// merge-base, that is every component.
+//
+// Asserted on the refusal itself and not only on the row beside it: a decision
+// that reported the row and carried on would run the whole component anyway,
+// which is the cost this exists to avoid, while every assertion about the row
+// still passed.
+func TestAComponentTheChangeDoesNotTouchIsRefusedBeforeAnythingRuns(t *testing.T) {
+	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
+	plan := componentPlan{c: c, log: testLog(t)}
+	// No changed lines at all, which is what a component outside the diff has.
+	_, row, ok := prepareMutation(plan, config.Config{}, nil, mutationOptions{root: t.TempDir()})
+	if ok {
+		t.Fatal("a component the change touches no source of was prepared to run")
+	}
+	if row.Status != ui.StatusUnmeasured {
+		t.Errorf("status is %q, want unmeasured — nothing was mutated", row.Status)
+	}
+	if !strings.Contains(row.Value, "touches no source") {
+		t.Errorf("value = %q, want it to say why", row.Value)
+	}
+}
+
 // Go needs no worker directory: an overlay names the mutated file wherever it
 // is written. Rust and TypeScript have no such instruction, so their mutants
 // run in a copy of the repository — and one git lists no file in has nothing

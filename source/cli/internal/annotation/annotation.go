@@ -174,6 +174,9 @@ func gather(rest string, open int, next []Comment) (reason string, consumed int,
 			return reason, used, reason != ""
 		}
 		if used == len(next) || next[used].Line != open+used+1 {
+			// // [lydite:exclude_from_mutation][the reason a false third value comes back with is
+			// read by nobody: Declarations answers ErrNoReason on it and never
+			// looks at the string, so no caller can be shown a different one]
 			return "", used, false
 		}
 		parts = append(parts, body(next[used].Text))

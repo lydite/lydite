@@ -82,6 +82,24 @@ func Verified(ctx context.Context, url, want string) ([]byte, error) {
 // ExtractTarGz unpacks a .tar.gz into dest, dropping stripComponents leading
 // path components from each entry.
 func ExtractTarGz(data []byte, dest string, stripComponents int) error {
+	return extractTarGz(data, dest, stripComponents, maxArchiveBytes)
+}
+
+// extractTarGz is that with the written-bytes cap as an argument.
+//
+// A cap welded into a constant is one no test can reach: 2 GiB of fixtures is
+// not a test anybody runs, so the arithmetic that keeps a running total under
+// it — every entry's budget being what is left rather than what there was —
+// would be asserted by nothing. Passed in, the same arithmetic is exercised by
+// three small files against a cap of a hundred bytes.
+//
+// It is the written cap alone, and the stream stays bounded by the constant.
+// The two limits look alike and guard different things: one caps what a
+// decompressor may produce, so a bomb cannot be read at all, and this one caps
+// what reaches the filesystem. Sharing a value works at 2 GiB and nowhere
+// else — a stream limit small enough to test the budget truncates the archive
+// mid-header, and the reader fails before any entry is weighed.
+func extractTarGz(data []byte, dest string, stripComponents int, cap int64) error {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -106,13 +124,13 @@ func ExtractTarGz(data []byte, dest string, stripComponents int) error {
 		if err != nil {
 			return err
 		}
-		n, err := extractEntry(hdr, tr, dest, rel, target, maxArchiveBytes-written)
+		n, err := extractEntry(hdr, tr, dest, rel, target, cap-written)
 		if err != nil {
 			return err
 		}
 		written += n
-		if written >= maxArchiveBytes {
-			return fmt.Errorf("archive exceeds %d bytes; refusing to continue", maxArchiveBytes)
+		if written >= cap {
+			return fmt.Errorf("archive exceeds %d bytes; refusing to continue", cap)
 		}
 	}
 }
@@ -131,6 +149,9 @@ func extractEntry(hdr *tar.Header, r io.Reader, dest, rel, target string, budget
 	case tar.TypeReg:
 		return extractRegular(hdr, r, target, budget)
 	case tar.TypeSymlink:
+		// // [lydite:exclude_from_mutation][a symlink writes no bytes, and a count that claimed
+		// otherwise would have to reach maxArchiveBytes to be noticed — 2 GiB
+		// of links, at one byte each, is not an archive a test can build]
 		return 0, extractSymlink(hdr, dest, rel, target)
 	default:
 		// Character devices, FIFOs and hard links have no business in a

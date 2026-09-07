@@ -91,6 +91,24 @@ func TestAFailingRowNamesTheFunctionsToActOn(t *testing.T) {
 	}
 }
 
+// The excluded count rides on every row that has one, because a repository can
+// annotate its way to nothing above the threshold and that number is what makes
+// it visible when one does — and says nothing when there is nothing to say,
+// since a trailing "0 excluded" on every clean row is a clause readers learn to
+// skip.
+func TestARowSaysHowManyFunctionsWereExcluded(t *testing.T) {
+	t.Parallel()
+	clean := scored("api", 1, 41.5)
+	if got := crapValue(clean.CRAP); strings.Contains(got, "excluded") {
+		t.Errorf("crap(api) = %q, want no clause when nothing was excluded", got)
+	}
+	declared := scored("api", 1, 41.5)
+	declared.CRAP.Excluded = 2
+	if got := crapValue(declared.CRAP); !strings.Contains(got, "2 excluded") {
+		t.Errorf("crap(api) = %q, want the two declarations counted", got)
+	}
+}
+
 // A failing row names enough functions to act on and no more, and says how many
 // it left out. The whole of a component's debt is a page, and a detail nobody
 // reads to the end is a detail nobody reads.

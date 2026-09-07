@@ -200,6 +200,16 @@ func TestUpdateCmdRejectsUnrecognizedVersion(t *testing.T) {
 // for a notice.
 func TestTheNudgeOnlyRunsWhereSomebodyWouldSeeIt(t *testing.T) {
 	t.Parallel()
+	// /dev/null is a character device, which is what the terminal check asks
+	// about — so it stands in for an attached terminal and lets each of the
+	// other two guards be asserted on its own. Without a stream that passes
+	// that check, every case here is false for the same reason and the version
+	// and CI guards are never exercised at all.
+	tty, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tty.Close() }()
 	// A pipe is what a redirected stderr is, and it is never a terminal.
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -207,10 +217,15 @@ func TestTheNudgeOnlyRunsWhereSomebodyWouldSeeIt(t *testing.T) {
 	}
 	defer func() { _ = r.Close(); _ = w.Close() }()
 
-	if nudgeWanted("dev", "", w) {
+	// The one case that is nudged, which is what makes the three refusals
+	// below mean anything.
+	if !nudgeWanted("1.0.0", "", tty) {
+		t.Fatal("a released build on an attached terminal outside CI was not nudged")
+	}
+	if nudgeWanted("dev", "", tty) {
 		t.Error("a from-source build was nudged, and it has no release to compare against")
 	}
-	if nudgeWanted("1.0.0", "true", w) {
+	if nudgeWanted("1.0.0", "true", tty) {
 		t.Error("a CI run was nudged, and nobody is reading its stderr")
 	}
 	if nudgeWanted("1.0.0", "", w) {
@@ -257,6 +272,19 @@ func TestARefreshedCheckRecordsTheAttemptEvenWhenItFails(t *testing.T) {
 	}
 	if got.Latest != "1.2.3" {
 		t.Errorf("latest = %q, want the version it already knew kept", got.Latest)
+	}
+}
+
+// A check that the remote answers records what it found. It is the case that
+// says the deadline the request is given is long enough to make one at all —
+// a check given no time fails before it is sent, and every assertion about a
+// failing check passes on that too.
+func TestACheckTheRemoteAnswersRecordsWhatItFound(t *testing.T) { //nolint:paralleltest // fakeRelease swaps the package's base URL
+	fakeRelease(t, "3.4.5", []byte("binary"), "")
+	stale := updateCheckState{CheckedAt: time.Now().Add(-2 * updateCheckTTL), Latest: "1.2.3"}
+	got := refreshedUpdateCheck(stale, http.DefaultClient)
+	if got.Latest != "3.4.5" {
+		t.Errorf("latest = %q, want the version the remote answered with", got.Latest)
 	}
 }
 

@@ -302,6 +302,10 @@ func readUpdateCheck(path string) updateCheckState {
 // previous answer is kept in that case rather than cleared, since a failed
 // check is no evidence that the release it named has gone.
 func refreshedUpdateCheck(st updateCheckState, client *http.Client) updateCheckState {
+	// // [lydite:exclude_from_mutation][the boundary is a reading of the clock, and no test can
+	// arrange for one to land exactly on the TTL: time.Since is evaluated
+	// after the value it is compared against was chosen, so the two are equal
+	// only by a coincidence nothing can produce on purpose]
 	if time.Since(st.CheckedAt) < updateCheckTTL {
 		return st
 	}
