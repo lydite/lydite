@@ -47,8 +47,12 @@ gate.
 **Per component, and no repository-wide gate.** The per-component rule is
 strictly the stricter one: a change that adds a function above the threshold to
 one component and removes one from another fails there and nets to zero over
-the repository. The `crap` row a whole run and a fold emit is `context`, and
-carries the two ledger scalars summed.
+the repository. The `crap` row a whole run and a fold emit carries the two
+ledger scalars summed and gates nothing — `context` where anything was scored,
+and `unmeasured` where a repository lydite could have scored produced no score,
+since a figure over a repository nothing was examined in must not read as a
+clean one. It counts the entries the run carried forward and names how many,
+the way a composed coverage figure does.
 
 ## Go alone, and that is a property of the language
 

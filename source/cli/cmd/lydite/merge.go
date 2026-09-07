@@ -126,7 +126,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 	// The figure over the repository, whether or not the shards gated: it is
 	// the two ledger scalars summed and it compares nothing, so a run that
 	// read no baseline still has one to publish.
-	if row, ok := crapSummaryRow(folded.scorable, folded.crapScores); ok && folded.measured {
+	if row, ok := crapSummaryRow(folded.scorable, folded.crapScores, folded.crapCarried); ok && folded.measured {
 		rep.Add(row)
 	}
 	switch row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); {
@@ -189,8 +189,12 @@ type composition struct {
 	// measurements, because a shard's document carries the two numbers and not
 	// the functions behind them — a report's rows carry rendered prose, and
 	// the figure over the repository is a sum of counts.
-	scorable   int
-	crapScores []gitstate.CRAPEntry
+	scorable int
+	// crapScores is what the shards scored and crapCarried what they carried
+	// forward, kept apart for the reason coverage keeps `carried` apart: the
+	// figure counts both, and says how many of itself this run measured.
+	crapScores  []gitstate.CRAPEntry
+	crapCarried []gitstate.CRAPEntry
 	// floorMs is ms with every carried entry back to unmeasured, which is
 	// what the shards themselves held the floor against: a carried number
 	// describes the base tree, and the component whose baseline it came from
@@ -258,7 +262,11 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 			out.parts = append(out.parts, p)
 		}
 		if e.CRAP != nil {
-			out.crapScores = append(out.crapScores, *e.CRAP)
+			if e.Carried {
+				out.crapCarried = append(out.crapCarried, *e.CRAP)
+			} else {
+				out.crapScores = append(out.crapScores, *e.CRAP)
+			}
 		}
 	}
 	out.doc, out.measured, out.gated = folded, true, folded.Gated

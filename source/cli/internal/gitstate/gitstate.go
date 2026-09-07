@@ -377,43 +377,56 @@ type Snapshot struct {
 	CRAP CRAPBaseline
 }
 
-// Recorded reports whether anything was ever recorded for this tree.
+// Recorded reports whether anything was ever recorded for this tree, under any
+// metric.
 //
-// The coverage baseline answers it, because it is the one document every
-// recording writes: a repository lydite scores no component of records no CRAP
-// document at all, so a snapshot holding one and not the other is a repository
-// nothing has measured.
-func (s Snapshot) Recorded() bool { return len(s.Coverage) > 0 }
+// Any, and not the coverage document alone. It answers one question — is there
+// something here to merge onto — and a tree carrying a CRAP document and no
+// readable coverage one still has something: a recording that skipped the merge
+// there would leave that document holding entries for components the
+// declaration no longer has, which nothing later reads and nothing later
+// clears.
+func (s Snapshot) Recorded() bool { return len(s.Coverage) > 0 || len(s.CRAP) > 0 }
 
-// ReadBaseline returns the cached coverage baseline for the first key that
-// resolves, and false if none exists yet (a cache miss, not an error — the
-// caller computes and writes one).
-func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bool, error) {
-	return readState[Baseline](ctx, dir, StatePath, keys...)
-}
-
-// ReadCRAP returns the cached CRAP baseline for the first key that resolves.
+// ReadSnapshot returns what the branch holds for the first key that resolves,
+// across every metric.
 //
-// Its own document and its own miss, so a repository that has a coverage
+// One call and one fetch, because a caller wanting one metric for a tree wants
+// the other for the same tree: two readers each refreshing `origin/lydite`
+// would double the network round trips on every gated run to learn one thing.
+//
+// Each metric still misses on its own. A repository that has a coverage
 // baseline and no CRAP one — every repository, the first time it runs a lydite
-// that computes CRAP — takes no cache miss on the coverage it already has. The
-// components read `new` and gate nothing for one change, which is the shape a
-// changed producer already has.
-func ReadCRAP(ctx context.Context, dir string, keys ...string) (CRAPBaseline, bool, error) {
-	return readState[CRAPBaseline](ctx, dir, CRAPStatePath, keys...)
-}
-
-// readState reads one metric's document off the branch. One implementation for
-// both, because everything that makes a read correct — a missing branch is a
-// first run, an unreadable entry is a miss rather than a permanent red line, an
-// empty object is a miss — is a property of caching a measurement rather than
-// of which measurement it is.
-func readState[M ~map[string]E, E any](ctx context.Context, dir string, path func(string) string, keys ...string) (M, bool, error) {
+// that computes CRAP — is not a coverage miss, so it pays nothing to re-measure
+// coverage it already has; its components read `new` for CRAP and gate nothing
+// for one change, which is the shape a changed producer already has. Ask
+// `Recorded` or the individual maps which of them resolved.
+func ReadSnapshot(ctx context.Context, dir string, keys ...string) (Snapshot, error) {
 	// A missing remote branch is the expected first-ever-run state, not an
 	// error: there's nothing to fetch yet.
 	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
-		return nil, false, nil
+		return Snapshot{}, nil
 	}
+	coverage, err := readState[Baseline](ctx, dir, StatePath, keys...)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	scores, err := readState[CRAPBaseline](ctx, dir, CRAPStatePath, keys...)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Coverage: coverage, CRAP: scores}, nil
+}
+
+// readState reads one metric's document off the branch, which the caller has
+// already fetched. One implementation for every metric, because everything that
+// makes a read correct — an unreadable entry is a miss rather than a permanent
+// red line, an empty object is a miss — is a property of caching a measurement
+// rather than of which measurement it is.
+//
+// A miss is a nil map and never an error, so a caller asks `len` rather than
+// carrying a second value per metric.
+func readState[M ~map[string]E, E any](ctx context.Context, dir string, path func(string) string, keys ...string) (M, error) {
 	// Keys are tried in order: the tree first, then the commit SHA. The SHA is
 	// only a fallback for baselines written before keying moved to trees, so
 	// existing state keeps resolving instead of every repository recomputing on
@@ -435,7 +448,7 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 	// empty string and answers with a parse error — a hard failure where the
 	// question was only whether an entry exists.
 	if found == "" || !r.Ok() {
-		return nil, false, nil
+		return nil, nil
 	}
 	var report M
 	if err := json.Unmarshal([]byte(r.Output), &report); err != nil {
@@ -447,7 +460,7 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 		// A miss recomputes and overwrites, which is the same self-healing the
 		// empty-entry rule below exists for.
 		fmt.Fprintf(os.Stderr, "lydite: the cached baseline for %s is not readable (%v) — measuring it again\n", found, err)
-		return nil, false, nil
+		return nil, nil
 	}
 	// An empty baseline ("{}") is a cache miss, not a baseline of nothing. A
 	// run whose measurement failed for every component records nothing worth
@@ -459,9 +472,9 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 	// miss here heals the entries that were already written, without a manual
 	// purge.
 	if len(report) == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
-	return report, true, nil
+	return report, nil
 }
 
 // WriteBaseline caches report for sha on the lydite branch, via a

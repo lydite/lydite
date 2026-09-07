@@ -1468,11 +1468,11 @@ func previousOrCurrentBaseline(t *testing.T, dir, rev string) gitstate.Baseline 
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := gitstate.ReadBaseline(context.Background(), dir, tree)
+	snap, err := gitstate.ReadSnapshot(context.Background(), dir, tree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return snap.Coverage
 }
 
 // The floor's denominator counts only components a run could ever measure. A

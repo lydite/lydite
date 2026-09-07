@@ -1855,8 +1855,19 @@ raises it without adding a thing to fix.
 
 **There is no repository-wide gate**, because the per-component rule is strictly stricter: a change
 adding a function above the threshold to one component and removing one from another fails there
-and nets to zero over the repository. The `crap` row a whole run and `lydite test merge` emit is
-`context` and carries the scalars summed, over a denominator of the components CRAP could apply to.
+and nets to zero over the repository. The `crap` row a whole run and `lydite test merge` emit
+carries the scalars summed, over a denominator of the components CRAP could apply to. It is
+`context` when anything was scored — and `unmeasured` when a repository lydite could have scored
+produced no score at all, for the reason `floorSummaryRow` is: a figure over a repository nothing
+was examined in must not read as a clean one.
+
+**The figure counts what this run carried forward, and says how many.** A component affected
+selection did not run still has a score, so leaving it out would make the number swing with
+whatever a change happened to touch — and a figure that does not say how much of itself this run
+measured is indistinguishable from one that measured everything, which is the rule `composedValue`
+already follows. `carriedScore` is the one implementation of which entry a component keeps, read by
+both the row a run renders and the document it hands the fold; two copies would have one tree
+report one figure sharded and another unsharded.
 
 **Go alone, and that is a property of the language.** lydite is Go and walks `go/ast` in-process —
 no tool, no pin, no install, no staleness risk. Rust and TypeScript have no equivalent in hand and

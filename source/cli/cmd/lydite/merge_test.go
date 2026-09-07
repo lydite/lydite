@@ -656,6 +656,34 @@ func TestMergeSumsTheScoresNoShardCanAnswerFor(t *testing.T) {
 				},
 			}})
 	}
+	// One shard measured its component; the other carried its score forward,
+	// which is what an --affected matrix produces. Both count towards the
+	// figure and the carried one is named, so the fold and an unsharded run
+	// answer the same tree the same way.
+	carried := shardDir(t,
+		[]ui.Row{
+			{Status: ui.StatusPass, Label: "orphans", Value: "none in 2 source file(s)"},
+			{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
+			{Status: ui.StatusPass, Label: "schedule", Value: "1 component(s), max 1 concurrent"},
+			{Status: ui.StatusUnmeasured, Label: "test(b)", Value: "not measured — the component was not selected for this run"},
+			{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the component was not selected for this run"},
+			{Status: ui.StatusUnmeasured, Label: "crap(b)", Value: "not measured — the component was not selected for this run"},
+		},
+		&measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{
+			"b": {
+				Entry:   gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go"},
+				Carried: true,
+				CRAP:    &gitstate.CRAPEntry{Above: 2, Worst: 156.3, Producer: "go"},
+			},
+		}})
+	withCarried, err := runMergeCmd(t, root, shard("a", 3, 41.5), carried)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, withCarried)
+	}
+	if got := jsonRowByLabel(t, withCarried, "crap").Value; !strings.Contains(got, "2 of 2 component(s), 1 carried forward") {
+		t.Errorf("crap = %q, want the carried component counted and named", got)
+	}
+
 	out, err := runMergeCmd(t, root, shard("a", 3, 41.5), shard("b", 2, 156.3))
 	if err != nil {
 		t.Fatalf("merge: %v\n%s", err, out)

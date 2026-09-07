@@ -228,7 +228,7 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 	t.Parallel()
 	web := measured("web", runner.TypeScript, 1, 2)
 	web.CRAPWhy = "lydite scores Go alone, and web is typescript"
-	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), web})
+	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), web}, nil, nil)
 	if !ok {
 		t.Fatal("no summary row over a repository with two scored components")
 	}
@@ -247,14 +247,14 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 
 	// A repository lydite can score nothing of gets no row at all: that is a
 	// property of the metric, not a gap this run left.
-	if _, ok := crapSummaryOf([]measurement{web}); ok {
+	if _, ok := crapSummaryOf([]measurement{web}, nil, nil); ok {
 		t.Error("a repository with no component CRAP applies to got a summary row")
 	}
 	// One it could score and did not is amber, for the reason a floor that
 	// cleared nothing is: a gate that examined nothing must not read as one
 	// that did.
 	failed := unmeasuredComponent(component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}, "the suite failed")
-	if row, ok := crapSummaryOf([]measurement{failed}); !ok || row.Status != ui.StatusUnmeasured {
+	if row, ok := crapSummaryOf([]measurement{failed}, nil, nil); !ok || row.Status != ui.StatusUnmeasured {
 		t.Errorf("crap = %+v (ok=%v), want an amber row", row, ok)
 	}
 }
@@ -287,7 +287,19 @@ func TestOnlyAnUnselectedComponentCarriesItsScoreForward(t *testing.T) {
 		"the component was not selected for this run")
 	uncovered.Carryable = true
 
-	got := crapRecord([]measurement{scored("api", 1, 33), unselected, failed, uncovered}, record, carried, anchor)
+	// A component that ran, measured its coverage, and could not be scored.
+	// It has an entry in `record` and is not carried, so nothing licenses
+	// standing in the baseline's number for it: its content may be exactly
+	// what changed.
+	unscorable := measured("unscorable", runner.Go, 9, 10)
+	unscorable.CRAPWhy = "parsing unscorable/lib.go to score its functions: expected ';'"
+	record["unscorable"] = entry(9, 10)
+	anchor["unscorable"] = gitstate.CRAPEntry{Above: 3, Worst: 70}
+
+	got := crapRecord([]measurement{scored("api", 1, 33), unselected, failed, uncovered, unscorable}, record, carried, anchor)
+	if _, ok := got["unscorable"]; ok {
+		t.Error("a component that ran and could not be scored recorded the baseline's score")
+	}
 	if e, ok := got["unselected"]; !ok || e.Above != 4 {
 		t.Errorf("unselected = %+v (ok=%v), want the baseline's entry carried", e, ok)
 	}
@@ -299,6 +311,84 @@ func TestOnlyAnUnselectedComponentCarriesItsScoreForward(t *testing.T) {
 	}
 	if e, ok := got["api"]; !ok || e.Above != 1 {
 		t.Errorf("api = %+v (ok=%v), want what this run scored", e, ok)
+	}
+}
+
+// A Go component whose source the walk cannot read is scored by nobody, and
+// the reason travels to the row rather than being swallowed. Driven through
+// `score` rather than by assigning the field, so the wiring between
+// crap.Measure's error and CRAPWhy is what is asserted.
+func TestAScoreThatCouldNotBeTakenCarriesItsReason(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "svc/lib.go", "package svc\n\nfunc broken(\n")
+	m := measured("svc", runner.Go, 9, 10)
+	m.Hits = coverage.LineHits{"svc/lib.go": {1: 1, 2: 1, 3: 1}}
+
+	rep, why := score(root, m)
+	if rep.Measured() {
+		t.Errorf("report = %+v, want nothing scored", rep)
+	}
+	if !strings.Contains(why, "svc/lib.go") {
+		t.Errorf("why = %q, want the file the walk could not read", why)
+	}
+	// And the row is amber: this is a gate that could not run, not a language
+	// the metric has no source for.
+	m.CRAPWhy = why
+	if got := crapRow(m, nil, true); got.Status != ui.StatusUnmeasured {
+		t.Errorf("crap(svc) = %+v, want amber", got)
+	}
+}
+
+// The figure over the repository is the same figure whether the run was
+// sharded or not. A component affected selection did not run still has a score,
+// so both paths count the entry carried forward for it and both say how many
+// they carried — one rule, because two that agreed today would come apart the
+// day one learned something, and nothing in either report would show it.
+func TestTheFigureOverTheRepositoryDoesNotDependOnSharding(t *testing.T) {
+	t.Parallel()
+	anchor := gitstate.CRAPBaseline{"sdk": {Above: 4, Worst: 90}}
+	unselected := unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
+		"the component was not selected for this run")
+	unselected.Carryable = true
+	ms := []measurement{scored("api", 3, 41.5), unselected}
+	carried := map[string]bool{"sdk": true}
+
+	row, ok := crapSummaryOf(ms, carried, anchor)
+	if !ok {
+		t.Fatal("no summary row over a run that carried one of its two components")
+	}
+	// Both counted, and the carried one named — the shape composedValue gives
+	// a coverage figure for the same reason.
+	for _, want := range []string{"7 function(s) above 30", "2 of 2 component(s)", "1 carried forward", "worst 90.0"} {
+		if !strings.Contains(row.Value, want) {
+			t.Errorf("crap = %q, want it to say %q", row.Value, want)
+		}
+	}
+
+	// The fold composes the same figure from the scalars the shards wrote,
+	// which is where the carried entry arrives with `carried` set.
+	folded, ok := crapSummaryRow(2,
+		[]gitstate.CRAPEntry{{Above: 3, Worst: 41.5}},
+		[]gitstate.CRAPEntry{{Above: 4, Worst: 90}})
+	if !ok || folded.Value != row.Value {
+		t.Errorf("the fold says %q and the run says %q — one tree, two figures", folded.Value, row.Value)
+	}
+}
+
+// A component in a language lydite scores none of names the language, and one
+// declaring a raw command says its language is unstated — neither is reported
+// as a score that could not be taken, which is what a Go component gets.
+func TestARawCommandComponentSaysItsLanguageIsUnstated(t *testing.T) {
+	t.Parallel()
+	raw := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
+		"the component declares a raw command, which has no instrumented variant")
+	row := crapRow(raw, nil, true)
+	if row.Status != ui.StatusContext {
+		t.Errorf("crap(docs) = %+v, want context — the metric has no source for it", row)
+	}
+	if !strings.Contains(row.Value, "declares a raw command") {
+		t.Errorf("crap(docs) = %q, want it to say the language is unstated", row.Value)
 	}
 }
 
@@ -333,11 +423,11 @@ func TestTheComplexityGateAgainstARealRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scores, hit, err := gitstate.ReadCRAP(context.Background(), root, tree)
-	if err != nil || !hit {
-		t.Fatalf("the CRAP baseline = (hit=%v, %v), want the default branch's run recorded", hit, err)
+	snap, err := gitstate.ReadSnapshot(context.Background(), root, tree)
+	if err != nil || len(snap.CRAP) == 0 {
+		t.Fatalf("the CRAP baseline = (%v, %v), want the default branch's run recorded", snap.CRAP, err)
 	}
-	if e, ok := scores["svc"]; !ok || e.Worst == 0 {
+	if e, ok := snap.CRAP["svc"]; !ok || e.Worst == 0 {
 		t.Fatalf("svc = %+v (ok=%v), want a recorded score", e, ok)
 	}
 

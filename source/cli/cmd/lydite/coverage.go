@@ -386,7 +386,7 @@ func ungatedRows(rep *ui.Report, ms []measurement, composed bool) {
 	// its measurements arrive with those counts already substituted in.
 	if composed {
 		rep.Add(ungatedComposedRow(repoLabel("coverage"), ms, nil, everything))
-		if row, ok := crapSummaryOf(ms); ok {
+		if row, ok := crapSummaryOf(ms, nil, nil); ok {
 			rep.Add(row)
 		}
 	}
@@ -515,7 +515,7 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	// every shard's measurements instead.
 	if !opts.Narrowed {
 		composedRows(rep, current, carried, snap.Coverage, parts, cfg)
-		if row, ok := crapSummaryOf(ms); ok {
+		if row, ok := crapSummaryOf(ms, carried, snap.CRAP); ok {
 			rep.Add(row)
 		}
 	}
@@ -580,15 +580,12 @@ func previousTreeBaseline(ctx context.Context, dir string) gitstate.Snapshot {
 	if err != nil {
 		return gitstate.Snapshot{}
 	}
-	var snap gitstate.Snapshot
-	if baseline, hit, err := gitstate.ReadBaseline(ctx, dir, tree); err == nil && hit {
-		snap.Coverage = baseline
-	}
-	// Its own read and its own miss, for the reason the gated path takes two:
-	// the metrics are separate documents, and a repository that has one and
-	// not the other must carry forward what it has.
-	if scores, hit, err := gitstate.ReadCRAP(ctx, dir, tree); err == nil && hit {
-		snap.CRAP = scores
+	// Every metric, because a component affected selection did not run carries
+	// each of them forward from here, and an anchor holding half a tree's
+	// state silently drops the other half.
+	snap, err := gitstate.ReadSnapshot(ctx, dir, tree)
+	if err != nil {
+		return gitstate.Snapshot{}
 	}
 	return snap
 }
@@ -605,23 +602,20 @@ func baselineFor(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, b
 	if err != nil {
 		tree = ""
 	}
-	baseline, hit, err := gitstate.ReadBaseline(ctx, dir, tree, base)
+	cached, err := gitstate.ReadSnapshot(ctx, dir, tree, base)
 	if err != nil {
 		return gitstate.Snapshot{}, err
 	}
-	if hit {
-		// CRAP is its own document with its own miss, and a miss there does
-		// not measure the base tree. Every repository has a coverage baseline
-		// and no CRAP one the first time it runs a lydite that computes CRAP,
-		// and re-measuring the base tree for a metric that gates nothing yet
-		// would charge every one of them a full suite run for it. The
-		// components read `new` and gate nothing for one change, which is the
-		// shape a changed producer already has.
-		scores, _, err := gitstate.ReadCRAP(ctx, dir, tree, base)
-		if err != nil {
-			return gitstate.Snapshot{}, err
-		}
-		return gitstate.Snapshot{Coverage: baseline, CRAP: scores}, nil
+	// The coverage baseline alone decides whether the base tree is measured
+	// again. CRAP is its own document with its own miss, and a miss there does
+	// not measure: every repository has a coverage baseline and no CRAP one
+	// the first time it runs a lydite that computes CRAP, and re-measuring the
+	// base tree for a metric that gates nothing yet would charge every one of
+	// them a full suite run for it. Those components read `new` and gate
+	// nothing for one change, which is the shape a changed producer already
+	// has.
+	if len(cached.Coverage) > 0 {
+		return cached, nil
 	}
 	rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
 		Value:  fmt.Sprintf("not cached for %s — measuring it now", shortSHA(base)),
@@ -940,32 +934,45 @@ func worstFunctions(rep crap.Report) []string {
 // whose TypeScript components cannot be scored is not reported as two thirds
 // ungated. It is the same rule `gateable` applies to a composed coverage
 // figure.
-func crapSummaryRow(scorable int, scored []gitstate.CRAPEntry) (ui.Row, bool) {
+func crapSummaryRow(scorable int, scored, carried []gitstate.CRAPEntry) (ui.Row, bool) {
 	// Nothing lydite could score, so there is no figure and no gap. A row here
 	// would report a repository with no Go as ungated, which is a property of
 	// the metric rather than of the run.
 	if scorable == 0 {
 		return ui.Row{}, false
 	}
-	if len(scored) == 0 {
+	if len(scored)+len(carried) == 0 {
 		return unmeasuredRow("crap", fmt.Sprintf("none of its %d component(s) produced a score", scorable)), true
 	}
 	above, worst := 0, 0.0
-	for _, e := range scored {
+	for _, e := range append(append([]gitstate.CRAPEntry{}, scored...), carried...) {
 		above += e.Above
 		worst = math.Max(worst, e.Worst)
 	}
-	return ui.Row{Status: ui.StatusContext, Label: "crap",
-		Value: fmt.Sprintf("%d function(s) above %d across %d of %d component(s), worst %.1f",
-			above, crap.Threshold, len(scored), scorable, worst)}, true
+	// Carried entries are counted and named, the way a composed coverage
+	// figure counts and names them: the figure is over the repository, so a
+	// component this run did not reach still has a score and leaving it out
+	// would make the number swing with whatever a change happened to touch.
+	// Named, because a figure that does not say how much of it this run
+	// measured is indistinguishable from one that measured everything.
+	value := fmt.Sprintf("%d function(s) above %d across %d of %d component(s), worst %.1f",
+		above, crap.Threshold, len(scored)+len(carried), scorable, worst)
+	if len(carried) > 0 {
+		value = fmt.Sprintf("%d function(s) above %d across %d of %d component(s), %d carried forward, worst %.1f",
+			above, crap.Threshold, len(scored)+len(carried), scorable, len(carried), worst)
+	}
+	return ui.Row{Status: ui.StatusContext, Label: "crap", Value: value}, true
 }
 
 // crapSummaryOf is that figure over a run's own measurements. `lydite test
 // merge` composes the same row from the shards' scalars instead, which is why
 // the row above takes those rather than measurements.
-func crapSummaryOf(ms []measurement) (ui.Row, bool) {
+//
+// carried and anchor are what the gated path already computed for coverage;
+// an ungated run has neither and carries nothing.
+func crapSummaryOf(ms []measurement, carried map[string]bool, anchor gitstate.CRAPBaseline) (ui.Row, bool) {
 	scorable := 0
-	var scored []gitstate.CRAPEntry
+	var scored, inherited []gitstate.CRAPEntry
 	for _, m := range ms {
 		if !m.scorable() {
 			continue
@@ -973,9 +980,29 @@ func crapSummaryOf(ms []measurement) (ui.Row, bool) {
 		scorable++
 		if m.Scored() {
 			scored = append(scored, m.crapEntry())
+			continue
+		}
+		if e, ok := carriedScore(m, carried, anchor); ok {
+			inherited = append(inherited, e)
 		}
 	}
-	return crapSummaryRow(scorable, scored)
+	return crapSummaryRow(scorable, scored, inherited)
+}
+
+// carriedScore is the baseline score a component keeps when this run did not
+// reach it: only a component affected selection left out, and only when the
+// baseline has an entry for it.
+//
+// One implementation, because both the row a run renders and the document it
+// hands `lydite test merge` are counted from it — and two copies that agreed
+// today would come apart the day one learned something, leaving the same tree
+// reporting one figure sharded and another unsharded.
+func carriedScore(m measurement, carried map[string]bool, anchor gitstate.CRAPBaseline) (gitstate.CRAPEntry, bool) {
+	if m.Scored() || !carried[m.Name] {
+		return gitstate.CRAPEntry{}, false
+	}
+	e, ok := anchor[m.Name]
+	return e, ok
 }
 
 // componentRow gates one component against its own baseline entry.
@@ -1570,13 +1597,16 @@ func crapRecord(ms []measurement, record gitstate.Baseline, carried map[string]b
 		if _, ok := record[m.Name]; !ok {
 			continue
 		}
-		switch {
-		case m.Scored():
+		if m.Scored() {
 			out[m.Name] = m.crapEntry()
-		case carried[m.Name]:
-			if e, ok := anchor[m.Name]; ok {
-				out[m.Name] = e
-			}
+			continue
+		}
+		// A component that ran and could not be scored records nothing. Its
+		// content may be exactly what changed, so the baseline's entry is a
+		// guess — and the next change reports it `new`, gates nothing for that
+		// one change, and records it, which heals rather than persisting.
+		if e, ok := carriedScore(m, carried, anchor); ok {
+			out[m.Name] = e
 		}
 	}
 	return out

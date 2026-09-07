@@ -220,14 +220,11 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 // it records what it measured — which is the state the tree would have been
 // left in had nothing been there.
 func existingSnapshot(ctx context.Context, dir, tree string) gitstate.Snapshot {
-	var out gitstate.Snapshot
-	if baseline, hit, err := gitstate.ReadBaseline(ctx, dir, tree); err == nil && hit {
-		out.Coverage = baseline
+	snap, err := gitstate.ReadSnapshot(ctx, dir, tree)
+	if err != nil {
+		return gitstate.Snapshot{}
 	}
-	if scores, hit, err := gitstate.ReadCRAP(ctx, dir, tree); err == nil && hit {
-		out.CRAP = scores
-	}
-	return out
+	return snap
 }
 
 // sameSnapshot reports whether two snapshots hold the same entries under every
