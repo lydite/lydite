@@ -167,7 +167,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// Merged onto whatever this tree already holds, never skipped because it
 	// holds something: a re-run that measured more than the last one must not
 	// be refused for finding an entry there.
-	if existing := existingSnapshot(ctx, dir, head); len(existing.Coverage) > 0 {
+	if existing := existingSnapshot(ctx, dir, head); existing.Recorded() {
 		// Anchored against what this tree already holds, not only against
 		// what the measuring run compared with. The same tree is the same
 		// content, so a difference between two measurements of it is the

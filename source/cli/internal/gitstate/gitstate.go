@@ -377,6 +377,14 @@ type Snapshot struct {
 	CRAP CRAPBaseline
 }
 
+// Recorded reports whether anything was ever recorded for this tree.
+//
+// The coverage baseline answers it, because it is the one document every
+// recording writes: a repository lydite scores no component of records no CRAP
+// document at all, so a snapshot holding one and not the other is a repository
+// nothing has measured.
+func (s Snapshot) Recorded() bool { return len(s.Coverage) > 0 }
+
 // ReadBaseline returns the cached coverage baseline for the first key that
 // resolves, and false if none exists yet (a cache miss, not an error — the
 // caller computes and writes one).

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/crap"
 	"lydite/lydite/internal/executil"
@@ -77,6 +79,77 @@ func TestAFailingRowNamesTheFunctionsToActOn(t *testing.T) {
 		if !strings.Contains(row.Value, want) {
 			t.Errorf("crap(api) = %q, want it to say %q", row.Value, want)
 		}
+	}
+
+	// And how many the change added, against a baseline that is not zero:
+	// the number a reader acts on is the delta, and against an empty baseline
+	// the delta and the count are the same number.
+	over := scored("api", 9, 400)
+	if got := crapRow(over, gitstate.CRAPBaseline{"api": {Above: 4}}, true); !strings.Contains(got.Value, "5 more") {
+		t.Errorf("crap(api) = %q, want it to say the change added 5", got.Value)
+	}
+}
+
+// A failing row names enough functions to act on and no more, and says how many
+// it left out. The whole of a component's debt is a page, and a detail nobody
+// reads to the end is a detail nobody reads.
+func TestAFailingRowNamesTheWorstFewAndCountsTheRest(t *testing.T) {
+	t.Parallel()
+	rowFor := func(n int) ui.Row {
+		t.Helper()
+		m := measured("api", runner.Go, 9, 10)
+		m.CRAP = crap.Report{Scored: 40, Worst: 200}
+		for i := range n {
+			m.CRAP.Over = append(m.CRAP.Over, crap.Function{
+				Name: fmt.Sprintf("F%d", i), File: "api/lib.go", Line: i + 1,
+				Complexity: 12, Value: float64(200 - i),
+				Lines: coverage.LineCount{Covered: 0, Total: 20},
+			})
+		}
+		return crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0}}, true)
+	}
+	// Exactly the cap: every one is named, and there is no tail saying none
+	// were left out.
+	capped := strings.Join(rowFor(worstOffenders).Detail, "\n")
+	if strings.Contains(capped, "more above") {
+		t.Errorf("detail = %q, want no tail when nothing was left out", capped)
+	}
+	if !strings.Contains(capped, "F4") {
+		t.Errorf("detail = %q, want every one of the %d named", capped, worstOffenders)
+	}
+	// Two beyond it: the tail counts exactly those two.
+	over := strings.Join(rowFor(worstOffenders+2).Detail, "\n")
+	if !strings.Contains(over, "and 2 more above 30") {
+		t.Errorf("detail = %q, want the two it left out counted", over)
+	}
+	if strings.Contains(over, "F5") || strings.Contains(over, "F6") {
+		t.Errorf("detail = %q, want the ones beyond the cap left out rather than named", over)
+	}
+}
+
+// An ungated run reports each component's score beside its coverage. Without
+// the row a workflow that reads no baseline says nothing at all about
+// complexity, which is indistinguishable from a repository that has none — and
+// the row is where the two ledger scalars reach a reader at all on the path
+// that gates nothing.
+func TestAnUngatedRunStillReportsWhatItScored(t *testing.T) {
+	t.Parallel()
+	rep := ui.NewReport("test")
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+	}}
+	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components,
+		[]measurement{scored("api", 3, 41.5)}, config.Default(), coverageOptions{Instrument: true})
+	rows := rowsOf(rep)
+	got, ok := rows["crap(api)"]
+	if !ok {
+		t.Fatalf("no crap(api) row in an ungated run: %v", rep.Rows())
+	}
+	if got.Status != ui.StatusContext || !strings.Contains(got.Value, "3 function(s) above 30") {
+		t.Errorf("crap(api) = %+v, want the score, uncompared", got)
+	}
+	if _, ok := rows["crap"]; !ok {
+		t.Errorf("no figure over the repository in an ungated run: %v", rep.Rows())
 	}
 }
 

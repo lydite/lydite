@@ -25,6 +25,7 @@
 package crap
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -32,7 +33,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"lydite/lydite/internal/coverage"
@@ -118,11 +119,11 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 			files = append(files, file)
 		}
 	}
-	// Sorted, so a run over one tree produces one report: the worst-first
-	// ordering below breaks ties by file and line, and an unsorted walk would
-	// otherwise let two runs disagree about which of two equal functions the
-	// detail lines name.
-	sort.Strings(files)
+	// Sorted, so a run over one tree produces one report. The ordering below
+	// is a total order and does not need it; what does is the *first* failure,
+	// since a tree with two unreadable files would otherwise name a different
+	// one on each run and a reader would be chasing a moving target.
+	slices.Sort(files)
 
 	var rep Report
 	fset := token.NewFileSet()
@@ -139,15 +140,18 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 			}
 		}
 	}
-	sort.Slice(rep.Over, func(i, j int) bool {
-		a, b := rep.Over[i], rep.Over[j]
-		if a.Value != b.Value {
-			return a.Value > b.Value
-		}
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		return a.Line < b.Line
+	// Worst first, then by where it is. The tie-break is what makes the order
+	// a total one, so two functions scoring the same are not reported in
+	// whichever order the walk happened to reach them — and it is written as a
+	// chain of comparisons rather than as a cascade of `!=` guards, because a
+	// guard that has already established inequality leaves the comparison
+	// under it unable to be wrong.
+	slices.SortFunc(rep.Over, func(a, b Function) int {
+		return cmp.Or(
+			cmp.Compare(b.Value, a.Value),
+			cmp.Compare(a.File, b.File),
+			cmp.Compare(a.Line, b.Line),
+		)
 	})
 	return rep, nil
 }

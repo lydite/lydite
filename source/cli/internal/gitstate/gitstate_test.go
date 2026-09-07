@@ -647,3 +647,24 @@ func revCount(t *testing.T, ctx context.Context, dir string) int {
 	}
 	return n
 }
+
+// A snapshot holding nothing has recorded nothing. The predicate is what
+// decides whether a recording merges onto what a tree already holds or writes
+// afresh, and asked as a length it reads as true for the empty snapshot — which
+// is the one case it exists to answer no to.
+func TestAnEmptySnapshotHasRecordedNothing(t *testing.T) {
+	t.Parallel()
+	if (Snapshot{}).Recorded() {
+		t.Error("an empty snapshot reports something recorded")
+	}
+	// A repository lydite scores no component of records no CRAP document at
+	// all, so a snapshot carrying one and not the other is still a recording.
+	if !(Snapshot{Coverage: Baseline{"api": entry(1, 2)}}).Recorded() {
+		t.Error("a snapshot holding a coverage baseline reports nothing recorded")
+	}
+	// And the CRAP document alone is not one: nothing writes it without the
+	// coverage entry a score is derived from.
+	if (Snapshot{CRAP: CRAPBaseline{"api": {Above: 1}}}).Recorded() {
+		t.Error("a snapshot holding only scores reports a recording")
+	}
+}

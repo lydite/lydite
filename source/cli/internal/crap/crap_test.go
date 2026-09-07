@@ -1,6 +1,7 @@
 package crap
 
 import (
+	"fmt"
 	"go/token"
 	"math"
 	"os"
@@ -94,6 +95,8 @@ func branches(n int, ch chan int) int {
 	select {
 	case v := <-ch:
 		n = v
+	case w := <-ch:
+		n = w
 	default:
 	}
 	return n
@@ -106,12 +109,13 @@ func branches(n int, ch chan int) int {
 	if rep.Scored != 1 {
 		t.Fatalf("scored %d functions, want 1", rep.Scored)
 	}
-	// 1 base + if + && + || + for + range + two non-default cases + one
-	// communicating select clause = 9. `default` is not a decision in either
-	// statement: control reaches it when every other clause is decided
-	// against.
-	if got := functions(t, root, "a.go")[0].Complexity; got != 9 {
-		t.Errorf("complexity = %d, want 9", got)
+	// 1 base + if + && + || + for + range + two non-default cases + two
+	// communicating select clauses = 10. `default` is not a decision in
+	// either statement: control reaches it when every other clause is decided
+	// against — and there are two of each kind so that miscounting one for
+	// the other does not come to the same total.
+	if got := functions(t, root, "a.go")[0].Complexity; got != 10 {
+		t.Errorf("complexity = %d, want 10", got)
 	}
 }
 
@@ -330,4 +334,132 @@ func functions(t *testing.T, root, file string) []Function {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// The threshold is exclusive: a function sitting exactly on it is not counted.
+// 30 is where a complexity-12 function lands at half coverage, which is the
+// worked example the definition is usually explained with, so the boundary is
+// reachable rather than theoretical.
+func TestAFunctionExactlyOnTheThresholdIsNotAboveIt(t *testing.T) {
+	t.Parallel()
+	if got := Index(12, coverage.LineCount{Covered: 5, Total: 10}); got != Threshold {
+		t.Fatalf("the fixture scores %v, not the threshold — the boundary is not being tested", got)
+	}
+	root := t.TempDir()
+	// Complexity 12 — one base plus eleven `if`s — with half its reported
+	// lines covered.
+	var body strings.Builder
+	body.WriteString("package a\n\nfunc onTheLine(n int) int {\n")
+	for i := range 11 {
+		fmt.Fprintf(&body, "\tif n > %d {\n\t\tn++\n\t}\n", i)
+	}
+	body.WriteString("\treturn n\n}\n")
+	write(t, root, "a.go", body.String())
+
+	hits := map[int]int{}
+	for line := 1; line <= 40; line++ {
+		hits[line] = line % 2
+	}
+	rep, err := Measure(root, coverage.LineHits{"a.go": hits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Scored != 1 {
+		t.Fatalf("scored %d functions, want 1", rep.Scored)
+	}
+	// Exactly on the line by construction, and so not above it.
+	if got := rep.Over; len(got) != 0 {
+		t.Errorf("over = %v, want nothing: a score equal to the threshold is not above it", got)
+	}
+}
+
+// A fully covered function scores its own complexity, which is the whole of
+// what makes the threshold also a complexity ceiling. It is the assertion that
+// says the coverage half of the formula is read at all — every other test here
+// scores functions the report covers none of, where the covered count could be
+// anything.
+func TestCoverageIsReadAndAFullyCoveredFunctionScoresItsComplexity(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "a.go", `package a
+
+func two(n int) int {
+	if n > 0 {
+		return 1
+	}
+	return 0
+}
+`)
+	covered := functions(t, root, "a.go")
+	if len(covered) != 1 {
+		t.Fatalf("scored %d functions, want 1", len(covered))
+	}
+	if covered[0].Lines.Percent() != 100 {
+		t.Fatalf("coverage = %v%%, want a fully covered function", covered[0].Lines.Percent())
+	}
+	if covered[0].Value != 2 {
+		t.Errorf("value = %v, want the complexity 2 — a fully covered function costs nothing more", covered[0].Value)
+	}
+	// The same function with nothing covered costs the square, which is what
+	// says the two are being told apart rather than both read as uncovered.
+	uncovered, err := scoreFile(token.NewFileSet(), root, "a.go", covering(400, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uncovered[0].Value != 6 {
+		t.Errorf("value = %v, want 6 — complexity 2 with nothing covered", uncovered[0].Value)
+	}
+}
+
+// Two functions scoring the same are ordered by where they are, so a report is
+// the same report whichever order the walk reached them in. Without it the
+// detail lines under a failing row name a different function each run, and a
+// reader chases a moving target.
+func TestEqualScoresAreOrderedByWhereTheyAre(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	same := "package a\n\nfunc f(n int) int {\n\tif n > 1 {\n\t\tn++\n\t}\n\tif n > 2 {\n\t\tn++\n\t}\n\tif n > 3 {\n\t\tn++\n\t}\n\tif n > 4 {\n\t\tn++\n\t}\n\tif n > 5 {\n\t\tn++\n\t}\n\treturn n\n}\n"
+	hits := coverage.LineHits{}
+	for _, name := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		write(t, root, name, same)
+		hits[name] = covering(30, 0)
+	}
+	for range 30 {
+		rep, err := Measure(root, hits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rep.Over) != 5 {
+			t.Fatalf("over = %v, want one per file", rep.Over)
+		}
+		var files []string
+		for _, f := range rep.Over {
+			files = append(files, f.File)
+		}
+		if got := strings.Join(files, ","); got != "a.go,b.go,c.go,d.go,e.go" {
+			t.Fatalf("order = %s, want the identical scores ordered by where they are", got)
+		}
+	}
+}
+
+// A tree with more than one unreadable file names the same one every run. The
+// walk is over a map, so without an ordering the failure a reader is handed
+// changes between runs of the same command over the same tree.
+func TestTheFirstFailureIsTheSameFailureEveryRun(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	hits := coverage.LineHits{}
+	for _, name := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		write(t, root, name, "package a\n\nfunc (\n")
+		hits[name] = covering(3, 1)
+	}
+	for range 30 {
+		_, err := Measure(root, hits)
+		if err == nil {
+			t.Fatal("no error over a tree of unparseable files")
+		}
+		if !strings.Contains(err.Error(), "a.go") {
+			t.Fatalf("err = %v, want the first file by name every time", err)
+		}
+	}
 }
