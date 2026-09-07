@@ -378,40 +378,11 @@ jobs:
       # for. The test matrix keeps its output captured: a suite's log is
       # thousands of passing lines, and a CI log carrying all of them buries
       # the one component that failed.
-      #
-      # --concurrency 2, because a slot costs more here than it does in the
-      # test matrix and the default is set for that one. A slot in `lydite
-      # test` is an already-compiled suite; a slot in `lydite mutation` is a
-      # *compile* as well, since an overlay changes the build hash — and this
-      # repository's `cli` component declares `-race` over a package graph
-      # carrying all 206 of gotreesitter's grammars, which is the heaviest
-      # build it has. Four of those at once exhausts a 16GB runner: the agent
-      # is killed, the step reports 143, and every `if: always()` step and
-      # post-step after it is skipped, which is the signature of a runner
-      # that went away rather than a job that failed.
       - name: lydite mutation
         env:
           COMPONENTS: ${{ matrix.shard.components }}
-        run: |
-          # Temporary: the mutation job dies with its runner at roughly the
-          # same mutant each run, and neither memory nor disk has been measured
-          # on the runner itself. Sampled to stderr beside the mutant stream so
-          # the two line up. Remove once the cause is named.
-          ( while :; do
-              printf 'probe %s mem_avail_MB=%s gocache_MB=%s root_avail_MB=%s\n' \
-                "$(date -u +%T)" \
-                "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" \
-                "$(du -sm "${HOME}/.cache/go-build" 2>/dev/null | cut -f1)" \
-                "$(df -m --output=avail / | tail -1)" >&2
-              sleep 20
-            done ) &
-          probe=$!
-          trap 'kill "${probe}" 2>/dev/null || true' EXIT
-          lydite mutation --dir . --affected --component "$COMPONENTS" --stream --concurrency 2
+        run: lydite mutation --dir . --affected --component "$COMPONENTS" --stream
 
-      # Under its own prefix, so `publish` never reads a shard's document as a
-      # `mutation` section of its own: there would be one per shard, each
-      # answering about part of the repository under one heading.
       - uses: ./.github/actions/lydite-reports
         if: always()
         with:

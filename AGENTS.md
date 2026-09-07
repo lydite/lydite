@@ -147,13 +147,13 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
-**A mutation slot costs more than a test slot, and CI bounds it lower.** `--concurrency` means
-suite executions in flight in both commands, but a slot in `lydite test` is an already-compiled
-suite while a slot in `lydite mutation` is a *compile* as well — an overlay changes the build hash,
-so every mutant rebuilds the mutated package and its dependents. This repository's `cli` component
-declares `-race` over a package graph carrying all 206 of gotreesitter's grammars, which is the
-heaviest build it has, and four of those at once exhausts a 16GB hosted runner. `lydite-pr.yml`
-passes `--concurrency 2` to `mutation` and leaves `test` on the default.
+**A mutant is bounded in time and not in memory, and that is a real limit.** `--timeout` (and the
+derived three-times-baseline default) says how long a mutant's suite may run; nothing says how much
+it may allocate. A mutant that turns a bounded loop into an unbounded one takes the machine down
+before its deadline arrives — measured on a hosted runner, 14GB in eighty seconds against a timeout
+that fired correctly at 1m46s and was already too late. The engine cannot fix that for a consumer's
+code ([#109](https://github.com/lydite/lydite/issues/109)); what lydite can do in its own is write
+loops whose bound belongs to the loop rather than to a counter its body advances.
 
 **The failure has a signature worth recognising**, because it does not look like a failing gate: the
 step reports exit 143, and every `if: always()` step and post-step after it is `skipped`. Those run

@@ -158,21 +158,27 @@ func Declarations(path string, gate Gate, comments []Comment) (map[int]string, e
 // It returns how many lines it used, and false for a reason that no line closes
 // or that closes with nothing in it.
 func gather(rest string, open int, next []Comment) (reason string, consumed int, ok bool) {
-	var parts []string
-	line := rest
-	for {
-		if before, _, closed := strings.Cut(line, "]"); closed {
-			parts = append(parts, before)
+	// Bounded by the comments the reason could continue into, and written as a
+	// range so the bound belongs to the loop rather than to a counter its body
+	// advances. A reason nothing closes has to run out of lines, not out of
+	// memory: the body appends once per turn, so a walk that could be made not
+	// to advance would append until the machine it runs on has no memory left,
+	// which no timeout can prevent — a deadline bounds how long a process
+	// lives and not how much it allocates before it dies.
+	parts := []string{rest}
+	for used := range len(next) + 1 {
+		last := len(parts) - 1
+		if before, _, closed := strings.Cut(parts[last], "]"); closed {
+			parts[last] = before
 			reason = strings.TrimSpace(strings.Join(parts, " "))
-			return reason, consumed, reason != ""
+			return reason, used, reason != ""
 		}
-		parts = append(parts, line)
-		if consumed >= len(next) || next[consumed].Line != open+consumed+1 {
-			return "", consumed, false
+		if used == len(next) || next[used].Line != open+used+1 {
+			return "", used, false
 		}
-		line = body(next[consumed].Text)
-		consumed++
+		parts = append(parts, body(next[used].Text))
 	}
+	return "", len(next), false
 }
 
 // body is a comment's text with its introducer and the space after it removed,
