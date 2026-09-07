@@ -149,10 +149,9 @@ func extractEntry(hdr *tar.Header, r io.Reader, dest, rel, target string, budget
 	case tar.TypeReg:
 		return extractRegular(hdr, r, target, budget)
 	case tar.TypeSymlink:
-		// // [lydite:exclude_from_mutation][a symlink writes no bytes, and a count that claimed
-		// otherwise would have to reach maxArchiveBytes to be noticed — 2 GiB
-		// of links, at one byte each, is not an archive a test can build]
-		return 0, extractSymlink(hdr, dest, rel, target)
+		return 0, extractSymlink(hdr, dest, rel, target) // [lydite:exclude_from_mutation][a symlink
+		// writes no bytes, and a count claiming otherwise would have to reach the archive cap to
+		// be noticed — 2 GiB of links, at one byte each, is not an archive a test can build]
 	default:
 		// Character devices, FIFOs and hard links have no business in a
 		// toolchain tarball; skipping is safer than materialising them.

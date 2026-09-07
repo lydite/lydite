@@ -261,12 +261,23 @@ func TestARefreshedCheckRecordsTheAttemptEvenWhenItFails(t *testing.T) {
 	failing := &http.Client{Transport: &http.Transport{}, Timeout: time.Millisecond}
 
 	fresh := updateCheckState{CheckedAt: time.Now(), Latest: "9.9.9"}
-	if got := refreshedUpdateCheck(fresh, failing); got != fresh {
+	if got := refreshedUpdateCheck(fresh, time.Now(), failing); got != fresh {
 		t.Errorf("a check inside the TTL = %+v, want it left alone", got)
 	}
 
+	// Exactly on the TTL, which is the boundary the comparison turns on and
+	// the one moment a function that read the clock itself could never be
+	// stood on. A check whose age has only just reached the TTL is stale.
+	edge := updateCheckState{CheckedAt: time.Now(), Latest: "1.2.3"}
+	if got := refreshedUpdateCheck(edge, edge.CheckedAt.Add(updateCheckTTL), failing); !got.CheckedAt.After(edge.CheckedAt) {
+		t.Error("a check exactly as old as the TTL was treated as fresh")
+	}
+	if got := refreshedUpdateCheck(edge, edge.CheckedAt.Add(updateCheckTTL-time.Nanosecond), failing); got != edge {
+		t.Errorf("a check a nanosecond younger than the TTL = %+v, want it left alone", got)
+	}
+
 	stale := updateCheckState{CheckedAt: time.Now().Add(-2 * updateCheckTTL), Latest: "1.2.3"}
-	got := refreshedUpdateCheck(stale, failing)
+	got := refreshedUpdateCheck(stale, time.Now(), failing)
 	if !got.CheckedAt.After(stale.CheckedAt) {
 		t.Error("a failed check did not record the attempt, so every run past the TTL re-pays the timeout")
 	}
@@ -282,7 +293,7 @@ func TestARefreshedCheckRecordsTheAttemptEvenWhenItFails(t *testing.T) {
 func TestACheckTheRemoteAnswersRecordsWhatItFound(t *testing.T) { //nolint:paralleltest // fakeRelease swaps the package's base URL
 	fakeRelease(t, "3.4.5", []byte("binary"), "")
 	stale := updateCheckState{CheckedAt: time.Now().Add(-2 * updateCheckTTL), Latest: "1.2.3"}
-	got := refreshedUpdateCheck(stale, http.DefaultClient)
+	got := refreshedUpdateCheck(stale, time.Now(), http.DefaultClient)
 	if got.Latest != "3.4.5" {
 		t.Errorf("latest = %q, want the version the remote answered with", got.Latest)
 	}

@@ -258,7 +258,7 @@ func maybeNudgeUpdate() {
 		return
 	}
 	path := filepath.Join(cacheDir, "lydite", "update-check.json")
-	st := refreshedUpdateCheck(readUpdateCheck(path), http.DefaultClient)
+	st := refreshedUpdateCheck(readUpdateCheck(path), time.Now(), http.DefaultClient)
 	writeUpdateCheck(path, st)
 	if updateAvailable(st.Latest, version) {
 		_, _ = fmt.Fprintf(os.Stderr, "\nlydite v%s is available (you have v%s) — run 'lydite update'\n",
@@ -301,18 +301,21 @@ func readUpdateCheck(path string) updateCheckState {
 // otherwise every invocation past the TTL re-pays the network timeout. The
 // previous answer is kept in that case rather than cleared, since a failed
 // check is no evidence that the release it named has gone.
-func refreshedUpdateCheck(st updateCheckState, client *http.Client) updateCheckState {
-	// // [lydite:exclude_from_mutation][the boundary is a reading of the clock, and no test can
-	// arrange for one to land exactly on the TTL: time.Since is evaluated
-	// after the value it is compared against was chosen, so the two are equal
-	// only by a coincidence nothing can produce on purpose]
-	if time.Since(st.CheckedAt) < updateCheckTTL {
+//
+// now is taken rather than read, so the moment the check is judged against is
+// the caller's to choose. A function that reads the clock itself has a boundary
+// nothing can stand on — `time.Since` is evaluated after the value it is
+// compared with was chosen, so the two are equal only by a coincidence nobody
+// can arrange — and the comparison deciding whether the network is touched at
+// all would then be asserted by nobody.
+func refreshedUpdateCheck(st updateCheckState, now time.Time, client *http.Client) updateCheckState {
+	if now.Sub(st.CheckedAt) < updateCheckTTL {
 		return st
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	latest, err := latestReleaseVersion(ctx, client)
-	st.CheckedAt = time.Now()
+	st.CheckedAt = now
 	if err == nil {
 		st.Latest = latest
 	}
