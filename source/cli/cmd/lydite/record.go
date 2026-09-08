@@ -311,13 +311,17 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 		return nil, "this checkout names no branch, so pass " + gitstate.BranchFlag +
 			" — history is per branch, and one filed under the wrong branch is worse than none"
 	}
-	head, err := gitstate.DescribeCommit(ctx, dir, "HEAD")
-	if err != nil {
-		return nil, "this commit could not be described: " + err.Error()
-	}
+	// What there is to say, before asking git anything: a fold carrying no
+	// scalar is a record naming a commit and holding no number, which is a
+	// point on no line — and there is no reason to describe a commit nothing
+	// is going to be filed against.
 	components := historyComponents(folded)
 	if len(components) == 0 {
 		return nil, "no component produced a scalar"
+	}
+	head, err := gitstate.DescribeCommit(ctx, dir, "HEAD")
+	if err != nil {
+		return nil, "this commit could not be described: " + err.Error()
 	}
 	entry := ledger.Record{
 		Kind:       ledger.KindEntry,
@@ -360,20 +364,17 @@ func gapBefore(ctx context.Context, dir, worktree, branch string, head gitstate.
 		return ledger.Record{}, false
 	}
 	gap := ledger.Gap{From: previous.Commit}
+	// At least one commit lies between, and never nought: CommitsBetween
+	// answers nought only when the last recorded commit is this one's first
+	// parent, and that is the contiguous case the return above already took.
 	missing, known := gitstate.CommitsBetween(ctx, dir, previous.Commit, head.SHA)
-	switch {
-	case !known:
+	if !known {
 		// A force-push, an unrelated history, or a checkout too shallow to
 		// see back that far. The break is real and its width is not
 		// establishable, and saying so is the whole of what this record is
 		// for — a width invented here would be worse than the honest absence.
 		gap.Reason = "the last recorded commit is not an ancestor of this one, so how many recordings are missing cannot be established"
-	case missing == 0:
-		// The parent chain skips the previous record without any commit
-		// between the two, which is what a merge whose first parent is not
-		// the recorded commit looks like.
-		gap.Reason = "this commit does not follow the last recorded one along its first parent"
-	default:
+	} else {
 		gap.Reason = fmt.Sprintf("%d commit(s) between the last recorded one and this one were never recorded", missing)
 		gap.Missing = missing
 	}

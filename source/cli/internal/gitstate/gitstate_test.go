@@ -2,6 +2,7 @@ package gitstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -895,5 +896,92 @@ func TestBranchTakesTheCallersStatementFirst(t *testing.T) {
 	}
 	if got := Branch(ctx, repo, "main"); got != "main" {
 		t.Errorf("Branch on a detached HEAD with an override = %q, want the override", got)
+	}
+}
+
+// Records that cannot be built fail the write rather than landing a baseline
+// with no history beside it. The two are one commit precisely so a tree's
+// state cannot half-land, and an error from the closure is the case where it
+// would.
+func TestRecordsThatCannotBeBuiltFailTheWrite(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	before := revCount(t, ctx, clone)
+
+	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) { return nil, errors.New("the history could not be described") })
+	if err == nil {
+		t.Fatal("Write reported success though the records could not be built")
+	}
+	if !strings.Contains(err.Error(), "could not be described") {
+		t.Errorf("error = %q, want it to carry what went wrong", err)
+	}
+	if got := revCount(t, ctx, clone); got != before {
+		t.Errorf("the write added %d commits despite failing", got-before)
+	}
+}
+
+// A record the ledger refuses is the same kind of failure, and must not leave
+// the baseline landed on its own.
+func TestARecordTheLedgerRefusesFailsTheWrite(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	before := revCount(t, ctx, clone)
+
+	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) {
+			// No commit, which nothing could ever read back.
+			return []ledger.Record{{Kind: ledger.KindEntry, Branch: "main",
+				At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)}}, nil
+		})
+	if err == nil {
+		t.Fatal("Write accepted a record the ledger refuses")
+	}
+	if got := revCount(t, ctx, clone); got != before {
+		t.Errorf("the write added %d commits despite failing", got-before)
+	}
+}
+
+// A revision git cannot resolve is an error naming it, not a zero commit that
+// would then be recorded as this tree's history.
+func TestDescribeCommitReportsARevisionGitCannotResolve(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+
+	got, err := DescribeCommit(ctx, repo, "refs/heads/nothing-here")
+	if err == nil {
+		t.Fatalf("DescribeCommit resolved a revision that does not exist: %+v", got)
+	}
+	if !strings.Contains(err.Error(), "nothing-here") {
+		t.Errorf("error = %q, want it to name the revision", err)
+	}
+}
+
+// A root commit has no parent, which is the first record a repository can ever
+// have — not an error, and not a gap, because nothing precedes it.
+func TestDescribeCommitAcceptsARootCommit(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "-A")
+	run(repo, "commit", "-m", "root")
+
+	got, err := DescribeCommit(ctx, repo, "HEAD")
+	if err != nil {
+		t.Fatalf("DescribeCommit on a root commit: %v", err)
+	}
+	if got.Parent != "" {
+		t.Errorf("a root commit named parent %q", got.Parent)
+	}
+	if got.SHA == "" || got.Tree == "" || got.At.IsZero() {
+		t.Errorf("DescribeCommit = %+v, want a commit, a tree and a date", got)
 	}
 }

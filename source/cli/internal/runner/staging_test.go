@@ -125,3 +125,21 @@ func TestOnlyTheInvocationThatRunsTheWrapperInstallsIt(t *testing.T) {
 		t.Error("the instrumented variant reported success without installing the wrapper it runs")
 	}
 }
+
+// A config that cannot be staged is an error, not a silent skip. nextest would
+// otherwise run without the JUnit profile and lydite would look for a report
+// nobody was told to write — reported as a component whose suite ran no tests.
+func TestAToolConfigThatCannotBeStagedIsReported(t *testing.T) {
+	home := t.TempDir()
+	// A file where the cache directory belongs, so nothing under it can be
+	// created.
+	if err := os.WriteFile(filepath.Join(home, "blocked"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(home, "blocked"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "blocked", "cache"))
+
+	if err := stageNextestToolConfig(llvmCovNextest(nil)); err == nil {
+		t.Error("stageNextestToolConfig reported success though it could not create its directory")
+	}
+}

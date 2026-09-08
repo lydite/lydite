@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +477,25 @@ func TestAPartitionLineLongerThanTheScannerDefaultIsStillRead(t *testing.T) {
 	if got := lines(t, root, "history/v1/2026-03.ndjson"); len(got) != 1 {
 		t.Errorf("the partition holds %d records, want 1 — the long line was not read back", len(got))
 	}
+
+	// And the projection, which carries the same components on its row. A
+	// second record on that day is what makes the rollup be read back rather
+	// than only written, and a reader stuck at the scanner's default drops
+	// the day it is meant to be updating.
+	second := big
+	second.Commit = "b"
+	second.Parent = "a"
+	second.At = at("2026-03-15T20:00:00Z")
+	if _, _, err := Append(root, []Record{second}); err != nil {
+		t.Fatalf("appending a second record on a day whose rollup row is long: %v", err)
+	}
+	rows := readRollupOrFail(t, root, "history/v1/daily/main/2026.ndjson")
+	if len(rows) != 1 || rows[0].Entries != 2 {
+		t.Fatalf("the projection = %+v, want one day counting both records", rows)
+	}
+	if rows[0].Commit != "b" {
+		t.Errorf("the day's row names %q, want the later commit — the long row was not read back", rows[0].Commit)
+	}
 }
 
 // The projection is read in file order, so its rows are written in day order
@@ -506,9 +524,10 @@ func TestTheProjectionIsWrittenInDayOrder(t *testing.T) {
 	}
 }
 
-// The files Append names are sorted, so what a caller stages — and therefore
-// the commit it builds — does not depend on which order a map iterated in.
-func TestAppendNamesItsFilesInAStableOrder(t *testing.T) {
+// Append names its files in the order it wrote them — each month's partition
+// ahead of the projection it feeds — so what a caller stages, and therefore
+// the commit it builds, is the same for the same records.
+func TestAppendNamesItsFilesInWriteOrder(t *testing.T) {
 	root := t.TempDir()
 	written, _, err := Append(root, []Record{
 		entry("a", "", "main", "2026-03-15T08:00:00Z"),
@@ -517,8 +536,24 @@ func TestAppendNamesItsFilesInAStableOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if !sort.StringsAreSorted(written) {
-		t.Errorf("Append named %v, which is not sorted — the commit would vary by map order", written)
+	want := []string{
+		"history/v1/2026-03.ndjson",
+		"history/v1/daily/main/2026.ndjson",
+		"history/v1/daily/release/2026.ndjson",
+	}
+	if len(written) != len(want) {
+		t.Fatalf("Append named %v, want %v", written, want)
+	}
+	for i := range want {
+		if written[i] != want[i] {
+			t.Fatalf("Append named %v, want %v", written, want)
+		}
+	}
+	// The month is named once even though two records landed in it: a caller
+	// staging the same path twice is harmless, and a list that repeats it is
+	// one nobody can compare against an expectation.
+	if got := len(written); got != 3 {
+		t.Errorf("Append named %d files for two records in one month, want 3", got)
 	}
 }
 
@@ -566,5 +601,61 @@ func TestAPartitionIsRolledOnlyWhenTheRecordWouldTakeItOver(t *testing.T) {
 	}
 	if info.Size() != int64(maxPartitionBytes) {
 		t.Errorf("the part is %d bytes, want exactly the cap", info.Size())
+	}
+}
+
+// A write the ledger could not make is an error, never a silent success. The
+// caller stages what Append names, so a path it reported writing and did not
+// is a commit that lands without the record it claims to carry.
+func TestAppendReportsAWriteItCouldNotMake(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o500); err != nil {
+		t.Skipf("cannot make the root read-only here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+
+	written, landed, err := Append(root, []Record{entry("a", "", "main", "2026-03-15T10:00:00Z")})
+	if err == nil {
+		t.Fatalf("Append reported success on a read-only root, naming %v", written)
+	}
+	if written != nil || landed != nil {
+		t.Errorf("Append named %v / %v alongside its error, want nothing at all", written, landed)
+	}
+}
+
+// A partition that cannot be read is an error rather than a miss. A miss would
+// append the record a second time, which is the one thing the deduplication
+// exists to prevent — and it would do it silently, every run.
+func TestAnUnreadablePartitionIsAnErrorRatherThanAMiss(t *testing.T) {
+	root := t.TempDir()
+	rec := entry("a", "", "main", "2026-03-15T10:00:00Z")
+	if _, _, err := Append(root, []Record{rec}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	part := filepath.Join(root, "history", "v1", "2026-03.ndjson")
+	if err := os.Chmod(part, 0o000); err != nil {
+		t.Skipf("cannot make the partition unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(part, 0o600) })
+
+	if _, _, err := Append(root, []Record{rec}); err == nil {
+		t.Error("Append treated an unreadable partition as a miss and would have written the record twice")
+	}
+}
+
+// A projection that cannot be written fails the append that produced it. It is
+// derived and rebuildable, but a caller told the file was written stages a
+// path that is not there.
+func TestAProjectionThatCannotBeWrittenFailsTheAppend(t *testing.T) {
+	root := t.TempDir()
+	// A file where the projection's directory belongs, so creating it fails.
+	if err := os.MkdirAll(filepath.Join(root, "history", "v1", "daily"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "history", "v1", "daily", "main"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Append(root, []Record{entry("a", "", "main", "2026-03-15T10:00:00Z")}); err == nil {
+		t.Error("Append reported success though the projection could not be written")
 	}
 }

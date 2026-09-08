@@ -161,3 +161,16 @@ func TestAReportThatIsNotXMLIsAnError(t *testing.T) {
 		t.Error("Read accepted a document that is not XML")
 	}
 }
+
+// A report that is not there is an error naming the path. It is what a
+// component's row reports as the reason it contributed no counts, so a bare
+// "no such file" with no path in it tells its reader nothing to act on.
+func TestReadFileNamesAReportThatIsNotThere(t *testing.T) {
+	_, err := ReadFile("/nonexistent/lydite/junit.xml")
+	if err == nil {
+		t.Fatal("ReadFile reported success for a report that does not exist")
+	}
+	if !strings.Contains(err.Error(), "junit.xml") {
+		t.Errorf("error = %q, want it to name the report", err)
+	}
+}

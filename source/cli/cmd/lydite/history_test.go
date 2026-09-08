@@ -48,6 +48,17 @@ func historyOn(t *testing.T, root string) []ledger.Record {
 	return recs
 }
 
+// headCommit is the commit currently checked out, which a test uses to rewind
+// to a point it wants to build a different history from.
+func headCommit(t *testing.T, root string) string {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), root, "git", "rev-parse", "HEAD")
+	if !r.Ok() {
+		t.Fatalf("git rev-parse HEAD: %v", r.Err)
+	}
+	return strings.TrimSpace(r.Output)
+}
+
 func measureAndRecord(t *testing.T, root string) string {
 	t.Helper()
 	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
@@ -393,5 +404,86 @@ func TestTheBranchFlagNamesTheLineARecordingJoins(t *testing.T) {
 	recs := historyOn(t, root)
 	if len(recs) != 1 || recs[0].Branch != "release/1.x" {
 		t.Fatalf("the branch holds %+v, want one record on release/1.x", recs)
+	}
+}
+
+// A checkout that names no branch and a caller that states none appends
+// nothing, and says which flag fills the gap. Silence here would be a
+// repository that records history on no run and never says why.
+func TestARecordingWithNoBranchSaysWhichFlagNamesIt(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) { gitIn(t, root, args...) }
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	run("checkout", "--quiet", "--detach", "HEAD")
+
+	out, _, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("recording: %v\n%s", err, out)
+	}
+	row := jsonRows(t, out)["history"]
+	if row.Status != "unmeasured" {
+		t.Fatalf("history = %+v, want an amber row: nothing can be filed under a branch nobody named", row)
+	}
+	if !strings.Contains(row.Value, gitstate.BranchFlag) {
+		t.Errorf("history = %q, want it to name the flag that fills the gap", row.Value)
+	}
+	// The baseline still lands: the branch is the history's question, not the
+	// baseline's.
+	if r := jsonRows(t, out)["record"]; r.Status != "pass" {
+		t.Errorf("record = %+v, want the baseline recorded regardless", r)
+	}
+}
+
+// A fold whose components carry no scalar appends nothing. A record naming a
+// commit and holding no number is a point on no line, and writing one would
+// make the history claim a measurement that was never taken.
+func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
+	records, why := historyRecords(context.Background(), t.TempDir(), "main",
+		measurementsDoc{Components: map[string]componentMeasurement{
+			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
+		}})
+	if records != nil {
+		t.Error("a fold carrying no scalar produced records")
+	}
+	if !strings.Contains(why, "no component produced a scalar") {
+		t.Errorf("why = %q, want it to say no scalar was produced", why)
+	}
+}
+
+// A commit whose recorded predecessor is not an ancestor is a break whose
+// width cannot be established — a force-push, or an unrelated history. Saying
+// so is the whole of what the record is for; a width invented here would be
+// worse than the honest absence.
+func TestAPredecessorThatIsNotAnAncestorIsAGapOfUnknownWidth(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) { gitIn(t, root, args...) }
+	base := headCommit(t, root)
+
+	// A commit recorded and then rewritten away, which is what a force-push
+	// leaves behind: the branch's last record is no longer on it.
+	write(t, root, "svc/notes.md", "recorded, then rewritten\n")
+	run("add", "-A")
+	run("commit", "-m", "the commit that gets rewritten")
+	measureAndRecord(t, root)
+
+	run("reset", "--quiet", "--hard", base)
+	write(t, root, "svc/other.md", "a different line of history\n")
+	run("add", "-A")
+	run("commit", "-m", "what replaced it")
+	measureAndRecord(t, root)
+
+	var gap *ledger.Gap
+	for _, rec := range historyOn(t, root) {
+		if rec.Kind == ledger.KindGap {
+			gap = rec.Gap
+		}
+	}
+	if gap == nil {
+		t.Fatal("no gap was recorded across an unrelated history")
+	}
+	if gap.Missing != 0 || !strings.Contains(gap.Reason, "not an ancestor") {
+		t.Errorf("the gap = %+v, want an unestablished width and the reason why", gap)
 	}
 }

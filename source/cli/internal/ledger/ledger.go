@@ -231,7 +231,21 @@ type Gap struct {
 // caller say "already recorded" rather than claiming an append that was a
 // no-op.
 func Append(root string, recs []Record) ([]string, []Record, error) {
+	// Collected in the order they are written — a month's partition, then the
+	// projection it feeds — rather than gathered from a map and sorted. A map
+	// has no order, so a sort is the only thing that would make the caller's
+	// `git add` arguments stable, and a rule that holds only because a call
+	//at the end of the function happens to still be there is one nothing
+	// notices the loss of.
 	written := map[string]bool{}
+	var files []string
+	add := func(path string) {
+		if written[path] {
+			return
+		}
+		written[path] = true
+		files = append(files, path)
+	}
 	var landed []Record
 	for _, rec := range recs {
 		if rec.Commit == "" || rec.Branch == "" {
@@ -251,20 +265,15 @@ func Append(root string, recs []Record) ([]string, []Record, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		written[part] = true
+		add(part)
 		proj, err := project(root, rec)
 		if err != nil {
 			return nil, nil, err
 		}
-		written[proj] = true
+		add(proj)
 		landed = append(landed, rec)
 	}
-	out := make([]string, 0, len(written))
-	for p := range written {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out, landed, nil
+	return files, landed, nil
 }
 
 // validBranch reports whether a branch name may be used as the path segment

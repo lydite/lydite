@@ -98,3 +98,19 @@ func TestAnInstallThatFailsIsReported(t *testing.T) {
 		t.Errorf("error = %q, want it to name the package that could not be installed", err)
 	}
 }
+
+// An install that failed hands back no path. A caller that reads the path
+// without the error would otherwise put a binary that was never installed on
+// PATH, and the component would fail on the invocation rather than on the
+// install that is the actual cause.
+func TestAFailedInstallReturnsNoPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got, err := Ensure(context.Background(), []string{"GOPROXY=off", "GOFLAGS=-mod=mod"},
+		"gotestsum", "v0.0.0-does-not-exist", "gotest.tools/gotestsum@v0.0.0-does-not-exist", "")
+	if err == nil {
+		t.Fatal("Ensure reported success for a package that cannot be installed")
+	}
+	if got != "" {
+		t.Errorf("Ensure = %q on a failed install, want no path at all", got)
+	}
+}
