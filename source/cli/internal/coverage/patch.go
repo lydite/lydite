@@ -275,15 +275,24 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 				if skip[line] {
 					continue
 				}
-				if count, seen := executed[line]; !seen || b.Count > count {
-					executed[line] = b.Count
-				}
+				// The greater count wins, never the later one. A line
+				// carrying more than one block is exactly what makes an
+				// lcov's LF differ from a tally of its DA lines — measured at
+				// 57 against 55 on the proving ground — so a block with no
+				// hits following one with some leaves the line hit. Taking
+				// the last would have the patch gate score it uncovered while
+				// the aggregate scored it covered, two figures disagreeing
+				// about one line.
+				//
+				// `max` against the zero an absent key already reads as,
+				// rather than a comparison guarded by whether the key was
+				// seen: a hit count is never negative, so the two are the
+				// same rule and this one has no boundary to get wrong.
+				executed[line] = max(executed[line], b.Count)
 				if excluded[line] {
 					continue
 				}
-				if count, seen := hits[line]; !seen || b.Count > count {
-					hits[line] = b.Count
-				}
+				hits[line] = max(hits[line], b.Count)
 			}
 		}
 		out.Hits[rel] = hits

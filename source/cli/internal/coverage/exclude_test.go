@@ -296,3 +296,39 @@ func original() int { return 2 }
 		t.Errorf("unused = %v, want none: the declaration found a function", got.Unused)
 	}
 }
+
+// A line covered by more than one block reads as hit when any of them ran.
+// Taking the last record instead would have the patch gate score it uncovered
+// while the aggregate scored it covered — two figures disagreeing about one
+// line — and it is what separates an lcov's LF from a tally of its DA records.
+func TestTheGreaterCountWinsNotTheLaterOne(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module m\n\ngo 1.26\n")
+	writeFile(t, root, "a.go", `package m
+
+func Both(n int) int {
+	if n > 0 {
+		return 1
+	}
+	return 0
+}
+`)
+	// Two blocks over line 4: the first ran, the second did not. The order is
+	// the one the file lists them in, so a rule that took the last would
+	// answer 0.
+	writeFile(t, root, "cover.out", `mode: set
+m/a.go:4.2,4.13 1 1
+m/a.go:4.13,6.3 1 0
+`)
+	rep, err := goProfile(GoModuleProfile{Profile: filepath.Join(root, "cover.out"), ModuleName: "m"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Hits["a.go"][4] != 1 {
+		t.Errorf("hits[4] = %d, want the greater of the two blocks", rep.Hits["a.go"][4])
+	}
+	if rep.Executed["a.go"][4] != 1 {
+		t.Errorf("executed[4] = %d, want the same rule on both maps", rep.Executed["a.go"][4])
+	}
+}

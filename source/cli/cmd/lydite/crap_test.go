@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
@@ -564,4 +565,32 @@ func goProducer(t *testing.T, root string) string {
 		t.Fatal("no go-test runner")
 	}
 	return r.Producer(filepath.Join(root, "svc"), "")
+}
+
+// A declaration that documents no function reaches a reader. Its author
+// believes they have answered a finding, and nothing they can see says
+// otherwise — so the run that renders rows says which ones covered nothing, on
+// the command's own stderr rather than the process's, since a base tree is
+// measured through the same path and its report is discarded.
+func TestADeclarationCoveringNoFunctionIsNamedOnTheCommandsStderr(t *testing.T) {
+	t.Parallel()
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+	}}
+	m := scored("api", 1, 41.5)
+	m.CRAP.Unused = []string{"api/lib.go:12"}
+
+	cmd := newTestCmd()
+	var errOut strings.Builder
+	cmd.SetErr(&errOut)
+	addCoverageRows(context.Background(), cmd, ui.NewReport("test"), t.TempDir(), decl, decl.Components,
+		[]measurement{m}, config.Default(), coverageOptions{Instrument: true})
+
+	got := errOut.String()
+	if !strings.Contains(got, "api/lib.go:12") {
+		t.Errorf("stderr = %q, want the declaration located", got)
+	}
+	if !strings.Contains(got, annotation.Marker(annotation.CRAP)) {
+		t.Errorf("stderr = %q, want it to name the token an author has to fix", got)
+	}
 }
