@@ -659,3 +659,64 @@ func TestAProjectionThatCannotBeWrittenFailsTheAppend(t *testing.T) {
 		t.Error("Append reported success though the projection could not be written")
 	}
 }
+
+// Everything that fails hands back the zero value beside its error, never a
+// plausible-looking one. The three matter for different reasons and the rule
+// is the same: a caller that reads the value without the error must not be
+// told something it would act on.
+//
+//   - Recorded answering true would have Append skip the record entirely, so
+//     the append this deduplication protects would never happen.
+//   - project and scan answer with a path and a found-flag their callers
+//     stage and branch on.
+func TestAFailedReadHandsBackTheZeroValueBesideItsError(t *testing.T) {
+	root := t.TempDir()
+	rec := entry("a", "", "main", "2026-03-15T10:00:00Z")
+	if _, _, err := Append(root, []Record{rec}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	part := filepath.Join(root, "history", "v1", "2026-03.ndjson")
+	if err := os.Chmod(part, 0o000); err != nil {
+		t.Skipf("cannot make a file unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(part, 0o600) })
+	if _, err := os.ReadFile(part); err == nil { // #nosec G304 -- the path this test just wrote
+		t.Skip("this user can read a file with no permission bits, so the failure cannot be provoked")
+	}
+
+	// scan: the visitor never ran, so nothing was found.
+	found, err := scan(part, func(Record) bool { return true })
+	if err == nil {
+		t.Fatal("scan read a file with no permission bits")
+	}
+	if found {
+		t.Error("scan reported a match from a file it could not open")
+	}
+
+	// Recorded: a read that failed is not a record that is present. Answering
+	// true here would have Append silently skip the record.
+	have, err := Recorded(root, rec)
+	if err == nil {
+		t.Fatal("Recorded read a partition it has no permission for")
+	}
+	if have {
+		t.Error("Recorded reported the record present after failing to look, so the append would be skipped")
+	}
+
+	// project: the path is what the caller stages, so an unwritable
+	// projection must name none.
+	dir := filepath.Join(root, "history", "v1", "daily", "release")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("a file where the branch's directory belongs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := project(root, entry("b", "", "release", "2026-03-15T10:00:00Z"))
+	if err == nil {
+		t.Fatal("project wrote a rollup into a path that is a file")
+	}
+	if file != "" {
+		t.Errorf("project named %q alongside its error, which a caller would stage", file)
+	}
+}
