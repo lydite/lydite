@@ -98,6 +98,31 @@ func TestATestWithTwoOutcomesIsCountedOnce(t *testing.T) {
 	}
 }
 
+// A test's outcome is still its outcome when something else is nested inside
+// the case first. Producers write <system-out> and <properties> beside the
+// result, and a reader that stopped tracking the case at the first closing tag
+// would count the failure that follows as belonging to nobody.
+func TestAnOutcomeAfterANestedElementStillCounts(t *testing.T) {
+	got, err := Read(strings.NewReader(`<testsuites>
+		<testsuite>
+			<testcase name="noisy">
+				<system-out>a line the runner captured</system-out>
+				<failure message="assertion"></failure>
+			</testcase>
+			<testcase name="skipped-after-output">
+				<system-out>more output</system-out>
+				<skipped/>
+			</testcase>
+		</testsuite>
+	</testsuites>`))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if want := (Counts{Total: 2, Failed: 1, Skipped: 1}); got != want {
+		t.Errorf("Read = %+v, want %+v", got, want)
+	}
+}
+
 // An outcome element outside a testcase belongs to something else — a
 // producer's own properties block, a suite-level summary — and reading it as a
 // test's outcome would count a failure no test had.

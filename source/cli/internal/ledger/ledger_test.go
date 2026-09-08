@@ -2,8 +2,10 @@ package ledger
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -442,5 +444,127 @@ func TestABranchThatIsNotARefPathIsRefused(t *testing.T) {
 	// rejects traversal, not slashes.
 	if _, _, err := Append(root, []Record{entry("a", "", "release/1.x", "2026-03-15T10:00:00Z")}); err != nil {
 		t.Errorf("Append refused an ordinary namespaced branch: %v", err)
+	}
+}
+
+// A record is one line, and a component-rich repository's line is far past the
+// 64KB a bufio.Scanner reads by default. A partition whose lines cannot be read
+// back is one every later append duplicates into and every reader truncates.
+func TestAPartitionLineLongerThanTheScannerDefaultIsStillRead(t *testing.T) {
+	root := t.TempDir()
+	big := entry("a", "", "main", "2026-03-15T08:00:00Z")
+	big.Components = map[string]Component{}
+	for i := range 900 {
+		big.Components[fmt.Sprintf("component-with-a-long-name-%03d", i)] = Component{
+			Coverage: &Lines{Covered: i, Total: i * 2},
+			Producer: "go 1.26.6, a producer string long enough to matter to the line length",
+		}
+	}
+	if _, _, err := Append(root, []Record{big}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "history", "v1", "2026-03.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) <= 64*1024 {
+		t.Fatalf("the fixture's line is %d bytes, which does not exceed the scanner default", len(data))
+	}
+	// Read back through the package's own reader: the deduplication is what
+	// depends on it, and a line it cannot read is a record it appends twice.
+	if _, _, err := Append(root, []Record{big}); err != nil {
+		t.Fatalf("Append over a long line: %v", err)
+	}
+	if got := lines(t, root, "history/v1/2026-03.ndjson"); len(got) != 1 {
+		t.Errorf("the partition holds %d records, want 1 — the long line was not read back", len(got))
+	}
+}
+
+// The projection is read in file order, so its rows are written in day order
+// whatever order the records arrived in — a run that records two days out of
+// order must not leave a file a reader has to sort for itself.
+func TestTheProjectionIsWrittenInDayOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, day := range []string{"2026-03-17", "2026-03-15", "2026-03-16"} {
+		if _, _, err := Append(root, []Record{entry("c"+day, "", "main", day+"T08:00:00Z")}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	rows := readRollupOrFail(t, root, "history/v1/daily/main/2026.ndjson")
+	var got []string
+	for _, r := range rows {
+		got = append(got, r.Day)
+	}
+	want := []string{"2026-03-15", "2026-03-16", "2026-03-17"}
+	if len(got) != len(want) {
+		t.Fatalf("the projection has %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("the projection is ordered %v, want %v", got, want)
+		}
+	}
+}
+
+// The files Append names are sorted, so what a caller stages — and therefore
+// the commit it builds — does not depend on which order a map iterated in.
+func TestAppendNamesItsFilesInAStableOrder(t *testing.T) {
+	root := t.TempDir()
+	written, _, err := Append(root, []Record{
+		entry("a", "", "main", "2026-03-15T08:00:00Z"),
+		entry("b", "a", "release", "2026-03-16T08:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if !sort.StringsAreSorted(written) {
+		t.Errorf("Append named %v, which is not sorted — the commit would vary by map order", written)
+	}
+}
+
+// A record that does not match is skipped, never a reason to stop reading: the
+// newest entry for one branch can sit behind any number of records belonging
+// to another.
+func TestLatestReadsPastRecordsThatDoNotMatch(t *testing.T) {
+	root := t.TempDir()
+	if _, _, err := Append(root, []Record{
+		// Another branch's record, and a gap, both ahead of the one wanted.
+		entry("x", "", "release", "2026-03-15T08:00:00Z"),
+		{Kind: KindGap, At: at("2026-03-15T09:00:00Z"), Commit: "g", Branch: "main", Gap: &Gap{Reason: "unknown"}},
+		entry("a", "", "main", "2026-03-15T10:00:00Z"),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, ok := Latest(root, "main", at("2026-03-31T00:00:00Z"))
+	if !ok || got.Commit != "a" {
+		t.Errorf("Latest = %+v (%v), want the main entry that sits behind two records it must skip", got, ok)
+	}
+}
+
+// A part that would land exactly on the cap is not rolled: the rule is that no
+// part goes over, and a file of exactly the cap is servable.
+func TestAPartitionIsRolledOnlyWhenTheRecordWouldTakeItOver(t *testing.T) {
+	root := t.TempDir()
+	rec := entry("a", "", "main", "2026-03-15T10:00:00Z")
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly enough room for the record and its newline, and not a byte more:
+	// appendRecord weighs the line with its newline already on it.
+	filler := strings.Repeat("x", maxPartitionBytes-len(line)-2) + "\n"
+	write(t, root, "history/v1/2026-03.ndjson", filler)
+	if _, _, err := Append(root, []Record{rec}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "history", "v1", "2026-03.1.ndjson")); err == nil {
+		t.Error("a record that fits exactly rolled to a new part")
+	}
+	info, err := os.Stat(filepath.Join(root, "history", "v1", "2026-03.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(maxPartitionBytes) {
+		t.Errorf("the part is %d bytes, want exactly the cap", info.Size())
 	}
 }

@@ -456,8 +456,24 @@ func project(root string, rec Record) (string, error) {
 		row.At, row.Commit, row.Components = rec.At, rec.Commit, rec.Components
 	}
 	rows[i] = row
-	sort.SliceStable(rows, func(a, b int) bool { return rows[a].Day < rows[b].Day })
-	return file, writeRollup(path, rows)
+	// By day, ascending, through the standard library's own ordering: a file
+	// holds one branch, so a day identifies a row, and a comparator written
+	// here would be one more thing that can be subtly wrong about the order
+	// the whole file is read in.
+	byDay := make(map[string]Rollup, len(rows))
+	days := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if _, seen := byDay[r.Day]; !seen {
+			days = append(days, r.Day)
+		}
+		byDay[r.Day] = r
+	}
+	sort.Strings(days)
+	ordered := make([]Rollup, 0, len(days))
+	for _, day := range days {
+		ordered = append(ordered, byDay[day])
+	}
+	return file, writeRollup(path, ordered)
 }
 
 // Rollup is one day of one branch, as the projection stores it.
@@ -490,7 +506,12 @@ func readRollup(path string) ([]Rollup, error) {
 	defer func() { _ = f.Close() }()
 	var rows []Rollup
 	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 0, 64*1024), maxPartitionBytes)
+	// No initial capacity: bufio grows the buffer as far as the cap on its
+	// own, and the only thing a starting size could do here is be wrong.
+	// The cap is what matters — a partition line is one record, and a
+	// scanner left at its 64KB default refuses to read one a component
+	// with many entries produces.
+	s.Buffer(nil, maxPartitionBytes)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
 		if line == "" {
@@ -543,7 +564,12 @@ func scan(path string, visit func(Record) bool) (bool, error) {
 	}
 	defer func() { _ = f.Close() }()
 	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 0, 64*1024), maxPartitionBytes)
+	// No initial capacity: bufio grows the buffer as far as the cap on its
+	// own, and the only thing a starting size could do here is be wrong.
+	// The cap is what matters — a partition line is one record, and a
+	// scanner left at its 64KB default refuses to read one a component
+	// with many entries produces.
+	s.Buffer(nil, maxPartitionBytes)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
 		if line == "" {
@@ -586,9 +612,9 @@ func appendLine(path string, line []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(line); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	// Both errors, joined: a write that failed and a close that failed are
+	// each a record that did not land, and reporting them together leaves no
+	// branch here to get the wrong way round.
+	_, werr := f.Write(line)
+	return errors.Join(werr, f.Close())
 }

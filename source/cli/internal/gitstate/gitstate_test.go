@@ -827,17 +827,22 @@ func TestCommitsBetweenCountsOnlyAlongAnAncestryChain(t *testing.T) {
 	}
 	first := commit("one")
 	commit("two")
-	commit("three")
+	third := commit("three")
 	fourth := commit("four")
 
 	// Two commits lie strictly between, which is what the gap record reports.
 	if n, ok := CommitsBetween(ctx, repo, first, fourth); !ok || n != 2 {
 		t.Errorf("CommitsBetween(first, fourth) = (%d, %v), want (2, true)", n, ok)
 	}
-	// Consecutive commits have nothing between them, which is what tells a
-	// merge whose first parent is not the recorded commit from a real hole.
-	if n, ok := CommitsBetween(ctx, repo, first, first); ok {
-		t.Errorf("CommitsBetween(first, first) = (%d, %v), want a refusal — the range is empty", n, ok)
+	// An adjacent pair has nothing between it and is still an answer: that is
+	// what tells a merge whose first parent is not the recorded commit from a
+	// hole with commits in it, and the two get different gap reasons.
+	if n, ok := CommitsBetween(ctx, repo, third, fourth); !ok || n != 0 {
+		t.Errorf("CommitsBetween(third, fourth) = (%d, %v), want (0, true)", n, ok)
+	}
+	// A range with no commits in it at all is not an answer.
+	if n, ok := CommitsBetween(ctx, repo, first, first); ok || n != 0 {
+		t.Errorf("CommitsBetween(first, first) = (%d, %v), want (0, false) — the range is empty", n, ok)
 	}
 
 	// An unrelated history is what a force-push looks like from here, and its
@@ -846,12 +851,16 @@ func TestCommitsBetweenCountsOnlyAlongAnAncestryChain(t *testing.T) {
 	run(repo, "checkout", "--quiet", "--orphan", "elsewhere")
 	run(repo, "rm", "-rf", "--ignore-unmatch", ".")
 	orphan := commit("unrelated")
-	if n, ok := CommitsBetween(ctx, repo, orphan, fourth); ok {
-		t.Errorf("CommitsBetween across unrelated histories = (%d, %v), want a refusal", n, ok)
+	// Every refusal answers zero as well as false, so a caller that reads the
+	// count without the bool is not handed a width nothing established.
+	if n, ok := CommitsBetween(ctx, repo, orphan, fourth); ok || n != 0 {
+		t.Errorf("CommitsBetween across unrelated histories = (%d, %v), want (0, false)", n, ok)
 	}
-	// And a name git cannot resolve at all.
-	if n, ok := CommitsBetween(ctx, repo, "", fourth); ok {
-		t.Errorf("CommitsBetween with no `from` = (%d, %v), want a refusal", n, ok)
+	if n, ok := CommitsBetween(ctx, repo, "", fourth); ok || n != 0 {
+		t.Errorf("CommitsBetween with no `from` = (%d, %v), want (0, false)", n, ok)
+	}
+	if n, ok := CommitsBetween(ctx, repo, first, ""); ok || n != 0 {
+		t.Errorf("CommitsBetween with no `to` = (%d, %v), want (0, false)", n, ok)
 	}
 }
 

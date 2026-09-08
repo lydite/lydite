@@ -11,6 +11,7 @@ import (
 
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
 )
 
@@ -324,10 +325,73 @@ func TestAPushThatNeverLandsDoesNotFailAHistoryOnlyRecording(t *testing.T) {
 		t.Fatalf("a failed history append failed the command: %v\n%s", err, out)
 	}
 	rows := jsonRows(t, out)
-	if row := rows["record"]; row.Status == "fail" {
+	// Present and saying its own thing: an absent row is not "not a failure",
+	// it is a reader told nothing about the baseline at all.
+	if row := rows["record"]; row.Status != "unmeasured" || !strings.Contains(row.Value, "nothing to record") {
 		t.Errorf("record = %+v, want the baseline's own answer rather than a push failure", row)
 	}
 	if row := rows["history"]; row.Status != "unmeasured" || !strings.Contains(row.Value, "records the gap") {
 		t.Errorf("history = %+v, want an amber row saying the next recording records the gap", row)
+	}
+}
+
+// A component contributing no scalar at all is a point on no line, and is
+// dropped. One carrying any single scalar is kept: coverage without a score is
+// every non-Go component, and test counts without coverage is every component
+// whose suite went red.
+func TestOnlyAComponentWithNoScalarAtAllIsDropped(t *testing.T) {
+	doc := measurementsDoc{
+		Components: map[string]componentMeasurement{
+			"measured": {Entry: producing(3, 4, "go 1.26")},
+			"scored": {Entry: gitstate.Entry{Producer: "go 1.26"},
+				CRAP: &gitstate.CRAPEntry{Above: 0, Worst: 12.5}},
+			"empty": {Entry: gitstate.Entry{Producer: "go 1.26"}},
+		},
+		Tests: map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
+	}
+	got := historyComponents(doc)
+
+	for _, name := range []string{"measured", "scored", "red"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("%s was dropped, but it carries a scalar", name)
+		}
+	}
+	if _, ok := got["empty"]; ok {
+		t.Error("a component carrying no scalar at all was kept")
+	}
+	if c := got["measured"]; c.Coverage == nil || c.Coverage.Covered != 3 {
+		t.Errorf("measured = %+v, want its line counts", c.Coverage)
+	}
+	if c := got["scored"]; c.CRAP == nil || c.Coverage != nil {
+		t.Errorf("scored = %+v, want a score and no coverage", c)
+	}
+	if c := got["red"]; c.Tests == nil || c.Tests.Failed != 2 {
+		t.Errorf("red = %+v, want the counts from a suite that failed", c.Tests)
+	}
+}
+
+// The branch a recording is filed under is the caller's to state, and the flag
+// is what states it. A checkout that names no branch is the normal shape of a
+// CI job, so the flag is the path that has to work.
+func TestTheBranchFlagNamesTheLineARecordingJoins(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) { gitIn(t, root, args...) }
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	// Detached, which is what the flag exists for: discovery answers nothing
+	// here, and without the flag nothing would be appended at all.
+	run("checkout", "--quiet", "--detach", "HEAD")
+
+	out, errOut, err := runRecordCmd(t, root, "--json", "--branch", "release/1.x")
+	if err != nil {
+		t.Fatalf("recording: %v\n%s\n%s", err, out, errOut)
+	}
+	if row := jsonRows(t, out)["history"]; row.Status != "context" {
+		t.Fatalf("history = %+v, want the stated branch to have carried the append", row)
+	}
+	recs := historyOn(t, root)
+	if len(recs) != 1 || recs[0].Branch != "release/1.x" {
+		t.Fatalf("the branch holds %+v, want one record on release/1.x", recs)
 	}
 }
