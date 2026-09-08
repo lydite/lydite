@@ -833,13 +833,36 @@ def main_record(gated: str, recorded: str) -> int:
             "orphan gate on purpose, and that must not stop the tree being recorded"
         )
 
+    # The quality history rides in the same commit, and this is the only place
+    # it is exercised against a real repository with a real remote. A record
+    # that never reached the branch is a data point nobody can ever recover:
+    # unlike a baseline, nothing recomputes it, so a silent failure here is
+    # exactly the failure this whole assertion exists to catch, one metric
+    # over.
+    history = recorded_rows.get("history")
+    if history is None:
+        failures.append("no `history` row on the recording run: nothing said what reached the ledger")
+    elif history.get("status") != "context" or history.get("value", "").startswith("not "):
+        failures.append(
+            f"history is {history.get('status')!r}: {history.get('value', '')} — the record did "
+            "not reach the ledger, and nothing can recompute it later"
+        )
+    elif "gap" in history.get("value", ""):
+        # The first recording a branch ever makes has nothing before it, so a
+        # gap here is the detection claiming a break that is not there — which
+        # renders as a hole in the line that nobody can do anything about.
+        failures.append(
+            f"history is {history.get('value')!r}; the first recording on a fresh branch "
+            "precedes nothing and must not be recorded as a gap"
+        )
+
     for failure in failures:
         print(f"proving ground record: {failure}", file=sys.stderr)
     if failures:
         return 1
     print(
         "proving ground record: the gated run handed on a candidate and wrote no baseline itself; "
-        "`lydite test record` landed it despite the expected orphan-gate failure"
+        "`lydite test record` landed it, and the ledger, despite the expected orphan-gate failure"
     )
     return 0
 

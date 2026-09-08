@@ -32,7 +32,7 @@ func TestGoTestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "go test -race ./..."},
-		{Instrumented, "go test -coverprofile=.lydite-reports/coverage/coverage.out -coverpkg=./... -race ./..."},
+		{Instrumented, "gotestsum --format pkgname --junitfile .lydite-reports/junit.xml -- -coverprofile=.lydite-reports/coverage/coverage.out -coverpkg=./... -race ./..."},
 		{BuildOnly, "go build -race ./..."},
 	} {
 		if got := line(argv(t, GoTest, tc.variant, "-race", "./...")); got != tc.want {
@@ -193,7 +193,11 @@ func TestVitestVariants(t *testing.T) {
 		want    string
 	}{
 		{Plain, "npx vitest run --project app"},
-		{Instrumented, "npx vitest run --coverage --coverage.reporter=lcovonly --coverage.reportsDirectory=" + coverageDir + " --coverage.clean=false --project app"},
+		// The default reporter is named beside junit deliberately:
+		// --reporter=junit alone replaces the reporter set, and the
+		// component's log would then hold nothing for a failing row to show.
+		{Instrumented, "npx vitest run --coverage --coverage.reporter=lcovonly --coverage.reportsDirectory=" + coverageDir +
+			" --coverage.clean=false --reporter=default --reporter=junit --outputFile.junit=" + junitReport + " --project app"},
 		{BuildOnly, "npx tsc --noEmit"},
 	} {
 		if got := line(argv(t, Vitest, tc.variant, "--project", "app")); got != tc.want {

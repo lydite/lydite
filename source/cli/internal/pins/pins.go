@@ -67,8 +67,15 @@ func (d Drift) String() string {
 // entry and needs none.
 func Mirrors() []Mirror {
 	return []Mirror{
-		goPin("gosec", "github.com/securego/gosec/v2", "gosecVersion"),
-		goPin("govulncheck", "golang.org/x/vuln", "govulncheckVersion"),
+		goPin("gosec", "github.com/securego/gosec/v2", "gosecVersion",
+			filepath.Join("internal", "golang", "go-pin", "go.mod"),
+			filepath.Join("internal", "golang", "golang.go")),
+		goPin("govulncheck", "golang.org/x/vuln", "govulncheckVersion",
+			filepath.Join("internal", "golang", "go-pin", "go.mod"),
+			filepath.Join("internal", "golang", "golang.go")),
+		goPin("gotestsum", "gotest.tools/gotestsum", "gotestsumVersion",
+			filepath.Join("internal", "runner", "gotestsum-pin", "go.mod"),
+			filepath.Join("internal", "runner", "pins.go")),
 		{
 			Name:   "biome",
 			Pin:    filepath.Join("internal", "typescript", "biome-pin", "package.json"),
@@ -96,11 +103,19 @@ func Files() []string {
 	return files
 }
 
-func goPin(name, module, constant string) Mirror {
+// goPin is one version stated in a nested module's go.mod and again as a Go
+// constant, which is the shape every Go tool pin takes: go:embed cannot read a
+// file inside a nested module, and a pin has to be a nested module or its
+// dependency graph joins lydite's own.
+//
+// The manifest and the file are parameters rather than fixed, because a pin is
+// colocated with the package that uses it: the scanners' pin sits under
+// internal/golang and the test wrapper's under internal/runner.
+func goPin(name, module, constant, pin, file string) Mirror {
 	return Mirror{
 		Name:   name,
-		Pin:    filepath.Join("internal", "golang", "go-pin", "go.mod"),
-		File:   filepath.Join("internal", "golang", "golang.go"),
+		Pin:    pin,
+		File:   file,
 		pinned: func(manifest []byte) (string, error) { return moduleVersion(manifest, module) },
 		stated: func(file []byte) (string, error) { return goConst(file, constant) },
 		write:  func(file []byte, version string) []byte { return writeGoConst(file, constant, version) },

@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/junit"
+	"lydite/lydite/internal/ledger"
 )
 
 // An empty baseline must read back as a cache MISS, not as a baseline of
@@ -112,7 +115,7 @@ func seedStateBranch(t *testing.T, ctx context.Context, files map[string]string)
 	return origin
 }
 
-func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
+func TestWritePushesOverAStaleTrackingRef(t *testing.T) {
 	ctx := context.Background()
 	run := gitRunner(t, ctx)
 	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
@@ -139,8 +142,8 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	run(writer, "commit", "-m", "coverage baseline for concurrent")
 	run(writer, "push", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "stalerace", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}); err != nil {
-		t.Fatalf("WriteBaseline over a stale tracking ref: %v", err)
+	if _, err := Write(ctx, clone, "stalerace", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}, nil); err != nil {
+		t.Fatalf("Write over a stale tracking ref: %v", err)
 	}
 
 	// Both the concurrent write and ours must be on the remote branch.
@@ -148,7 +151,7 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 	run(verify, "clone", "-b", BranchName, origin, ".")
 	for _, key := range []string{"first", "concurrent", "stalerace"} {
 		if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(StatePath(key)))); err != nil {
-			t.Errorf("%s missing from %s after WriteBaseline: %v", StatePath(key), BranchName, err)
+			t.Errorf("%s missing from %s after Write: %v", StatePath(key), BranchName, err)
 		}
 	}
 }
@@ -156,7 +159,7 @@ func TestWriteBaselinePushesOverAStaleTrackingRef(t *testing.T) {
 // A push that never lands must surface as an error so the caller can say
 // "failed to record" instead of the misleading "recorded coverage baseline"
 // wardnet's main run printed while the baseline was in fact lost.
-func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
+func TestWriteReportsAPushThatNeverLands(t *testing.T) {
 	ctx := context.Background()
 	run := gitRunner(t, ctx)
 	origin := seedStateBranch(t, ctx, map[string]string{"first": `{"api":{"covered":10,"total":100}}`})
@@ -172,8 +175,8 @@ func TestWriteBaselineReportsAPushThatNeverLands(t *testing.T) {
 	run(clone, "remote", "add", "origin", origin)
 	run(clone, "fetch", "origin", BranchName)
 
-	if err := WriteBaseline(ctx, clone, "rejected", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}); err == nil {
-		t.Error("WriteBaseline returned nil even though the push was rejected and the baseline never landed")
+	if _, err := Write(ctx, clone, "rejected", Snapshot{Coverage: Baseline{"api": entry(30, 100)}}, nil); err == nil {
+		t.Error("Write returned nil even though the push was rejected and the baseline never landed")
 	}
 }
 
@@ -280,7 +283,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 	}
 
 	// Only a commit-keyed entry, as written before this change.
-	if err := WriteBaseline(ctx, repo, head, Snapshot{Coverage: Baseline{"api": entry(11, 100)}}); err != nil {
+	if _, err := Write(ctx, repo, head, Snapshot{Coverage: Baseline{"api": entry(11, 100)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snap, err := ReadSnapshot(ctx, repo, tree, head)
@@ -294,7 +297,7 @@ func TestReadBaselinePrefersTheTreeAndFallsBackToTheCommit(t *testing.T) {
 
 	// Now a tree-keyed entry as well: it must win, because it is the one a
 	// pull request records and the one a later main commit shares.
-	if err := WriteBaseline(ctx, repo, tree, Snapshot{Coverage: Baseline{"api": entry(77, 100)}}); err != nil {
+	if _, err := Write(ctx, repo, tree, Snapshot{Coverage: Baseline{"api": entry(77, 100)}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	snap, err = ReadSnapshot(ctx, repo, tree, head)
@@ -606,11 +609,11 @@ func TestEveryMetricLandsInOneCommitAndMissesOnItsOwn(t *testing.T) {
 	}
 
 	before := revCount(t, ctx, clone)
-	if err := WriteBaseline(ctx, clone, "both", Snapshot{
+	if _, err := Write(ctx, clone, "both", Snapshot{
 		Coverage: Baseline{"api": entry(30, 100)},
 		CRAP:     CRAPBaseline{"api": {Above: 2, Worst: 156.25, Producer: "go1.26.6"}},
-	}); err != nil {
-		t.Fatalf("WriteBaseline: %v", err)
+	}, nil); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	if got := revCount(t, ctx, clone) - before; got != 1 {
 		t.Errorf("the write added %d commits to %s, want 1 carrying both documents", got, BranchName)
@@ -627,8 +630,8 @@ func TestEveryMetricLandsInOneCommitAndMissesOnItsOwn(t *testing.T) {
 	// empty object every reader treats as a miss anyway — which for a
 	// repository lydite computes no CRAP for would be one such file per tree,
 	// forever.
-	if err := WriteBaseline(ctx, clone, "nocrap", Snapshot{Coverage: Baseline{"api": entry(40, 100)}}); err != nil {
-		t.Fatalf("WriteBaseline: %v", err)
+	if _, err := Write(ctx, clone, "nocrap", Snapshot{Coverage: Baseline{"api": entry(40, 100)}}, nil); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 	verify := t.TempDir()
 	run(verify, "clone", "-b", BranchName, origin, ".")
@@ -675,4 +678,125 @@ func TestAnEmptySnapshotHasRecordedNothing(t *testing.T) {
 	if !(Snapshot{CRAP: CRAPBaseline{"api": {Above: 1}}}).Recorded() {
 		t.Error("a snapshot holding a CRAP baseline reports nothing recorded")
 	}
+}
+
+// The baseline and the history land in ONE commit. Two writes would double the
+// retry loop against a shared, busy branch and leave a window where the branch
+// holds one half of a recording — and a second writer is a second place state
+// can reach the branch, which is the invariant `lydite test record` rests on.
+func TestABaselineAndItsHistoryLandInOneCommit(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+
+	before := revCount(t, ctx, clone)
+	rec := ledger.Record{
+		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
+		Commit: "cafe", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
+	}
+	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) { return []ledger.Record{rec}, nil })
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := revCount(t, ctx, clone) - before; got != 1 {
+		t.Errorf("the write added %d commits to %s, want 1 carrying the baseline and the record", got, BranchName)
+	}
+	for _, path := range []string{StatePath("tree1"), ledger.Dir + "/2026-03.ndjson", ledger.Dir + "/daily/main/2026.ndjson"} {
+		if r := executil.RunQuiet(ctx, clone, "git", "show", "origin/"+BranchName+":"+path); !r.Ok() {
+			t.Errorf("%s missing from %s after the write", path, BranchName)
+		}
+	}
+}
+
+// A recording with no baseline still lands its history. The two are different
+// policies over one branch: a baseline is refused whenever it would be
+// partial, and what a run measured happened whether or not it adds up to one —
+// so a run whose suites went red records its test counts and no entry.
+func TestHistoryLandsWithNoBaselineBesideIt(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	rec := ledger.Record{
+		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
+		Commit: "cafe", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Tests: &junit.Counts{Total: 40, Failed: 3}}},
+	}
+	_, err := Write(ctx, clone, "tree1", Snapshot{},
+		func(string) ([]ledger.Record, error) { return []ledger.Record{rec}, nil })
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if r := executil.RunQuiet(ctx, clone, "git", "show", "origin/"+BranchName+":"+ledger.Dir+"/2026-03.ndjson"); !r.Ok() {
+		t.Fatalf("the history did not land without a baseline beside it")
+	}
+	if r := executil.RunQuiet(ctx, clone, "git", "show", "origin/"+BranchName+":"+StatePath("tree1")); r.Ok() {
+		t.Error("an empty snapshot wrote a baseline document")
+	}
+}
+
+// The records are asked for once per push attempt, against the branch as that
+// attempt fetched it. An answer computed once, ahead of the retry loop, would
+// have a retry write its append against the first attempt's view — silently
+// dropping whatever a concurrent run landed in between, and declaring a gap
+// that run had just filled.
+func TestTheRecordsAreRecomputedForEveryAttempt(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndCloneRejectingPushes(t, ctx)
+	asked := 0
+	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) {
+			asked++
+			return nil, nil
+		})
+	if err == nil {
+		t.Fatal("Write reported success even though every push was rejected")
+	}
+	if asked < 2 {
+		t.Errorf("the records were asked for %d time(s) across the retries, want one per attempt", asked)
+	}
+}
+
+// A caller with nothing to say passes nil, which is not the same as a caller
+// whose records were all already on the branch — and a nil must not be a write
+// of its own.
+func TestARecordingWithNothingToSayWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	before := revCount(t, ctx, clone)
+	if _, err := Write(ctx, clone, "tree1", Snapshot{}, nil); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := revCount(t, ctx, clone); got != before {
+		t.Errorf("a recording with nothing in it added %d commits", got-before)
+	}
+}
+
+// originAndClone is a seeded state branch and a working repository pointed at
+// it, which is what every write test needs before it can write anything.
+func originAndClone(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	return cloneOf(t, ctx, seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`}))
+}
+
+// originAndCloneRejectingPushes is the same, with the remote refusing every
+// push — the shape a branch under contention has when a run loses the race
+// every time.
+func originAndCloneRejectingPushes(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	origin := seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`})
+	hook := filepath.Join(origin, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { // #nosec G306 -- a hook this test needs to be executable
+		t.Fatal(err)
+	}
+	return cloneOf(t, ctx, origin)
+}
+
+func cloneOf(t *testing.T, ctx context.Context, origin string) string {
+	t.Helper()
+	run := gitRunner(t, ctx)
+	clone := t.TempDir()
+	run(clone, "init", "-b", "main", ".")
+	run(clone, "remote", "add", "origin", origin)
+	run(clone, "fetch", "origin", BranchName)
+	return clone
 }

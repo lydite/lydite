@@ -531,8 +531,8 @@ func TestACRAPMissAloneDoesNotMeasureTheBaseTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := gitstate.WriteBaseline(context.Background(), root, base,
-		gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": {LineCount: lines(2, 4), Producer: goProducer(t, root)}}}); err != nil {
+	if _, err := gitstate.Write(context.Background(), root, base,
+		gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": {LineCount: lines(2, 4), Producer: goProducer(t, root)}}}, nil); err != nil {
 		t.Fatal(err)
 	}
 
