@@ -476,6 +476,12 @@ func PatchPercent(changed map[string][]int, hits LineHits) (hit, total int) {
 type Run struct {
 	File        string
 	First, Last int
+	// Lines is how many lines between First and Last the report speaks for
+	// and reports as uncovered. It is not the span: a comment or a blank line
+	// written inside an untested block lies between the two ends and counts
+	// towards neither side of PatchPercent, so a claim measured by the span
+	// would say more lines are untested than a gate ever counted.
+	Lines int
 }
 
 // Uncovered groups the changed lines no test reached into contiguous runs.
@@ -502,12 +508,16 @@ func Uncovered(changed map[string][]int, hits LineHits) []Run {
 		}
 		lines := slices.Clone(changed[file])
 		slices.Sort(lines)
+		// A line named twice is one line. Left in, the second copy reads as a
+		// gap against the first — the run flushes and reopens — and one
+		// stretch is reported as two overlapping claims.
+		lines = slices.Compact(lines)
 
 		open := false
-		var first, last, prev int
+		var first, last, prev, count int
 		flush := func() {
 			if open {
-				runs = append(runs, Run{File: file, First: first, Last: last})
+				runs = append(runs, Run{File: file, First: first, Last: last, Lines: count})
 				open = false
 			}
 		}
@@ -519,17 +529,17 @@ func Uncovered(changed map[string][]int, hits LineHits) []Run {
 				flush()
 			}
 			prev = line
-			count, coverable := fileHits[line]
+			hitCount, coverable := fileHits[line]
 			switch {
 			case !coverable:
 				// Nothing the report speaks for. It cannot end a run, or a
 				// comment written inside an untested block would split it.
-			case count > 0:
+			case hitCount > 0:
 				flush()
 			case open:
-				last = line
+				last, count = line, count+1
 			default:
-				open, first, last = true, line, line
+				open, first, last, count = true, line, line, 1
 			}
 		}
 		flush()

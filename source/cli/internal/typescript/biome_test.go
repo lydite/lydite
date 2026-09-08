@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"lydite/lydite/internal/finding"
 )
 
 // biomeCfg decodes the embedded config so assertions read against structure
@@ -227,4 +229,39 @@ func diagnosticAt(path string, line int, category, severity, message string) bio
 	d.Location.Path = path
 	d.Location.Start.Line = line
 	return d
+}
+
+// reportableBiome deliberately keeps what is not a rule opinion, which includes
+// a parse failure and a file Biome could not read. Those fail the row and are
+// the reason it fails, and they locate nothing: a claim carrying line 0 of the
+// component's own directory is not one anything can anchor or tell from the
+// next.
+func TestADiagnosticThatLocatesNothingMakesNoClaim(t *testing.T) {
+	dir := t.TempDir()
+	got := biomeFindings(dir, biomeReport{Diagnostics: []biomeDiagnostic{
+		diagnosticAt("", 0, "internalError/io", "error", "a source file Biome cannot read"),
+		diagnosticAt("bad.ts", 0, "parse", "error", "expected a declaration"),
+	}})
+
+	if len(got) != 0 {
+		t.Errorf("a diagnostic that locates nothing produced %+v", got)
+	}
+}
+
+// A scan runs over a whole repository rather than over a diff, so it knows of
+// no change to place a claim against. Unanchorable is the safe default: such a
+// claim belongs in the standing comment rather than offered to a platform that
+// would refuse it.
+func TestAScannersClaimIsUnanchorable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.ts"), []byte("eval(x)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := biomeFindings(dir, biomeReport{Diagnostics: []biomeDiagnostic{
+		diagnosticAt("bad.ts", 1, "lint/security/noGlobalEval", "error", "eval() is dangerous"),
+	}})
+
+	if len(got) != 1 || got[0].Anchor != finding.AnchorNowhere {
+		t.Errorf("a scanner's claim anchored %q, want nowhere", got[0].Anchor)
+	}
 }

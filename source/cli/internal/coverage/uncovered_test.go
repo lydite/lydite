@@ -13,7 +13,7 @@ func TestAdjacentUntestedLinesAreOneRun(t *testing.T) {
 		map[string][]int{"a.go": {10, 11, 12}},
 		LineHits{"a.go": {10: 0, 11: 0, 12: 0}},
 	)
-	want := []Run{{File: "a.go", First: 10, Last: 12}}
+	want := []Run{{File: "a.go", First: 10, Last: 12, Lines: 3}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -25,8 +25,8 @@ func TestCoverResumingEndsARun(t *testing.T) {
 		LineHits{"a.go": {10: 0, 11: 3, 12: 0, 13: 0}},
 	)
 	want := []Run{
-		{File: "a.go", First: 10, Last: 10},
-		{File: "a.go", First: 12, Last: 13},
+		{File: "a.go", First: 10, Last: 10, Lines: 1},
+		{File: "a.go", First: 12, Last: 13, Lines: 2},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
@@ -41,8 +41,8 @@ func TestUnchangedCodeBetweenTwoStretchesSeparatesThem(t *testing.T) {
 		LineHits{"a.go": {10: 0, 11: 0, 40: 0, 41: 0}},
 	)
 	want := []Run{
-		{File: "a.go", First: 10, Last: 11},
-		{File: "a.go", First: 40, Last: 41},
+		{File: "a.go", First: 10, Last: 11, Lines: 2},
+		{File: "a.go", First: 40, Last: 41, Lines: 2},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
@@ -57,7 +57,7 @@ func TestALineTheReportKnowsNothingAboutDoesNotSplitARun(t *testing.T) {
 		map[string][]int{"a.go": {10, 11, 12}},
 		LineHits{"a.go": {10: 0, 12: 0}}, // 11 is a comment: no entry at all
 	)
-	want := []Run{{File: "a.go", First: 10, Last: 12}}
+	want := []Run{{File: "a.go", First: 10, Last: 12, Lines: 2}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -95,11 +95,40 @@ func TestRunsAreOrderedByFileAndLine(t *testing.T) {
 		LineHits{"z.go": {5: 0}, "a.go": {10: 0, 40: 0}},
 	)
 	want := []Run{
-		{File: "a.go", First: 10, Last: 10},
-		{File: "a.go", First: 40, Last: 40},
-		{File: "z.go", First: 5, Last: 5},
+		{File: "a.go", First: 10, Last: 10, Lines: 1},
+		{File: "a.go", First: 40, Last: 40, Lines: 1},
+		{File: "z.go", First: 5, Last: 5, Lines: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// A line named twice is one line. Left in, the second copy reads as a gap
+// against the first — the run flushes and reopens — and one stretch is
+// reported as two overlapping claims.
+func TestALineNamedTwiceIsOneLine(t *testing.T) {
+	got := Uncovered(
+		map[string][]int{"a.go": {10, 10, 11}},
+		LineHits{"a.go": {10: 0, 11: 0}},
+	)
+	want := []Run{{File: "a.go", First: 10, Last: 11, Lines: 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// A run's length is not its span. A comment written inside an untested block
+// lies between the two ends and counts towards neither side of PatchPercent,
+// so a claim measured by the span would say more lines are untested than the
+// gate ever counted.
+func TestARunCountsWhatTheReportSpeaksFor(t *testing.T) {
+	got := Uncovered(
+		map[string][]int{"a.go": {10, 11, 12, 13}},
+		LineHits{"a.go": {10: 0, 13: 0}}, // 11 and 12 are comments
+	)
+	want := []Run{{File: "a.go", First: 10, Last: 13, Lines: 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v — the span is 4 and only 2 lines are untested", got, want)
 	}
 }

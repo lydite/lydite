@@ -22,9 +22,9 @@ renders is derived from the findings rather than beside them.**
 [#111](https://github.com/lydite/lydite/issues/111) wants a count per component
 in the quality-history ledger. [#114](https://github.com/lydite/lydite/issues/114)
 wants a finding that names a file and a line to arrive as a review thread on
-that line. [ADR 0009](0009-quality-history-storage-and-access.md) defers
-per-finding fingerprints as *"additive later"*, so that "when did this finding
-first appear?" can be answered one day.
+that line. [ADR 0009](0009-quality-history-storage-and-access.md) records that
+*"adding stable per-finding fingerprints later is additive"*, so that "when did
+this finding first appear?" can be answered one day.
 
 None of the three can start without the same missing piece, and each would have
 invented it differently. So it is designed once, here, and the other two consume
@@ -94,7 +94,10 @@ v1 : sha256( gate │ component │ path │ site │ ordinal )[:16]
 `site` is the gate's own identity ingredient, and every one of them is content:
 a rule with the source text it fired on, a function's name with its receiver, an
 operator with the text it replaced and the text replacing it, a stretch's two
-ends and its length. It is derived centrally rather than by each gate, for the
+ends. A stretch's *length* is deliberately not one of them — adding an untested
+line to an untested block would otherwise orphan the claim already made about
+it, which is the failure a line-free fingerprint exists to prevent. It is
+derived centrally rather than by each gate, for the
 reason `internal/pathmatch` holds one matcher and `internal/scheduler` holds one
 port-conflict predicate — a second copy agrees until one of them learns
 something, and the disagreement surfaces as a duplicate anchor rather than as a

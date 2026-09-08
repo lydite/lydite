@@ -955,7 +955,7 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row,
 		findings := crapFindings(m)
 		return ui.Row{Status: ui.StatusFail, Label: label,
 			Value:  fmt.Sprintf("%s, baseline %d — %d more", counts, base.Above, m.CRAP.Above()-base.Above),
-			Detail: worstFunctions(findings)}, findings
+			Detail: worstFunctions(findings, m.CRAP.Above())}, findings
 	default:
 		return ui.Row{Status: ui.StatusPass, Label: label,
 			Value: fmt.Sprintf("%s, baseline %d", counts, base.Above)}, nil
@@ -973,9 +973,17 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row,
 //
 // The site is the function's own name, which crap.Function already carries
 // with its receiver, so the claim survives the function moving down its file.
+//
+// It names the same worst few the row does, and no more. The gate is cleared
+// by bringing any one of them under the threshold, so a longer list is not
+// more actionable — and a component carrying hundreds of functions in standing
+// debt would otherwise put every one of them into the document on every run
+// that regressed by one, which is a document that grows with the debt rather
+// than with the change.
 func crapFindings(m measurement) []finding.Finding {
-	out := make([]finding.Finding, 0, len(m.CRAP.Over))
-	for _, f := range m.CRAP.Over {
+	over := m.CRAP.Over[:min(len(m.CRAP.Over), worstOffenders)]
+	out := make([]finding.Finding, 0, len(over))
+	for _, f := range over {
 		out = append(out, finding.Finding{
 			Gate:      "crap",
 			Component: m.Name,
@@ -1020,12 +1028,12 @@ const worstOffenders = 5
 // — a function renamed or moved would read as one fixed and one introduced. So
 // the row says what is over the threshold now, and any one of them coming under
 // it clears the gate.
-func worstFunctions(findings []finding.Finding) []string {
+func worstFunctions(findings []finding.Finding, over int) []string {
 	out := []string{"the count may not rise; testing or splitting any one of these clears it"}
-	for _, f := range findings[:min(len(findings), worstOffenders)] {
+	for _, f := range findings {
 		out = append(out, fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message))
 	}
-	if rest := len(findings) - worstOffenders; rest > 0 {
+	if rest := over - len(findings); rest > 0 {
 		out = append(out, fmt.Sprintf("and %d more above %d", rest, crap.Threshold))
 	}
 	return out
@@ -1343,10 +1351,12 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 // lines too, and putting a claim on each of them would fire on ordinary work.
 //
 // The site is the stretch's own text rather than where it sits, so inserting
-// code above it does not report it as something new. Its two ends and its
-// length stand for the whole: they identify the stretch, they survive an edit
-// inside it — which is the same block, still untested — and they keep a claim
-// about three hundred lines from carrying three hundred lines of them.
+// code above it does not report it as something new. Its two ends stand for
+// the whole: they identify the stretch, they survive an edit inside it — the
+// same block, still untested — and they keep a claim about three hundred lines
+// from carrying three hundred lines of them. Its length is deliberately not an
+// ingredient, or adding one untested line to an untested block would orphan
+// the claim already made about it.
 //
 // A stretch whose source cannot be read keeps its claim and loses only what
 // tells it from a neighbour, which the ordinal then supplies. The row has
@@ -1356,19 +1366,17 @@ func patchFindings(dir string, m measurement, scoped map[string][]int) []finding
 	var out []finding.Finding
 	src := finding.NewSource(dir)
 	for _, run := range coverage.Uncovered(scoped, m.Hits) {
-		span := run.Last - run.First + 1
 		out = append(out, finding.Finding{
 			Gate:      "patch",
 			Component: m.Name,
 			Path:      run.File,
 			Line:      run.First,
 			EndLine:   run.Last,
-			Message:   fmt.Sprintf("%d new line(s) here are covered by no test", span),
+			Message:   fmt.Sprintf("%d new line(s) here are covered by no test", run.Lines),
 			Detail: []string{
 				"Patch coverage gates this component against its own aggregate baseline, so a test reaching these lines clears it.",
 			},
-			Site: fmt.Sprintf("%s\x1f%s\x1f%d",
-				src.Line(run.File, run.First), src.Line(run.File, run.Last), span),
+			Site: src.Line(run.File, run.First) + "\x1f" + src.Line(run.File, run.Last),
 		})
 	}
 	finding.Number(out)

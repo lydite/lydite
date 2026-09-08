@@ -3,6 +3,7 @@ package finding
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,61 @@ func TestSourceReadsEachFileOnce(t *testing.T) {
 	}
 	if got := src.Line("a.go", 1); got != "first" {
 		t.Errorf("Line = %q after the file changed, want the first read to stand", got)
+	}
+}
+
+// A root that cannot be opened answers empty for everything, for the reason an
+// unreadable file does: identity is what is lost, and the gate has already
+// reported what it found.
+func TestASourceOnARootThatIsNotThereReadsNothing(t *testing.T) {
+	src := NewSource(filepath.Join(t.TempDir(), "no-such-directory"))
+	if got := src.Line("a.go", 1); got != "" {
+		t.Errorf("a source with no root read %q", got)
+	}
+}
+
+// A minified bundle is one line of several megabytes, and a scanner firing on
+// it would otherwise embed the whole file in every claim's identity — which
+// travels in the report document and is read back whole by the fold.
+func TestAFileTooLargeToIdentifyAClaimIsNotRead(t *testing.T) {
+	root := t.TempDir()
+	oversized := make([]byte, maxFileBytes+1)
+	for i := range oversized {
+		oversized[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(root, "bundle.js"), oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewSource(root).Line("bundle.js", 1); got != "" {
+		t.Errorf("an oversized file contributed %d characters to a claim's identity", len(got))
+	}
+}
+
+// A file at the cap is still read whole: refusing it would lose the identity of
+// every claim in it for being one byte from a limit.
+func TestAFileExactlyAtTheCapIsRead(t *testing.T) {
+	root := t.TempDir()
+	body := append([]byte("first\n"), make([]byte, maxFileBytes-len("first\n"))...)
+	for i := len("first\n"); i < len(body); i++ {
+		body[i] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.go"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewSource(root).Line("big.go", 1); got != "first" {
+		t.Errorf("a file at the cap read %q, want first", got)
+	}
+}
+
+// One line is bounded too, or a single-line bundle becomes the whole of a
+// claim's identity in the document.
+func TestOneLineContributesABoundedAmountToAnIdentity(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "min.js"), []byte(strings.Repeat("a", maxSiteRunes*3)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := NewSource(root).Line("min.js", 1)
+	if len([]rune(got)) != maxSiteRunes {
+		t.Errorf("one line contributed %d runes, want it clipped to %d", len([]rune(got)), maxSiteRunes)
 	}
 }

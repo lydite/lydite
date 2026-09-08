@@ -214,14 +214,23 @@ func biomeFindings(dir string, report biomeReport) []finding.Finding {
 		if !reportableBiome(d.Category) {
 			continue
 		}
+		path := filepath.ToSlash(d.Location.Path)
+		if path == "" || d.Location.Start.Line < 1 {
+			// reportableBiome deliberately keeps what is not a rule opinion,
+			// which includes a parse failure and a file Biome could not read.
+			// Those fail the row and are the reason it fails, and they locate
+			// nothing: a claim carrying line 0 of the component's own
+			// directory is not one anything can anchor or tell from the next.
+			continue
+		}
 		out = append(out, finding.Finding{
 			Gate:     "biome",
-			Path:     filepath.ToSlash(d.Location.Path),
+			Path:     path,
 			Line:     d.Location.Start.Line,
 			Rule:     d.Category,
 			Severity: d.Severity,
 			Message:  d.Message,
-			Site:     d.Category + "\x1f" + src.Line(filepath.ToSlash(d.Location.Path), d.Location.Start.Line),
+			Site:     d.Category + "\x1f" + src.Line(path, d.Location.Start.Line),
 		})
 	}
 	finding.Number(out)

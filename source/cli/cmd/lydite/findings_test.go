@@ -9,6 +9,7 @@ import (
 
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/crap"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/mutation"
@@ -315,5 +316,108 @@ func TestAPatchClaimIsAnchoredToItsLines(t *testing.T) {
 	got := patchFindings(t.TempDir(), m, map[string][]int{"a.go": {3, 4}})
 	if len(got) != 1 || got[0].Anchor != finding.AnchorLine {
 		t.Errorf("a stretch of changed lines anchored %q, want line", got[0].Anchor)
+	}
+}
+
+// A survivor is a claim that the suite passed with the code changed that way,
+// and a suite that was killed established no such thing. A claim left behind
+// here would be one nobody can stand behind, anchored to a line, on a pull
+// request.
+func TestAnInterruptedComponentWithdrawsItsClaims(t *testing.T) {
+	t.Parallel()
+	rows := []ui.Row{{Status: ui.StatusFail, Label: mutationLabel("api"), Value: "1 survived"}}
+	results := []componentMutation{{
+		ran:      true,
+		findings: []finding.Finding{{Gate: "mutation", Component: "api", Path: "a.go", Line: 10, Site: "x"}},
+	}}
+
+	withdrawInterrupted(rows, results, []int{0})
+
+	if rows[0].Status != ui.StatusUnmeasured {
+		t.Errorf("an interrupted component's row is %q, want unmeasured", rows[0].Status)
+	}
+	if len(results[0].findings) != 0 {
+		t.Errorf("an interrupted component kept %d claim(s): %+v", len(results[0].findings), results[0].findings)
+	}
+}
+
+// A component that had already passed is not in doubt, so an interrupt leaves
+// both its row and its claims alone.
+func TestAnInterruptLeavesAComponentThatAlreadyPassed(t *testing.T) {
+	t.Parallel()
+	rows := []ui.Row{{Status: ui.StatusPass, Label: mutationLabel("api"), Value: "8 killed"}}
+	results := []componentMutation{{ran: true}}
+
+	withdrawInterrupted(rows, results, []int{0})
+
+	if rows[0].Status != ui.StatusPass {
+		t.Errorf("a component that passed became %q", rows[0].Status)
+	}
+	if !results[0].ran {
+		t.Error("a component that passed had its outcome discarded")
+	}
+}
+
+// A scanner runs inside its component and reports paths relative to there,
+// while every other producer names a file from the scan root. One file named
+// from two roots is two claims, and only one of them can be anchored.
+func TestAScannersClaimIsRebasedOntoTheScanRoot(t *testing.T) {
+	t.Parallel()
+	got := labelled([]executil.Result{{
+		Name: "biome",
+		Findings: []finding.Finding{
+			{Gate: "biome", Path: "src/app.ts", Line: 12, Site: "lint/security/noGlobalEval\x1feval(x)"},
+		},
+	}}, "web", "apps/web")
+
+	if len(got) != 1 || len(got[0].Findings) != 1 {
+		t.Fatalf("the claim did not survive labelling: %+v", got)
+	}
+	f := got[0].Findings[0]
+	if f.Path != "apps/web/src/app.ts" {
+		t.Errorf("path is %q, want it rebased onto the scan root", f.Path)
+	}
+	if f.Component != "web" {
+		t.Errorf("component is %q, want web", f.Component)
+	}
+}
+
+// Labelling copies rather than writing through the caller's slice, so a result
+// handed to it is not altered underneath whoever still holds it.
+func TestLabellingDoesNotAlterTheResultItWasGiven(t *testing.T) {
+	t.Parallel()
+	original := []executil.Result{{
+		Name:     "biome",
+		Findings: []finding.Finding{{Gate: "biome", Path: "src/app.ts", Line: 12}},
+	}}
+	_ = labelled(original, "web", "apps/web")
+
+	if got := original[0].Findings[0].Path; got != "src/app.ts" {
+		t.Errorf("the caller's own finding was rewritten to %q", got)
+	}
+	if original[0].Name != "biome" {
+		t.Errorf("the caller's own result was renamed to %q", original[0].Name)
+	}
+}
+
+// The row names the same worst few the claims do, so the prose is a rendering
+// of the data rather than a truncation of it — and a component carrying
+// hundreds of functions in standing debt does not put every one of them into
+// the document on every run that regressed by one.
+func TestAFailingCRAPRowClaimsTheWorstFewAndCountsTheRest(t *testing.T) {
+	t.Parallel()
+	row, findings := crapRow(over("api", worstOffenders+3), gitstate.CRAPBaseline{"api": {Above: 0}}, true)
+
+	if len(findings) != worstOffenders {
+		t.Fatalf("%d claims, want the same %d the row names", len(findings), worstOffenders)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "and 3 more above 30") {
+		t.Errorf("the row does not say what it left out:\n%s", detail)
+	}
+	for _, f := range findings {
+		if !strings.Contains(detail, f.Message) {
+			t.Errorf("the row's detail is not a rendering of its claims, missing %q", f.Message)
+		}
 	}
 }

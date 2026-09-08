@@ -189,17 +189,25 @@ func Number(findings []Finding) {
 // precise anchor and never costs the run an anchor the platform refuses.
 func Anchored(findings []Finding, changed map[string][]int) {
 	for i := range findings {
-		lines, ok := changed[findings[i].Path]
-		if !ok {
-			findings[i].Anchor = AnchorNowhere
-			continue
-		}
-		findings[i].Anchor = AnchorFile
-		for _, line := range lines {
-			if line >= findings[i].Line && line <= max(findings[i].Line, findings[i].EndLine) {
-				findings[i].Anchor = AnchorLine
-				break
+		reach := AnchorNowhere
+		if lines, ok := changed[findings[i].Path]; ok {
+			reach = AnchorFile
+			for _, line := range lines {
+				if line >= findings[i].Line && line <= max(findings[i].Line, findings[i].EndLine) {
+					reach = AnchorLine
+					break
+				}
 			}
+		}
+		if precedence[reach] > precedence[findings[i].Anchor] {
+			findings[i].Anchor = reach
 		}
 	}
 }
+
+// precedence orders the anchors, so a second pass over a map that does not
+// cover a claim cannot quietly take back an anchor an earlier one established.
+// Raising and never lowering is what makes the call safe to repeat, and a
+// producer that anchors against the wrong map is a bug that shows up as a
+// claim in the standing comment rather than as one silently mislocated.
+var precedence = map[Anchor]int{AnchorNowhere: 0, AnchorFile: 1, AnchorLine: 2}

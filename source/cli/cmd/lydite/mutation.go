@@ -292,24 +292,8 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 		rows[i], results[i] = mutateComponent(ctx, plans[i], cfg, envs.For(plans[i].c.Name), slots, opts)
 	})
 
-	// The same rule runComponents applies, for the same reason: under
-	// cancellation lydite cannot tell a suite that failed from one that was
-	// killed, and a red row blaming a CI job timeout on the repository's
-	// tests is the worst available answer.
 	if ctx.Err() != nil {
-		for _, i := range index {
-			if rows[i].Status != ui.StatusFail {
-				continue
-			}
-			rows[i] = ui.Row{
-				Status: ui.StatusUnmeasured,
-				Label:  rows[i].Label,
-				Value:  "not completed",
-				Detail: []string{"the run was interrupted before this component finished"},
-				Log:    rows[i].Log,
-			}
-			results[i] = componentMutation{}
-		}
+		withdrawInterrupted(rows, results, index)
 	}
 
 	rep.Add(scheduleRow(ctx, outcome, len(plans), opts.limit))
@@ -324,6 +308,33 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	}
 	if opts.summary {
 		rep.Add(mutationSummaryRow(results))
+	}
+}
+
+// withdrawInterrupted takes back every failing verdict a cancelled run reached.
+//
+// The same rule runComponents applies, for the same reason: under cancellation
+// lydite cannot tell a suite that failed from one that was killed, and a red
+// row blaming a CI job timeout on the repository's tests is the worst available
+// answer.
+//
+// The component's findings go with the row. A survivor is a claim that the
+// suite passed with the code changed that way, and a suite that was killed
+// established no such thing — so a claim left behind here would be one nobody
+// can stand behind, anchored to a line, on a pull request.
+func withdrawInterrupted(rows []ui.Row, results []componentMutation, index []int) {
+	for _, i := range index {
+		if rows[i].Status != ui.StatusFail {
+			continue
+		}
+		rows[i] = ui.Row{
+			Status: ui.StatusUnmeasured,
+			Label:  rows[i].Label,
+			Value:  "not completed",
+			Detail: []string{"the run was interrupted before this component finished"},
+			Log:    rows[i].Log,
+		}
+		results[i] = componentMutation{}
 	}
 }
 

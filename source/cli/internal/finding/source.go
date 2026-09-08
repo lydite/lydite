@@ -7,6 +7,25 @@ import (
 	"strings"
 )
 
+// maxFileBytes is how much of a file Source will read to identify a claim in
+// it, and maxSiteRunes is how much of one line it will hand back.
+//
+// Both bound what a repository lydite does not own can put into lydite's own
+// output. A minified bundle is one line of several megabytes, and a scanner
+// firing on it would otherwise embed the whole file in every finding's Site —
+// which travels in the report document, is uploaded as an artifact, and is
+// read back whole by the fold. It is the rule the standing comment already
+// follows, where quoted output is capped because a platform refuses an
+// oversized one and a refused surface is no surface at all.
+//
+// Truncating is safe for identity. A fingerprint needs its ingredient to be
+// stable, not complete, and two claims sharing a truncated prefix are told
+// apart by their ordinal.
+const (
+	maxFileBytes = 4 << 20
+	maxSiteRunes = 256
+)
+
 // Source reads the code a gate fired on, so a claim can be identified by what
 // it is about rather than by where it sits.
 //
@@ -64,7 +83,19 @@ func (s *Source) Line(path string, n int) string {
 	if n > len(lines) {
 		return ""
 	}
-	return Normalise(lines[n-1])
+	return clip(Normalise(lines[n-1]))
+}
+
+// clip bounds one line's contribution to a claim's identity.
+func clip(s string) string {
+	if len(s) <= maxSiteRunes {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxSiteRunes {
+		return s
+	}
+	return string(runes[:maxSiteRunes])
 }
 
 func (s *Source) read(path string) []string {
@@ -76,8 +107,12 @@ func (s *Source) read(path string) []string {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(f)
-	if err != nil {
+	// One byte past the cap, so a file exactly at it is still read whole and
+	// one over it is refused rather than silently truncated mid-line — a
+	// truncated last line is a Site that identifies a claim by code the file
+	// does not contain.
+	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
+	if err != nil || len(data) > maxFileBytes {
 		return nil
 	}
 	return strings.Split(string(data), "\n")

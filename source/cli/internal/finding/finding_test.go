@@ -173,3 +173,25 @@ func TestNormaliseKeepsTheTextAndNotItsLayout(t *testing.T) {
 		}
 	}
 }
+
+// Anchored raises and never lowers, so a second pass over a map that does not
+// cover a claim cannot quietly take back an anchor an earlier one established.
+// The failure it prevents is silent: a claim mislocated rather than one
+// visibly missing.
+func TestAnchoringRaisesAndNeverLowers(t *testing.T) {
+	findings := []Finding{{Path: "a.go", Line: 10}}
+	Anchored(findings, map[string][]int{"a.go": {10}})
+	if findings[0].Anchor != AnchorLine {
+		t.Fatalf("the first pass anchored %q, want line", findings[0].Anchor)
+	}
+
+	Anchored(findings, nil)
+	if findings[0].Anchor != AnchorLine {
+		t.Errorf("a second pass over a map covering nothing lowered the anchor to %q", findings[0].Anchor)
+	}
+
+	Anchored(findings, map[string][]int{"a.go": {900}})
+	if findings[0].Anchor != AnchorLine {
+		t.Errorf("a second pass reaching only the file lowered the anchor to %q", findings[0].Anchor)
+	}
+}
