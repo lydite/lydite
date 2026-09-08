@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -349,7 +349,7 @@ func TestAScoreThatCouldNotBeTakenCarriesItsReason(t *testing.T) {
 	m := measured("svc", runner.Go, 9, 10)
 	m.Hits = coverage.LineHits{"svc/lib.go": {1: 1, 2: 1, 3: 1}}
 
-	rep, why := score(io.Discard, root, m)
+	rep, why := score(root, m)
 	if rep.Measured() {
 		t.Errorf("report = %+v, want nothing scored", rep)
 	}
@@ -507,4 +507,61 @@ func Tangled(a, b, c, d, e, f int) int {
 	if got, ok := rows["crap"]; !ok || got.Status != "context" {
 		t.Errorf("crap = %+v (ok=%v), want a context row over the repository", got, ok)
 	}
+}
+
+// A repository that has a coverage baseline and no CRAP one is every
+// repository, the first time it runs a lydite that computes CRAP. The coverage
+// baseline alone decides whether the base tree is measured again: re-measuring
+// it for a metric that would gate nothing on that run charges every one of them
+// a full suite run for it. The components read `new` and gate nothing for one
+// change, which is the shape a changed producer already has.
+func TestACRAPMissAloneDoesNotMeasureTheBaseTree(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), root, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	// A coverage baseline for the base tree, and deliberately no CRAP one —
+	// written directly rather than by a run, which is the only way to reach a
+	// state `lydite test record` no longer produces.
+	base, err := gitstate.TreeSHA(context.Background(), root, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitstate.WriteBaseline(context.Background(), root, base,
+		gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": {LineCount: lines(2, 4), Producer: goProducer(t, root)}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	run("switch", "--quiet", "-c", "change")
+	write(t, root, "svc/notes.md", "not code\n")
+	run("add", "-A")
+	run("commit", "-m", "a change that touches no Go")
+
+	out, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json")
+	if err != nil {
+		t.Fatalf("the gate failed: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	rows := jsonRows(t, out)
+	// The coverage baseline was a hit, so nothing re-measured the base tree.
+	if got, ok := rows["baseline"]; ok && strings.Contains(got.Value, "measuring it now") {
+		t.Errorf("baseline = %q, want a hit — a CRAP miss must not measure the base tree", got.Value)
+	}
+	// And CRAP reports itself new rather than comparing against nothing.
+	if got := rows["crap(svc)"]; got.Status != "new" {
+		t.Errorf("crap(svc) = %+v, want new — there is no CRAP baseline for this tree", got)
+	}
+}
+
+// goProducer is what the Go toolchain in this environment names itself, so a
+// hand-written baseline entry is comparable with one a run would take.
+func goProducer(t *testing.T, root string) string {
+	t.Helper()
+	r, ok := runner.Lookup(runner.GoTest)
+	if !ok {
+		t.Fatal("no go-test runner")
+	}
+	return r.Producer(filepath.Join(root, "svc"), "")
 }

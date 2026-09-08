@@ -125,8 +125,12 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 	}
 	// The figure over the repository, whether or not the shards gated: it is
 	// the two ledger scalars summed and it compares nothing, so a run that
-	// read no baseline still has one to publish.
-	if row, ok := crapSummaryRow(folded.scorable, folded.crapScores, folded.crapCarried); ok && folded.measured {
+	// read no baseline still has one to publish. A fold that holds no
+	// measurement at all still emits the row, because `crapSummaryRow`answers
+	// `unmeasured` for a repository lydite could have scored and produced
+	// nothing for — and a row that simply vanished would be indistinguishable
+	// from a repository with no Go in it.
+	if row, ok := crapSummaryRow(folded.scorable, folded.crapScores, folded.crapCarried); ok {
 		rep.Add(row)
 	}
 	switch row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); {
@@ -227,6 +231,15 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 			docs = append(docs, in.measured)
 		}
 	}
+	// Counted before the documents are, because it is a property of the
+	// declaration rather than of what the shards managed to write: a fold that
+	// lost every measurement still has to say the repository had components it
+	// could have scored, the way the coverage and floor rows do below.
+	for _, c := range decl.Components {
+		if langOf(c) == runner.Go {
+			out.scorable++
+		}
+	}
 	if len(docs) == 0 {
 		return out
 	}
@@ -237,9 +250,6 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 		return out
 	}
 	for _, c := range decl.Components {
-		if langOf(c) == runner.Go {
-			out.scorable++
-		}
 		e, ok := folded.Components[c.Name]
 		if !ok {
 			m := unmeasuredComponent(c, "no shard's measurements hold this component")

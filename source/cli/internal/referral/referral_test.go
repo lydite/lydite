@@ -386,6 +386,12 @@ func TestBroadSuppressionFormsDisqualify(t *testing.T) {
 		"//go:build ignore":            "test disabled",
 		"// +build ignore":             "test disabled",
 		"\treturn a < b // [lydite:exclude_from_mutation][b is always a+1]": "suppression added",
+		// Every gate's declaration, by the prefix they share. The list is a
+		// prefix rather than a token precisely so a gate added later needs no
+		// edit here — and a test that covered only the one gate that existed
+		// when it was written would let that silently stop being true.
+		"// [lydite:exclude_from_crap][the proving ground exercises this]":     "suppression added",
+		"// [lydite:exclude_from_coverage][the proving ground exercises this]": "suppression added",
 	}
 	for line, want := range cases {
 		d := Disqualifications(Change{

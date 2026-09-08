@@ -211,108 +211,104 @@ type GoModuleProfile struct {
 	RelDir string
 }
 
-// goProfileLines counts a component's covered and total statements straight
-// from its profile — the two numbers behind the ratio `go tool cover -func`
-// prints on its `total:` line, minus generated files.
+// goProfile reads one module's coverage profile and produces every quantity a
+// gate takes from it: the counts the aggregate and floor read, the per-line
+// hits the patch and complexity gates read, and the lines that actually ran.
 //
-// Parsing rather than shelling out to `go tool cover -func` is what lets this
-// work from anywhere. That command resolves each profile entry's
-// package-qualified name through the module graph, so it only succeeds when
-// run from inside the module the profile came from — from a monorepo root it
-// fails outright, which is how Go coverage came to be silently absent from
-// wardnet's gate. The number is the same either way; it is already in the file.
+// One pass, because the three are three views of one file and each one used to
+// re-read and re-parse every source file the profile mentions. Parsing rather
+// than shelling out to `go tool cover -func` is what lets any of it work from
+// anywhere: that command resolves each entry's package-qualified name through
+// the module graph, so it only succeeds from inside the module the profile came
+// from — from a monorepo root it fails outright, which is how Go coverage came
+// to be silently absent from wardnet's gate. The number is the same either way;
+// it is already in the file.
 //
-// It is also the only place a generated file can be dropped from the
-// denominator, which `go tool cover` offers no way to do.
-func goProfileLines(src GoModuleProfile, root string) (LineCount, error) {
+// It is also the only place a generated file can be dropped, which `go tool
+// cover` offers no way to do.
+func goProfile(src GoModuleProfile, root string) (Report, error) {
 	profiles, err := cover.ParseProfiles(src.Profile)
 	if err != nil {
-		return LineCount{}, fmt.Errorf("parsing the coverage profile at %s: %w", src.Profile, err)
+		return Report{}, fmt.Errorf("parsing the coverage profile at %s: %w", src.Profile, err)
 	}
-	var lines LineCount
-	for _, p := range profiles {
-		abs := filepath.Join(root, filepath.FromSlash(goRelPath(p.FileName, src)))
-		if isGeneratedGoFile(abs) {
-			continue
-		}
-		// Out of the denominator as well as the numerator. A declaration says
-		// this suite does not measure the function, so counting its statements
-		// as uncovered would report the author's own statement as a hole they
-		// have to fill — which is the reading that makes an exclusion worth
-		// nothing.
-		excluded, err := excludedGoLines(abs, annotation.Coverage)
-		if err != nil {
-			return LineCount{}, err
-		}
-		for _, b := range p.Blocks {
-			if excluded[b.StartLine] {
-				continue
-			}
-			lines.Total += b.NumStmt
-			if b.Count > 0 {
-				lines.Covered += b.NumStmt
-			}
-		}
-	}
-	return lines, nil
-}
-
-// ParseGoProfile extracts per-file, per-line hit counts from a Go coverage
-// profile (the same file `go tool cover -func` already reads for the
-// aggregate percentage). A block's hit count applies to every line in its
-// [StartLine, EndLine] range — the same block-level granularity `go tool
-// cover -html` itself uses, since the profile format doesn't record
-// per-statement line data any finer than that.
-//
-// That block-level granularity is precisely why comment and blank lines have
-// to be excluded here, reading each profiled file from dir to do it. lcov —
-// which the Rust and TypeScript paths parse — only ever records executable
-// lines, so PatchPercent can safely treat "line absent from the report" as
-// "not executable, don't count it". A Go block's span makes no such
-// distinction: every line between its braces lands in the report, comments
-// included. Left unfiltered, adding a comment inside an uncovered function
-// counts as an uncovered new line, and a comment-only PR scores 0% patch
-// coverage and fails the gate — which is exactly what wardnet/inforge#216 hit.
-func ParseGoProfile(src GoModuleProfile, dir string) (LineHits, error) {
-	profiles, err := cover.ParseProfiles(src.Profile)
-	if err != nil {
-		return nil, err
-	}
-	hits := LineHits{}
+	out := Report{Hits: LineHits{}, Executed: LineHits{}}
 	for _, p := range profiles {
 		rel := goRelPath(p.FileName, src)
-		abs := filepath.Join(dir, filepath.FromSlash(rel))
+		abs := filepath.Join(root, filepath.FromSlash(rel))
 		// Generated code is nobody's to hand-test, and it lands in large,
 		// entirely-uncovered blocks — wardnet's regenerated REST client alone
 		// accounts for 983 of one PR's 1007 changed Go lines. Counting it
-		// would make the patch gate a measure of how much code was generated.
+		// would make the patch gate a measure of how much code was generated,
+		// and mutating it would ask a generator's author for an assertion.
 		if isGeneratedGoFile(abs) {
 			continue
 		}
+		// A Go profile records blocks, not statements: every line between a
+		// block's braces lands in the report, comments and blank lines
+		// included. lcov lists only executable lines, so "absent from the
+		// report" safely means "not executable" there and needs no filtering;
+		// here it would count a comment added inside an uncovered function as
+		// an uncovered new line, and a comment-only pull request would score
+		// 0% patch coverage and fail the gate.
 		skip := nonExecutableLines(abs)
-		// Lines a function's own author declared this suite does not measure.
-		// Dropped from the map rather than marked in it, so every reader —
-		// the patch gate, the aggregate, the complexity score — sees the same
-		// file it would see if those lines were not executable at all, and no
-		// reader needs a second rule about what a marked line means.
+		// The lines this file's author declared the suite does not measure.
+		// Read once for the whole file, because the aggregate, the per-line
+		// hits and the executed set all answer to it.
 		excluded, err := excludedGoLines(abs, annotation.Coverage)
 		if err != nil {
-			return nil, err
+			return Report{}, err
 		}
-		fileHits := map[int]int{}
+		hits, executed := map[int]int{}, map[int]int{}
 		for _, b := range p.Blocks {
+			// Out of the denominator as well as the numerator. A declaration
+			// says this suite does not measure the function, so counting its
+			// statements as uncovered would report the author's own statement
+			// back as a hole they have to fill — the reading that makes an
+			// exclusion worth nothing.
+			if !excluded[b.StartLine] {
+				out.Lines.Total += b.NumStmt
+				if b.Count > 0 {
+					out.Lines.Covered += b.NumStmt
+				}
+			}
 			for line := b.StartLine; line <= b.EndLine; line++ {
-				if skip[line] || excluded[line] {
+				if skip[line] {
 					continue
 				}
-				if count, seen := fileHits[line]; !seen || b.Count > count {
-					fileHits[line] = b.Count
+				if count, seen := executed[line]; !seen || b.Count > count {
+					executed[line] = b.Count
+				}
+				if excluded[line] {
+					continue
+				}
+				if count, seen := hits[line]; !seen || b.Count > count {
+					hits[line] = b.Count
 				}
 			}
 		}
-		hits[rel] = fileHits
+		out.Hits[rel] = hits
+		out.Executed[rel] = executed
 	}
-	return hits, nil
+	return out, nil
+}
+
+// ParseGoProfile is one module's per-line hits as the coverage gates see them:
+// generated files gone, non-executable lines gone, and every line a
+// `[lydite:exclude_from_coverage]` declaration covers gone with them.
+//
+// Mutation reads Report.Executed instead, which is this with those declared
+// lines put back — a declaration names one gate and answers no other.
+func ParseGoProfile(src GoModuleProfile, root string) (LineHits, error) {
+	rep, err := goProfile(src, root)
+	return rep.Hits, err
+}
+
+// goProfileLines is one module's covered and total statements: the two numbers
+// behind the ratio `go tool cover -func` prints on its `total:` line, minus
+// generated files and minus what a declaration excludes.
+func goProfileLines(src GoModuleProfile, root string) (LineCount, error) {
+	rep, err := goProfile(src, root)
+	return rep.Lines, err
 }
 
 // goRelPath turns a profile entry's package-qualified file name into a path

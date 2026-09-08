@@ -383,6 +383,9 @@ jobs:
           COMPONENTS: ${{ matrix.shard.components }}
         run: lydite mutation --dir . --affected --component "$COMPONENTS" --stream
 
+      # Under its own prefix, so `publish` never reads a shard's document as a
+      # `mutation` section of its own: there would be one per shard, each
+      # answering about part of the repository under one heading.
       - uses: ./.github/actions/lydite-reports
         if: always()
         with:

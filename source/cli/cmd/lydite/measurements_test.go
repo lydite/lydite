@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -557,4 +558,48 @@ func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
 	if gap, blocked := missingFromRecord(decl, doc); !blocked || !strings.Contains(gap, "web") {
 		t.Errorf("missingFromRecord = (%q, %v), want the fold to refuse the partial document", gap, blocked)
 	}
+}
+
+// Recording a tree whose state is already exactly what would be written must
+// not push. The branch is shared and busy, and a commit that changes nothing is
+// a commit every concurrent run then has to fetch past.
+func TestRecordingIdenticalStateTwicePushesOnce(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	if out, errOut, err := runRecordCmd(t, root, "--json"); err != nil {
+		t.Fatalf("first recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	before := stateCommits(t, root)
+
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("second recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	if got := jsonRows(t, out)["record"]; !strings.Contains(got.Value, "already holds") {
+		t.Errorf("record = %q, want the second recording to find its own entry", got.Value)
+	}
+	if after := stateCommits(t, root); after != before {
+		t.Errorf("the %s branch gained %d commit(s) for a measurement it already held", gitstate.BranchName, after-before)
+	}
+}
+
+// stateCommits is how many commits the state branch carries, which is what says
+// a recording that changed nothing wrote nothing.
+func stateCommits(t *testing.T, dir string) int {
+	t.Helper()
+	ctx := context.Background()
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", gitstate.BranchName); !r.Ok() {
+		t.Fatalf("fetch: %v", r.Err)
+	}
+	r := executil.RunQuiet(ctx, dir, "git", "rev-list", "--count", "origin/"+gitstate.BranchName)
+	if !r.Ok() {
+		t.Fatalf("rev-list: %v", r.Err)
+	}
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(r.Output), "%d", &n); err != nil {
+		t.Fatalf("rev-list output %q: %v", r.Output, err)
+	}
+	return n
 }

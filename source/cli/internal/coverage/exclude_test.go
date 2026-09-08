@@ -217,3 +217,82 @@ func writeFile(t *testing.T, root, rel, body string) {
 		t.Fatal(err)
 	}
 }
+
+// A coverage declaration answers the coverage gates and no other. Mutation
+// bounds its mutants by the lines the report says ran, so reading the same map
+// the coverage gates read would let one declaration silence a second gate — and
+// a function whose coverage is taken in another process has not thereby become
+// unmutable.
+func TestACoverageDeclarationLeavesTheExecutedLinesAlone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module m\n\ngo 1.26\n")
+	writeFile(t, root, "a.go", `package m
+
+// Provisioned runs somewhere this suite cannot see.
+//
+// [lydite:exclude_from_coverage][the proving ground exercises this end to end]
+func Provisioned(n int) int {
+	if n > 0 {
+		return 1
+	}
+	return 0
+}
+`)
+	// Executed, and declared. Both halves matter: a line with no hits would be
+	// absent from the executed set anyway, and the assertion would hold for
+	// the wrong reason.
+	writeFile(t, root, "cover.out", `mode: set
+m/a.go:6.27,7.11 1 1
+m/a.go:7.11,9.3 1 1
+m/a.go:10.2,10.10 1 1
+`)
+	rep, err := goProfile(GoModuleProfile{Profile: filepath.Join(root, "cover.out"), ModuleName: "m"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Lines.Total != 0 {
+		t.Errorf("lines = %+v, want the declared function out of the coverage figure", rep.Lines)
+	}
+	if len(rep.Hits["a.go"]) != 0 {
+		t.Errorf("hits = %v, want the declared lines out of what the coverage gates read", rep.Hits["a.go"])
+	}
+	if rep.Executed["a.go"][6] == 0 {
+		t.Errorf("executed = %v, want the lines that ran kept for the gates a coverage declaration does not answer",
+			rep.Executed["a.go"])
+	}
+}
+
+// go/parser attaches a doc comment to the declaration that follows it, so a
+// function written directly beneath an existing declaration takes it. The
+// behaviour is pinned rather than defended against: which function a
+// declaration names is Go's answer, and a rule of lydite's that disagreed with
+// the compiler would be worse than this. What the test protects is that the
+// limit is known, and that anyone changing the attachment rule sees it move.
+func TestADeclarationFollowsGosOwnAttachment(t *testing.T) {
+	t.Parallel()
+	src := `package a
+
+// [lydite:exclude_from_coverage][the proving ground exercises this]
+func inserted() int { return 1 }
+
+func original() int { return 2 }
+`
+	got, _, err := declaredIn(t, src, annotation.Coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Funcs) != 1 {
+		t.Fatalf("excluded %d functions, want the one the parser attached it to", len(got.Funcs))
+	}
+	for fn := range got.Funcs {
+		if fn.Name.Name != "inserted" {
+			t.Errorf("excluded %s; the declaration belongs to whichever declaration follows it", fn.Name.Name)
+		}
+	}
+	// And it is not reported as covering nothing, because it does cover a
+	// function — which is exactly why nothing notices the transfer.
+	if len(got.Unused) != 0 {
+		t.Errorf("unused = %v, want none: the declaration found a function", got.Unused)
+	}
+}

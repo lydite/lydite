@@ -258,8 +258,15 @@ func maybeNudgeUpdate() {
 		return
 	}
 	path := filepath.Join(cacheDir, "lydite", "update-check.json")
-	st := refreshedUpdateCheck(readUpdateCheck(path), time.Now(), http.DefaultClient)
-	writeUpdateCheck(path, st)
+	// Saved only when the check actually happened. Inside the TTL the state
+	// comes back unchanged, and rewriting identical bytes on every invocation
+	// is a directory creation and a file write on a path nobody asked lydite
+	// to touch.
+	cached := readUpdateCheck(path)
+	st := refreshedUpdateCheck(cached, time.Now(), http.DefaultClient)
+	if st != cached {
+		writeUpdateCheck(path, st)
+	}
 	if updateAvailable(st.Latest, version) {
 		_, _ = fmt.Fprintf(os.Stderr, "\nlydite v%s is available (you have v%s) — run 'lydite update'\n",
 			st.Latest, version)

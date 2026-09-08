@@ -182,7 +182,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 	}
 	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
 		Lines: rep.Lines, Hits: rep.Hits, Producer: producerOf(root, c, tc)}
-	m.CRAP, m.CRAPWhy = score(os.Stderr, root, m)
+	m.CRAP, m.CRAPWhy = score(root, m)
 	return m
 }
 
@@ -195,7 +195,12 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 // complexity source for is not scored and says so, rather than being silently
 // absent — a component nobody scored and one that scored clean read identically
 // in a count of zero.
-func score(w io.Writer, root string, m measurement) (crap.Report, string) {
+//
+// It names nothing on stderr. A base tree is measured through this same path
+// and its report is discarded, so a declaration warned about here would belong
+// to a tree nobody is looking at; the report carries them instead, and the run
+// that renders rows says which of them covered no function.
+func score(root string, m measurement) (crap.Report, string) {
 	if !m.scorable() {
 		return crap.Report{}, noComplexitySource(m)
 	}
@@ -203,25 +208,18 @@ func score(w io.Writer, root string, m measurement) (crap.Report, string) {
 	if err != nil {
 		return crap.Report{}, err.Error()
 	}
-	// A declaration that covers no function is named rather than dropped, for
-	// the reason a mutation declaration covering no mutant is: its author
-	// believes they have answered a finding, and nothing they can see says
-	// otherwise. The commonest cause is a declaration written inside a
-	// function body rather than above it, where it reads perfectly and does
-	// nothing.
-	for _, where := range rep.Unused {
-		_, _ = fmt.Fprintf(w, "warning: %s: %s covers no function, so nothing is excluded by it\n",
-			where, annotation.Marker(annotation.CRAP))
+	switch {
+	case rep.Measured():
+		return rep, ""
+	case rep.Excluded > 0:
+		// A component whose every scorable function is excluded is not clean;
+		// it is a component nothing was scored in, and it says so. The report
+		// travels with the reason, so the declarations it holds are still
+		// named.
+		return rep, fmt.Sprintf("every function the coverage report describes is excluded (%d)", rep.Excluded)
+	default:
+		return rep, "the coverage report describes no function to score"
 	}
-	// A component whose every scorable function is excluded is not clean; it
-	// is a component nothing was scored in, and it says so.
-	if !rep.Measured() {
-		if rep.Excluded > 0 {
-			return crap.Report{}, fmt.Sprintf("every function the coverage report describes is excluded (%d)", rep.Excluded)
-		}
-		return crap.Report{}, "the coverage report describes no function to score"
-	}
-	return rep, ""
 }
 
 // noComplexitySource says why a component is not scored, for the one reason
@@ -325,6 +323,7 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 		return
 	}
 	ordered := inDeclarationOrder(own, ms, opts.Selected)
+	nameUnusedDeclarations(cmd, ordered)
 	if !opts.Gate {
 		ungatedRows(rep, ordered, !opts.Narrowed)
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "baseline",
@@ -350,6 +349,28 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 	}
 	for _, row := range gated.Rows() {
 		rep.Add(row)
+	}
+}
+
+// nameUnusedDeclarations says which `[lydite:exclude_from_crap]` declarations
+// documented no function.
+//
+// Named rather than dropped, for the reason a mutation declaration covering no
+// mutant is named: its author believes they have answered a finding, and
+// nothing they can see says otherwise. The commonest cause is one written
+// inside a body, where it reads perfectly and does nothing.
+//
+// Here rather than where the score is taken, because a base tree is measured
+// through that same path and its report is discarded — so a declaration in a
+// tree nobody is looking at is never reported as this run's, and the warning
+// goes to the command's stderr with every other one rather than to os.Stderr
+// directly.
+func nameUnusedDeclarations(cmd *cobra.Command, ms []measurement) {
+	for _, m := range ms {
+		for _, where := range m.CRAP.Unused {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s covers no function, so nothing is excluded by it\n",
+				where, annotation.Marker(annotation.CRAP))
+		}
 	}
 }
 

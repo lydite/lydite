@@ -341,15 +341,6 @@ func addRows(rep *ui.Report, rows []ui.Row, ordered []component.Component, skipp
 	}
 }
 
-// mutateComponent runs one component's baseline, generates its mutants and
-// reports what became of them.
-//
-// The baseline is the instrumented variant, which is both halves of what this
-// needs: a suite that passes, and the lines coverage says were executed. A
-// component whose baseline fails is unmeasured rather than failed — nothing
-// can be concluded about tests that were not passing before the mutation, and
-// failing here would report one broken suite as two red gates whose second
-// names a cause its author clears by fixing the first.
 // mutationTarget is everything a component needs before its first suite runs:
 // the three invocations of its own declaration, the isolation strategy its
 // mutants execute under, and the changed lines they may come from.
@@ -447,6 +438,15 @@ func prepareMutation(p componentPlan, cfg config.Config, tc *toolchain.Env, opts
 	return t, ui.Row{}, true
 }
 
+// mutateComponent runs one component's baseline, generates its mutants and
+// reports what became of them.
+//
+// The baseline is the instrumented variant, which is both halves of what this
+// needs: a suite that passes, and the lines coverage says were executed. A
+// component whose baseline fails is unmeasured rather than failed — nothing
+// can be concluded about tests that were not passing before the mutation, and
+// failing here would report one broken suite as two red gates whose second
+// names a cause its author clears by fixing the first.
 func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc *toolchain.Env, slots *mutation.Slots, opts mutationOptions) (row ui.Row, out componentMutation) {
 	c, log := p.c, p.log
 	label := mutationLabel(c.Name)
@@ -502,7 +502,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
 	}
-	mutants, err := generate(opts.root, c, report.Hits, scoped)
+	mutants, err := generate(opts.root, c, report.Executed, scoped)
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
 	}
@@ -629,17 +629,17 @@ const minimumBudget = 60 * time.Second
 // makes mutation affordable at all; the coverage intersection removes mutants
 // that cannot be killed by construction, and reporting one would only restate
 // what patch coverage already said about the same line.
-func generate(root string, c component.Component, hits coverage.LineHits, scoped map[string][]int) ([]mutation.Mutant, error) {
+func generate(root string, c component.Component, executed coverage.LineHits, scoped map[string][]int) ([]mutation.Mutant, error) {
 	var out []mutation.Mutant
 	lang := langOf(c)
 	for _, file := range sortedFiles(scoped) {
-		executed := hits[file]
+		ran := executed[file]
 		lines := map[int]bool{}
 		for _, l := range scoped[file] {
 			// Reported *and* executed. A line the report lists with a hit
 			// count of zero is covered by no test, so a mutant on it survives
 			// by construction and says nothing about the suite.
-			if executed[l] > 0 {
+			if ran[l] > 0 {
 				lines[l] = true
 			}
 		}

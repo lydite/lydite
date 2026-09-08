@@ -99,7 +99,7 @@ func ExtractTarGz(data []byte, dest string, stripComponents int) error {
 // what reaches the filesystem. Sharing a value works at 2 GiB and nowhere
 // else — a stream limit small enough to test the budget truncates the archive
 // mid-header, and the reader fails before any entry is weighed.
-func extractTarGz(data []byte, dest string, stripComponents int, cap int64) error {
+func extractTarGz(data []byte, dest string, stripComponents int, maxBytes int64) error {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -124,13 +124,13 @@ func extractTarGz(data []byte, dest string, stripComponents int, cap int64) erro
 		if err != nil {
 			return err
 		}
-		n, err := extractEntry(hdr, tr, dest, rel, target, cap-written)
+		n, err := extractEntry(hdr, tr, dest, rel, target, maxBytes-written)
 		if err != nil {
 			return err
 		}
 		written += n
-		if written >= cap {
-			return fmt.Errorf("archive exceeds %d bytes; refusing to continue", cap)
+		if written >= maxBytes {
+			return fmt.Errorf("archive exceeds %d bytes; refusing to continue", maxBytes)
 		}
 	}
 }

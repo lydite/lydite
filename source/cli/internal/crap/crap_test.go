@@ -289,8 +289,8 @@ func real(n int) int {
 }
 
 // The hit map bounds what is scored, which is what makes the generated-file
-// exclusion #16 asks for the one internal/coverage already applies rather than
-// a second copy of it here. A file on disk that the profile says nothing about
+// exclusion the one internal/coverage already applies rather than a second copy
+// of it here. A file on disk that the profile says nothing about
 // is a file no test could reach.
 func TestOnlyWhatTheProfileDescribesIsScored(t *testing.T) {
 	t.Parallel()

@@ -68,7 +68,8 @@ source/cli/internal/coverage/     # reads a component's coverage report (see Cov
 source/cli/internal/crap/         # the CRAP index per Go function, from that report (see Complexity)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
                                   #   (see Mutation below)
-source/cli/internal/annotation/   # the equivalence declaration: the token, and how a comment
+source/cli/internal/annotation/   # the exclusion declaration: the [lydite:exclude_from_<gate>]
+                                  #   token for mutation, crap and coverage, and how a comment
                                   #   carrying one is read. A leaf, so referral can link it
 source/cli/internal/gitstate/     # the base branch, and lydite branch read/write (see Coverage below)
 source/cli/internal/executil/     # shared external-command runner every scanner package uses
@@ -166,8 +167,9 @@ intact.
 long as it takes — every mutant's line goes to the component's log, and that log reaches a reader
 through an artifact the job uploads on its way out. A job that is killed never gets there, so the
 whole run is lost and nothing says how far it had come, which is exactly the case `--stream` exists
-for. The test matrix keeps its output captured for the reason `internal/ui` gives: a suite's log is
-thousands of passing lines, and a CI log carrying all of them buries the one component that failed.
+for. The test matrix keeps its output captured for the reason `internal/executil` gives, where `Run` and
+`RunOutput` are told apart: a suite's log is thousands of passing lines, and a CI log carrying all
+of them buries the one component that failed.
 
 **Both workflows cache the Go build graph, and not only `~/.cache/lydite`.** `~/.cache/go-build`
 and `~/go/pkg/mod` hold the toolchain `go.mod` names, the modules and the compiled dependencies;
@@ -1935,6 +1937,21 @@ reported back as a hole they have to fill, which is the reading that would make 
 worth nothing. `[lydite:exclude_from_crap]` drops a function from the score alone: it keeps its
 coverage, and its complexity is simply not held against it.
 
+**A coverage declaration answers the coverage gates and nothing else.** `coverage.Report` carries
+two maps: `Hits`, which the aggregate, the patch gate and the score read and from which a declared
+line is absent, and `Executed`, which is the same map with those lines put back. Mutation bounds
+its mutants by lines coverage reports as executed, so reading `Hits` there would let one
+declaration silence a second gate — and a function whose coverage is taken in another process has
+not thereby become unmutable. A language with no declaration form has one map under both names.
+
+**A declaration follows Go's own attachment, and that is a stated limit.** A function written
+directly beneath an existing declaration — no blank line, no doc comment of its own — takes that
+declaration, because `go/parser` attaches the group to the nearer declaration; the new function is
+excluded and the old one returns to being counted, and nothing refers the change because the diff
+adds no line holding the token. What bounds it is that gofmt separates declarations with a blank
+line and the shape is unusual. Closing it properly means naming the function inside the token,
+which is a grammar change rather than a rule this one can make.
+
 **The reason is required and delimited.** Required for the cause the exemption set requires one:
 the declaration is the entire risk record for a finding nobody can clear, and a bare token is not
 reviewable. Delimited because that is what lets it wrap — an undelimited reason is capped by
@@ -1951,8 +1968,8 @@ also read a trailing comment on the `func` line would let a declaration written 
 acknowledge the next after an edit moved a blank line. `coverage.DeclaredExclusions` is the one
 implementation, in `internal/coverage` because `internal/crap` already imports it and the reverse
 would be a cycle; `internal/annotation` stays a leaf that answers what a comment *says* rather than
-what a language's syntax attaches it to, so `internal/referral` keeps linking neither a parser nor
-this.
+what a language's syntax attaches it to, so `internal/referral` links the token and neither a
+parser nor `coverage.DeclaredExclusions`.
 
 **Two numbers keep it honest.** Every `crap` row carries how many functions were excluded, because
 a repository can annotate its way to nothing above the threshold and that count is what makes it

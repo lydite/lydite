@@ -46,12 +46,22 @@ func (e Excluded) Lines(fset *token.FileSet) map[int]bool {
 // DeclaredExclusions reads one file's declarations for gate.
 //
 // A declaration covers the function whose **doc comment** holds it, and nothing
-// else. The doc comment is where a claim about a function belongs, it is the
-// one comment group a language's own parser already attaches to a declaration,
-// and it is the only placement that cannot silently widen: a rule that also
-// read a trailing comment on the `func` line, or the nearest comment above it,
-// would let a declaration written for one function acknowledge the next one
-// after an edit moved a blank line.
+// else. The doc comment is where a claim about a function belongs, and it is
+// the one comment group a language's own parser already attaches to a
+// declaration — so which function a declaration names is Go's answer rather
+// than a rule of lydite's that could disagree with the compiler.
+//
+// It is not proof against every edit, and the limit is worth stating. A
+// function written directly beneath an existing declaration, with no blank line
+// and no doc comment of its own, takes that declaration: go/parser attaches the
+// group to the nearer declaration, so the new function is excluded and the old
+// one silently returns to being counted. Nothing refers such a change, because
+// the diff adds no line holding the token. What bounds it is that the shape is
+// unusual — gofmt-formatted Go separates declarations with a blank line, and a
+// new exported function without its own doc comment is itself unusual — and
+// that half of the effect is in the safe direction. Closing it properly means
+// naming the function in the declaration, which is a grammar change and not
+// one this rule can make on its own.
 //
 // It is here rather than in internal/annotation because that package is a leaf
 // that answers what a comment says, not what a language's syntax attaches it

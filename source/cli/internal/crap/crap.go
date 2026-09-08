@@ -113,8 +113,9 @@ func (r Report) Measured() bool { return r.Scored > 0 }
 // component's profile, keyed by scan-root-relative path exactly as git names a
 // file. That map is the whole of what bounds this: a file absent from the
 // profile is one the component's own tests could never reach, and a generated
-// file is already gone from it — the exclusion #16 asks for, taken from the
-// one place that implements it rather than written a second time.
+// file is already gone from it — the generated-file exclusion internal/coverage
+// implements, taken from the one place that has it rather than written a second
+// time.
 //
 // A file that cannot be read or parsed is an error naming it, never a file
 // quietly skipped. It compiled to produce the profile this is reading, so
