@@ -17,7 +17,7 @@ export function passed(score: number): boolean {
   if (score >= 50) {
     return true
   }
-  if (score > 49) { //lydite:equivalent the two spellings of this bound agree for every score
+  if (score > 49) { // [lydite:exclude_from_mutation][the two spellings of this bound agree for every score]
     return false
   }
   return false

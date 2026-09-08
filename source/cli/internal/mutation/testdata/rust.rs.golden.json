@@ -126,7 +126,7 @@
     "line": 22,
     "column": 16,
     "operator": "replace-return",
-    "offset": 615,
+    "offset": 630,
     "length": 5,
     "original": "false",
     "mutated": "true"
@@ -136,7 +136,7 @@
     "line": 28,
     "column": 28,
     "operator": "arithmetic-operator",
-    "offset": 705,
+    "offset": 720,
     "length": 1,
     "original": "/",
     "mutated": "*"
@@ -146,7 +146,7 @@
     "line": 28,
     "column": 24,
     "operator": "arithmetic-operator",
-    "offset": 701,
+    "offset": 716,
     "length": 1,
     "original": "*",
     "mutated": "/"
@@ -156,7 +156,7 @@
     "line": 29,
     "column": 5,
     "operator": "remove-statement",
-    "offset": 714,
+    "offset": 729,
     "length": 13,
     "original": "counter += 1;",
     "mutated": ""
@@ -166,7 +166,7 @@
     "line": 30,
     "column": 15,
     "operator": "negate-conditional",
-    "offset": 742,
+    "offset": 757,
     "length": 2,
     "original": "!=",
     "mutated": "=="

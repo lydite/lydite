@@ -96,7 +96,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 	}
 	problems = append(problems, componentRows(rep, decl, inputs, testLabel)...)
 	for _, c := range decl.Components {
-		for _, label := range []string{"coverage(" + c.Name + ")", "patch(" + c.Name + ")", "floor(" + c.Name + ")"} {
+		for _, label := range []string{"coverage(" + c.Name + ")", "patch(" + c.Name + ")", "crap(" + c.Name + ")", "floor(" + c.Name + ")"} {
 			for _, row := range rowsFor(inputs, label) {
 				rep.Add(row)
 			}
@@ -123,6 +123,16 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		rep.Add(unmeasuredRow(repoLabel("coverage"),
 			"the shards wrote no "+measurementsName+", so there are no counts to compose — each shard writes one when --gate-coverage reaches a baseline"))
 	}
+	// The figure over the repository, whether or not the shards gated: it is
+	// the two ledger scalars summed and it compares nothing, so a run that
+	// read no baseline still has one to publish. A fold that holds no
+	// measurement at all still emits the row, because `crapSummaryRow`answers
+	// `unmeasured` for a repository lydite could have scored and produced
+	// nothing for — and a row that simply vanished would be indistinguishable
+	// from a repository with no Go in it.
+	if row, ok := crapSummaryRow(folded.scorable, folded.crapScores, folded.crapCarried); ok {
+		rep.Add(row)
+	}
 	switch row, ok := floorSummaryRow(folded.floorMs, cfg.Coverage.Floor); {
 	case ok:
 		rep.Add(row)
@@ -148,7 +158,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 // tell a row it replaced from one it has never seen.
 func foldedRow(label string, decl component.File) bool {
 	switch label {
-	case "schedule", "shards", "record", repoLabel("coverage"), repoLabel("patch"), "floor":
+	case "schedule", "shards", "record", repoLabel("coverage"), repoLabel("patch"), "crap", "floor":
 		return true
 	}
 	for _, l := range testWholeTreeRows {
@@ -161,7 +171,7 @@ func foldedRow(label string, decl component.File) bool {
 	}
 	for _, c := range decl.Components {
 		if label == testLabel(c.Name) || label == "coverage("+c.Name+")" ||
-			label == "patch("+c.Name+")" || label == "floor("+c.Name+")" {
+			label == "patch("+c.Name+")" || label == "crap("+c.Name+")" || label == "floor("+c.Name+")" {
 			return true
 		}
 	}
@@ -178,6 +188,17 @@ type composition struct {
 	carried  map[string]bool
 	baseline gitstate.Baseline
 	parts    []patchPart
+	// scorable is how many declared components CRAP could apply to, and
+	// crapScores what the shards scored for them. Scalars rather than
+	// measurements, because a shard's document carries the two numbers and not
+	// the functions behind them — a report's rows carry rendered prose, and
+	// the figure over the repository is a sum of counts.
+	scorable int
+	// crapScores is what the shards scored and crapCarried what they carried
+	// forward, kept apart for the reason coverage keeps `carried` apart: the
+	// figure counts both, and says how many of itself this run measured.
+	crapScores  []gitstate.CRAPEntry
+	crapCarried []gitstate.CRAPEntry
 	// floorMs is ms with every carried entry back to unmeasured, which is
 	// what the shards themselves held the floor against: a carried number
 	// describes the base tree, and the component whose baseline it came from
@@ -210,6 +231,15 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 			docs = append(docs, in.measured)
 		}
 	}
+	// Counted before the documents are, because it is a property of the
+	// declaration rather than of what the shards managed to write: a fold that
+	// lost every measurement still has to say the repository had components it
+	// could have scored, the way the coverage and floor rows do below.
+	for _, c := range decl.Components {
+		if langOf(c) == runner.Go {
+			out.scorable++
+		}
+	}
 	if len(docs) == 0 {
 		return out
 	}
@@ -240,6 +270,13 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 		}
 		if p, ok := e.patchPartOf(c.Name); ok {
 			out.parts = append(out.parts, p)
+		}
+		if e.CRAP != nil {
+			if e.Carried {
+				out.crapCarried = append(out.crapCarried, *e.CRAP)
+			} else {
+				out.crapScores = append(out.crapScores, *e.CRAP)
+			}
 		}
 	}
 	out.doc, out.measured, out.gated = folded, true, folded.Gated

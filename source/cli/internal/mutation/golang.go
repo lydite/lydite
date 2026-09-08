@@ -81,7 +81,7 @@ func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, []Unmatc
 	if err != nil {
 		return nil, nil, err
 	}
-	reasons, err := annotation.Declarations(path, goComments(fset, file))
+	reasons, err := annotation.Declarations(path, annotation.Mutation, goComments(fset, file))
 	if err != nil {
 		return nil, nil, err
 	}

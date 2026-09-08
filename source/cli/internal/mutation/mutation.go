@@ -15,7 +15,7 @@
 // restate what patch coverage already said about the same line.
 //
 // Equivalence is undecidable, so nothing here tries to detect it. An author
-// declares it with a "//lydite:equivalent <reason>" comment beside it, and
+// declares it with a "[lydite:exclude_from_mutation][<reason>]" comment beside
 // the declared mutant is generated, counted and never run. internal/annotation
 // holds that token and the rule for reading one, because internal/referral
 // recognises the same token as a suppression: killing the mutant merges
@@ -98,7 +98,7 @@ type Mutant struct {
 	// it. Apply checks the first against the source it is given, so a mutant
 	// can never be spliced into a file it was not generated from.
 	Original, Mutated string
-	// Reason is the text of the //lydite:equivalent annotation covering this
+	// Reason is the text of the [lydite:exclude_from_mutation] declaration covering this
 	// site, and is empty for every mutant that is not acknowledged.
 	Reason string
 }
@@ -301,7 +301,7 @@ type UnmatchedDeclaration struct {
 }
 
 func (u UnmatchedDeclaration) String() string {
-	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Marker)
+	return fmt.Sprintf("%s:%d: %s covers no mutant", u.Path, u.Line, annotation.Marker(annotation.Mutation))
 }
 
 // ErrPathEscapes reports a source path that is not inside the tree it is

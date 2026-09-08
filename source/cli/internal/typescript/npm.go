@@ -27,6 +27,10 @@ import (
 // fails loudly if the lockfile and package.json disagree (which is how a
 // half-applied Dependabot bump surfaces), and never silently re-resolves
 // transitive dependencies to something newer than what was reviewed.
+//
+// [lydite:exclude_from_coverage][
+// the self-scan installs the pinned Biome over source/cloud-services on
+// every run; a unit test here would run the machine's own npm]
 func ensureNPMToolchain(ctx context.Context, env []string, name, binName string, packageJSON, packageLock []byte) (string, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {

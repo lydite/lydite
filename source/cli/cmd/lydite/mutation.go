@@ -87,7 +87,7 @@ a suppression, declaring one refers the change to a human.`,
 			defer stop()
 			go func() {
 				<-ctx.Done()
-				stop() //lydite:equivalent its only effect is to restore the default disposition for the second interrupt, and a test that observed that would be a test signalling the test binary to death
+				stop() // [lydite:exclude_from_mutation][its only effect is to restore the default disposition for the second interrupt, and a test that observed that would be a test signalling the test binary to death]
 			}()
 
 			limit, err := resolveConcurrency(concurrency)
@@ -204,13 +204,14 @@ a suppression, declaring one refers the change to a human.`,
 	return cmd
 }
 
-// annotationMarker is the equivalence declaration an author writes. One
-// statement of the token, so the command's own help cannot drift from what
-// internal/annotation reads.
-const annotationMarker = annotation.Marker
+// annotationMarker is the declaration an author writes to say no test could
+// kill a mutant, in the form the help and a failing row quote it: the comment
+// introducer, the token, and where the reason goes. One statement of it, so the
+// command's own words cannot drift from what internal/annotation reads.
+var annotationMarker = "// " + annotation.Marker(annotation.Mutation) + "[<reason>]"
 
 // mutationMarker is that token as the help text quotes it.
-const mutationMarker = "`" + annotationMarker + "`"
+var mutationMarker = "`" + annotationMarker + "`"
 
 // mutationLabel is how every row about one component is named.
 //
@@ -340,6 +341,103 @@ func addRows(rep *ui.Report, rows []ui.Row, ordered []component.Component, skipp
 	}
 }
 
+// mutationTarget is everything a component needs before its first suite runs:
+// the three invocations of its own declaration, the isolation strategy its
+// mutants execute under, and the changed lines they may come from.
+type mutationTarget struct {
+	lang    runner.Lang
+	inv     runner.Invocation
+	suite   runner.Invocation
+	backend mutation.Backend
+	scoped  map[string][]int
+	dir     string
+}
+
+// prepareMutation answers whether this component can be mutated at all, and
+// with what.
+//
+// Every way it cannot is a row rather than an error, and every one of them is
+// settled from the declaration and the diff before anything is prepared,
+// started or run. Half of what bounds a mutant is knowable that way, and a
+// component the change does not touch has no mutant whatever its coverage says
+// — so the baseline suite, the compose stack and the setup commands are all
+// pure cost there. On the default branch, where HEAD is its own merge-base,
+// that is every component.
+func prepareMutation(p componentPlan, cfg config.Config, tc *toolchain.Env, opts mutationOptions) (mutationTarget, ui.Row, bool) {
+	c, log := p.c, p.log
+	label := mutationLabel(c.Name)
+	var t mutationTarget
+
+	if !c.MutationEnabled() {
+		// Present, so ADR 0026's completeness rule holds with no exception
+		// and the fold needs no second copy of the opt-out rule to know which
+		// absences are legitimate. Context and not unmeasured: the amber tag
+		// is for a gate that could not run, and spending it on a decision the
+		// repository stated deliberately is what teaches a reader to skim
+		// past it.
+		return t, ui.Row{Status: ui.StatusContext, Label: label, Value: "mutation is off for this component",
+			Detail: []string{"`mutation: false` in " + component.FileName}}, false
+	}
+	t.lang = langOf(c)
+	if len(c.Command) > 0 || t.lang == "" {
+		return t, unmeasuredRow(label, "the component declares a raw command, so lydite cannot derive the build-only and plain variants a mutant needs"), false
+	}
+	// All three variants of one declaration, derived together: mutation needs
+	// every one of them, and a component that cannot produce one can produce
+	// no mutant at all. Built in a loop so the failure is written once rather
+	// than three times, which is what a reader has to check three copies of.
+	var build runner.Invocation
+	for _, want := range []struct {
+		variant runner.Variant
+		into    *runner.Invocation
+	}{
+		{runner.Instrumented, &t.inv},
+		{runner.BuildOnly, &build},
+		{runner.Plain, &t.suite},
+	} {
+		inv, err := invocation(c, want.variant)
+		if err != nil {
+			return t, ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, false
+		}
+		*want.into = inv
+	}
+
+	backend, err := backendFor(t.lang, opts.root, c.Dir, build, t.suite, opts.files,
+		func(ctx context.Context, dir string) error {
+			// The runner's own preparation, in the worker rather than in the
+			// component: a JavaScript workspace copied without its
+			// node_modules fails at import, naming the tests rather than the
+			// absent dependencies. Once per worker and never once per mutant,
+			// which is the bound that makes a tree copy affordable.
+			row, ok := prepare(ctx, t.suite, dir, label, c, cfg, tc, log)
+			if !ok {
+				return errors.New(strings.Join(row.Detail, "; "))
+			}
+			return nil
+		})
+	if err != nil {
+		return t, unmeasuredRow(label, err.Error()), false
+	}
+	t.backend = backend
+
+	t.scoped = scopeToComponent(opts.changed, measurement{Name: c.Name, Dir: c.Dir, Lang: t.lang})
+	if len(t.scoped) == 0 {
+		return t, unmeasuredRow(label, "this change touches no source this component is written in"), false
+	}
+	// A runner whose instrumented variant names no report can supply no
+	// executed lines, and mutation needs those as much as it needs a passing
+	// baseline. Reported rather than attempted: `clearReport` joins the
+	// report path onto the component's directory, so an empty one names the
+	// directory itself, and asking it to clear that is asking to remove the
+	// component.
+	if t.inv.CoverageReport == "" {
+		return t, unmeasuredRow(label,
+			"the runner's instrumented variant names no coverage report, so there are no executed lines to mutate"), false
+	}
+	t.dir = filepath.Join(opts.root, filepath.FromSlash(c.Dir))
+	return t, ui.Row{}, true
+}
+
 // mutateComponent runs one component's baseline, generates its mutants and
 // reports what became of them.
 //
@@ -352,72 +450,13 @@ func addRows(rep *ui.Report, rows []ui.Row, ordered []component.Component, skipp
 func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc *toolchain.Env, slots *mutation.Slots, opts mutationOptions) (row ui.Row, out componentMutation) {
 	c, log := p.c, p.log
 	label := mutationLabel(c.Name)
+	t, blocked, ok := prepareMutation(p, cfg, tc, opts)
+	if !ok {
+		return blocked, out
+	}
+	inv, suite, backend, scoped, dir := t.inv, t.suite, t.backend, t.scoped, t.dir
+	lang := t.lang
 
-	if !c.MutationEnabled() {
-		// Present, so ADR 0026's completeness rule holds with no exception
-		// and the fold needs no second copy of the opt-out rule to know which
-		// absences are legitimate. Context and not unmeasured: the amber tag
-		// is for a gate that could not run, and spending it on a decision the
-		// repository stated deliberately is what teaches a reader to skim
-		// past it.
-		return ui.Row{Status: ui.StatusContext, Label: label, Value: "mutation is off for this component",
-			Detail: []string{"`mutation: false` in " + component.FileName}}, out
-	}
-	lang := langOf(c)
-	if len(c.Command) > 0 || lang == "" {
-		return unmeasuredRow(label, "the component declares a raw command, so lydite cannot derive the build-only and plain variants a mutant needs"), out
-	}
-	inv, err := invocation(c, runner.Instrumented)
-	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, out
-	}
-	build, err := invocation(c, runner.BuildOnly)
-	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, out
-	}
-	suite, err := invocation(c, runner.Plain)
-	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, out
-	}
-	backend, err := backendFor(lang, opts.root, c.Dir, build, suite, opts.files,
-		func(ctx context.Context, dir string) error {
-			// The runner's own preparation, in the worker rather than in the
-			// component: a JavaScript workspace copied without its
-			// node_modules fails at import, naming the tests rather than the
-			// absent dependencies. Once per worker and never once per mutant,
-			// which is the bound that makes a tree copy affordable.
-			row, ok := prepare(ctx, suite, dir, label, c, cfg, tc, log)
-			if !ok {
-				return errors.New(strings.Join(row.Detail, "; "))
-			}
-			return nil
-		})
-	if err != nil {
-		return unmeasuredRow(label, err.Error()), out
-	}
-	// Before anything is prepared, started or run. Half of what bounds a
-	// mutant is knowable from the diff alone, and a component the change
-	// does not touch has no mutant whatever its coverage says — so the
-	// baseline suite, the compose stack and the setup commands are all pure
-	// cost there. On the default branch, where HEAD is its own merge-base,
-	// that is every component.
-	scoped := scopeToComponent(opts.changed, measurement{Name: c.Name, Dir: c.Dir, Lang: lang})
-	if len(scoped) == 0 {
-		return unmeasuredRow(label, "this change touches no source this component is written in"), out
-	}
-
-	// A runner whose instrumented variant names no report can supply no
-	// executed lines, and mutation needs those as much as it needs a passing
-	// baseline. Reported rather than attempted: `clearReport` joins the
-	// report path onto the component's directory, so an empty one names the
-	// directory itself, and asking it to clear that is asking to remove the
-	// component.
-	if inv.CoverageReport == "" {
-		return unmeasuredRow(label,
-			"the runner's instrumented variant names no coverage report, so there are no executed lines to mutate"), out
-	}
-
-	dir := filepath.Join(opts.root, filepath.FromSlash(c.Dir))
 	if err := clearReport(dir, inv.CoverageReport); err != nil {
 		return failure(label, log, err.Error(), "not runnable", ""), out
 	}
@@ -463,7 +502,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
 	}
-	mutants, err := generate(opts.root, c, report.Hits, scoped)
+	mutants, err := generate(opts.root, c, report.Executed, scoped)
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
 	}
@@ -590,17 +629,17 @@ const minimumBudget = 60 * time.Second
 // makes mutation affordable at all; the coverage intersection removes mutants
 // that cannot be killed by construction, and reporting one would only restate
 // what patch coverage already said about the same line.
-func generate(root string, c component.Component, hits coverage.LineHits, scoped map[string][]int) ([]mutation.Mutant, error) {
+func generate(root string, c component.Component, executed coverage.LineHits, scoped map[string][]int) ([]mutation.Mutant, error) {
 	var out []mutation.Mutant
 	lang := langOf(c)
 	for _, file := range sortedFiles(scoped) {
-		executed := hits[file]
+		ran := executed[file]
 		lines := map[int]bool{}
 		for _, l := range scoped[file] {
 			// Reported *and* executed. A line the report lists with a hit
 			// count of zero is covered by no test, so a mutant on it survives
 			// by construction and says nothing about the suite.
-			if executed[l] > 0 {
+			if ran[l] > 0 {
 				lines[l] = true
 			}
 		}
@@ -653,7 +692,7 @@ func componentRelative(dir, file string) (string, error) {
 	}
 	rel, ok := strings.CutPrefix(file, clean+"/")
 	if !ok {
-		return "", fmt.Errorf("%s is not inside %s", file, dir) //lydite:equivalent the one caller abandons the file when the error is non-nil, so no path reads the string beside it and no test can be shown a different one
+		return "", fmt.Errorf("%s is not inside %s", file, dir) // [lydite:exclude_from_mutation][the one caller abandons the file when the error is non-nil, so no path reads the string beside it and no test can be shown a different one]
 	}
 	return rel, nil
 }
@@ -711,7 +750,7 @@ func mutationRow(label string, log *componentLog, s mutation.Summary, results []
 	}
 	row.Detail = append(row.Detail,
 		"write the assertion that fails when the code changes this way, or declare the mutant equivalent with "+
-			annotationMarker+" <reason> beside it")
+			annotationMarker+" beside it")
 	if log.Rel != "" {
 		row.Detail = append(row.Detail, "full output: "+log.Rel)
 	}

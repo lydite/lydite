@@ -812,11 +812,11 @@ func TestRecordingMergesRatherThanSkipping(t *testing.T) {
 		t.Error("a component the declaration no longer has kept its entry")
 	}
 	// A merge that changes nothing must not push.
-	if !sameCounts(merged, merged) {
-		t.Error("sameCounts says an identical baseline differs")
+	if !sameEntries(merged, merged) {
+		t.Error("sameEntries says an identical baseline differs")
 	}
-	if sameCounts(merged, existing) {
-		t.Error("sameCounts says a changed baseline is identical")
+	if sameEntries(merged, existing) {
+		t.Error("sameEntries says a changed baseline is identical")
 	}
 }
 
@@ -1309,6 +1309,13 @@ func TestTheGateAgainstARealRepository(t *testing.T) {
 	if strings.Contains(errOut, "git push") {
 		t.Errorf("the gate pushed to the %s branch: %s", gitstate.BranchName, errOut)
 	}
+	// And it measured the base tree, so it must not also say it measured
+	// nothing there. That warning is what a base tree gating against nothing
+	// looks like, and a run that prints it whenever a measurement succeeded
+	// is one whose readers learn to ignore it.
+	if strings.Contains(errOut, "measured no coverage at all") {
+		t.Errorf("the gate measured the base tree and said it had not: %s", errOut)
+	}
 
 	// The second command lands it, running none of the repository.
 	recOut, recErr, recRunErr := runRecordCmd(t, root, "--json")
@@ -1439,11 +1446,18 @@ func TestTheSelfBasePathAnchorsAgainstThePreviousCommit(t *testing.T) {
 	run("commit", "-m", "second")
 
 	got := previousTreeBaseline(context.Background(), root)
-	if len(got) == 0 {
+	if len(got.Coverage) == 0 {
 		t.Fatal("no anchor found for the commit immediately before")
 	}
-	if got["svc"] != first["svc"] {
-		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got["svc"], first["svc"])
+	if got.Coverage["svc"] != first["svc"] {
+		t.Errorf("anchor = %+v, want the previous commit's entry %+v", got.Coverage["svc"], first["svc"])
+	}
+	// Every metric, not only coverage. A component affected selection did not
+	// run carries its score forward from here, and an anchor holding half the
+	// state would drop it — after which the next change sees it as new and
+	// gates it against nothing, permanently, since each run drops it again.
+	if _, ok := got.CRAP["svc"]; !ok {
+		t.Errorf("anchor = %+v, want the previous commit's score beside its counts", got.CRAP)
 	}
 }
 
@@ -1454,11 +1468,11 @@ func previousOrCurrentBaseline(t *testing.T, dir, rev string) gitstate.Baseline 
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := gitstate.ReadBaseline(context.Background(), dir, tree)
+	snap, err := gitstate.ReadSnapshot(context.Background(), dir, tree)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return snap.Coverage
 }
 
 // The floor's denominator counts only components a run could ever measure. A

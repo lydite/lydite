@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRelease serves the GitHub release URLs selfUpdate and
@@ -191,4 +192,124 @@ func TestUpdateCmdRejectsUnrecognizedVersion(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not a recognized release version") {
 		t.Fatalf("expected unrecognized-version error, got %v", err)
 	}
+}
+
+// The nudge runs only where somebody is watching and could act on it. A
+// from-source build has no release to compare against, CI has nobody reading
+// stderr, and a redirected stream is being parsed by something that did not ask
+// for a notice.
+func TestTheNudgeOnlyRunsWhereSomebodyWouldSeeIt(t *testing.T) {
+	t.Parallel()
+	// /dev/null is a character device, which is what the terminal check asks
+	// about — so it stands in for an attached terminal and lets each of the
+	// other two guards be asserted on its own. Without a stream that passes
+	// that check, every case here is false for the same reason and the version
+	// and CI guards are never exercised at all.
+	tty, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tty.Close() }()
+	// A pipe is what a redirected stderr is, and it is never a terminal.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+
+	// The one case that is nudged, which is what makes the three refusals
+	// below mean anything.
+	if !nudgeWanted("1.0.0", "", tty) {
+		t.Fatal("a released build on an attached terminal outside CI was not nudged")
+	}
+	if nudgeWanted("dev", "", tty) {
+		t.Error("a from-source build was nudged, and it has no release to compare against")
+	}
+	if nudgeWanted("1.0.0", "true", tty) {
+		t.Error("a CI run was nudged, and nobody is reading its stderr")
+	}
+	if nudgeWanted("1.0.0", "", w) {
+		t.Error("a redirected stderr was nudged, and something is parsing it")
+	}
+}
+
+// A cache that is absent, unreadable or malformed is a check that has not
+// happened, which is what the zero CheckedAt already means — so it re-checks
+// rather than failing or reporting a version nobody has.
+func TestAnUnreadableUpdateCheckIsACheckThatHasNotHappened(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if got := readUpdateCheck(filepath.Join(dir, "absent.json")); got != (updateCheckState{}) {
+		t.Errorf("an absent cache = %+v, want the zero state", got)
+	}
+	path := filepath.Join(dir, "broken.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUpdateCheck(path); got != (updateCheckState{}) {
+		t.Errorf("a malformed cache = %+v, want the zero state", got)
+	}
+}
+
+// A check inside the TTL asks nothing, and one past it records the attempt even
+// when it fails — otherwise every invocation past the TTL re-pays the network
+// timeout. A failed check keeps the version it already knew, since failing to
+// ask is no evidence that the release has gone.
+func TestARefreshedCheckRecordsTheAttemptEvenWhenItFails(t *testing.T) {
+	t.Parallel()
+	// A client pointed at a closed listener, so the request fails at once.
+	failing := &http.Client{Transport: &http.Transport{}, Timeout: time.Millisecond}
+
+	fresh := updateCheckState{CheckedAt: time.Now(), Latest: "9.9.9"}
+	if got := refreshedUpdateCheck(fresh, time.Now(), failing); got != fresh {
+		t.Errorf("a check inside the TTL = %+v, want it left alone", got)
+	}
+
+	// Exactly on the TTL, which is the boundary the comparison turns on and
+	// the one moment a function that read the clock itself could never be
+	// stood on. A check whose age has only just reached the TTL is stale.
+	edge := updateCheckState{CheckedAt: time.Now(), Latest: "1.2.3"}
+	if got := refreshedUpdateCheck(edge, edge.CheckedAt.Add(updateCheckTTL), failing); !got.CheckedAt.After(edge.CheckedAt) {
+		t.Error("a check exactly as old as the TTL was treated as fresh")
+	}
+	if got := refreshedUpdateCheck(edge, edge.CheckedAt.Add(updateCheckTTL-time.Nanosecond), failing); got != edge {
+		t.Errorf("a check a nanosecond younger than the TTL = %+v, want it left alone", got)
+	}
+
+	stale := updateCheckState{CheckedAt: time.Now().Add(-2 * updateCheckTTL), Latest: "1.2.3"}
+	got := refreshedUpdateCheck(stale, time.Now(), failing)
+	if !got.CheckedAt.After(stale.CheckedAt) {
+		t.Error("a failed check did not record the attempt, so every run past the TTL re-pays the timeout")
+	}
+	if got.Latest != "1.2.3" {
+		t.Errorf("latest = %q, want the version it already knew kept", got.Latest)
+	}
+}
+
+// A check that the remote answers records what it found. It is the case that
+// says the deadline the request is given is long enough to make one at all —
+// a check given no time fails before it is sent, and every assertion about a
+// failing check passes on that too.
+func TestACheckTheRemoteAnswersRecordsWhatItFound(t *testing.T) { //nolint:paralleltest // fakeRelease swaps the package's base URL
+	fakeRelease(t, "3.4.5", []byte("binary"), "")
+	stale := updateCheckState{CheckedAt: time.Now().Add(-2 * updateCheckTTL), Latest: "1.2.3"}
+	got := refreshedUpdateCheck(stale, time.Now(), http.DefaultClient)
+	if got.Latest != "3.4.5" {
+		t.Errorf("latest = %q, want the version the remote answered with", got.Latest)
+	}
+}
+
+// The cache is an optimisation, so a run that cannot write it re-checks next
+// time rather than failing. What it does write, it reads back.
+func TestTheUpdateCheckRoundTrips(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "update-check.json")
+	want := updateCheckState{CheckedAt: time.Now().UTC().Truncate(time.Second), Latest: "2.0.0"}
+	writeUpdateCheck(path, want)
+	if got := readUpdateCheck(path); !got.CheckedAt.Equal(want.CheckedAt) || got.Latest != want.Latest {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+	// A path that cannot be created is silent.
+	writeUpdateCheck(filepath.Join(path, "under-a-file.json"), want)
 }

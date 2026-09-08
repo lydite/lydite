@@ -73,9 +73,23 @@ type Report struct {
 	// Lines is the component's tally.
 	Lines LineCount
 	// Hits maps a scan-root-relative, forward-slash path to line number to
-	// hit count. Scan-root-relative because that is what git's diff paths are
-	// mapped to, and the patch gate intersects the two.
+	// hit count, as the coverage gates see it. Scan-root-relative because that
+	// is what git's diff paths are mapped to, and the patch gate intersects
+	// the two.
+	//
+	// A line a `[lydite:exclude_from_coverage]` declaration covers is absent,
+	// which is what takes it out of both sides of every coverage figure.
 	Hits LineHits
+	// Executed is the same map with those lines put back: every line the
+	// report says ran, whatever its author declared about measuring it.
+	//
+	// The two are separate because a declaration names one gate and answers no
+	// other. Mutation bounds its mutants by lines coverage reports as executed,
+	// and reading Hits for that would let a coverage declaration silence the
+	// mutation gate as well — a function whose coverage is taken in another
+	// process has not thereby become unmutable. A language with no declaration
+	// form has one map under both names.
+	Executed LineHits
 }
 
 // Measure reads the report an instrumented run wrote for one component.
@@ -129,16 +143,7 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 	if name == "" {
 		return Report{}, fmt.Errorf("%s is not a Go module root, so the coverage profile's package-qualified paths cannot be resolved — a go-test component's dir is the directory holding its go.mod", dir)
 	}
-	src := GoModuleProfile{Profile: reportPath, ModuleName: name, RelDir: relDir(dir)}
-	hits, err := ParseGoProfile(src, root)
-	if err != nil {
-		return Report{}, fmt.Errorf("parsing the coverage profile at %s: %w", reportPath, err)
-	}
-	lines, err := goProfileLines(src, root)
-	if err != nil {
-		return Report{}, err
-	}
-	return Report{Lines: lines, Hits: hits}, nil
+	return goProfile(GoModuleProfile{Profile: reportPath, ModuleName: name, RelDir: relDir(dir)}, root)
 }
 
 // measureLCOV reads an lcov trace, which is what both cargo-llvm-cov and
@@ -152,7 +157,10 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 // silently reports a smaller denominator than the tool does.
 func measureLCOV(data []byte, unitDir, dir string) (Report, error) {
 	lines, hits := ParseLCOV(data, unitDir)
-	return Report{Lines: lines, Hits: prefixHits(hits, relDir(dir))}, nil
+	prefixed := prefixHits(hits, relDir(dir))
+	// One map under both names: lcov carries no declaration lydite reads, so
+	// nothing was removed from it and there is nothing to put back.
+	return Report{Lines: lines, Hits: prefixed, Executed: prefixed}, nil
 }
 
 // prefixHits puts the component's own directory back on each path, so every

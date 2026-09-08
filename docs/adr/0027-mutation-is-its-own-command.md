@@ -96,7 +96,7 @@ Nothing can be concluded about tests that were not passing before the mutation.
 
 An equivalent mutant is one no test could kill, because the change it makes is
 unobservable. Equivalence is undecidable in general, so lydite never tries to
-detect one: the author declares it, in a `//lydite:equivalent <reason>` comment
+detect one: the author declares it, in a `[lydite:exclude_from_mutation][<reason>]` comment
 beside the mutant. All three languages spell a line comment `//`, so one form
 covers them.
 

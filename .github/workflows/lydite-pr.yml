@@ -251,6 +251,25 @@ jobs:
           key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
           restore-keys: lydite-${{ runner.os }}-
 
+      # The Go toolchain, the modules and the compiled dependencies every
+      # component's suite is built from. Without it each job downloads the
+      # toolchain its go.mod names and compiles gotreesitter and the rest of
+      # the graph from cold, every run — and mutation pays that before its
+      # first mutant, which is the one job whose budget is the sum of a suite
+      # run repeated a hundred times.
+      #
+      # Keyed on go.sum, so the entry is written once per dependency change
+      # and read thereafter. Not on the commit: a per-commit key writes a new
+      # multi-gigabyte entry on every push and evicts the rest of the
+      # repository's cache to hold copies of one graph.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('source/cli/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
       # No working-directory override, and that is deliberate. A step-level
       # relative working-directory is resolved against the workspace rather
       # than against the job's default, so `..` would name a directory above
@@ -326,16 +345,43 @@ jobs:
           key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
           restore-keys: lydite-${{ runner.os }}-
 
+      # The Go toolchain, the modules and the compiled dependencies every
+      # component's suite is built from. Without it each job downloads the
+      # toolchain its go.mod names and compiles gotreesitter and the rest of
+      # the graph from cold, every run — and mutation pays that before its
+      # first mutant, which is the one job whose budget is the sum of a suite
+      # run repeated a hundred times.
+      #
+      # Keyed on go.sum, so the entry is written once per dependency change
+      # and read thereafter. Not on the commit: a per-commit key writes a new
+      # multi-gigabyte entry on every push and evicts the rest of the
+      # repository's cache to hold copies of one graph.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('source/cli/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
       # --affected and --component compose here as they do in the test matrix:
       # this shard reports one row per component in its slice whether or not
       # selection ran it, and nothing at all about any other. A component the
       # change does not touch costs nothing — no baseline suite, no compose
       # stack — because half of what bounds a mutant is knowable from the diff
       # alone.
+      # --stream, and only here. A mutation run prints nothing for as long as
+      # it takes: every mutant's line goes to the component's log, and that log
+      # reaches a reader through an artifact this job uploads on its way out.
+      # A job that is killed never gets there, so the whole run is lost and
+      # nothing says how far it had come — which is the case --stream exists
+      # for. The test matrix keeps its output captured: a suite's log is
+      # thousands of passing lines, and a CI log carrying all of them buries
+      # the one component that failed.
       - name: lydite mutation
         env:
           COMPONENTS: ${{ matrix.shard.components }}
-        run: lydite mutation --dir . --affected --component "$COMPONENTS"
+        run: lydite mutation --dir . --affected --component "$COMPONENTS" --stream
 
       # Under its own prefix, so `publish` never reads a shard's document as a
       # `mutation` section of its own: there would be one per shard, each

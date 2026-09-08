@@ -96,6 +96,22 @@ type componentMeasurement struct {
 	// figure from what the shards already read, rather than reading the lydite
 	// branch a second time.
 	Base *gitstate.Entry `json:"base,omitempty"`
+	// CRAP is this component's complexity scalars, absent for a component
+	// lydite scores none of and for one whose score could not be taken.
+	//
+	// It rides on the entry rather than in a document of its own, because a
+	// score is derived from the coverage measurement beside it and the two are
+	// recorded by the same command from the same fold. They are separate
+	// documents only where they are *stored*, which is where the cost of
+	// coupling them falls: a change to what one records must not be a cache
+	// miss in the other.
+	//
+	// No baseline entry beside it, unlike Base. The fold composes no CRAP
+	// comparison — the per-component gate is strictly the stricter one, since
+	// a change adding a function above the threshold to one component and
+	// removing one from another fails there and nets to zero over the
+	// repository — so nothing downstream has a comparison to make.
+	CRAP *gitstate.CRAPEntry `json:"crap,omitempty"`
 }
 
 // patchCount is a component's changed lines, and how many of them its coverage
@@ -197,21 +213,24 @@ func foldMeasurements(docs []measurementsDoc) (measurementsDoc, error) {
 	return out, nil
 }
 
-// baseline is the fold as the map the lydite branch stores, dropping
+// snapshot is the fold as the documents the lydite branch stores, dropping
 // everything that says how an entry was arrived at in one run rather than what
 // is true of the tree.
-func (d measurementsDoc) baseline() gitstate.Baseline {
-	out := gitstate.Baseline{}
+func (d measurementsDoc) snapshot() gitstate.Snapshot {
+	snap := gitstate.Snapshot{Coverage: gitstate.Baseline{}, CRAP: gitstate.CRAPBaseline{}}
 	for name, e := range d.Components {
-		out[name] = e.Entry
+		snap.Coverage[name] = e.Entry
+		if e.CRAP != nil {
+			snap.CRAP[name] = *e.CRAP
+		}
 	}
-	return out
+	return snap
 }
 
 // measurementsFrom builds the document a run hands on: what it would record,
 // what it actually measured, which entries it carried forward rather than
 // measured, and what each was gated against.
-func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, baseline gitstate.Baseline, gated bool, parts []patchPart) measurementsDoc {
+func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, scores gitstate.CRAPBaseline, baseline gitstate.Baseline, gated bool, parts []patchPart) measurementsDoc {
 	doc := measurementsDoc{Tree: tree, Gated: gated, Components: make(map[string]componentMeasurement, len(record))}
 	patch := make(map[string]patchCount, len(parts))
 	for _, p := range parts {
@@ -233,6 +252,9 @@ func measurementsFrom(tree string, record, measured gitstate.Baseline, carried m
 		// shard's own `patch(<name>)` row already refused.
 		if b, ok := baseline[name]; ok && b.Measured() && b.Producer == e.Producer {
 			m.Base = &b
+		}
+		if c, ok := scores[name]; ok {
+			m.CRAP = &c
 		}
 		doc.Components[name] = m
 	}

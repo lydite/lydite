@@ -1,7 +1,14 @@
-// Package gitstate stores and retrieves coverage baselines on a dedicated
-// `lydite` branch, keyed by the TREE they were computed against.
+// Package gitstate stores and retrieves the baselines lydite gates against on a
+// dedicated `lydite` branch, keyed by the TREE they were computed against.
 //
-// A baseline is one component's covered and total line counts, per component.
+// One document per metric, each under its own key: a component's coverage
+// counts, and its CRAP scalars. Separate rather than one wider entry, because
+// the two are different quantities with different producers and different
+// costs to re-measure — so a change to what one records must not cost every
+// consumer a cache miss in the other. One writer, though, and one commit: they
+// describe the same tree and are landed by the same job.
+//
+// A coverage baseline is one component's covered and total line counts, per component.
 // Counts rather than percentages, because a percentage cannot be re-weighted:
 // the per-language and global figures lydite gates are sums over these
 // entries, and a run that measured only some components composes the rest from
@@ -33,6 +40,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"lydite/lydite/internal/coverage"
@@ -70,10 +78,38 @@ const BranchName = "lydite"
 // overwritten.
 const stateDir = "v4"
 
-// StatePath is the path, inside BranchName, of the baseline for key (a tree
-// or commit SHA).
+// StatePath is the path, inside BranchName, of the coverage baseline for key
+// (a tree or commit SHA).
 func StatePath(key string) string {
 	return stateDir + "/" + key + ".json"
+}
+
+// crapStateDir is where CRAP baselines live, and it is a directory of its own
+// for the reason stateDir is keyed to its metric: the two are different
+// quantities, measured over different units, and an entry recorded under one
+// definition is not comparable to one recorded under another.
+//
+// Separate documents rather than a wider entry under stateDir, and the
+// separation is load-bearing in both directions. A v4 entry carries no CRAP
+// scalars, so a widened entry read back would give them their zero value — the
+// delta would be `current − 0`, which is the absolute count, so the first run
+// after an upgrade would fail every repository over debt it has always had.
+// That is the exact thing gating on a delta exists to prevent, arriving through
+// the mechanism meant to prevent it. Widening therefore forces a version bump,
+// and a bump there costs every consumer a full coverage cache miss for a
+// feature that is not coverage — coupling two quantities with different
+// producers and different costs to re-measure, so that every later change to
+// one is a cache miss in the other.
+//
+// The threshold is not stored, because it is not configurable: crap.Threshold
+// is the value the definition names, and moving it would change what the count
+// means — which is a change to what is measured, and so a bump of this
+// constant rather than a field beside the number.
+const crapStateDir = "crap/v1"
+
+// CRAPStatePath is the path, inside BranchName, of the CRAP baseline for key.
+func CRAPStatePath(key string) string {
+	return crapStateDir + "/" + key + ".json"
 }
 
 // TreeSHA resolves the tree a commit points at.
@@ -295,14 +331,102 @@ type Entry struct {
 // of the two that is unique by construction.
 type Baseline map[string]Entry
 
-// ReadBaseline returns the cached baseline for sha, and false if none exists
-// yet (a cache miss, not an error — the caller computes and writes one).
-func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bool, error) {
+// CRAPEntry is one component's CRAP scalars: how many of its functions score
+// above the threshold, and the highest score any of them reached.
+//
+// Two numbers and not the functions themselves. The gate is the delta of the
+// count, and a list of names cannot be compared across trees — a function
+// renamed or moved would read as one fixed and one introduced. The names
+// belong in the row a run renders, where a reader can act on them.
+type CRAPEntry struct {
+	// Above is how many functions exceed the threshold, and is the only
+	// number the gate compares. A change may not raise it.
+	Above int `json:"above"`
+	// Worst is the highest CRAP value in the component. Recorded because a
+	// quality ledger cannot recompute it after the fact, and never gated: a
+	// change taking the worst function from 400 to 380 has improved nothing
+	// anybody can act on, and one adding a well-tested complex function
+	// raises it without adding a thing to fix.
+	Worst float64 `json:"worst"`
+	// Producer names the instrument that measured the coverage half of the
+	// score, for the reason Entry carries one: a toolchain that counts
+	// statements differently moves every function's coverage, and the count
+	// on the far side of that is a different quantity rather than a
+	// regression. Compared verbatim, so a difference reports the component
+	// new.
+	Producer string `json:"producer,omitempty"`
+}
+
+// CRAPBaseline is one tree's CRAP measurement, keyed by component name exactly
+// as Baseline is.
+type CRAPBaseline map[string]CRAPEntry
+
+// Snapshot is everything recorded for one tree: one document per metric, each
+// under its own key and each with its own miss.
+//
+// It exists so that there is one writer. Both documents describe the same tree
+// and are landed by the same command in the same job, so writing them in one
+// commit is one push, one retry loop and one thing that can half-happen — and
+// a second WriteBaseline would be a second place a baseline can reach the
+// branch, which is the invariant `lydite test record` rests on.
+type Snapshot struct {
+	// Coverage is each component's line counts.
+	Coverage Baseline
+	// CRAP is each component's complexity scalars, empty for a repository
+	// with no component lydite computes them for.
+	CRAP CRAPBaseline
+}
+
+// Recorded reports whether anything was ever recorded for this tree, under any
+// metric.
+//
+// Any, and not the coverage document alone. It answers one question — is there
+// something here to merge onto — and a tree carrying a CRAP document and no
+// readable coverage one still has something: a recording that skipped the merge
+// there would leave that document holding entries for components the
+// declaration no longer has, which nothing later reads and nothing later
+// clears.
+func (s Snapshot) Recorded() bool { return len(s.Coverage) > 0 || len(s.CRAP) > 0 }
+
+// ReadSnapshot returns what the branch holds for the first key that resolves,
+// across every metric.
+//
+// One call and one fetch, because a caller wanting one metric for a tree wants
+// the other for the same tree: two readers each refreshing `origin/lydite`
+// would double the network round trips on every gated run to learn one thing.
+//
+// Each metric still misses on its own. A repository that has a coverage
+// baseline and no CRAP one — every repository, the first time it runs a lydite
+// that computes CRAP — is not a coverage miss, so it pays nothing to re-measure
+// coverage it already has; its components read `new` for CRAP and gate nothing
+// for one change, which is the shape a changed producer already has. Ask
+// `Recorded` or the individual maps which of them resolved.
+func ReadSnapshot(ctx context.Context, dir string, keys ...string) (Snapshot, error) {
 	// A missing remote branch is the expected first-ever-run state, not an
 	// error: there's nothing to fetch yet.
 	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
-		return nil, false, nil
+		return Snapshot{}, nil
 	}
+	coverage, err := readState[Baseline](ctx, dir, StatePath, keys...)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	scores, err := readState[CRAPBaseline](ctx, dir, CRAPStatePath, keys...)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Coverage: coverage, CRAP: scores}, nil
+}
+
+// readState reads one metric's document off the branch, which the caller has
+// already fetched. One implementation for every metric, because everything that
+// makes a read correct — an unreadable entry is a miss rather than a permanent
+// red line, an empty object is a miss — is a property of caching a measurement
+// rather than of which measurement it is.
+//
+// A miss is a nil map and never an error, so a caller asks `len` rather than
+// carrying a second value per metric.
+func readState[M ~map[string]E, E any](ctx context.Context, dir string, path func(string) string, keys ...string) (M, error) {
 	// Keys are tried in order: the tree first, then the commit SHA. The SHA is
 	// only a fallback for baselines written before keying moved to trees, so
 	// existing state keeps resolving instead of every repository recomputing on
@@ -313,7 +437,7 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 		if key == "" {
 			continue
 		}
-		r = executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+StatePath(key))
+		r = executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+path(key))
 		if r.Ok() {
 			found = key
 			break
@@ -324,9 +448,9 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 	// empty string and answers with a parse error — a hard failure where the
 	// question was only whether an entry exists.
 	if found == "" || !r.Ok() {
-		return nil, false, nil
+		return nil, nil
 	}
-	var report Baseline
+	var report M
 	if err := json.Unmarshal([]byte(r.Output), &report); err != nil {
 		// A miss, and never an error. Nothing rewrites the base tree's entry —
 		// a run records the tree it measured — so returning an error here
@@ -336,7 +460,7 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 		// A miss recomputes and overwrites, which is the same self-healing the
 		// empty-entry rule below exists for.
 		fmt.Fprintf(os.Stderr, "lydite: the cached baseline for %s is not readable (%v) — measuring it again\n", found, err)
-		return nil, false, nil
+		return nil, nil
 	}
 	// An empty baseline ("{}") is a cache miss, not a baseline of nothing. A
 	// run whose measurement failed for every component records nothing worth
@@ -348,9 +472,9 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 	// miss here heals the entries that were already written, without a manual
 	// purge.
 	if len(report) == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
-	return report, true, nil
+	return report, nil
 }
 
 // WriteBaseline caches report for sha on the lydite branch, via a
@@ -367,23 +491,55 @@ func ReadBaseline(ctx context.Context, dir string, keys ...string) (Baseline, bo
 // that's fatal, but it must never be reported as recorded (wardnet's main
 // run printed "recorded coverage baseline" while the push had been rejected,
 // and its PRs gated against nothing).
-func WriteBaseline(ctx context.Context, dir, sha string, report Baseline) error {
-	data, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
+func WriteBaseline(ctx context.Context, dir, sha string, snap Snapshot) error {
+	// One commit carrying every metric's document, never one push per metric.
+	// The two describe the same tree and are landed by the same job, so
+	// separate pushes would double the retry loop and leave a window where the
+	// branch holds one half of a measurement — and a second writer is a second
+	// place a baseline can reach the branch, which is the invariant
+	// `lydite test record` rests on.
+	//
+	// A metric with nothing to record writes no document at all. An empty
+	// object is a miss to every reader anyway, so writing one would add a file
+	// per tree saying nothing — and for a repository whose components lydite
+	// computes no CRAP for, one on every recording forever.
+	files := map[string][]byte{}
+	if err := stage(files, StatePath(sha), snap.Coverage); err != nil {
 		return err
+	}
+	if err := stage(files, CRAPStatePath(sha), snap.CRAP); err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
 	}
 	const attempts = 3
 	var lastErr error
 	for range attempts {
-		if lastErr = pushBaseline(ctx, dir, sha, data); lastErr == nil {
+		if lastErr = pushBaseline(ctx, dir, sha, files); lastErr == nil {
 			return nil
 		}
 	}
 	return fmt.Errorf("pushing baseline for %s to %s (%d attempts): %w", sha, BranchName, attempts, lastErr)
 }
 
-// pushBaseline is one fetch → stage → commit → push attempt.
-func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
+// stage adds one metric's document to what the push will write, and adds
+// nothing for a metric with no entry.
+func stage[M ~map[string]E, E any](files map[string][]byte, path string, report M) error {
+	if len(report) == 0 {
+		return nil
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	files[path] = data
+	return nil
+}
+
+// pushBaseline is one fetch → stage → commit → push attempt, over every
+// document the snapshot holds.
+func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte) error {
 	tmp, err := os.MkdirTemp("", "lydite-*")
 	if err != nil {
 		return err
@@ -401,39 +557,14 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	// via refspec below.
 	staging := "lydite-staging-" + filepath.Base(tmp)
 
-	branchExists := executil.RunQuiet(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok()
-	if branchExists {
-		// Refresh origin/<BranchName> right before staging on it: the tracking
-		// ref left behind by the job's checkout (or a prior ReadBaseline) can
-		// be minutes stale, and a staging branch built on a stale ref pushes
-		// non-fast-forward and is rejected.
-		if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
-			return fmt.Errorf("fetch %s: %w", BranchName, r.Err)
-		}
-		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
-			return fmt.Errorf("worktree add %s: %w", BranchName, r.Err)
-		}
-	} else {
-		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
-			return fmt.Errorf("worktree add (detached): %w", r.Err)
-		}
-		if r := executil.RunQuiet(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
-			return fmt.Errorf("checkout --orphan %s: %w", staging, r.Err)
-		}
-		if r := executil.RunQuiet(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
-			return fmt.Errorf("clear orphan worktree: %w", r.Err)
-		}
-	}
-
-	rel := StatePath(sha)
-	path := filepath.Join(tmp, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := stageBranch(ctx, dir, tmp, staging); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	rels, err := writeDocuments(tmp, files)
+	if err != nil {
 		return err
 	}
-	if r := executil.RunQuiet(ctx, tmp, "git", "add", rel); !r.Ok() {
+	if r := executil.RunQuiet(ctx, tmp, "git", append([]string{"add"}, rels...)...); !r.Ok() {
 		return fmt.Errorf("git add: %w", r.Err)
 	}
 	// Nothing staged means the fetched branch already carries this exact
@@ -448,7 +579,7 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 	commitR := executil.RunQuietEnv(ctx, tmp, []string{
 		"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@users.noreply.github.com",
 		"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@users.noreply.github.com",
-	}, "git", "commit", "-m", "coverage baseline for "+sha)
+	}, "git", "commit", "-m", "baseline for "+sha)
 	if !commitR.Ok() {
 		return fmt.Errorf("git commit: %w", commitR.Err)
 	}
@@ -456,4 +587,54 @@ func pushBaseline(ctx context.Context, dir, sha string, data []byte) error {
 		return fmt.Errorf("git push: %w", r.Err)
 	}
 	return nil
+}
+
+// stageBranch checks the state branch out into the throwaway worktree, or
+// starts it when the remote has none yet.
+//
+// The fetch is not an optimisation: the tracking ref left behind by the job's
+// checkout (or by a prior read) can be minutes stale, and a staging branch
+// built on a stale ref pushes non-fast-forward and is rejected. Every attempt
+// therefore refreshes immediately before staging on it.
+func stageBranch(ctx context.Context, dir, tmp, staging string) error {
+	if !executil.RunQuiet(ctx, dir, "git", "ls-remote", "--exit-code", "--heads", "origin", BranchName).Ok() {
+		if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "--detach", tmp); !r.Ok() {
+			return fmt.Errorf("worktree add (detached): %w", r.Err)
+		}
+		if r := executil.RunQuiet(ctx, tmp, "git", "checkout", "--orphan", staging); !r.Ok() {
+			return fmt.Errorf("checkout --orphan %s: %w", staging, r.Err)
+		}
+		if r := executil.RunQuiet(ctx, tmp, "git", "rm", "-rf", "--ignore-unmatch", "."); !r.Ok() {
+			return fmt.Errorf("clear orphan worktree: %w", r.Err)
+		}
+		return nil
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+		return fmt.Errorf("fetch %s: %w", BranchName, r.Err)
+	}
+	if r := executil.RunQuiet(ctx, dir, "git", "worktree", "add", "-b", staging, tmp, "origin/"+BranchName); !r.Ok() {
+		return fmt.Errorf("worktree add %s: %w", BranchName, r.Err)
+	}
+	return nil
+}
+
+// writeDocuments lays every metric's document out in the worktree and returns
+// their paths, sorted — so the `git add` arguments, and therefore the commit,
+// are the same whatever order the map iterated in.
+func writeDocuments(tmp string, files map[string][]byte) ([]string, error) {
+	rels := make([]string, 0, len(files))
+	for rel := range files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		path := filepath.Join(tmp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, files[rel], 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return rels, nil
 }

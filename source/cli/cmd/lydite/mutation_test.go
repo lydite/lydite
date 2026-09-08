@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
@@ -189,6 +190,32 @@ func TestAComponentThatOptedOutStillTakesARowAndRunsNothing(t *testing.T) {
 	}
 	if out.ran {
 		t.Error("an opted-out component was run")
+	}
+}
+
+// A component the change touches no source of is refused before anything is
+// prepared, started or run. Half of what bounds a mutant is knowable from the
+// diff alone, so the baseline suite, the compose stack and the setup commands
+// are pure cost there — and on the default branch, where HEAD is its own
+// merge-base, that is every component.
+//
+// Asserted on the refusal itself and not only on the row beside it: a decision
+// that reported the row and carried on would run the whole component anyway,
+// which is the cost this exists to avoid, while every assertion about the row
+// still passed.
+func TestAComponentTheChangeDoesNotTouchIsRefusedBeforeAnythingRuns(t *testing.T) {
+	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
+	plan := componentPlan{c: c, log: testLog(t)}
+	// No changed lines at all, which is what a component outside the diff has.
+	_, row, ok := prepareMutation(plan, config.Config{}, nil, mutationOptions{root: t.TempDir()})
+	if ok {
+		t.Fatal("a component the change touches no source of was prepared to run")
+	}
+	if row.Status != ui.StatusUnmeasured {
+		t.Errorf("status is %q, want unmeasured — nothing was mutated", row.Status)
+	}
+	if !strings.Contains(row.Value, "touches no source") {
+		t.Errorf("value = %q, want it to say why", row.Value)
 	}
 }
 
@@ -844,8 +871,9 @@ func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 // mutant. The declared mutant is generated, counted and never run — and
 // because it is a suppression, internal/referral refers the change.
 func TestADeclaredMutantIsCountedAndNeverRun(t *testing.T) {
-	declared := "\nfunc Deeper(a, b string) bool {\n\treturn Depth(a) > Depth(b) " +
-		annotationMarker + " the two forms agree for every input this is called with\n}\n"
+	declared := "\nfunc Deeper(a, b string) bool {\n\treturn Depth(a) > Depth(b) // " +
+		annotation.Marker(annotation.Mutation) +
+		"[the two forms agree for every input this is called with]\n}\n"
 	root := goModuleRepo(t, declared, `
 func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 	Deeper("a/b", "a")

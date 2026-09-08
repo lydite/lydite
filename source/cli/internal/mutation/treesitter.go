@@ -289,7 +289,7 @@ func GenerateTreeSitter(lang runner.Lang, path string, src []byte, lines map[int
 	}
 
 	t := &tsGen{sites: sites{path: path, src: src, lines: lines}, g: g, lang: language}
-	reasons, err := annotation.Declarations(path, t.comments(root))
+	reasons, err := annotation.Declarations(path, annotation.Mutation, t.comments(root))
 	if err != nil {
 		return nil, nil, err
 	}

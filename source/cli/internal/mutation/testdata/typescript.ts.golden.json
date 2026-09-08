@@ -126,7 +126,7 @@
     "line": 21,
     "column": 12,
     "operator": "replace-return",
-    "offset": 550,
+    "offset": 565,
     "length": 5,
     "original": "false",
     "mutated": "true"
@@ -136,7 +136,7 @@
     "line": 23,
     "column": 10,
     "operator": "replace-return",
-    "offset": 569,
+    "offset": 584,
     "length": 5,
     "original": "false",
     "mutated": "true"
@@ -146,7 +146,7 @@
     "line": 27,
     "column": 28,
     "operator": "arithmetic-operator",
-    "offset": 652,
+    "offset": 667,
     "length": 1,
     "original": "/",
     "mutated": "*"
@@ -156,7 +156,7 @@
     "line": 27,
     "column": 24,
     "operator": "arithmetic-operator",
-    "offset": 648,
+    "offset": 663,
     "length": 1,
     "original": "*",
     "mutated": "/"
@@ -166,7 +166,7 @@
     "line": 28,
     "column": 3,
     "operator": "remove-statement",
-    "offset": 658,
+    "offset": 673,
     "length": 12,
     "original": "counter += 1",
     "mutated": ""
@@ -176,7 +176,7 @@
     "line": 29,
     "column": 3,
     "operator": "remove-statement",
-    "offset": 673,
+    "offset": 688,
     "length": 9,
     "original": "counter++",
     "mutated": ""
@@ -186,7 +186,7 @@
     "line": 30,
     "column": 14,
     "operator": "negate-conditional",
-    "offset": 696,
+    "offset": 711,
     "length": 3,
     "original": "!==",
     "mutated": "==="
@@ -196,7 +196,7 @@
     "line": 31,
     "column": 12,
     "operator": "replace-return",
-    "offset": 716,
+    "offset": 731,
     "length": 6,
     "original": "\"pass\"",
     "mutated": "\"\""
@@ -206,7 +206,7 @@
     "line": 33,
     "column": 10,
     "operator": "replace-return",
-    "offset": 736,
+    "offset": 751,
     "length": 2,
     "original": "\"\"",
     "mutated": "\"lydite\""

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -276,7 +277,7 @@ func TestACandidateSaysWhyItIsEmpty(t *testing.T) {
 	decl := component.File{Components: []component.Component{{Name: "api", Dir: "api", Runner: "go-test"}}}
 	ms := []measurement{unmeasuredComponent(decl.Components[0], "the suite failed")}
 
-	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, nil, nil, true, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, t.TempDir(), decl, ms, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 	if len(doc.Components) != 0 || doc.Reason == "" {
 		t.Errorf("doc = %+v, want no components and a reason", doc)
 	}
@@ -425,7 +426,7 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 		Producer:  measured.Producer,
 	}
 	tree := candidate.Tree
-	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Baseline{"svc": higher}); err != nil {
+	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": higher}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +452,7 @@ func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
 		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
 		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
 	}
-	doc := measurementsFrom("tree", record, record, nil, baseline, true, nil)
+	doc := measurementsFrom("tree", record, record, nil, nil, baseline, true, nil)
 	if doc.Components["same"].Base == nil {
 		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
 	}
@@ -478,7 +479,7 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 	unrun := unmeasuredComponent(decl.Components[1], "the component was not selected for this run")
 	unrun.Unselected = true
 	_, value := candidateThisTree(context.Background(), cmd, root, decl,
-		[]measurement{measured("api", runner.Go, 1, 2), unrun}, nil, nil, true, nil, 0.1)
+		[]measurement{measured("api", runner.Go, 1, 2), unrun}, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 	if !strings.HasPrefix(value, "1 of 2 component(s)") {
 		t.Errorf("record row = %q, want it to name the declaration's count as well as its own", value)
 	}
@@ -494,7 +495,7 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	record := gitstate.Baseline{"api": producing(90, 100, "go")}
 	measured := gitstate.Baseline{"api": producing(89, 100, "go")}
-	doc := measurementsFrom("tree", record, measured, nil, nil, true, nil)
+	doc := measurementsFrom("tree", record, measured, nil, nil, nil, true, nil)
 
 	e := doc.Components["api"]
 	if e.LineCount != (coverage.LineCount{Covered: 90, Total: 100}) {
@@ -508,7 +509,7 @@ func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	}
 	// An entry that never dipped carries nothing extra: the two agree, and a
 	// second copy of one number is one that can disagree with the first.
-	plain := measurementsFrom("tree", record, record, nil, nil, true, nil)
+	plain := measurementsFrom("tree", record, record, nil, nil, nil, true, nil)
 	if plain.Components["api"].Unanchored != nil {
 		t.Error("an entry that was not anchored still carries a second copy of its counts")
 	}
@@ -542,7 +543,7 @@ func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
 		unmeasuredComponent(decl.Components[1], "the coverage report lists no coverable line"),
 	}
 
-	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, nil, nil, true, nil, 0.1)
+	doc, value := candidateThisTree(context.Background(), cmd, root, decl, ms, gitstate.Snapshot{}, gitstate.Snapshot{}, true, nil, 0.1)
 
 	if _, ok := doc.Components["api"]; !ok {
 		t.Errorf("the run discarded the component it measured: %+v", doc)
@@ -557,4 +558,48 @@ func TestABlockedRunHandsOnItsMeasurementsAndTheFoldRefusesThem(t *testing.T) {
 	if gap, blocked := missingFromRecord(decl, doc); !blocked || !strings.Contains(gap, "web") {
 		t.Errorf("missingFromRecord = (%q, %v), want the fold to refuse the partial document", gap, blocked)
 	}
+}
+
+// Recording a tree whose state is already exactly what would be written must
+// not push. The branch is shared and busy, and a commit that changes nothing is
+// a commit every concurrent run then has to fetch past.
+func TestRecordingIdenticalStateTwicePushesOnce(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	if out, errOut, err := runRecordCmd(t, root, "--json"); err != nil {
+		t.Fatalf("first recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	before := stateCommits(t, root)
+
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("second recording: %v\nstdout: %s\nstderr: %s", err, out, errOut)
+	}
+	if got := jsonRows(t, out)["record"]; !strings.Contains(got.Value, "already holds") {
+		t.Errorf("record = %q, want the second recording to find its own entry", got.Value)
+	}
+	if after := stateCommits(t, root); after != before {
+		t.Errorf("the %s branch gained %d commit(s) for a measurement it already held", gitstate.BranchName, after-before)
+	}
+}
+
+// stateCommits is how many commits the state branch carries, which is what says
+// a recording that changed nothing wrote nothing.
+func stateCommits(t *testing.T, dir string) int {
+	t.Helper()
+	ctx := context.Background()
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", gitstate.BranchName); !r.Ok() {
+		t.Fatalf("fetch: %v", r.Err)
+	}
+	r := executil.RunQuiet(ctx, dir, "git", "rev-list", "--count", "origin/"+gitstate.BranchName)
+	if !r.Ok() {
+		t.Fatalf("rev-list: %v", r.Err)
+	}
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(r.Output), "%d", &n); err != nil {
+		t.Fatalf("rev-list output %q: %v", r.Output, err)
+	}
+	return n
 }

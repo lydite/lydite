@@ -40,12 +40,15 @@ type Disqualification struct {
 // would veto the small suppression and wave the large one through.
 var suppressionTokens = []string{
 	"nosemgrep",
-	// A mutant declared equivalent is a survivor nobody can kill, asserted
-	// by its author and checkable by nobody. Killing it merges unattended;
-	// declaring it unkillable puts a human on the claim. The token is
-	// imported rather than respelled, so the engine that honours it and the
-	// gate that refers it cannot come to disagree about its text.
-	annotation.Marker,
+	// Every lydite declaration, by the prefix they share: a mutant nobody
+	// can kill, a function whose coverage is taken in another process. Each
+	// is asserted by its author and checkable by nobody, so clearing the gate
+	// merges unattended and declaring it unclearable puts a human on the
+	// claim. The prefix is imported rather than respelled, and read instead
+	// of the individual tokens — a list of those here would go stale the
+	// first time a gate is added, silently, in the one place where a missed
+	// suppression means a change merges unread.
+	annotation.Prefix,
 	"#nosec",
 	"//nolint",
 	"#[allow(",

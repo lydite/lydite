@@ -119,6 +119,11 @@ const biomeNestedRootConfig = "Found a nested root configuration"
 
 // lintDirBiome runs Biome over one package and reports only lydite's own
 // findings.
+//
+// [lydite:exclude_from_coverage][
+// the self-scan runs Biome over source/cloud-services on every run; a
+// unit test here would test the machine's Biome rather than lydite's
+// invocation, which internal/typescript's own tests assert as argv]
 func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, configPath string) executil.Result {
 	out, err := os.CreateTemp("", "lydite-biome-*.json")
 	if err != nil {

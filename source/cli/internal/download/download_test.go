@@ -235,3 +235,86 @@ func TestSafeJoinIsNotFooledByAPrefixSibling(t *testing.T) {
 		t.Fatal("safeJoin allowed a sibling directory sharing the destination's prefix")
 	}
 }
+
+// The last entry at a path is the one that lands. An archive may name a path
+// twice, and each regular file replaces whatever is already there — which is
+// also what stops the symlink-then-file two-step, since opening with O_CREATE
+// would otherwise write straight through a link planted earlier.
+func TestExtractTarGzOverwritesAnEntryWrittenTwice(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, body := range []string{"first\n", "second\n"} {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "go/a.txt", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractTarGz(buf.Bytes(), dest, 1); err != nil {
+		t.Fatalf("ExtractTarGz: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != "second" {
+		t.Errorf("content = %q, want the later entry to have replaced the earlier one", got)
+	}
+}
+
+// The cap is over the archive and not over each entry, so an entry's budget is
+// what is left rather than what there was. Three files of forty bytes against a
+// cap of a hundred exceed it together and none of them alone — which is the
+// only shape that tells a running total from a per-entry limit.
+func TestExtractTarGzCapsTheArchiveAndNotTheEntry(t *testing.T) {
+	body := strings.Repeat("x", 40)
+	archive := tarGz(t, map[string]string{
+		"go/a.txt": body,
+		"go/b.txt": body,
+		"go/c.txt": body,
+	})
+	dest := t.TempDir()
+	err := extractTarGz(archive, dest, 1, 100)
+	if err == nil {
+		t.Fatal("120 bytes were extracted under a 100-byte cap")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want it to name the cap", err)
+	}
+	// And no more than the cap reached the filesystem. The refusal alone does
+	// not say that: an entry handed the whole cap rather than what is left of
+	// it writes past the limit and the refusal still fires, one entry late,
+	// with the bytes already on disk.
+	var written int64
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		written += info.Size()
+	}
+	if written > 100 {
+		t.Errorf("%d bytes reached the filesystem under a 100-byte cap", written)
+	}
+	// And the same three files under a cap that fits them are extracted, so the
+	// refusal above is the total rather than the count of entries.
+	if err := extractTarGz(archive, t.TempDir(), 1, 1000); err != nil {
+		t.Errorf("120 bytes were refused under a 1000-byte cap: %v", err)
+	}
+}
