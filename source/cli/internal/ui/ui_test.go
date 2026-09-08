@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"lydite/lydite/internal/finding"
 )
 
 // The grammar in docs/design/tokens.md puts every value at the same column so
@@ -220,6 +222,43 @@ func TestJSONKeysArePartOfTheContract(t *testing.T) {
 	for _, key := range []string{"status", "label", "value", "detail", "log"} {
 		if _, ok := row[key]; !ok {
 			t.Errorf("the row is missing the %q key: %s", key, buf.String())
+		}
+	}
+}
+
+// A finding's keys are what a consumer anchors, counts and tracks by, so they
+// are as much a contract as the row's are. A field renamed here silently stops
+// a thread finding the finding it belongs to.
+func TestFindingKeysArePartOfTheContract(t *testing.T) {
+	var buf bytes.Buffer
+	rep := NewReport("mutation")
+	rep.AddFindings(finding.Finding{
+		Gate: "mutation", Component: "cli", Path: "internal/runner/runner.go",
+		Line: 412, EndLine: 414, Rule: "G306", Severity: "high",
+		Message: "a survivor", Detail: []string{"< -> >="},
+		Site: "relational < >=", Ordinal: 1, Anchor: finding.AnchorLine,
+	})
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	findings, ok := doc["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("expected one finding, got %v", doc["findings"])
+	}
+	one, ok := findings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a finding object, got %v", findings[0])
+	}
+	for _, key := range []string{
+		"gate", "component", "path", "line", "end_line", "rule",
+		"severity", "message", "detail", "site", "ordinal", "anchor",
+	} {
+		if _, ok := one[key]; !ok {
+			t.Errorf("the finding is missing the %q key: %s", key, buf.String())
 		}
 	}
 }

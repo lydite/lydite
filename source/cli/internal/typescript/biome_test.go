@@ -2,6 +2,8 @@ package typescript
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -163,4 +165,66 @@ func TestReportableBiomeGatesOnlyOnOurGroups(t *testing.T) {
 			t.Errorf("reportableBiome(%q) = true, want false", category)
 		}
 	}
+}
+
+// Biome is the one check whose findings lydite already renders rather than the
+// tool, so its diagnostics are in hand as data. What a consumer anchors and
+// what a human reads must come from the same set.
+func TestBiomeDiagnosticsBecomeLocatedClaims(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.ts"), []byte(
+		"const a = 1\neval(userInput)\neval(other)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := biomeReport{Diagnostics: []biomeDiagnostic{
+		diagnosticAt("bad.ts", 2, "lint/security/noGlobalEval", "error", "eval() is dangerous"),
+		diagnosticAt("bad.ts", 3, "lint/security/noGlobalEval", "error", "eval() is dangerous"),
+		diagnosticAt("bad.ts", 1, "lint/style/useConst", "error", "an opinion lydite never agreed to enforce"),
+	}}
+
+	got := biomeFindings(dir, report)
+	if len(got) != 2 {
+		t.Fatalf("%d claims, want 2 — a style opinion is not one of lydite's", len(got))
+	}
+	if got[0].Rule != "lint/security/noGlobalEval" || got[0].Line != 2 || got[0].Path != "bad.ts" {
+		t.Errorf("the claim lost its location: %+v", got[0])
+	}
+	if got[0].Severity != "error" {
+		t.Errorf("severity is %q, want the tool's own word", got[0].Severity)
+	}
+	// One rule firing twice in one file is two claims, told apart by the code
+	// each fired on.
+	if got[0].Fingerprint() == got[1].Fingerprint() {
+		t.Errorf("two occurrences of one rule share the fingerprint %s", got[0].Fingerprint())
+	}
+}
+
+// A rule firing on identical code in one file has nothing but source order to
+// tell its two claims apart.
+func TestIdenticalBiomeSitesAreNumbered(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.ts"), []byte(
+		"eval(x)\neval(x)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := biomeFindings(dir, biomeReport{Diagnostics: []biomeDiagnostic{
+		diagnosticAt("bad.ts", 1, "lint/security/noGlobalEval", "error", "eval() is dangerous"),
+		diagnosticAt("bad.ts", 2, "lint/security/noGlobalEval", "error", "eval() is dangerous"),
+	}})
+
+	if len(got) != 2 || got[0].Ordinal != 0 || got[1].Ordinal != 1 {
+		t.Fatalf("ordinals are wrong: %+v", got)
+	}
+	if got[0].Fingerprint() == got[1].Fingerprint() {
+		t.Errorf("two identical sites share the fingerprint %s", got[0].Fingerprint())
+	}
+}
+
+// diagnosticAt builds the subset of Biome's report lydite reads.
+func diagnosticAt(path string, line int, category, severity, message string) biomeDiagnostic {
+	var d biomeDiagnostic
+	d.Category, d.Severity, d.Message = category, severity, message
+	d.Location.Path = path
+	d.Location.Start.Line = line
+	return d
 }

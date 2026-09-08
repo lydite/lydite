@@ -42,6 +42,11 @@ type shardInput struct {
 // readShards reads each named directory's report for one command, adding a row
 // per directory so a folded report says what it was folded from.
 //
+// Every shard's findings are carried through unchanged. They need no folding
+// rule of their own: a shard reports exactly the components it was responsible
+// for, so each claim is made once, and the duplicate a shard matrix could
+// produce is already caught as a component with two rows.
+//
 // alongside reads whatever else that command's shards wrote beside the report
 // and says so on the same row — `lydite test` writes measurements, and nothing
 // else does. On the same row rather than in a second pass, because a second row
@@ -59,6 +64,7 @@ func readShards(rep *ui.Report, reports []string, command string, alongside func
 			continue
 		}
 		in.doc, in.read = doc, true
+		rep.AddFindings(doc.Findings...)
 		row := ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
 			Value: fmt.Sprintf("%d row(s), %s", len(doc.Rows), doc.Verdict)}
 		if alongside != nil {

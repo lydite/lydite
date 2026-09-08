@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 )
 
 //go:embed biome.json
@@ -175,25 +176,54 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 		return r
 	}
 
-	var b strings.Builder
-	count := 0
-	for _, d := range report.Diagnostics {
-		if !reportableBiome(d.Category) {
-			continue
-		}
-		count++
-		fmt.Fprintf(&b, "%s:%d  %s  %s\n", d.Location.Path, d.Location.Start.Line, d.Category, d.Message)
-	}
-
-	if count == 0 {
+	findings := biomeFindings(dir, report)
+	if len(findings) == 0 {
 		r.Err = nil
 		return r
 	}
+	var b strings.Builder
+	for _, f := range findings {
+		fmt.Fprintf(&b, "%s:%d  %s  %s\n", f.Path, f.Line, f.Rule, f.Message)
+	}
+	r.Findings = findings
 	// Detail, not Output: Output is Biome's own stream, which already reached
 	// the terminal and holds no findings, and overwriting it would discard the
 	// raw log the run artifact keeps. These findings exist nowhere else, so
 	// they are what report() has to print.
 	r.Detail = b.String()
-	r.Err = fmt.Errorf("%d finding(s)", count)
+	r.Err = fmt.Errorf("%d finding(s)", len(findings))
 	return r
+}
+
+// biomeFindings is every reportable diagnostic as a located claim.
+//
+// Biome is the one check whose findings lydite already renders rather than the
+// tool, because its report goes to a file so that its own chatter cannot
+// corrupt the JSON. The claims are therefore already in hand as data, and the
+// prose under a failing row is rendered from them rather than beside them.
+//
+// The site is the rule with the text it fired on, read from the tree rather
+// than from the report: Biome states a path, a line and a category, and the
+// code on that line is lydite's to look up. The rule alone would make every
+// occurrence of one rule in one file the same claim, and the text alone would
+// merge two rules firing on one line.
+func biomeFindings(dir string, report biomeReport) []finding.Finding {
+	src := finding.NewSource(dir)
+	var out []finding.Finding
+	for _, d := range report.Diagnostics {
+		if !reportableBiome(d.Category) {
+			continue
+		}
+		out = append(out, finding.Finding{
+			Gate:     "biome",
+			Path:     filepath.ToSlash(d.Location.Path),
+			Line:     d.Location.Start.Line,
+			Rule:     d.Category,
+			Severity: d.Severity,
+			Message:  d.Message,
+			Site:     d.Category + "\x1f" + src.Line(filepath.ToSlash(d.Location.Path), d.Location.Start.Line),
+		})
+	}
+	finding.Number(out)
+	return out
 }

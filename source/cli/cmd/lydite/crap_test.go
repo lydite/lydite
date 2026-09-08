@@ -45,7 +45,7 @@ func TestTheGateIsTheDeltaAndNotTheCount(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			row := crapRow(scored("api", tc.above, 156.3),
+			row, _ := crapRow(scored("api", tc.above, 156.3),
 				gitstate.CRAPBaseline{"api": {Above: tc.base}}, true)
 			if row.Status != tc.want {
 				t.Errorf("crap(api) = %+v, want %s", row, tc.want)
@@ -66,7 +66,7 @@ func TestAFailingRowNamesTheFunctionsToActOn(t *testing.T) {
 		{Name: "Tangled", File: "api/lib.go", Line: 42, Complexity: 12, Value: 156.3,
 			Lines: coverage.LineCount{Covered: 0, Total: 20}},
 	}}
-	row := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0}}, true)
+	row, _ := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0}}, true)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("crap(api) = %+v, want a failure", row)
 	}
@@ -87,7 +87,7 @@ func TestAFailingRowNamesTheFunctionsToActOn(t *testing.T) {
 	// the number a reader acts on is the delta, and against an empty baseline
 	// the delta and the count are the same number.
 	over := scored("api", 9, 400)
-	if got := crapRow(over, gitstate.CRAPBaseline{"api": {Above: 4}}, true); !strings.Contains(got.Value, "5 more") {
+	if got, _ := crapRow(over, gitstate.CRAPBaseline{"api": {Above: 4}}, true); !strings.Contains(got.Value, "5 more") {
 		t.Errorf("crap(api) = %q, want it to say the change added 5", got.Value)
 	}
 }
@@ -126,7 +126,8 @@ func TestAFailingRowNamesTheWorstFewAndCountsTheRest(t *testing.T) {
 				Lines: coverage.LineCount{Covered: 0, Total: 20},
 			})
 		}
-		return crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0}}, true)
+		row, _ := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0}}, true)
+		return row
 	}
 	// Exactly the cap: every one is named, and there is no tail saying none
 	// were left out.
@@ -186,17 +187,17 @@ func TestAScoreWithNothingComparableIsNewAndNotAFailure(t *testing.T) {
 	m := scored("api", 9, 200)
 	m.Producer = "go1.26.6"
 
-	fresh := crapRow(m, nil, true)
+	fresh, _ := crapRow(m, nil, true)
 	if fresh.Status != ui.StatusNew || !strings.Contains(fresh.Value, "no baseline yet") {
 		t.Errorf("crap(api) with no baseline = %+v, want new", fresh)
 	}
-	moved := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0, Producer: "go1.25.1"}}, true)
+	moved, _ := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0, Producer: "go1.25.1"}}, true)
 	if moved.Status != ui.StatusNew || !strings.Contains(moved.Value, "not compared") {
 		t.Errorf("crap(api) across a changed instrument = %+v, want new", moved)
 	}
 	// And an ungated run compares nothing at all, so it renders as context
 	// rather than as the green a gated run reports.
-	ungated := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0, Producer: "go1.26.6"}}, false)
+	ungated, _ := crapRow(m, gitstate.CRAPBaseline{"api": {Above: 0, Producer: "go1.26.6"}}, false)
 	if ungated.Status != ui.StatusContext {
 		t.Errorf("crap(api) in an ungated run = %+v, want context", ungated)
 	}
@@ -216,7 +217,7 @@ func TestALanguageWithNoComplexitySourceIsContextAndAFailedScoreIsAmber(t *testi
 	// the suite failed" reads as though fixing the suite would produce a
 	// score.
 	web := unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "the suite failed")
-	row := crapRow(web, nil, true)
+	row, _ := crapRow(web, nil, true)
 	if row.Status != ui.StatusContext {
 		t.Errorf("crap(web) = %+v, want context — the metric has no source for it", row)
 	}
@@ -226,7 +227,7 @@ func TestALanguageWithNoComplexitySourceIsContextAndAFailedScoreIsAmber(t *testi
 
 	broken := measured("api", runner.Go, 9, 10)
 	broken.CRAPWhy = "parsing api/lib.go to score its functions: expected ';'"
-	if got := crapRow(broken, nil, true); got.Status != ui.StatusUnmeasured || !strings.Contains(got.Value, "api/lib.go") {
+	if got, _ := crapRow(broken, nil, true); got.Status != ui.StatusUnmeasured || !strings.Contains(got.Value, "api/lib.go") {
 		t.Errorf("crap(api) = %+v, want an amber row naming what could not be read", got)
 	}
 
@@ -236,7 +237,7 @@ func TestALanguageWithNoComplexitySourceIsContextAndAFailedScoreIsAmber(t *testi
 	unrun := unmeasuredComponent(component.Component{Name: "sdk", Dir: "sdk", Runner: runner.GoTest},
 		"the component was not selected for this run")
 	unrun.Carryable = true
-	if got := crapRow(unrun, gitstate.CRAPBaseline{"sdk": {Above: 7}}, true); !strings.Contains(got.Value, "carrying the baseline's 7") {
+	if got, _ := crapRow(unrun, gitstate.CRAPBaseline{"sdk": {Above: 7}}, true); !strings.Contains(got.Value, "carrying the baseline's 7") {
 		t.Errorf("crap(sdk) = %q, want it to name what it carries forward", got.Value)
 	}
 }
@@ -360,7 +361,7 @@ func TestAScoreThatCouldNotBeTakenCarriesItsReason(t *testing.T) {
 	// And the row is amber: this is a gate that could not run, not a language
 	// the metric has no source for.
 	m.CRAPWhy = why
-	if got := crapRow(m, nil, true); got.Status != ui.StatusUnmeasured {
+	if got, _ := crapRow(m, nil, true); got.Status != ui.StatusUnmeasured {
 		t.Errorf("crap(svc) = %+v, want amber", got)
 	}
 }
@@ -408,7 +409,7 @@ func TestARawCommandComponentSaysItsLanguageIsUnstated(t *testing.T) {
 	t.Parallel()
 	raw := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
 		"the component declares a raw command, which has no instrumented variant")
-	row := crapRow(raw, nil, true)
+	row, _ := crapRow(raw, nil, true)
 	if row.Status != ui.StatusContext {
 		t.Errorf("crap(docs) = %+v, want context — the metric has no source for it", row)
 	}

@@ -56,7 +56,7 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			row := mutationRow(mutationLabel("app"), testLog(t), c.s, c.results, 42*time.Second)
+			row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t), c.s, c.results, nil, 42*time.Second)
 			decl := component.File{Components: []component.Component{{Name: "app"}}}
 			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, decl)
 
@@ -989,19 +989,19 @@ func TestARowCarriesAnAsideAndALogOnlyWhenItHasThem(t *testing.T) {
 	}
 
 	// A passing row with nothing outside its denominator says nothing more.
-	row := mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 3}, nil, time.Second)
+	row, _ := mutationRow(mutationLabel("app"), "app", "app", logged, mutation.Summary{Killed: 3}, nil, nil, time.Second)
 	if len(row.Detail) != 0 {
 		t.Errorf("a clean passing row carries %v", row.Detail)
 	}
 	// ...and with something outside it, exactly that.
-	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 3, Unviable: 2}, nil, time.Second)
+	row, _ = mutationRow(mutationLabel("app"), "app", "app", logged, mutation.Summary{Killed: 3, Unviable: 2}, nil, nil, time.Second)
 	if len(row.Detail) != 1 || row.Detail[0] != "2 did not compile" {
 		t.Errorf("a passing row's detail is %v, want the aside alone", row.Detail)
 	}
 
 	// A failing row names every survivor, then the aside if there is one,
 	// then what to do, then the log.
-	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 1, Survived: 1}, survivor, time.Second)
+	row, _ = mutationRow(mutationLabel("app"), "app", "app", logged, mutation.Summary{Killed: 1, Survived: 1}, survivor, nil, time.Second)
 	if joined := strings.Join(row.Detail, "\n"); strings.Contains(joined, "did not compile") ||
 		strings.Contains(joined, "declared equivalent") {
 		t.Errorf("a failing row with nothing outside its denominator carries an aside: %v", row.Detail)
@@ -1009,14 +1009,14 @@ func TestARowCarriesAnAsideAndALogOnlyWhenItHasThem(t *testing.T) {
 	if !hasDetail(row, "full output: "+logged.Rel) {
 		t.Errorf("a failing row does not name its log: %v", row.Detail)
 	}
-	row = mutationRow(mutationLabel("app"), logged, mutation.Summary{Killed: 1, Survived: 1, Unviable: 2}, survivor, time.Second)
+	row, _ = mutationRow(mutationLabel("app"), "app", "app", logged, mutation.Summary{Killed: 1, Survived: 1, Unviable: 2}, survivor, nil, time.Second)
 	if !hasDetail(row, "2 did not compile") {
 		t.Errorf("a failing row does not name what is outside its denominator: %v", row.Detail)
 	}
 
 	// A run whose log could not be opened names no log rather than a path to
 	// nothing, on a failing row and on an unmeasured one alike.
-	row = mutationRow(mutationLabel("app"), unlogged, mutation.Summary{Killed: 1, Survived: 1}, survivor, time.Second)
+	row, _ = mutationRow(mutationLabel("app"), "app", "app", unlogged, mutation.Summary{Killed: 1, Survived: 1}, survivor, nil, time.Second)
 	for _, d := range row.Detail {
 		if strings.HasPrefix(d, "full output:") {
 			t.Errorf("a row with no log carries %q", d)
@@ -1025,14 +1025,14 @@ func TestARowCarriesAnAsideAndALogOnlyWhenItHasThem(t *testing.T) {
 	if row.Log != "" {
 		t.Errorf("a row with no log names %q", row.Log)
 	}
-	unmeasured := mutationRow(mutationLabel("app"), logged, mutation.Summary{Unviable: 2}, nil, time.Second)
+	unmeasured, _ := mutationRow(mutationLabel("app"), "app", "app", logged, mutation.Summary{Unviable: 2}, nil, nil, time.Second)
 	if unmeasured.Status != ui.StatusUnmeasured {
 		t.Fatalf("a run with an empty denominator is %q, want unmeasured", unmeasured.Status)
 	}
 	if !hasDetail(unmeasured, "full output: "+logged.Rel) || unmeasured.Log != logged.Rel {
 		t.Errorf("an unmeasured row does not name its log: %+v", unmeasured)
 	}
-	if got := mutationRow(mutationLabel("app"), unlogged, mutation.Summary{Unviable: 2}, nil, time.Second); got.Log != "" {
+	if got, _ := mutationRow(mutationLabel("app"), "app", "app", unlogged, mutation.Summary{Unviable: 2}, nil, nil, time.Second); got.Log != "" {
 		t.Errorf("an unmeasured row with no log names %q", got.Log)
 	}
 }

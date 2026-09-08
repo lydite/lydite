@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/finding"
 )
 
 // The document is written by one process and read by another, so a row that
@@ -78,5 +80,69 @@ func TestSomethingThatIsNotAReportIsRefused(t *testing.T) {
 		if _, err := ReadDocument(strings.NewReader(body)); err == nil {
 			t.Errorf("%s was accepted as a report", name)
 		}
+	}
+}
+
+// Findings travel beside the rows, and a consumer anchoring one to a line
+// reads them rather than parsing the prose a row renders.
+func TestFindingsSurviveTheRoundTrip(t *testing.T) {
+	rep := NewReport("mutation")
+	rep.Add(Row{Status: StatusFail, Label: "mutation(cli)", Value: "1 of 8 mutant(s) survived"})
+	rep.AddFindings(finding.Finding{
+		Gate: "mutation", Component: "cli", Path: "internal/runner/runner.go",
+		Line: 412, Message: "a survivor", Site: "relational < >=", Ordinal: 1,
+		Detail: []string{"< -> >="}, Anchor: finding.AnchorLine,
+	})
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ReadDocument(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(doc.Findings) != 1 {
+		t.Fatalf("%d findings survived, want 1", len(doc.Findings))
+	}
+	got := doc.Findings[0]
+	if got.Fingerprint() != rep.Findings()[0].Fingerprint() {
+		t.Errorf("the fingerprint did not survive: %s, want %s", got.Fingerprint(), rep.Findings()[0].Fingerprint())
+	}
+	if got.Anchor != finding.AnchorLine {
+		t.Errorf("the anchor read back as %q, want %q", got.Anchor, finding.AnchorLine)
+	}
+	if len(got.Detail) != 1 || got.Line != 412 {
+		t.Errorf("the located claim did not survive: %+v", got)
+	}
+}
+
+// Every document written before anything emitted a finding carries no such
+// key, and a reader that refused one would fail the comment for every run that
+// found nothing.
+func TestADocumentWithNoFindingsIsAReport(t *testing.T) {
+	doc, err := ReadDocument(strings.NewReader(
+		`{"command":"scan","verdict":"pass","exit":0,"duration_ms":12,"rows":[]}`))
+	if err != nil {
+		t.Fatalf("a document carrying no findings was refused: %v", err)
+	}
+	if len(doc.Findings) != 0 {
+		t.Errorf("findings were invented: %v", doc.Findings)
+	}
+}
+
+// A run that found nothing must not write an empty list where a reader could
+// mistake it for a key it has to understand.
+func TestNoFindingsWritesNoKey(t *testing.T) {
+	rep := NewReport("scan")
+	rep.Add(Row{Status: StatusPass, Label: "gosec(cli)", Value: "passed"})
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "findings") {
+		t.Errorf("a run with no findings wrote the key anyway: %s", buf.String())
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"lydite/lydite/internal/finding"
 )
 
 // Env is the two environments a language check runs with, which are
@@ -53,6 +55,11 @@ type Result struct {
 	// Empty for every tool that prints its own findings — reprinting those
 	// would duplicate what already streamed.
 	Detail string
+	// Findings are the located claims this check made, as data. A check that
+	// parses a structured report sets them and renders Detail from them, so
+	// the prose a human reads and the data a consumer anchors are one
+	// derivation. Empty for a tool whose output lydite does not parse.
+	Findings []finding.Finding
 	// Stderr is what the command wrote to stderr, kept apart from Output by
 	// RunQuiet only. Run deliberately merges the two, because for a scanner
 	// they are one stream of findings; RunQuiet's callers parse Output as

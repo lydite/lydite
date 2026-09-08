@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"lydite/lydite/internal/finding"
 )
 
 // Verdict is a whole run's answer, and the only thing that decides the exit
@@ -32,9 +34,10 @@ func (e ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code)
 
 // Report accumulates one run's rows and renders them, in either grammar.
 type Report struct {
-	command string
-	rows    []Row
-	started time.Time
+	command  string
+	rows     []Row
+	findings []finding.Finding
+	started  time.Time
 }
 
 // NewReport starts a report, and the clock — the verdict line carries the
@@ -49,6 +52,21 @@ func (r *Report) Add(row Row) { r.rows = append(r.rows, row) }
 
 // Rows returns what has been added so far.
 func (r *Report) Rows() []Row { return r.rows }
+
+// AddFindings appends located claims a gate made.
+//
+// They sit beside the rows rather than on one, because a finding carries its
+// own gate and component and so needs no row to be understood, and because a
+// row is what the terminal renders while a finding is what a consumer anchors
+// to. A gate that emits findings renders its row's Detail from them, so the
+// prose and the data are one derivation rather than two free to disagree.
+//
+// Findings never vote. The rows hold the verdict, and a gate that already
+// failed a row would otherwise be counted twice.
+func (r *Report) AddFindings(f ...finding.Finding) { r.findings = append(r.findings, f...) }
+
+// Findings returns every located claim added so far.
+func (r *Report) Findings() []finding.Finding { return r.findings }
 
 // Command names the run. It is what the document is keyed by on disk, so a
 // caller saving one does not have to restate a name the report already holds
@@ -150,6 +168,10 @@ type jsonReport struct {
 	Exit       int       `json:"exit"`
 	DurationMS int64     `json:"duration_ms"`
 	Rows       []jsonRow `json:"rows"`
+	// Findings are the located claims this run made, keyed to nothing in
+	// Rows. A consumer anchoring one to a line reads these; a human reads the
+	// rows, which say the same thing in prose.
+	Findings []finding.Finding `json:"findings,omitempty"`
 }
 
 // Document is a report read back — the published shape of WriteJSON, and the
@@ -166,6 +188,7 @@ type Document struct {
 	Exit       int
 	DurationMS int64
 	Rows       []Row
+	Findings   []finding.Finding
 }
 
 // ReadDocument decodes one report document.
@@ -197,6 +220,7 @@ func ReadDocument(r io.Reader) (Document, error) {
 		Exit:       doc.Exit,
 		DurationMS: doc.DurationMS,
 		Rows:       rows,
+		Findings:   doc.Findings,
 	}, nil
 }
 
@@ -218,6 +242,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		Exit:       r.ExitCode(),
 		DurationMS: time.Since(r.started).Milliseconds(),
 		Rows:       rows,
+		Findings:   r.findings,
 	})
 }
 

@@ -269,7 +269,7 @@ func TestDisabledLanguageProducesNoUnitsAndNoRows(t *testing.T) {
 // directories are not, and a scan row and a test row about one component have
 // to carry the same token.
 func TestLabelledNamesTheComponent(t *testing.T) {
-	got := labelled([]executil.Result{{Name: "gosec"}, {Name: "govulncheck"}}, "api")
+	got := labelled([]executil.Result{{Name: "gosec"}, {Name: "govulncheck"}}, "api", "services/api")
 	if len(got) != 2 || got[0].Name != "gosec(api)" || got[1].Name != "govulncheck(api)" {
 		t.Fatalf("labelled = %+v, want each result named for the component", got)
 	}
