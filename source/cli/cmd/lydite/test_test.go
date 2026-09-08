@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/toolchain"
@@ -365,14 +367,30 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	}
 }
 
-// A Go component has nothing to install, so nothing runs ahead of its suite.
-func TestAGoComponentHasNoPreparationStep(t *testing.T) {
+// A Go component's preparation is read off the invocation, not off the variant
+// that named it, so the plain suite mutation runs once per mutant installs
+// nothing while the instrumented one fetches the wrapper it goes through.
+//
+// The same rule cargo-llvm-cov's install follows, and for the same reason: a
+// second list of which variants need what is right until a variant changes and
+// only one of the two is updated.
+func TestAGoComponentPreparesOnlyWhatItsInvocationRuns(t *testing.T) {
 	r, ok := runner.Lookup(runner.GoTest)
 	if !ok {
 		t.Fatal("no go-test runner")
 	}
-	if r.Prepare != nil {
-		t.Error("go-test declares a preparation step it does not need")
+	if r.Prepare == nil {
+		t.Fatal("go-test declares no preparation step, so its instrumented suite runs a wrapper nothing installed")
+	}
+	plain, ok := r.Build(runner.Plain, nil)
+	if !ok {
+		t.Fatal("go-test builds no plain variant")
+	}
+	// `go` is on PATH or the component could not have been built at all, so
+	// the plain variant must prepare nothing — an install here is one mutation
+	// would pay for before every mutant.
+	if err := r.Prepare(context.Background(), plain, t.TempDir(), "", executil.Env{}, io.Discard); err != nil {
+		t.Errorf("the plain variant ran a preparation step: %v", err)
 	}
 }
 
@@ -1103,5 +1121,50 @@ func TestAComponentCannotCancelTheResolvedToolchain(t *testing.T) {
 	}
 	if last != "local" {
 		t.Fatalf("GOTOOLCHAIN = %q, want lydite's resolved value to win", last)
+	}
+}
+
+// A report that was asked for and did not arrive says why. A component
+// contributing no test counts is indistinguishable, in a history, from one
+// that ran no tests — and the commonest cause is a repository whose own runner
+// configuration sent the report somewhere lydite does not look, which is a
+// thing its author can fix once they are told.
+func TestWithTestCountsSaysWhyAReportIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "empty.xml", `<?xml version="1.0"?><testsuites tests="0"></testsuites>`)
+	write(t, dir, "real.xml", `<testsuites><testsuite><testcase name="a"/><testcase name="b"><failure/></testcase></testsuite></testsuites>`)
+
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   *junit.Counts
+		why    string
+	}{
+		// Silent, not a reason: nothing was expected, so nothing is missing,
+		// and a line per such component on every run is how a diagnostic
+		// teaches its reader to skim past it.
+		{"a runner that writes no report", "", nil, ""},
+		{"a report that was never written", "absent.xml", nil, "the test report was not written"},
+		// Nought tests is a runner that collected nothing, not a suite that
+		// passed everything.
+		{"a report holding no test", "empty.xml", nil, "the test report holds no test"},
+		{"a report with tests", "real.xml", &junit.Counts{Total: 2, Failed: 1}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := measurement{Name: "svc"}
+			withTestCounts(&m, dir, runner.Invocation{JUnitReport: tc.report})
+			if tc.want == nil && m.Tests != nil {
+				t.Fatalf("Tests = %+v, want none", m.Tests)
+			}
+			if tc.want != nil && (m.Tests == nil || *m.Tests != *tc.want) {
+				t.Fatalf("Tests = %+v, want %+v", m.Tests, tc.want)
+			}
+			if tc.why == "" && m.TestsWhy != "" {
+				t.Errorf("TestsWhy = %q, want nothing to report", m.TestsWhy)
+			}
+			if tc.why != "" && !strings.Contains(m.TestsWhy, tc.why) {
+				t.Errorf("TestsWhy = %q, want it to say %q", m.TestsWhy, tc.why)
+			}
+		})
 	}
 }

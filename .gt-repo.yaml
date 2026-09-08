@@ -84,6 +84,27 @@ dependabot:
         dependency_type: all
       - dependency_name: golang.org/x/vuln
         dependency_type: all
+  - ecosystem: gomod
+    directory: /source/cli/internal/runner/gotestsum-pin
+    note: |
+      gotestsum (internal/runner). A Go component's instrumented suite runs
+      through it so that suite writes a JUnit report, which is where the
+      quality-history ledger's test counts come from — `go test` writes no
+      report of its own.
+
+      Its own module rather than an entry in go-pin, because a pin is
+      colocated with the package that uses it and because the two are
+      installed under different rules: go-pin's tools are keyed by the Go
+      toolchain that will build them, and this one is not.
+
+      A bump must be mirrored into internal/runner/pins.go's constant, for the
+      reason go-pin's must be mirrored into golang.go's, and by the same rule
+      in internal/pins. The allow entry is load-bearing for the same reason
+      too: this module has no .go files, so `go mod tidy` marks gotestsum
+      itself `// indirect` and Dependabot's default would never see it.
+    allow:
+      - dependency_name: gotest.tools/gotestsum
+        dependency_type: all
   - ecosystem: pip
     directory: /source/cli/internal/semgrep
     note: |

@@ -41,10 +41,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/ledger"
 )
 
 // BranchName is the dedicated branch coverage baselines live on.
@@ -140,6 +143,109 @@ func HeadSHA(ctx context.Context, dir string) (string, error) {
 		return "", fmt.Errorf("git rev-parse HEAD: %w", r.Err)
 	}
 	return strings.TrimSpace(r.Output), nil
+}
+
+// Commit is what the quality-history ledger records about a commit, as git
+// states it: the commit itself, the first parent that makes the history a
+// chain, the tree that joins it to the baseline recorded for the same content,
+// and when it happened.
+type Commit struct {
+	SHA    string
+	Parent string
+	Tree   string
+	At     time.Time
+}
+
+// DescribeCommit reads one commit's identity out of git.
+//
+// The committer date and never the clock at recording time. It is the date of
+// the thing being recorded, it is the same on a re-run hours later, and it is
+// what makes a record's partition a function of the record rather than of when
+// somebody got round to writing it.
+//
+// The first parent alone, because that is the chain a branch's history is:
+// a merge commit's second parent is the branch that was merged, and following
+// it would make the line double back through work that was already counted.
+func DescribeCommit(ctx context.Context, dir, rev string) (Commit, error) {
+	r := executil.RunQuiet(ctx, dir, "git", "show", "-s", "--format=%H%n%P%n%T%n%cI", rev)
+	if !r.Ok() {
+		return Commit{}, fmt.Errorf("git show %s: %w", rev, r.Err)
+	}
+	lines := strings.Split(strings.TrimSpace(r.Output), "\n")
+	if len(lines) < 4 {
+		return Commit{}, fmt.Errorf("git show %s: %q is not a commit description", rev, r.Output)
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(lines[3]))
+	if err != nil {
+		return Commit{}, fmt.Errorf("git show %s: reading the commit date: %w", rev, err)
+	}
+	c := Commit{SHA: strings.TrimSpace(lines[0]), Tree: strings.TrimSpace(lines[2]), At: at.UTC()}
+	// A root commit has no parent, which is not an error: it is the first
+	// record a repository can ever have, and nothing precedes it to be a gap.
+	if parents := strings.Fields(lines[1]); len(parents) > 0 {
+		c.Parent = parents[0]
+	}
+	return c, nil
+}
+
+// BranchFlag names the flag a caller states the recording's branch with, so an
+// answer that could not be reached can name the fix.
+const BranchFlag = "--branch"
+
+// Branch is the branch a recording is filed under: the caller's own statement
+// first, then what the checkout says, and empty when neither answers.
+//
+// Explicit before discovered, the ladder BaseBranch already follows. A
+// detached HEAD is the normal shape of a CI checkout — one pinned to a SHA,
+// one that has moved to a base commit to measure it — and discovery answers
+// nothing there. The caller does know: it is the job that decided which ref to
+// build.
+//
+// Empty and never a guess. History is per branch, so a record filed under a
+// branch this checkout is not on is worse than no record: it puts one line's
+// points on another line, and nothing downstream can tell.
+func Branch(ctx context.Context, dir, override string) string {
+	if override != "" {
+		return override
+	}
+	return CurrentBranch(ctx, dir)
+}
+
+// CurrentBranch is the branch that is checked out, or empty on a detached
+// HEAD.
+func CurrentBranch(ctx context.Context, dir string) string {
+	r := executil.RunQuiet(ctx, dir, "git", "symbolic-ref", "--short", "HEAD")
+	if !r.Ok() {
+		return ""
+	}
+	return strings.TrimSpace(r.Output)
+}
+
+// CommitsBetween counts the commits strictly between two commits along the
+// first-parent chain, and reports false when from is not an ancestor of to.
+//
+// False is the honest answer to a force-push, an unrelated history, or a
+// shallow checkout that cannot see back that far, and it is what keeps a gap
+// record from claiming a width it cannot establish.
+func CommitsBetween(ctx context.Context, dir, from, to string) (int, bool) {
+	if from == "" || to == "" {
+		return 0, false
+	}
+	if !executil.RunQuiet(ctx, dir, "git", "merge-base", "--is-ancestor", from, to).Ok() {
+		return 0, false
+	}
+	r := executil.RunQuiet(ctx, dir, "git", "rev-list", "--count", "--first-parent", from+".."+to)
+	if !r.Ok() {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(r.Output))
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	// rev-list counts the range exclusive of `from` and inclusive of `to`, so
+	// the commits that are missing are the ones between: everything it counted
+	// but the record being written now.
+	return n - 1, true
 }
 
 // BaseBranchFlag names the flag every command that resolves a merge-base
@@ -477,8 +583,37 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 	return report, nil
 }
 
-// WriteBaseline caches report for sha on the lydite branch, via a
-// throwaway worktree so the caller's own working tree/branch is untouched.
+// Records is asked, once per push attempt, what quality history to append.
+//
+// A function and not a slice, because the answer depends on the branch as
+// FETCHED by that attempt. Whether a record is a break in the history is
+// decided by what is already on the branch, and a retry fetches a branch a
+// concurrent run may have advanced — so an answer computed once, ahead of the
+// loop, could have a retry declare a gap that the intervening run had just
+// filled. It is handed the staging worktree, which is where the history it
+// must read is checked out.
+//
+// nil means this recording appends no history at all, which is different from
+// a function that returns no records: the first is a caller with nothing to
+// say, the second is a caller whose records were all already there.
+type Records func(worktree string) ([]ledger.Record, error)
+
+// Write lands one recording on the state branch: the baselines for a tree, and
+// the quality-history records for the commit that produced them, in one commit.
+//
+// One writer and one commit, over two policies that are otherwise nothing
+// alike. A baseline is a cache — regenerable, overwritable, and a write that
+// never lands costs a slower run. A ledger record is not recomputable at all,
+// so it is appended and never rewritten. What they share is the branch, the
+// job that holds a token able to push it, and every part of getting a write
+// onto a busy shared branch: the fetch, the staging worktree, the
+// non-fast-forward retry. A second writer would be a second copy of all of
+// that, and the copy that drifts is the one nobody is looking at.
+//
+// Landing them together is also what stops a tree's state half-happening: a
+// baseline recorded with no record beside it is a hole in the history that
+// lydite's own write path invented, which the next append would then have to
+// explain as a gap.
 //
 // The branch is shared and busy — every CI run on the repo may push to it —
 // so a non-fast-forward rejection is a routine event, not an edge case: the
@@ -491,36 +626,25 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 // that's fatal, but it must never be reported as recorded (wardnet's main
 // run printed "recorded coverage baseline" while the push had been rejected,
 // and its PRs gated against nothing).
-func WriteBaseline(ctx context.Context, dir, sha string, snap Snapshot) error {
-	// One commit carrying every metric's document, never one push per metric.
-	// The two describe the same tree and are landed by the same job, so
-	// separate pushes would double the retry loop and leave a window where the
-	// branch holds one half of a measurement — and a second writer is a second
-	// place a baseline can reach the branch, which is the invariant
-	// `lydite test record` rests on.
-	//
-	// A metric with nothing to record writes no document at all. An empty
-	// object is a miss to every reader anyway, so writing one would add a file
-	// per tree saying nothing — and for a repository whose components lydite
-	// computes no CRAP for, one on every recording forever.
-	files := map[string][]byte{}
-	if err := stage(files, StatePath(sha), snap.Coverage); err != nil {
-		return err
-	}
-	if err := stage(files, CRAPStatePath(sha), snap.CRAP); err != nil {
-		return err
-	}
-	if len(files) == 0 {
-		return nil
+//
+// It returns the records that actually landed, which is not the same as the
+// ones the caller offered: a record already on the branch is not appended
+// again, and a caller that reported an append for it would claim a data point
+// that this run did not add.
+func Write(ctx context.Context, dir, sha string, snap Snapshot, records Records) ([]ledger.Record, error) {
+	if !snap.Recorded() && records == nil {
+		return nil, nil
 	}
 	const attempts = 3
 	var lastErr error
 	for range attempts {
-		if lastErr = pushBaseline(ctx, dir, sha, files); lastErr == nil {
-			return nil
+		landed, err := pushState(ctx, dir, sha, snap, records)
+		if err == nil {
+			return landed, nil
 		}
+		lastErr = err
 	}
-	return fmt.Errorf("pushing baseline for %s to %s (%d attempts): %w", sha, BranchName, attempts, lastErr)
+	return nil, fmt.Errorf("pushing the recording for %s to %s (%d attempts): %w", sha, BranchName, attempts, lastErr)
 }
 
 // stage adds one metric's document to what the push will write, and adds
@@ -537,12 +661,20 @@ func stage[M ~map[string]E, E any](files map[string][]byte, path string, report 
 	return nil
 }
 
-// pushBaseline is one fetch → stage → commit → push attempt, over every
-// document the snapshot holds.
-func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte) error {
+// pushState is one fetch → stage → commit → push attempt, over every document
+// and every record the recording holds.
+//
+// Staging happens inside the attempt rather than being computed once ahead of
+// the loop, and that is what an append needs. A baseline document is the same
+// bytes whatever the branch already holds, so it could be built once; a record
+// is appended to the partition on the branch AS FETCHED, and a retry fetches a
+// branch a concurrent run may have advanced. Building the appended file once
+// would write the retry against the first attempt's view and silently drop
+// whatever landed in between.
+func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Records) ([]ledger.Record, error) {
 	tmp, err := os.MkdirTemp("", "lydite-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	defer func() { _ = executil.RunQuiet(ctx, dir, "git", "worktree", "remove", "--force", tmp) }()
@@ -551,21 +683,27 @@ func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte)
 	// dir), never the shared BranchName itself: git refuses to have the same
 	// branch checked out in two worktrees at once, and this repo may well
 	// have several worktrees already (lydite's own gt bare-repo layout, or
-	// concurrent CI jobs sharing a checkout) — two concurrent WriteBaseline
-	// calls must not race on a shared local branch name. The remote branch
-	// is still named BranchName; only the local staging name differs, pushed
-	// via refspec below.
+	// concurrent CI jobs sharing a checkout) — two concurrent Write calls
+	// must not race on a shared local branch name. The remote branch is still
+	// named BranchName; only the local staging name differs, pushed via
+	// refspec below.
 	staging := "lydite-staging-" + filepath.Base(tmp)
 
 	if err := stageBranch(ctx, dir, tmp, staging); err != nil {
-		return err
+		return nil, err
 	}
-	rels, err := writeDocuments(tmp, files)
+	rels, landed, err := stageRecording(tmp, sha, snap, records)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	// Nothing to write at all: every record was already on the branch and the
+	// snapshot held no document. Committing here would fail, and there is
+	// nothing this attempt could improve.
+	if len(rels) == 0 {
+		return landed, nil
 	}
 	if r := executil.RunQuiet(ctx, tmp, "git", append([]string{"add"}, rels...)...); !r.Ok() {
-		return fmt.Errorf("git add: %w", r.Err)
+		return nil, fmt.Errorf("git add: %w", r.Err)
 	}
 	// Nothing staged means the fetched branch already carries this exact
 	// content — a concurrent run recorded the same SHA's baseline first. The
@@ -574,19 +712,52 @@ func pushBaseline(ctx context.Context, dir, sha string, files map[string][]byte)
 	// poisoned `{}` entry being healed by a real report) stages a change and
 	// proceeds to overwrite as usual.
 	if executil.RunQuiet(ctx, tmp, "git", "diff", "--cached", "--quiet").Ok() {
-		return nil
+		return landed, nil
 	}
 	commitR := executil.RunQuietEnv(ctx, tmp, []string{
 		"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@users.noreply.github.com",
 		"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@users.noreply.github.com",
-	}, "git", "commit", "-m", "baseline for "+sha)
+	}, "git", "commit", "-m", "record for "+sha)
 	if !commitR.Ok() {
-		return fmt.Errorf("git commit: %w", commitR.Err)
+		return nil, fmt.Errorf("git commit: %w", commitR.Err)
 	}
 	if r := executil.RunQuiet(ctx, tmp, "git", "push", "origin", staging+":refs/heads/"+BranchName); !r.Ok() {
-		return fmt.Errorf("git push: %w", r.Err)
+		return nil, fmt.Errorf("git push: %w", r.Err)
 	}
-	return nil
+	return landed, nil
+}
+
+// stageRecording lays every baseline document and every new record out in the
+// worktree, and returns their paths.
+//
+// A metric with nothing to record writes no document at all. An empty object
+// is a miss to every reader anyway, so writing one would add a file per tree
+// saying nothing — and for a repository whose components lydite computes no
+// CRAP for, one on every recording forever.
+func stageRecording(tmp, sha string, snap Snapshot, records Records) ([]string, []ledger.Record, error) {
+	files := map[string][]byte{}
+	if err := stage(files, StatePath(sha), snap.Coverage); err != nil {
+		return nil, nil, err
+	}
+	if err := stage(files, CRAPStatePath(sha), snap.CRAP); err != nil {
+		return nil, nil, err
+	}
+	rels, err := writeDocuments(tmp, files)
+	if err != nil {
+		return nil, nil, err
+	}
+	if records == nil {
+		return rels, nil, nil
+	}
+	recs, err := records(tmp)
+	if err != nil {
+		return nil, nil, err
+	}
+	files2, landed, err := ledger.Append(tmp, recs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(rels, files2...), landed, nil
 }
 
 // stageBranch checks the state branch out into the throwaway worktree, or

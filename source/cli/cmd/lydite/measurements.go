@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/junit"
 )
 
 // measurementsName is the file a run writes what it measured to, inside the
@@ -57,6 +59,22 @@ type measurementsDoc struct {
 	// there is something. A document that simply omitted its components would
 	// be indistinguishable from one that measured a repository with none.
 	Reason string `json:"reason,omitempty"`
+	// Tests is what became of each component's suite, for the components this
+	// run ran.
+	//
+	// Beside Components rather than inside it, and the separation is
+	// load-bearing. A component whose suite FAILED has test counts and
+	// deliberately has no baseline entry: a report written by a run that
+	// stopped early is not a measurement of the tree. Carrying the counts
+	// inside Components would put that component in the map every
+	// completeness check reads, so a failing suite would satisfy
+	// missingFromRecord and land a baseline entry of nought covered lines —
+	// which every later change then gates against.
+	//
+	// It is also why these are not a baseline at all. They are recorded in
+	// the quality history, which asks what happened rather than what the tree
+	// measures, and nothing compares them against a previous value.
+	Tests map[string]junit.Counts `json:"tests,omitempty"`
 }
 
 // componentMeasurement is one component's contribution: what would be
@@ -197,6 +215,18 @@ func foldMeasurements(docs []measurementsDoc) (measurementsDoc, error) {
 		if doc.Reason != "" {
 			reasons = append(reasons, doc.Reason)
 		}
+		for name, counts := range doc.Tests {
+			if out.Tests == nil {
+				out.Tests = map[string]junit.Counts{}
+			}
+			// First wins, for the reason a measured entry beats a carried
+			// one: every declared component belongs to exactly one shard, so
+			// a second answer means two jobs ran the same work and the fold
+			// does not pretend to arbitrate between them.
+			if _, seen := out.Tests[name]; !seen {
+				out.Tests[name] = counts
+			}
+		}
 		for name, e := range doc.Components {
 			if have, ok := out.Components[name]; ok && (!have.Carried || e.Carried) {
 				continue
@@ -230,8 +260,8 @@ func (d measurementsDoc) snapshot() gitstate.Snapshot {
 // measurementsFrom builds the document a run hands on: what it would record,
 // what it actually measured, which entries it carried forward rather than
 // measured, and what each was gated against.
-func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, scores gitstate.CRAPBaseline, baseline gitstate.Baseline, gated bool, parts []patchPart) measurementsDoc {
-	doc := measurementsDoc{Tree: tree, Gated: gated, Components: make(map[string]componentMeasurement, len(record))}
+func measurementsFrom(tree string, record, measured gitstate.Baseline, carried map[string]bool, scores gitstate.CRAPBaseline, baseline gitstate.Baseline, gated bool, parts []patchPart, tests map[string]junit.Counts) measurementsDoc {
+	doc := measurementsDoc{Tree: tree, Gated: gated, Components: make(map[string]componentMeasurement, len(record)), Tests: tests}
 	patch := make(map[string]patchCount, len(parts))
 	for _, p := range parts {
 		patch[p.Name] = patchCount{Hit: p.Hit, Total: p.Total}
@@ -285,4 +315,34 @@ func (e componentMeasurement) patchPartOf(name string) (patchPart, bool) {
 		base = e.Base.LineCount
 	}
 	return patchPart{Name: name, Hit: e.Patch.Hit, Total: e.Patch.Total, Base: base}, true
+}
+
+// testCounts is what each component's suite reported, for the components a run
+// actually ran one for.
+//
+// Every component in ms, whether or not it produced a measurement: a suite
+// that failed has counts and no measurement, which is exactly the pair this
+// map exists to carry past a document keyed on what would be recorded.
+func testCounts(w io.Writer, ms []measurement) map[string]junit.Counts {
+	var out map[string]junit.Counts
+	for _, m := range ms {
+		if m.Tests == nil {
+			// A report that was asked for and did not arrive is named, never
+			// skipped in silence: a component contributing no counts is
+			// indistinguishable in a history from one that ran no tests, and
+			// the commonest cause is a repository whose own runner
+			// configuration sent the report somewhere lydite does not look.
+			// Stderr, because stdout carries the report and, under --json, a
+			// document a warning would make unparseable.
+			if m.TestsWhy != "" {
+				_, _ = fmt.Fprintf(w, "warning: %s contributed no test counts: %s\n", m.Name, m.TestsWhy)
+			}
+			continue
+		}
+		if out == nil {
+			out = map[string]junit.Counts{}
+		}
+		out[m.Name] = *m.Tests
+	}
+	return out
 }

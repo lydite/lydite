@@ -72,6 +72,11 @@ source/cli/internal/annotation/   # the exclusion declaration: the [lydite:exclu
                                   #   token for mutation, crap and coverage, and how a comment
                                   #   carrying one is read. A leaf, so referral can link it
 source/cli/internal/gitstate/     # the base branch, and lydite branch read/write (see Coverage below)
+source/cli/internal/ledger/       # the quality history: append-only NDJSON and the daily
+                                  #   projection the dashboard reads (see Quality history below)
+source/cli/internal/junit/        # the test counts every runner's JUnit report holds
+source/cli/internal/gotool/       # the version-keyed `go install` internal/golang and
+                                  #   internal/runner both provision through
 source/cli/internal/executil/     # shared external-command runner every scanner package uses
 source/cli/.golangci.yml          # lint config (v2 schema)
 source/web/                       # the React dashboard (see ADR 0021 for the source/ root)
@@ -122,6 +127,12 @@ and `source/cloud-services/pr-relay` posts it under lydite's own App with no cre
 CI job (see Surface below). The relay is written and tested and **not yet deployed**: until
 `vars.LYDITE_RELAY_URL` is set, every comment goes through the `github-token` fallback, which is
 a supported path rather than a temporary one.
+
+`lydite test record` also appends this commit's scalars to the quality-history ledger on the
+same branch, in the same commit — coverage, CRAP and test counts per component, with an
+explicit gap record whenever the commit before it was never recorded (see Quality history
+below). Mutation and finding counts are not yet collected, for the reasons ADR 0029 gives.
+The dashboard that reads it is a later slice; `source/web/` is still empty.
 
 `lydite coverage` is **removed**, and so are `coverage.source`, `coverage.{go,rust}.report`,
 `coverage.rust.lcov`, `--source`, `--tests`, `--go-report`, `--rust-report` and
@@ -309,8 +320,9 @@ spliced into an arbitrary command**: `go-test` appends `-coverprofile`, while `c
 replaces the runner outright with `cargo llvm-cov`. That is why a component either names a runner
 or supplies a raw `command:`, which opts out of the derived variants entirely.
 
-- `go-test` — plain `go test`; instrumented adds `-coverprofile` **and `-coverpkg=./...`**;
-  build-only is `go build`. Without `-coverpkg` Go instruments only the package under test, so code
+- `go-test` — plain `go test`; instrumented runs through the pinned **gotestsum**, which writes
+  the JUnit report, and adds `-coverprofile` **and `-coverpkg=./...`** to the `go test` beyond
+  the `--`; build-only is `go build`. Without `-coverpkg` Go instruments only the package under test, so code
   exercised solely through another package's tests reads as uncovered and a pull request whose new
   code is fully exercised from its caller fails the patch gate on correct work
   ([#36](https://github.com/lydite/lydite/issues/36)).
@@ -445,9 +457,22 @@ running `lydite test` against every component of
 `node_modules`, no services started, nothing prepared by the workflow, because a step doing either
 would hide the case a consumer actually hits.
 
-Where a runner emits JUnit, the invocation names where it lands: the quality-history ledger
-([#26](https://github.com/lydite/lydite/issues/26)) records test counts, which no coverage report
-carries.
+**Every runner that can be made to write JUnit is made to**, on the instrumented variant. The
+quality-history ledger records test counts, which no coverage report carries and which nothing
+can recompute once a commit has been squashed away — and a path named without asking any runner
+to write to it is a claim about a file that does not exist. `go-test` and `vitest` write to
+`.lydite-reports/junit.xml`; cargo-nextest writes where the profile it runs under puts it,
+`target/nextest/default/junit.xml`, because the path is a profile setting rather than a flag.
+`go-test` runs through the pinned **gotestsum**; `vitest` names
+`--reporter=default --reporter=junit` (junit alone *replaces* the reporter set, and the
+component's log would then be empty, so a failing row would have nothing to show); and
+`cargo-nextest` gets a `--tool-config-file`, which turns its junit profile on *below* the
+repository's own configuration in priority — the opposite of the `--config-path` stance
+`internal/typescript` takes with Biome, because a linter's rule set is lydite's verdict to fix
+and a repository's test configuration is the repository's. `jest` bundles no JUnit reporter and
+lydite will not install `jest-junit` into a workspace it is about to gate, for the reason it
+installs no coverage provider — so a jest component contributes no counts and says so. The plain
+variant asks for none of it: that is what mutation runs once per mutant.
 
 
 ### Output: captured, not streamed
@@ -1231,6 +1256,7 @@ Dependabot watches, colocated with the package that uses it:
 | @biomejs/biome | `internal/typescript/biome-pin/package.json` + lock | the manifest itself (`npm ci`) |
 | cargo-audit | `internal/rust/cargo-audit-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | cargo-nextest | `internal/runner/cargo-nextest-pin/Cargo.toml` | parsed by `internal/runner/pins.go` |
+| gotestsum | `internal/runner/gotestsum-pin/go.mod` | **a Go constant** in `internal/runner/pins.go` — see below |
 | cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
 | gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |
@@ -1240,6 +1266,13 @@ by a **hash of that lockfile**. The old key was a hand-maintained string of conc
 numbers, so adding a dependency meant remembering to extend the key, and forgetting meant reusing
 a cache directory that predated it — precisely how "every .ts file is silently skipped" would have
 come back when the TypeScript parser was added. A lockfile hash cannot be forgotten.
+
+**Go tool pins are the exception, deliberately.** gotestsum's version is a constant in
+`internal/runner/pins.go` for exactly the reason gosec's and govulncheck's are constants in
+`internal/golang`, and its manifest is a module of its own rather than an entry in `go-pin`
+because a pin is colocated with the package that uses it — and because the two are installed
+under different rules: `go-pin`'s tools analyse source, so they are keyed by the Go toolchain
+that will build them, and a wrapper that reads another command's output is not.
 
 **Go is the one exception, deliberately.** `gosecPkg`/`govulncheckPkg` are const expressions that
 concatenate the version at compile time, and `go:embed` cannot read files inside a nested module,
@@ -1503,7 +1536,8 @@ that can push anywhere.
 base tree it measured in a throwaway worktree. It reads the baseline, gates, and leaves what it
 would record in `.lydite-reports/measurements.json`. `lydite test record --reports <dir>…` lands that,
 executing no suite, no `setup`/`teardown` command and no compose service. One invariant, checkable
-by grepping for the single `gitstate.WriteBaseline` call site.
+by grepping for the single `gitstate.Write` call site — the one place either a baseline or a
+quality-history record reaches the branch.
 
 **That narrows the tension and does not close it**, which is worth stating exactly because
 [ADR 0022](docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) once claimed more than it
@@ -1864,6 +1898,128 @@ actually fixes a stacked pull request is a caller passing the branch it targets,
 `lydite/actions` does: every job it runs takes `--base-branch` from `github.base_ref`, on
 `pull_request` events and never on a push.
 
+## Quality history: the ledger and the projection
+
+A baseline is a **cache** and quality history is a **ledger**, and the terms exist to keep
+the difference drawn. A baseline is regenerable by re-running the tool over the same tree,
+so a write that never lands costs a slower run and no information, and a better measurement
+of one tree overwrites the last. A ledger cannot be recomputed at all — the pins that
+produced a number may have moved since, and after a squash merge the commit it describes no
+longer exists — so a record is appended, never edited and never deleted. See
+[ADR 0009](docs/adr/0009-quality-history-storage-and-access.md) for the design and
+[ADR 0029](docs/adr/0029-the-ledger-appends-what-cannot-be-recomputed.md) for what building
+it decided.
+
+```
+history/v1/2026-09.ndjson          the month's records, one JSON object per line
+history/v1/2026-09.1.ndjson        the same month, once the first part is full
+history/v1/daily/main/2026.ndjson  the downsampled projection, per branch
+```
+
+**One writer and one commit, over two policies.** `gitstate.Write` takes a snapshot and the
+records together, so the single call site stays the one place anything reaches the branch.
+A second *writer* is what that invariant forbids; a second *commit* is not the same thing
+and was still rejected, because it doubles the retry loop against a busy shared branch and
+leaves a window where the branch holds a baseline with no record beside it — a hole in the
+history lydite's own write path invented.
+
+**Staging happens inside each push attempt, not once ahead of the retry loop.** A baseline
+document is the same bytes whatever the branch holds; a record is appended to the partition
+on the branch *as fetched*, and a retry fetches a branch a concurrent run may have advanced.
+`gitstate.Records` is a function for that reason, and it is handed the staging worktree.
+
+**The two are refused at different times, and that is the whole of the distinction in
+practice.** A baseline is refused whenever it would be partial, since any non-empty entry
+reads as a cache hit and a partial one gates every later change on nothing. A record is
+appended whether or not what was measured adds up to a baseline. **A commit whose suite went
+red establishes no baseline by construction and carries the counts a history most wants** —
+how many tests ran and how many failed — so `lydite test record` appends it and reports
+`record` as unmeasured in the same breath. The rule that only a passing component
+contributes a measurement is about a measurement *of the tree*; a JUnit report says what
+happened, which is exactly what a ledger records.
+
+**A gap is written by the next successful append, never by the failed one.** The obvious
+mechanism cannot work: the append that would consume a sequence number is the append that
+failed, so nothing wrote and nothing was consumed. Two mechanisms replace it, and the split
+is the point:
+
+- **Every record names its commit's first parent**, so a reader that finds a record whose
+  parent is not the previous record's commit has found the break using nothing but the file
+  it is already reading. Nothing the failing run did can damage this — it is written by the
+  *next* run, out of git history.
+- **An explicit `gap` record** says how many commits lie between the last recorded one and
+  this one along the first-parent chain. That is the half a reader cannot work out alone,
+  and it needs the repository, which the recording job has.
+
+A width that cannot be established — a force-push, an unrelated history, a checkout too
+shallow — is recorded as unknown rather than guessed. The first record on a branch is never
+a gap: nothing precedes it, and claiming one would put a break at the start of every line.
+
+**An entry is keyed by commit; a baseline is keyed by tree.** Different keys for different
+reasons, and copying one onto the other would be a reflex. A baseline answers "what was
+measured for this content", which is why a pull request and the commit it becomes
+deliberately share one; history is a sequence of events, and two commits carrying one tree
+are two points on the line. A record carries the commit, its first parent, the branch and
+the tree — the tree so it can be joined to the baseline for the same content.
+
+**The branch is stated before it is discovered.** `lydite test record --branch <name>` is the
+caller's own statement, and a checkout that names no branch is the normal shape of a CI job —
+one pinned to a SHA, one that moved to a base commit to measure it. Discovery
+(`git symbolic-ref`) answers nothing there, and a guess is worse than nothing: a record filed
+under a branch this checkout is not on puts one line's points on another line, and nothing
+downstream can tell. So both workflows pass it, the same ladder `--base-branch` follows, and a
+run that can name no branch appends nothing and says which flag fills the gap.
+
+**The timestamp is the commit's own committer date, never the clock at append time.** The
+partition is named from it, so a re-recording lands where the first attempt would have put
+it and the deduplication finds it there; and a CI job that ran hours late does not look like
+a delayed commit. A record's identity is its commit, its **branch** and its kind, so a
+retried push, a re-run workflow and a second invocation leave one line — and one commit
+recorded on two branches leaves two, since it is a point on each of them and a release
+branch cut from the default one would otherwise start its history wherever it next
+diverged.
+
+**Scalars are per component, and the repository figures are sums nobody stores.** The
+component is the unit every gate reports at, and a repository-wide number cannot say which
+component moved. Every metric is a pointer, so absent and zero are different answers: a
+component with no function above the CRAP threshold records zero and one lydite scores none
+of records nothing.
+
+**A ledger gains a field the way nothing else here does.** A baseline directory must be
+versioned on a gained field, because an entry lacking it would still read as a cache hit —
+the trap `crap/v1` is a separate directory to avoid. Nothing here is compared against a
+stored record, so a field added later costs a series that starts on the day it was added,
+which is what an append-only ledger is *for*.
+
+**A month grows parts; the granularity does not change.** Every file must be independently
+fetchable under the GitHub Contents API's 1 MB cap, because the dashboard reads this branch
+directly with the viewer's own credentials. A busier repository rolls to `2026-09.1.ndjson`,
+*before* the write that would cross the line rather than after it, so no part is ever over
+the cap even momentarily. The projection is one file **per branch per calendar year**,
+holding one row per day: the last record of that day, plus how many records and gaps the day
+held. Per branch because a day's row carries a scalar per component and several branches
+recording into one file would walk towards the same cap — and because a chart reads exactly
+the branch it is drawing. Per year because that is what makes the bound hold by construction
+rather than by expectation. The last record and not a mean, which is a number no commit ever
+had. There is no index file: the directory listing is the index, and an index is state that
+can disagree with the files it names.
+
+**Coverage, CRAP and test counts are in; mutation and finding counts are not, for different
+reasons.** Mutation is structural: mutants come only from lines the change touched, and on
+the default branch HEAD is its own merge-base, so the one job holding a token that can push
+mutates nothing. Its results exist only on pull requests, in jobs deliberately holding no
+writable token
+([#112](https://github.com/lydite/lydite/issues/112), and [#49](https://github.com/lydite/lydite/issues/49)
+behind it). Finding counts are a slice of their
+own: `lydite scan` streams each tool's own output because for a scanner the findings *are*
+the result, and a count means every scanner emitting a structured report lydite renders the
+findings from — five parsers and a change to what reaches a terminal, which is the same work
+per-finding fingerprints need ([#111](https://github.com/lydite/lydite/issues/111)).
+
+**The dashboard is not this slice.** `source/web/` is still empty, the hosted read path is
+[ADR 0009](docs/adr/0009-quality-history-storage-and-access.md)'s later work, and per-finding
+fingerprints are additive.
+
 ## Complexity: the CRAP index
 
 Coverage measures execution and nothing else — a test that calls a function and asserts nothing
@@ -2003,7 +2159,7 @@ of component name to `{above, worst, producer}`.
   failing every repository on the day it upgrades. That is what the delta exists to prevent,
   arriving through the mechanism meant to prevent it. Widening forces a `v5`, and a `v5` costs
   every consumer a full **coverage** cache miss for a **CRAP** feature.
-- **Separate documents, one writer.** `gitstate.WriteBaseline` stages every metric's document in
+- **Separate documents, one writer.** `gitstate.Write` stages every metric's document in
   one commit, so the single call site stays the only place a baseline reaches the branch and a
   tree's state cannot half-land.
 - **A CRAP miss does not measure the base tree.** Every repository has a coverage baseline and no
@@ -2058,7 +2214,7 @@ which on the default branch is every component.
 
 **Mutation has no baseline and writes nothing to the `lydite` branch.** There is no per-tree
 quantity to record and nothing to compare against last time; the gate is absolute the way
-`coverage.floor` is. `lydite test record` is untouched, and the single `gitstate.WriteBaseline`
+`coverage.floor` is. `lydite test record` is untouched, and the single `gitstate.Write`
 call site stays the one place a baseline is written.
 
 **Four outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run

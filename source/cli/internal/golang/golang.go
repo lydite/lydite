@@ -9,12 +9,9 @@ package golang
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gotool"
 )
 
 // Pinned so every invocation of lydite uses the exact same toolchain
@@ -70,11 +67,11 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 	return results
 }
 
-// ensure installs pkg via `go install` into a version-keyed lydite cache
-// directory (GOBIN), so a version bump gets a fresh install instead of
-// silently reusing a stale one, and returns the path to the installed binary.
+// ensure installs one of this package's scanners, keyed by the component's
+// resolved Go toolchain as well as by the tool's version.
 //
-// The key carries the component's resolved toolchain as well as the tool's
+// It exists for that key rather than for the install, which internal/gotool
+// does for every Go program lydite runs. The key carries the component's resolved toolchain as well as the tool's
 // version, because the toolchain is per component: a repository declaring `go
 // 1.24` in one module and `go 1.28` in another builds this tool twice, and a
 // single key would let whichever component ran first decide which build every
@@ -87,25 +84,5 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 // satisfies the declaration both set GOTOOLCHAIN=local, and what separates
 // them is the directory on PATH.
 func ensure(ctx context.Context, env []string, toolchainKey, name, version, pkg string) (string, error) {
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	binDir := filepath.Join(cacheDir, "lydite", "gobin-"+name+"-"+version+"-"+toolchainKey)
-	bin := filepath.Join(binDir, name)
-
-	if _, err := os.Stat(bin); err == nil {
-		return bin, nil
-	}
-	if err := os.MkdirAll(binDir, 0o750); err != nil {
-		return "", err
-	}
-	r := executil.RunEnv(ctx, "", append(append([]string{}, env...), "GOBIN="+binDir), "go", "install", pkg)
-	if !r.Ok() {
-		// The command's own output, not just its exit status: `exit status 1`
-		// is what a failing row would otherwise carry into --json, which is
-		// the document the pull-request comment renders.
-		return "", fmt.Errorf("installing %s: %w\n%s", pkg, r.Err, strings.TrimSpace(r.Output))
-	}
-	return bin, nil
+	return gotool.Ensure(ctx, env, name, version, pkg, toolchainKey)
 }

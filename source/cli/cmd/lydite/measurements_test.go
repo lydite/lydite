@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 )
 
@@ -426,7 +428,7 @@ func TestRecordingATreeAgainDoesNotLowerItsAnchoredEntry(t *testing.T) {
 		Producer:  measured.Producer,
 	}
 	tree := candidate.Tree
-	if err := gitstate.WriteBaseline(context.Background(), root, tree, gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": higher}}); err != nil {
+	if _, err := gitstate.Write(context.Background(), root, tree, gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": higher}}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -452,7 +454,7 @@ func TestMeasurementsStoreOnlyAComparableBaseline(t *testing.T) {
 		"same":  {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "go 1.26.5"},
 		"moved": {LineCount: coverage.LineCount{Covered: 2, Total: 2}, Producer: "vitest 3.2.7"},
 	}
-	doc := measurementsFrom("tree", record, record, nil, nil, baseline, true, nil)
+	doc := measurementsFrom("tree", record, record, nil, nil, baseline, true, nil, nil)
 	if doc.Components["same"].Base == nil {
 		t.Error("a baseline the same instrument produced was not stored, so the fold has nothing to compare against")
 	}
@@ -495,7 +497,7 @@ func TestTheRecordRowSaysHowMuchOfTheDeclarationItCovers(t *testing.T) {
 func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	record := gitstate.Baseline{"api": producing(90, 100, "go")}
 	measured := gitstate.Baseline{"api": producing(89, 100, "go")}
-	doc := measurementsFrom("tree", record, measured, nil, nil, nil, true, nil)
+	doc := measurementsFrom("tree", record, measured, nil, nil, nil, true, nil, nil)
 
 	e := doc.Components["api"]
 	if e.LineCount != (coverage.LineCount{Covered: 90, Total: 100}) {
@@ -509,7 +511,7 @@ func TestMeasurementsKeepWhatWasMeasuredBesideWhatIsRecorded(t *testing.T) {
 	}
 	// An entry that never dipped carries nothing extra: the two agree, and a
 	// second copy of one number is one that can disagree with the first.
-	plain := measurementsFrom("tree", record, record, nil, nil, nil, true, nil)
+	plain := measurementsFrom("tree", record, record, nil, nil, nil, true, nil, nil)
 	if plain.Components["api"].Unanchored != nil {
 		t.Error("an entry that was not anchored still carries a second copy of its counts")
 	}
@@ -602,4 +604,73 @@ func stateCommits(t *testing.T, dir string) int {
 		t.Fatalf("rev-list output %q: %v", r.Output, err)
 	}
 	return n
+}
+
+// A report that was asked for and did not arrive is named on stderr. A
+// component contributing no counts is indistinguishable, in a history, from
+// one that ran no tests — and the commonest cause is a repository whose own
+// runner configuration sent the report somewhere lydite does not look, which
+// is a thing its author can fix once they are told.
+func TestAMissingTestReportIsNamedOnStderr(t *testing.T) {
+	var errOut bytes.Buffer
+	ms := []measurement{
+		{Name: "api", Tests: &junit.Counts{Total: 12}},
+		{Name: "web", TestsWhy: "the test report was not written: no such file"},
+		// A runner that writes no report at all says nothing: nothing was
+		// expected, so nothing is missing, and a line per such component on
+		// every run is how a diagnostic teaches its reader to skim past it.
+		{Name: "docs"},
+	}
+	counts := testCounts(&errOut, ms)
+	if len(counts) != 1 || counts["api"].Total != 12 {
+		t.Errorf("testCounts = %+v, want only the component that reported", counts)
+	}
+	got := errOut.String()
+	if !strings.Contains(got, "web") || !strings.Contains(got, "not written") {
+		t.Errorf("stderr = %q, want it to name web and why", got)
+	}
+	if strings.Contains(got, "docs") {
+		t.Errorf("stderr = %q, want nothing about a runner that writes no report", got)
+	}
+}
+
+// Every declared component belongs to exactly one shard, so two documents
+// reporting test counts for one component mean two jobs ran the same work.
+// The fold keeps the first and does not pretend to arbitrate, the rule a
+// measured entry beating a carried one already follows.
+func TestFoldingKeepsOneShardsTestCountsPerComponent(t *testing.T) {
+	first := measurementsDoc{Tree: "t1", Tests: map[string]junit.Counts{
+		"api": {Total: 12, Failed: 1},
+	}}
+	second := measurementsDoc{Tree: "t1", Tests: map[string]junit.Counts{
+		"api": {Total: 99, Failed: 0},
+		"web": {Total: 7},
+	}}
+	got, err := foldMeasurements([]measurementsDoc{first, second})
+	if err != nil {
+		t.Fatalf("foldMeasurements: %v", err)
+	}
+	if got.Tests["api"] != (junit.Counts{Total: 12, Failed: 1}) {
+		t.Errorf("api = %+v, want the first shard's counts", got.Tests["api"])
+	}
+	// A component only one shard ran still contributes: the counts are a union
+	// across shards, not an intersection.
+	if got.Tests["web"] != (junit.Counts{Total: 7}) {
+		t.Errorf("web = %+v, want the one shard that ran it to contribute", got.Tests["web"])
+	}
+}
+
+// A fold of documents that carry no counts leaves none, rather than an empty
+// map that would render as a run in which every component reported nought
+// tests.
+func TestFoldingCarriesNoTestCountsWhenNoShardReported(t *testing.T) {
+	got, err := foldMeasurements([]measurementsDoc{
+		{Tree: "t1", Components: map[string]componentMeasurement{"api": {Entry: producing(5, 10, "go 1.26")}}},
+	})
+	if err != nil {
+		t.Fatalf("foldMeasurements: %v", err)
+	}
+	if got.Tests != nil {
+		t.Errorf("Tests = %+v, want nothing at all", got.Tests)
+	}
 }

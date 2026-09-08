@@ -22,6 +22,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
@@ -97,6 +98,27 @@ type measurement struct {
 	// establish a candidate only over a component it selected and failed to
 	// measure.
 	Unselected bool
+	// Tests is what became of the component's suite, from the JUnit report its
+	// runner wrote, and is nil when there is none.
+	//
+	// It is deliberately independent of Why: a suite that FAILED has test
+	// counts, and they are the counts a quality history most wants — the
+	// number of tests and how many of them went red is the whole of what a
+	// red build is. Coverage from that same run is refused, because a report
+	// written by a suite that stopped early describes an unfinished run; the
+	// test counts describe exactly what happened.
+	Tests *junit.Counts
+	// TestsWhy says why a report that was expected did not arrive, and is
+	// empty both when the counts are here and when this runner writes no
+	// report at all.
+	//
+	// Both, deliberately. A runner that writes none is not a component with
+	// something missing — nothing was expected, so there is nothing to tell
+	// its author, and a line per jest component on every run is how a
+	// diagnostic teaches its reader to skim past it. A report that was asked
+	// for and is unreadable, or holds no test, is a misconfiguration somebody
+	// can fix once they are told, which is why it is named on stderr.
+	TestsWhy string
 }
 
 // Measured reports whether this component produced a coverage measurement.
@@ -577,9 +599,14 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 //
 // A tree that will not resolve leaves it empty, which is the one case where
 // there is genuinely nothing to bind to.
-func reasonOnly(ctx context.Context, dir, prefix, reason string) (measurementsDoc, string) {
+//
+// It still carries the test counts, because a run in which every suite failed
+// is precisely the run that establishes no baseline and has the counts a
+// history most wants. Dropping them here would lose the numbers for every red
+// commit, which are the ones a trend line exists to show.
+func reasonOnly(ctx context.Context, w io.Writer, dir, prefix, reason string, ms []measurement) (measurementsDoc, string) {
 	tree, _ := gitstate.TreeSHA(ctx, dir, "HEAD")
-	return measurementsDoc{Tree: tree, Reason: reason}, prefix + " — " + reason
+	return measurementsDoc{Tree: tree, Reason: reason, Tests: testCounts(w, ms)}, prefix + " — " + reason
 }
 
 // candidateRow saves what this run would record and says so.
@@ -1564,7 +1591,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		}
 	}
 	if len(record) == 0 {
-		return reasonOnly(ctx, dir, "nothing to record", "no component produced a measurement")
+		return reasonOnly(ctx, cmd.ErrOrStderr(), dir, "nothing to record", "no component produced a measurement", ms)
 	}
 	scores := crapRecord(ms, record, carried, anchor.CRAP)
 	// Held before the anchoring, because the two are different quantities: the
@@ -1577,7 +1604,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so its coverage was not recorded: %v\n", err)
 		return measurementsDoc{Reason: "this tree could not be resolved"}, "not recorded — this tree could not be resolved"
 	}
-	doc := measurementsFrom(tree, record, measured, carried, scores, gatedAgainst.Coverage, gated, parts)
+	doc := measurementsFrom(tree, record, measured, carried, scores, gatedAgainst.Coverage, gated, parts, testCounts(cmd.ErrOrStderr(), ms))
 
 	// A run that could not measure a component it was supposed to has not
 	// established this tree's baseline, and recording a partial one is worse

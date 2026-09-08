@@ -27,6 +27,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
@@ -461,7 +462,16 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 		if rows[i].Status != ui.StatusPass {
 			// The row's own words, so the coverage row and the suite row give
 			// a reader the same account of one event rather than two.
-			measured[i] = unmeasuredComponent(plans[i].c, rows[i].Label+" did not pass: "+rows[i].Value)
+			replaced := unmeasuredComponent(plans[i].c, rows[i].Label+" did not pass: "+rows[i].Value)
+			// The test counts survive, and only they. The rule above is about
+			// a MEASUREMENT of the tree: a coverage report from a suite that
+			// stopped early describes an unfinished run, so nothing may be
+			// gated against it. A JUnit report is not a measurement of the
+			// tree at all — it says how many tests ran and how many went red,
+			// which is exactly what happened, and is the data point a quality
+			// history most wants from a commit whose build broke.
+			replaced.Tests, replaced.TestsWhy = measured[i].Tests, measured[i].TestsWhy
+			measured[i] = replaced
 		}
 	}
 
@@ -657,8 +667,11 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
 	// Prepared before the suite runs, so what is measured afterwards is what
 	// this run wrote.
-	if inv.CoverageReport != "" {
-		if err := clearReport(dir, inv.CoverageReport); err != nil {
+	for _, report := range []string{inv.CoverageReport, inv.JUnitReport} {
+		if report == "" {
+			continue
+		}
+		if err := clearReport(dir, report); err != nil {
 			return failure(label, log, err.Error(), "not runnable", ""), m
 		}
 	}
@@ -696,10 +709,51 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		// that did not finish describes the tests that got as far as running,
 		// and gating on it would let a broken suite record a baseline nothing
 		// can be compared against honestly.
-		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output),
-			unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
+		//
+		// The test counts are read anyway, and that is not the same
+		// concession. They are not a baseline and gate nothing; they are what
+		// the ledger records about this commit, and a commit whose suite went
+		// red is the one whose counts most want recording. A failure that
+		// wrote no report at all reports none, exactly as a pass would.
+		failed := unmeasuredComponent(c, "the suite failed, so its coverage report describes an unfinished run")
+		withTestCounts(&failed, dir, inv)
+		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output), failed
 	}
-	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, measure(ctx, root, c, inv, tc, instrument)
+	passed := measure(ctx, root, c, inv, tc, instrument)
+	withTestCounts(&passed, dir, inv)
+	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, passed
+}
+
+// withTestCounts reads the JUnit report the invocation asked for, and says why
+// there is none when there is not.
+//
+// A reason and never silence. A component contributing no test counts is
+// indistinguishable, in a history, from one that ran no tests — and the
+// commonest cause is a repository whose own runner configuration sent the
+// report somewhere lydite does not look, which is a thing its author can fix
+// once they are told.
+func withTestCounts(m *measurement, dir string, inv runner.Invocation) {
+	// Silent, and not a reason. A runner that writes no report is a property
+	// of the declaration rather than something its author left undone, and a
+	// line about it on every run is how a diagnostic earns a reader who skims
+	// past the ones that matter.
+	if inv.JUnitReport == "" {
+		return
+	}
+	counts, err := junit.ReadFile(filepath.Join(dir, filepath.FromSlash(inv.JUnitReport)))
+	if err != nil {
+		m.TestsWhy = "the test report was not written: " + err.Error()
+		return
+	}
+	if counts.Empty() {
+		// Nought tests is not a suite that passed everything. It is a runner
+		// that collected nothing — a filter that matched no test, a config
+		// that redirected the report — and recording it as a real zero would
+		// draw a line through a metric nobody measured.
+		m.TestsWhy = "the test report holds no test"
+		return
+	}
+	m.Tests = &counts
 }
 
 // clearReport makes the component's report path ready to be written to: its

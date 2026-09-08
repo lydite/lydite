@@ -35,11 +35,14 @@ package runner
 import (
 	"context"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gotool"
 	"lydite/lydite/internal/nodedeps"
 )
 
@@ -211,18 +214,21 @@ type Runner struct {
 	// instrumentation. Reading it off the command leaves one statement of
 	// what each variant runs, in the function that builds it.
 	//
-	// Two runners need one, for unrelated reasons. A JavaScript component has
-	// no node_modules on a fresh checkout and every import fails before a test
-	// is collected; a Rust component needs the pinned cargo-nextest, which is
-	// not a degradation when absent but a component that cannot run at all.
-	// `go test` needs nothing — its toolchain fetches what a build needs on
-	// the way past.
+	// Every runner needs one, for unrelated reasons. A JavaScript component
+	// has no node_modules on a fresh checkout and every import fails before a
+	// test is collected; a Rust component needs the pinned cargo-nextest,
+	// which is not a degradation when absent but a component that cannot run
+	// at all, and the tool config that turns its JUnit report on; a Go
+	// component needs the pinned wrapper its instrumented variant runs
+	// through. Its plain variant is `go test`, which needs nothing — the
+	// toolchain fetches what a build needs on the way past — so this one is
+	// read off the invocation like the rest.
 	Prepare func(ctx context.Context, inv Invocation, dir, override string, env executil.Env, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
 var registry = map[Name]Runner{
-	GoTest:              {Name: GoTest, Lang: Go, Build: buildGoTest},
+	GoTest:              {Name: GoTest, Lang: Go, Build: buildGoTest, Prepare: installGoTestsum},
 	CargoNextest:        {Name: CargoNextest, Lang: Rust, Build: buildCargoNextest, Prepare: installCargoTools},
 	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest, Prepare: installCargoTools},
 	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest, Prepare: installNodeDeps},
@@ -262,6 +268,16 @@ func report(name string) string { return path.Join(ReportDir, name) }
 // component's output is a data-loss bug rather than an untidy layout.
 var coverageDir = path.Join(ReportDir, "coverage")
 
+// junitReport is where every runner that can be made to write one puts its
+// JUnit XML, relative to the component directory.
+//
+// One path for every runner, because only one component can be running in a
+// given directory tree at a time — the scheduler serialises components whose
+// roots overlap, since two suites installing into and building in one tree is
+// not a race either of them can report honestly — so there is nobody to
+// collide with.
+var junitReport = report("junit.xml")
+
 // goTestArgs defaults to the module's whole package tree, because a `go
 // test` with no package argument tests the current directory alone — a
 // component that declared no args would report a pass having run almost
@@ -290,10 +306,26 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 		return Invocation{Name: "go", Args: append([]string{"test"}, pkgs...)}, true
 	case Instrumented:
 		profile := path.Join(coverageDir, "coverage.out")
+		// Through the pinned wrapper, because `go test` writes no report and
+		// the ledger records test counts. Everything after `--` is the `go
+		// test` command that would otherwise have run, unchanged, so what is
+		// measured does not depend on the wrapper.
+		//
+		// Only the instrumented variant. The plain one is what mutation runs
+		// once per mutant, where a JUnit report is written and discarded
+		// thousands of times and the wrapper is a process in the way of the
+		// thing being timed.
 		return Invocation{
-			Name:           "go",
-			Args:           append([]string{"test", "-coverprofile=" + profile, "-coverpkg=./..."}, pkgs...),
+			Name: gotestsumName,
+			Args: append([]string{
+				"--format", "pkgname",
+				"--junitfile", junitReport,
+				"--",
+				"-coverprofile=" + profile, "-coverpkg=./...",
+			}, pkgs...),
 			CoverageReport: profile,
+			JUnitReport:    junitReport,
+			PathDirs:       []string{gotestsumBinDir()},
 		}, true
 	case BuildOnly:
 		return Invocation{Name: "go", Args: append([]string{"build"}, pkgs...)}, true
@@ -302,19 +334,23 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	}
 }
 
-// nextestJUnit is where cargo-nextest writes JUnit, which is a profile
-// setting in the repository's own .config/nextest.toml rather than a flag.
-// Naming the path here would be lydite claiming a file it does not write.
+// nextestJUnit is where cargo-nextest writes JUnit under the default profile.
+//
+// The path is nextest's own composition — the profile's directory plus the
+// name the config gives — and lydite gives that name in the tool config it
+// stages, so this is the file it asked for rather than one it hopes is there.
+// A repository whose own configuration sets a different junit path wins, since
+// a tool config sits below it in priority, and that component then contributes
+// no test counts.
 const nextestJUnit = "target/nextest/default/junit.xml"
 
 func buildCargoNextest(variant Variant, args []string) (Invocation, bool) {
 	switch variant {
 	case Plain:
 		return Invocation{
-			Name:        "cargo",
-			Args:        append([]string{"nextest", "run"}, args...),
-			JUnitReport: nextestJUnit,
-			PathDirs:    cargoBinDirs(),
+			Name:     "cargo",
+			Args:     append([]string{"nextest", "run"}, args...),
+			PathDirs: cargoBinDirs(),
 		}, true
 	case Instrumented:
 		return llvmCovNextest(args), true
@@ -352,13 +388,24 @@ func buildCargoLLVMCovNextest(variant Variant, args []string) (Invocation, bool)
 // executes.
 func llvmCovNextest(args []string) Invocation {
 	lcov := path.Join(coverageDir, "lcov.info")
-	return Invocation{
+	inv := Invocation{
 		Name:           "cargo",
-		Args:           append([]string{"llvm-cov", "nextest", "--lcov", "--output-path", lcov}, args...),
+		Args:           []string{"llvm-cov", "nextest", "--lcov", "--output-path", lcov},
 		CoverageReport: lcov,
-		JUnitReport:    nextestJUnit,
 		PathDirs:       cargoBinDirs(),
 	}
+	// The JUnit report is asked for rather than assumed: nextest writes one
+	// only where a profile says to, so an invocation that merely named the
+	// path would have lydite report a component unmeasured for a file nobody
+	// was ever told to write. A machine with no usable cache directory has
+	// nowhere to stage the config, and then there is no report and no claim of
+	// one either.
+	if cfg, ok := nextestToolConfig(); ok {
+		inv.Args = append(inv.Args, "--tool-config-file", "lydite:"+cfg)
+		inv.JUnitReport = nextestJUnit
+	}
+	inv.Args = append(inv.Args, args...)
+	return inv
 }
 
 // installCargoTools installs the pinned cargo subcommands this invocation
@@ -388,10 +435,76 @@ func installCargoTools(ctx context.Context, inv Invocation, _, _ string, env exe
 	if err := cargoNextest.Install(ctx, env.Install, out); err != nil {
 		return err
 	}
+	if err := stageNextestToolConfig(inv); err != nil {
+		return err
+	}
 	if !runsLLVMCov(inv) {
 		return nil
 	}
 	return cargoLLVMCov.Install(ctx, env.Install, out)
+}
+
+// stageNextestToolConfig writes the config the invocation was built to point
+// at, and does nothing for one that points at none.
+//
+// Written every time rather than only when absent: it is a two-line file, and
+// a stale one left by an older lydite would send the report somewhere this
+// version does not read — which reads as a component whose suite ran no tests.
+func stageNextestToolConfig(inv Invocation) error {
+	if inv.JUnitReport == "" {
+		return nil
+	}
+	cfg, ok := nextestToolConfig()
+	if !ok {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o750); err != nil {
+		return err
+	}
+	// Staged and renamed into place, never written over. The path is one file
+	// for the whole process and components run concurrently, so a plain write
+	// truncates a file another component's nextest may be reading as it
+	// starts: a zero-length read leaves the JUnit profile off and the report
+	// silently unwritten, and a partial one fails that component's suite on a
+	// TOML parse error that has nothing to do with its code. Rename is atomic
+	// within a directory, so a reader sees the whole of one version or the
+	// whole of the other — the same stage-then-rename internal/download and
+	// the toolchain installs already use.
+	staged, err := os.CreateTemp(filepath.Dir(cfg), ".lydite-nextest-*.toml")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(staged.Name()) }()
+	if _, err := staged.WriteString(nextestToolConfigBody); err != nil {
+		_ = staged.Close()
+		return err
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	return os.Rename(staged.Name(), cfg)
+}
+
+// installGoTestsum installs the pinned wrapper a Go component's instrumented
+// suite runs through, and does nothing for the plain and build-only variants
+// that do not.
+//
+// The question is asked of the built command and never of the variant that
+// named it, which is the rule runsLLVMCov already follows: what a runner needs
+// is a property of what it is about to run, and a second list of which
+// variants use the wrapper is a list that is right until a variant changes and
+// only one of the two is updated.
+//
+// It installs *lydite's* tool, so it gets the install environment alone and
+// nothing the scanned repository declared — `go install` reads GOPROXY and
+// GOSUMDB, and the cache key names the version rather than where it came from,
+// so one substituted build outlives the run.
+func installGoTestsum(ctx context.Context, inv Invocation, _, _ string, env executil.Env, _ io.Writer) error {
+	if inv.Name != gotestsumName {
+		return nil
+	}
+	_, err := gotool.Ensure(ctx, env.Install, gotestsumName, gotestsumVersion, gotestsumPkg, "")
+	return err
 }
 
 // runsLLVMCov reports whether an invocation drives cargo-llvm-cov. It reads
@@ -447,7 +560,7 @@ func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, en
 func buildVitest(variant Variant, args []string) (Invocation, bool) {
 	switch variant {
 	case Plain:
-		return Invocation{Name: "npx", Args: append([]string{"vitest", "run"}, args...), JUnitReport: report("junit.xml")}, true
+		return Invocation{Name: "npx", Args: append([]string{"vitest", "run"}, args...)}, true
 	case Instrumented:
 		// The reporter and the directory are named rather than left to the
 		// repository's own vitest config. lcov is the one format both gates
@@ -463,6 +576,12 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 		// rows then name a file that no longer exists. The subdirectory alone
 		// would fix it for every name but `coverage`; the flag fixes it for
 		// all of them.
+		//
+		// The default reporter is named alongside junit, and that is not
+		// redundancy: `--reporter=junit` alone REPLACES the reporter set, so
+		// the component's log would hold nothing at all and a failing row's
+		// tail would have nothing to show. Naming both keeps the log the
+		// suite's own output and adds the report beside it.
 		return Invocation{
 			Name: "npx",
 			Args: append([]string{
@@ -470,9 +589,11 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 				"--coverage.reporter=lcovonly",
 				"--coverage.reportsDirectory=" + coverageDir,
 				"--coverage.clean=false",
+				"--reporter=default", "--reporter=junit",
+				"--outputFile.junit=" + junitReport,
 			}, args...),
 			CoverageReport: path.Join(coverageDir, "lcov.info"),
-			JUnitReport:    report("junit.xml"),
+			JUnitReport:    junitReport,
 		}, true
 	case BuildOnly:
 		// tsc, because there is no compile step in a JavaScript test run to
