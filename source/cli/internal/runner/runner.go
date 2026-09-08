@@ -461,7 +461,28 @@ func stageNextestToolConfig(inv Invocation) error {
 	if err := os.MkdirAll(filepath.Dir(cfg), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(cfg, []byte(nextestToolConfigBody), 0o600)
+	// Staged and renamed into place, never written over. The path is one file
+	// for the whole process and components run concurrently, so a plain write
+	// truncates a file another component's nextest may be reading as it
+	// starts: a zero-length read leaves the JUnit profile off and the report
+	// silently unwritten, and a partial one fails that component's suite on a
+	// TOML parse error that has nothing to do with its code. Rename is atomic
+	// within a directory, so a reader sees the whole of one version or the
+	// whole of the other — the same stage-then-rename internal/download and
+	// the toolchain installs already use.
+	staged, err := os.CreateTemp(filepath.Dir(cfg), ".lydite-nextest-*.toml")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(staged.Name()) }()
+	if _, err := staged.WriteString(nextestToolConfigBody); err != nil {
+		_ = staged.Close()
+		return err
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	return os.Rename(staged.Name(), cfg)
 }
 
 // installGoTestsum installs the pinned wrapper a Go component's instrumented

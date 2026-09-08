@@ -188,13 +188,31 @@ func DescribeCommit(ctx context.Context, dir, rev string) (Commit, error) {
 	return c, nil
 }
 
-// CurrentBranch is the branch that is checked out, or empty on a detached
-// HEAD.
+// BranchFlag names the flag a caller states the recording's branch with, so an
+// answer that could not be reached can name the fix.
+const BranchFlag = "--branch"
+
+// Branch is the branch a recording is filed under: the caller's own statement
+// first, then what the checkout says, and empty when neither answers.
+//
+// Explicit before discovered, the ladder BaseBranch already follows. A
+// detached HEAD is the normal shape of a CI checkout — one pinned to a SHA,
+// one that has moved to a base commit to measure it — and discovery answers
+// nothing there. The caller does know: it is the job that decided which ref to
+// build.
 //
 // Empty and never a guess. History is per branch, so a record filed under a
 // branch this checkout is not on is worse than no record: it puts one line's
-// points on another line, and nothing downstream can tell. A caller that
-// cannot name the branch says so instead.
+// points on another line, and nothing downstream can tell.
+func Branch(ctx context.Context, dir, override string) string {
+	if override != "" {
+		return override
+	}
+	return CurrentBranch(ctx, dir)
+}
+
+// CurrentBranch is the branch that is checked out, or empty on a detached
+// HEAD.
 func CurrentBranch(ctx context.Context, dir string) string {
 	r := executil.RunQuiet(ctx, dir, "git", "symbolic-ref", "--short", "HEAD")
 	if !r.Ok() {

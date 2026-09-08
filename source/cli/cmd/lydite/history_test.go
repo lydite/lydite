@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -253,5 +255,79 @@ func TestAFailingSuiteRecordsItsTestCountsAndNoBaseline(t *testing.T) {
 	if r := executil.RunQuiet(context.Background(), root, "git", "show",
 		"origin/"+gitstate.BranchName+":"+gitstate.StatePath(recs[0].Tree)); r.Ok() {
 		t.Error("a baseline was recorded for a tree whose suite failed")
+	}
+}
+
+// rejectPushes makes the repository's origin refuse every push, which is what
+// a lost race on the shared state branch looks like from here.
+func rejectPushes(t *testing.T, root string) {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), root, "git", "remote", "get-url", "origin")
+	if !r.Ok() {
+		t.Fatalf("git remote get-url: %v", r.Err)
+	}
+	hook := filepath.Join(strings.TrimSpace(r.Output), "hooks", "pre-receive")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { // #nosec G306 -- a hook this test needs to be executable
+		t.Fatal(err)
+	}
+}
+
+// A push that never lands fails the command when a baseline was being landed:
+// recording is the one thing this command exists to do, and a write that never
+// landed must never be reported as recorded.
+func TestAPushThatNeverLandsFailsTheRecording(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	rejectPushes(t, root)
+
+	out, _, err := runRecordCmd(t, root, "--json")
+	if err == nil {
+		t.Fatalf("record reported success even though every push was rejected\n%s", out)
+	}
+	rows := jsonRows(t, out)
+	if row := rows["record"]; row.Status != "fail" || !strings.Contains(row.Value, "did not land") {
+		t.Errorf("record = %+v, want a failure naming the write that did not land", row)
+	}
+	// The history row says the append is missing and points at what fills it,
+	// rather than repeating the baseline's own reason.
+	if row := rows["history"]; row.Status != "unmeasured" || !strings.Contains(row.Value, "records the gap") {
+		t.Errorf("history = %+v, want it to say the next recording records the gap", row)
+	}
+}
+
+// A recording carrying no baseline is writing only the ledger, and a failed
+// append is never a failing row: the branch is shared and busy, a push race is
+// routine, and failing a consumer's build over one would erode trust in a gate
+// that is otherwise about their code. The next successful append records the
+// gap.
+func TestAPushThatNeverLandsDoesNotFailAHistoryOnlyRecording(t *testing.T) {
+	root := gateRepo(t)
+	run := func(args ...string) { gitIn(t, root, args...) }
+	// A suite that fails establishes no baseline by construction and still has
+	// its test counts, which is the recording that writes history alone.
+	write(t, root, "svc/lib_test.go",
+		"package svc\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) {\n\tt.Fatal(\"deliberate\")\n}\n")
+	run("add", "-A")
+	run("commit", "-m", "a suite that fails")
+	if _, _, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err == nil {
+		t.Fatal("the fixture's suite passed, so this asserts nothing")
+	}
+	rejectPushes(t, root)
+
+	out, _, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("a failed history append failed the command: %v\n%s", err, out)
+	}
+	rows := jsonRows(t, out)
+	if row := rows["record"]; row.Status == "fail" {
+		t.Errorf("record = %+v, want the baseline's own answer rather than a push failure", row)
+	}
+	if row := rows["history"]; row.Status != "unmeasured" || !strings.Contains(row.Value, "records the gap") {
+		t.Errorf("history = %+v, want an amber row saying the next recording records the gap", row)
 	}
 }

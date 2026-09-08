@@ -457,11 +457,13 @@ running `lydite test` against every component of
 `node_modules`, no services started, nothing prepared by the workflow, because a step doing either
 would hide the case a consumer actually hits.
 
-**Every runner that can be made to write JUnit is made to**, on the instrumented variant, at
-`.lydite-reports/junit.xml`. The quality-history ledger records test counts, which no coverage
-report carries and which nothing can recompute once a commit has been squashed away — so naming
-a path without asking any runner to write to it is a claim about a file that does not exist, and
-that is what this replaced. `go-test` runs through the pinned **gotestsum**; `vitest` names
+**Every runner that can be made to write JUnit is made to**, on the instrumented variant. The
+quality-history ledger records test counts, which no coverage report carries and which nothing
+can recompute once a commit has been squashed away — and a path named without asking any runner
+to write to it is a claim about a file that does not exist. `go-test` and `vitest` write to
+`.lydite-reports/junit.xml`; cargo-nextest writes where the profile it runs under puts it,
+`target/nextest/default/junit.xml`, because the path is a profile setting rather than a flag.
+`go-test` runs through the pinned **gotestsum**; `vitest` names
 `--reporter=default --reporter=junit` (junit alone *replaces* the reporter set, and the
 component's log would then be empty, so a failing row would have nothing to show); and
 `cargo-nextest` gets a `--tool-config-file`, which turns its junit profile on *below* the
@@ -1959,6 +1961,14 @@ measured for this content", which is why a pull request and the commit it become
 deliberately share one; history is a sequence of events, and two commits carrying one tree
 are two points on the line. A record carries the commit, its first parent, the branch and
 the tree — the tree so it can be joined to the baseline for the same content.
+
+**The branch is stated before it is discovered.** `lydite test record --branch <name>` is the
+caller's own statement, and a checkout that names no branch is the normal shape of a CI job —
+one pinned to a SHA, one that moved to a base commit to measure it. Discovery
+(`git symbolic-ref`) answers nothing there, and a guess is worse than nothing: a record filed
+under a branch this checkout is not on puts one line's points on another line, and nothing
+downstream can tell. So both workflows pass it, the same ladder `--base-branch` follows, and a
+run that can name no branch appends nothing and says which flag fills the gap.
 
 **The timestamp is the commit's own committer date, never the clock at append time.** The
 partition is named from it, so a re-recording lands where the first attempt would have put

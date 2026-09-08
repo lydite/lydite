@@ -320,7 +320,11 @@ jobs:
           /tmp/lydite test --dir proving-ground --gate-coverage --json > gated.json || status=$?
           echo "lydite test --gate-coverage exited $status"
           recorded=0
-          /tmp/lydite test record --dir proving-ground \
+          # --branch, because the step above detached to measure the base tree
+          # and a detached HEAD names no branch. Quality history is per branch,
+          # so lydite refuses to guess one; the job knows which ref it built,
+          # which is why the flag exists rather than an inference.
+          /tmp/lydite test record --dir proving-ground --branch main \
             --reports proving-ground/.lydite-reports --json > recorded.json || recorded=$?
           echo "lydite test record exited $recorded"
           cat recorded.json
@@ -333,6 +337,15 @@ jobs:
           git -C proving-ground show "origin/lydite:v4/${tree}.json" > entries.json
           cat entries.json
           python3 .github/assert-proving-ground.py --entries entries.json
+          # And the ledger, for the reason the baseline gets this treatment and
+          # more so: a baseline a run failed to write costs the next run a
+          # measurement, and a ledger record it failed to write is gone. The
+          # partition is named from the commit's own date, so the month is the
+          # commit's rather than today's.
+          month=$(TZ=UTC git -C proving-ground show -s --format=%cd --date=format-local:%Y-%m HEAD)
+          git -C proving-ground show "origin/lydite:history/v1/${month}.ndjson" > history.ndjson
+          cat history.ndjson
+          python3 .github/assert-proving-ground.py --history history.ndjson "$tree"
 
       # 5. The shards, run sequentially in this one job rather than on three
       # runners: what is being asserted is what each shard reports, and a matrix

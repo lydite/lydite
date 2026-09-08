@@ -633,3 +633,44 @@ func TestAMissingTestReportIsNamedOnStderr(t *testing.T) {
 		t.Errorf("stderr = %q, want nothing about a runner that writes no report", got)
 	}
 }
+
+// Every declared component belongs to exactly one shard, so two documents
+// reporting test counts for one component mean two jobs ran the same work.
+// The fold keeps the first and does not pretend to arbitrate, the rule a
+// measured entry beating a carried one already follows.
+func TestFoldingKeepsOneShardsTestCountsPerComponent(t *testing.T) {
+	first := measurementsDoc{Tree: "t1", Tests: map[string]junit.Counts{
+		"api": {Total: 12, Failed: 1},
+	}}
+	second := measurementsDoc{Tree: "t1", Tests: map[string]junit.Counts{
+		"api": {Total: 99, Failed: 0},
+		"web": {Total: 7},
+	}}
+	got, err := foldMeasurements([]measurementsDoc{first, second})
+	if err != nil {
+		t.Fatalf("foldMeasurements: %v", err)
+	}
+	if got.Tests["api"] != (junit.Counts{Total: 12, Failed: 1}) {
+		t.Errorf("api = %+v, want the first shard's counts", got.Tests["api"])
+	}
+	// A component only one shard ran still contributes: the counts are a union
+	// across shards, not an intersection.
+	if got.Tests["web"] != (junit.Counts{Total: 7}) {
+		t.Errorf("web = %+v, want the one shard that ran it to contribute", got.Tests["web"])
+	}
+}
+
+// A fold of documents that carry no counts leaves none, rather than an empty
+// map that would render as a run in which every component reported nought
+// tests.
+func TestFoldingCarriesNoTestCountsWhenNoShardReported(t *testing.T) {
+	got, err := foldMeasurements([]measurementsDoc{
+		{Tree: "t1", Components: map[string]componentMeasurement{"api": {Entry: producing(5, 10, "go 1.26")}}},
+	})
+	if err != nil {
+		t.Fatalf("foldMeasurements: %v", err)
+	}
+	if got.Tests != nil {
+		t.Errorf("Tests = %+v, want nothing at all", got.Tests)
+	}
+}

@@ -237,6 +237,9 @@ func Append(root string, recs []Record) ([]string, []Record, error) {
 		if rec.Commit == "" || rec.Branch == "" {
 			return nil, nil, fmt.Errorf("a %s record names no commit or no branch, so nothing could read it back", rec.Kind)
 		}
+		if !validBranch(rec.Branch) {
+			return nil, nil, fmt.Errorf("a %s record names branch %q, which is not a ref path", rec.Kind, rec.Branch)
+		}
 		have, err := Recorded(root, rec)
 		if err != nil {
 			return nil, nil, err
@@ -262,6 +265,27 @@ func Append(root string, recs []Record) ([]string, []Record, error) {
 	}
 	sort.Strings(out)
 	return out, landed, nil
+}
+
+// validBranch reports whether a branch name may be used as the path segment
+// the projection files it under.
+//
+// Enforced here rather than left to the caller, because the claim that a
+// branch name is safe as a path is a property of git's ref format and this
+// package's callers are not all git. A `..` segment, an absolute name or an
+// empty segment would each place the projection outside the directory it
+// belongs in — which for a writer holding a token that can push is not a
+// property to take on trust.
+func validBranch(branch string) bool {
+	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(branch, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // Recorded reports whether an identical record is already on the branch.
@@ -302,7 +326,11 @@ func Recorded(root string, want Record) (bool, error) {
 // two recordings can land out of order, and the question this answers is which
 // commit the branch was last known at.
 func Latest(root, branch string, at time.Time) (Record, bool) {
-	month := at.UTC()
+	// Anchored to the first of the month before stepping. AddDate normalises
+	// an out-of-range day, so walking back from the 31st gives 2026-02-31 →
+	// 2026-03-03: the same month twice, and one month fewer than the lookback
+	// says. A commit's date is whatever day it happens to fall on.
+	month := time.Date(at.UTC().Year(), at.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
 	for range lookbackMonths {
 		parts, err := partsFor(root, month)
 		if err != nil {

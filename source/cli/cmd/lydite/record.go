@@ -46,7 +46,7 @@ import (
 // write after every shard has measured, in a workflow whose other jobs hold no
 // token that can push.
 func newRecordCmd() *cobra.Command {
-	var dir string
+	var dir, branch string
 	var reports []string
 	var asJSON, noColor bool
 	cmd := &cobra.Command{
@@ -68,7 +68,7 @@ cannot be recorded anywhere but where it was taken.`,
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
 			rep := ui.NewReport("record")
-			if err := recordBaseline(cmd.Context(), cmd, rep, dir, reports); err != nil {
+			if err := recordBaseline(cmd.Context(), cmd, rep, dir, branch, reports); err != nil {
 				return err
 			}
 			saveDocument(dir, rep)
@@ -82,6 +82,8 @@ cannot be recorded anywhere but where it was taken.`,
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+component.FileName+" applies")
 	cmd.Flags().StringSliceVar(&reports, "reports", nil,
 		"a "+runner.ReportDir+" directory holding a "+measurementsName+"; repeatable")
+	cmd.Flags().StringVar(&branch, "branch", "",
+		"the branch this recording's quality history is filed under; defaults to the checked-out branch, which a detached checkout does not have")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the machine-readable report instead of the terminal one")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	return cmd
@@ -93,7 +95,7 @@ cannot be recorded anywhere but where it was taken.`,
 // reached an answer: the documents were read and something about them says
 // they must not be recorded. An error is reserved for not reaching one at all
 // — an unreadable directory, a checkout with no tree.
-func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, reports []string) error {
+func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, branch string, reports []string) error {
 	docs, err := measurementsIn(rep, reports)
 	if err != nil {
 		return err
@@ -136,7 +138,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// baseline — and the run whose suite went red, which establishes no
 	// baseline by construction, is exactly the one whose test counts a history
 	// most wants.
-	history, historyWhy := historyRecords(ctx, dir, folded)
+	history, historyWhy := historyRecords(ctx, dir, branch, folded)
 
 	// What may be recorded as a baseline, and the row that says why when
 	// nothing may. An empty snapshot is a legitimate answer here, and is what
@@ -152,13 +154,27 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// command rests on and which a grep for `gitstate.Write` answers.
 	landed, err := gitstate.Write(ctx, dir, head, record, history)
 	if err != nil {
-		// A failing row and not a warning. This command exists to do exactly
-		// one thing, so a write that never landed is this command failing —
-		// unlike the same write attempted from inside a gate, where the
-		// verdict was already reached and the cost was the next run's.
-		rep.Add(ui.Row{Status: ui.StatusFail, Label: "record",
-			Value:  "not recorded — the write to the " + gitstate.BranchName + " branch did not land",
-			Detail: []string{err.Error()}})
+		// A failing row only when a baseline was actually being landed. That
+		// write is what this command exists to do, so one that never landed is
+		// this command failing. A recording carrying no baseline — a run whose
+		// every suite went red, which still has its test counts — was writing
+		// only the history, and a failed append is never a failing row: the
+		// branch is shared and busy, a push race is routine, and failing a
+		// consumer's build over one would erode trust in a gate that is
+		// otherwise about their code. The next successful append records the
+		// gap.
+		//
+		// A snapshot that is empty for any other reason than a stated one
+		// still fails: `verdict` carries the refusal that emptied it, and an
+		// empty snapshot with nothing to say about why is this command
+		// failing to do its job.
+		if record.Recorded() || verdict.Value == "" {
+			rep.Add(ui.Row{Status: ui.StatusFail, Label: "record",
+				Value:  "not recorded — the write to the " + gitstate.BranchName + " branch did not land",
+				Detail: []string{err.Error()}})
+		} else {
+			rep.Add(verdict)
+		}
 		// The write carried both, so a push that never landed took the record
 		// with it — unless there was nothing to append, in which case the
 		// reason is still its own and not this one.
@@ -284,13 +300,16 @@ func baselineToRecord(ctx context.Context, dir string, folded measurementsDoc, h
 // branch as fetched by the attempt that is about to write — a retry fetches a
 // branch a concurrent run may have advanced, and an answer computed once would
 // have that retry declare a gap the intervening run had just filled.
-func historyRecords(ctx context.Context, dir string, folded measurementsDoc) (gitstate.Records, string) {
+func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc) (gitstate.Records, string) {
 	// A branch and never a guess. History is per branch, so a record filed
 	// under a branch this checkout is not on puts one line's points on
-	// another line, and nothing downstream can tell.
-	branch := gitstate.CurrentBranch(ctx, dir)
+	// another line, and nothing downstream can tell. The caller's own
+	// statement comes first, because a detached HEAD is the normal shape of a
+	// CI checkout and the job that chose the ref is the one that knows.
+	branch := gitstate.Branch(ctx, dir, override)
 	if branch == "" {
-		return nil, "this checkout names no branch, and history is per branch"
+		return nil, "this checkout names no branch, so pass " + gitstate.BranchFlag +
+			" — history is per branch, and one filed under the wrong branch is worse than none"
 	}
 	head, err := gitstate.DescribeCommit(ctx, dir, "HEAD")
 	if err != nil {

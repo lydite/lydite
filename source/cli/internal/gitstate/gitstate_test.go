@@ -800,3 +800,91 @@ func cloneOf(t *testing.T, ctx context.Context, origin string) string {
 	run(clone, "fetch", "origin", BranchName)
 	return clone
 }
+
+// A gap is measured from the newest recorded ancestor, so how many commits lie
+// between it and this one is the one thing a reader of the partition cannot
+// work out alone — and the honest answer when the two are not on one line is
+// that it cannot be established, never a number.
+func TestCommitsBetweenCountsOnlyAlongAnAncestryChain(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	commit := func(msg string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, "f"), []byte(msg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(repo, "add", "-A")
+		run(repo, "commit", "-m", msg)
+		r := executil.RunQuiet(ctx, repo, "git", "rev-parse", "HEAD")
+		if !r.Ok() {
+			t.Fatal(r.Err)
+		}
+		return strings.TrimSpace(r.Output)
+	}
+	first := commit("one")
+	commit("two")
+	commit("three")
+	fourth := commit("four")
+
+	// Two commits lie strictly between, which is what the gap record reports.
+	if n, ok := CommitsBetween(ctx, repo, first, fourth); !ok || n != 2 {
+		t.Errorf("CommitsBetween(first, fourth) = (%d, %v), want (2, true)", n, ok)
+	}
+	// Consecutive commits have nothing between them, which is what tells a
+	// merge whose first parent is not the recorded commit from a real hole.
+	if n, ok := CommitsBetween(ctx, repo, first, first); ok {
+		t.Errorf("CommitsBetween(first, first) = (%d, %v), want a refusal — the range is empty", n, ok)
+	}
+
+	// An unrelated history is what a force-push looks like from here, and its
+	// width cannot be established. A number invented for it would be worse
+	// than the honest absence.
+	run(repo, "checkout", "--quiet", "--orphan", "elsewhere")
+	run(repo, "rm", "-rf", "--ignore-unmatch", ".")
+	orphan := commit("unrelated")
+	if n, ok := CommitsBetween(ctx, repo, orphan, fourth); ok {
+		t.Errorf("CommitsBetween across unrelated histories = (%d, %v), want a refusal", n, ok)
+	}
+	// And a name git cannot resolve at all.
+	if n, ok := CommitsBetween(ctx, repo, "", fourth); ok {
+		t.Errorf("CommitsBetween with no `from` = (%d, %v), want a refusal", n, ok)
+	}
+}
+
+// The branch a recording is filed under is the caller's own statement before
+// it is a discovery, because a detached HEAD is the normal shape of a CI
+// checkout and discovery answers nothing there.
+func TestBranchTakesTheCallersStatementFirst(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "-A")
+	run(repo, "commit", "-m", "one")
+
+	if got := Branch(ctx, repo, ""); got != "main" {
+		t.Errorf("Branch on a checked-out branch = %q, want main", got)
+	}
+	if got := Branch(ctx, repo, "release/1.x"); got != "release/1.x" {
+		t.Errorf("Branch with an override = %q, want the override to win", got)
+	}
+
+	run(repo, "checkout", "--quiet", "--detach", "HEAD")
+	// Empty, never a guess: a record filed under a branch this checkout is not
+	// on puts one line's points on another line.
+	if got := Branch(ctx, repo, ""); got != "" {
+		t.Errorf("Branch on a detached HEAD = %q, want it to say it cannot tell", got)
+	}
+	if got := Branch(ctx, repo, "main"); got != "main" {
+		t.Errorf("Branch on a detached HEAD with an override = %q, want the override", got)
+	}
+}

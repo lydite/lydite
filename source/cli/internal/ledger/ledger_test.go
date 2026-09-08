@@ -411,3 +411,36 @@ func TestOneCommitIsRecordedOnceForEachBranch(t *testing.T) {
 		t.Errorf("both records name branch %q", recs[0].Branch)
 	}
 }
+
+// A commit dated at month end must still look back the full lookback. AddDate
+// normalises an out-of-range day, so stepping from the 31st lands on the same
+// month again — and the branch's previous record, one month back, goes unseen.
+func TestTheLookbackReachesAFullYearFromAMonthEndCommit(t *testing.T) {
+	root := t.TempDir()
+	// Eleven months before a 31st is exactly the entry an un-normalised walk
+	// steps over.
+	if _, _, err := Append(root, []Record{entry("a", "", "main", "2025-04-10T08:00:00Z")}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, ok := Latest(root, "main", at("2026-03-31T10:00:00Z"))
+	if !ok || got.Commit != "a" {
+		t.Errorf("Latest from a month-end commit = %+v (%v), want the record eleven months back", got, ok)
+	}
+}
+
+// A branch name becomes a path segment in the projection, and the claim that
+// this is safe is a property of git's ref format rather than of this package's
+// callers — so it is enforced here.
+func TestABranchThatIsNotARefPathIsRefused(t *testing.T) {
+	root := t.TempDir()
+	for _, branch := range []string{"../escape", "a/../../b", "/absolute", "trailing/", "a//b", "."} {
+		if _, _, err := Append(root, []Record{entry("a", "", branch, "2026-03-15T10:00:00Z")}); err == nil {
+			t.Errorf("Append accepted branch %q as a path segment", branch)
+		}
+	}
+	// A perfectly ordinary namespaced branch is still accepted; the rule
+	// rejects traversal, not slashes.
+	if _, _, err := Append(root, []Record{entry("a", "", "release/1.x", "2026-03-15T10:00:00Z")}); err != nil {
+		t.Errorf("Append refused an ordinary namespaced branch: %v", err)
+	}
+}

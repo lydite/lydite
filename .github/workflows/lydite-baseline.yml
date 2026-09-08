@@ -216,6 +216,13 @@ jobs:
       # in a job `merge` does not precede — and asks completeness once, against
       # the declaration read from the tree being recorded.
       - name: lydite test record
+        # The branch is stated rather than discovered. Quality history is per
+        # branch, and while a push-event checkout does leave a branch checked
+        # out, resting a record that nothing can recompute on that behaviour is
+        # resting it on a property of an action rather than on what this job
+        # knows: it ran because of a push to this ref.
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
           shopt -s nullglob
           args=()
@@ -226,4 +233,4 @@ jobs:
             echo "no shard uploaded a report directory; there is nothing to record" >&2
             exit 1
           fi
-          lydite test record --dir . "${args[@]}"
+          lydite test record --dir . --branch "$BRANCH" "${args[@]}"

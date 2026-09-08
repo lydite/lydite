@@ -842,7 +842,10 @@ def main_record(gated: str, recorded: str) -> int:
     history = recorded_rows.get("history")
     if history is None:
         failures.append("no `history` row on the recording run: nothing said what reached the ledger")
-    elif history.get("status") != "context" or history.get("value", "").startswith("not "):
+    elif history.get("status") != "context":
+        # The status alone, because every "not appended — …" value is rendered
+        # with a non-context status; testing the wording as well would be a
+        # second condition that can only ever agree with the first.
         failures.append(
             f"history is {history.get('status')!r}: {history.get('value', '')} — the record did "
             "not reach the ledger, and nothing can recompute it later"
@@ -863,6 +866,75 @@ def main_record(gated: str, recorded: str) -> int:
     print(
         "proving ground record: the gated run handed on a candidate and wrote no baseline itself; "
         "`lydite test record` landed it, and the ledger, despite the expected orphan-gate failure"
+    )
+    return 0
+
+
+def main_history(path: str, tree: str) -> int:
+    """Assert the ledger file on the branch holds what the run said it did.
+
+    The record row is the CLI's own account of itself, and the whole reason
+    this metric exists is that nothing can recompute it later — so a bug that
+    reports an append while writing nothing, or writing something no reader can
+    parse, is exactly the silent failure worth paying a second check for. The
+    coverage baseline already gets one (`--entries`); this is its counterpart,
+    and it reads the NDJSON that was actually committed.
+
+    `path` is a partition fetched off the branch; `tree` is the tree the
+    recording was taken on, which the entry must name so a record can be joined
+    to the baseline stored under the same key.
+    """
+    failures = []
+    records = []
+    with open(path, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as err:
+                failures.append(f"line {n} of the partition is not JSON ({err}); a reader gets nothing from it")
+
+    entries = [r for r in records if r.get("kind") == "entry"]
+    if len(entries) != 1:
+        failures.append(
+            f"the partition holds {len(entries)} entries, want exactly 1 — the proving ground "
+            "records one commit, and a second means the append ran twice"
+        )
+    # The first recording a branch ever makes precedes nothing, so a gap here
+    # is the detection claiming a break that is not there.
+    if gaps := [r for r in records if r.get("kind") == "gap"]:
+        failures.append(f"the partition holds {len(gaps)} gap record(s) on a branch's first-ever recording")
+
+    for entry in entries:
+        if entry.get("tree") != tree:
+            failures.append(
+                f"the entry names tree {entry.get('tree')!r}, want {tree!r} — without it nothing "
+                "joins a record to the baseline recorded for the same content"
+            )
+        if not entry.get("commit"):
+            failures.append("the entry names no commit, which is its identity and its deduplication key")
+        if not entry.get("branch"):
+            failures.append("the entry names no branch, and history is per branch")
+        components = entry.get("components") or {}
+        missing = [name for name in EXPECTED_COVERAGE_UNITS if name not in components]
+        if missing:
+            failures.append(
+                f"the entry carries no scalars for {', '.join(sorted(missing))} — a component "
+                "absent from a ledger record is indistinguishable from one that was never measured"
+            )
+        for name, scalars in components.items():
+            if not any(k in scalars for k in ("coverage", "crap", "tests")):
+                failures.append(f"{name}'s entry carries no scalar at all, so it is a point on no line")
+
+    for failure in failures:
+        print(f"proving ground history: {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    print(
+        f"proving ground history: the partition holds one entry for {tree[:12]}, naming its tree, "
+        f"its branch and scalars for {len(EXPECTED_COVERAGE_UNITS)} component(s), with no spurious gap"
     )
     return 0
 
@@ -1021,6 +1093,8 @@ if __name__ == "__main__":
         sys.exit(main_merged(sys.argv[2]))
     if sys.argv[1] == "--incomplete":
         sys.exit(main_incomplete(sys.argv[2], sys.argv[3]))
+    if sys.argv[1] == "--history":
+        sys.exit(main_history(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--record":
         sys.exit(main_record(sys.argv[2], sys.argv[3]))
     if sys.argv[1] == "--mutation":

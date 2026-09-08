@@ -14,7 +14,7 @@
 //
 // Nothing here is ever built. It exists so Dependabot's `gomod` ecosystem can
 // see the version, and is read by internal/pins so a bump that is not mirrored
-// into runner.go's constant fails the build.
+// into internal/runner/pins.go's gotestsumVersion constant fails the build.
 module lydite/lydite/internal/runner/gotestsum-pin
 
 go 1.26.0
