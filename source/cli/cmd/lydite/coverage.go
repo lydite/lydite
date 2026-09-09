@@ -1335,9 +1335,7 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 		base, _ := comparableBase(m, baseline)
 		row := patchRow(label, hit, total, base.LineCount, cfg.Coverage.Patch.Tolerance)
 		byComponent[m.Name] = row
-		if row.Status == ui.StatusFail {
-			findings = append(findings, patchFindings(dir, m, scoped)...)
-		}
+		findings = append(findings, patchFindings(row, dir, m, scoped)...)
 		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: base.LineCount})
 	}
 	return byComponent, parts, findings, nil
@@ -1362,7 +1360,10 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 // tells it from a neighbour, which the ordinal then supplies. The row has
 // already gated on it, and dropping the claim to protect its identity would
 // hide a failure lydite found.
-func patchFindings(dir string, m measurement, scoped map[string][]int) []finding.Finding {
+func patchFindings(row ui.Row, dir string, m measurement, scoped map[string][]int) []finding.Finding {
+	if row.Status != ui.StatusFail {
+		return nil
+	}
 	var out []finding.Finding
 	src := finding.NewSource(dir)
 	for _, run := range coverage.Uncovered(scoped, m.Hits) {

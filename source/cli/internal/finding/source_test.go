@@ -162,3 +162,21 @@ func TestOneLineContributesABoundedAmountToAnIdentity(t *testing.T) {
 		t.Errorf("one line contributed %d runes, want it clipped to %d", len([]rune(got)), maxSiteRunes)
 	}
 }
+
+// A file whose last line has no newline after it still has that line. Splitting
+// on newlines gives no trailing empty element there, so the last line is the
+// last element — and a bound that is one out reads it as past the end.
+func TestTheLastLineOfAFileWithNoTrailingNewlineIsRead(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("first\nlast"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := NewSource(root)
+
+	if got := src.Line("a.go", 2); got != "last" {
+		t.Errorf("the last line read %q, want last", got)
+	}
+	if got := src.Line("a.go", 3); got != "" {
+		t.Errorf("a line past the end read %q", got)
+	}
+}

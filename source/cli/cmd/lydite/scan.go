@@ -281,15 +281,13 @@ func labelled(results []executil.Result, component, dir string) []executil.Resul
 	out := make([]executil.Result, 0, len(results))
 	for _, r := range results {
 		r.Name += "(" + component + ")"
-		if len(r.Findings) > 0 {
-			findings := make([]finding.Finding, len(r.Findings))
-			for i, f := range r.Findings {
-				f.Component = component
-				f.Path = path.Join(dir, f.Path)
-				findings[i] = f
-			}
-			r.Findings = findings
+		findings := make([]finding.Finding, len(r.Findings))
+		for i, f := range r.Findings {
+			f.Component = component
+			f.Path = path.Join(dir, f.Path)
+			findings[i] = f
 		}
+		r.Findings = findings
 		out = append(out, r)
 	}
 	return out

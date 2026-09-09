@@ -199,15 +199,29 @@ func Anchored(findings []Finding, changed map[string][]int) {
 				}
 			}
 		}
-		if precedence[reach] > precedence[findings[i].Anchor] {
-			findings[i].Anchor = reach
-		}
+		findings[i].Anchor = byReach[max(reach.reach(), findings[i].Anchor.reach())]
 	}
 }
 
-// precedence orders the anchors, so a second pass over a map that does not
-// cover a claim cannot quietly take back an anchor an earlier one established.
+// byReach orders the anchors, so a second pass over a map that does not cover
+// a claim cannot quietly take back an anchor an earlier one established.
 // Raising and never lowering is what makes the call safe to repeat, and a
-// producer that anchors against the wrong map is a bug that shows up as a
-// claim in the standing comment rather than as one silently mislocated.
-var precedence = map[Anchor]int{AnchorNowhere: 0, AnchorFile: 1, AnchorLine: 2}
+// producer that anchors against the wrong map is a bug that shows up as a claim
+// in the standing comment rather than as one silently mislocated.
+//
+// The rule is a max over that order rather than a comparison, so there is no
+// boundary to shift: two passes agreeing on how far a claim reaches take the
+// same path as one that reaches further.
+var byReach = [...]Anchor{AnchorNowhere, AnchorFile, AnchorLine}
+
+// reach is how far this anchor gets, as an index into byReach.
+func (a Anchor) reach() int {
+	switch a {
+	case AnchorLine:
+		return 2
+	case AnchorFile:
+		return 1
+	default:
+		return 0
+	}
+}

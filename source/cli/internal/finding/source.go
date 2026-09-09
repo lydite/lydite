@@ -87,15 +87,12 @@ func (s *Source) Line(path string, n int) string {
 }
 
 // clip bounds one line's contribution to a claim's identity.
+//
+// Stated as a clamp rather than as a comparison, so there is no boundary to be
+// wrong about: a line at exactly the cap and one under it take the same path.
 func clip(s string) string {
-	if len(s) <= maxSiteRunes {
-		return s
-	}
 	runes := []rune(s)
-	if len(runes) <= maxSiteRunes {
-		return s
-	}
-	return string(runes[:maxSiteRunes])
+	return string(runes[:min(len(runes), maxSiteRunes)])
 }
 
 func (s *Source) read(path string) []string {

@@ -17,6 +17,10 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
+// failedPatch is the row a patch gate fails with. A gate makes a claim exactly
+// where it fails, so every test about what a claim says starts from one.
+var failedPatch = ui.Row{Status: ui.StatusFail, Label: "patch(api)", Value: "failed"}
+
 // over is a component whose CRAP report names `n` functions above the
 // threshold, each in its own file so the fingerprints differ on something a
 // reader can see.
@@ -169,7 +173,7 @@ func TestAPatchClaimIsIdentifiedByTheCodeItIsAbout(t *testing.T) {
 	m.Hits = coverage.LineHits{"a.go": {3: 0, 4: 0}}
 
 	writeSource("package a\n\nfirst()\nsecond()\n")
-	before := patchFindings(dir, m, map[string][]int{"a.go": {3, 4}})
+	before := patchFindings(failedPatch, dir, m, map[string][]int{"a.go": {3, 4}})
 	if len(before) != 1 {
 		t.Fatalf("%d claims, want one stretch", len(before))
 	}
@@ -180,7 +184,7 @@ func TestAPatchClaimIsIdentifiedByTheCodeItIsAbout(t *testing.T) {
 	// The same two untested lines, pushed down by an import above them.
 	writeSource("package a\n\nimport \"fmt\"\n\nfirst()\nsecond()\n")
 	m.Hits = coverage.LineHits{"a.go": {5: 0, 6: 0}}
-	after := patchFindings(dir, m, map[string][]int{"a.go": {5, 6}})
+	after := patchFindings(failedPatch, dir, m, map[string][]int{"a.go": {5, 6}})
 	if len(after) != 1 {
 		t.Fatalf("%d claims after the insertion, want one", len(after))
 	}
@@ -199,7 +203,7 @@ func TestAStretchWhoseCodeCannotBeReadStillMakesAClaim(t *testing.T) {
 	m := measured("api", runner.Go, 1, 4)
 	m.Hits = coverage.LineHits{"gone.go": {3: 0}}
 
-	findings := patchFindings(t.TempDir(), m, map[string][]int{"gone.go": {3}})
+	findings := patchFindings(failedPatch, t.TempDir(), m, map[string][]int{"gone.go": {3}})
 	if len(findings) != 1 {
 		t.Fatalf("%d claims, want 1 — an unreadable file must not lose the claim", len(findings))
 	}
@@ -313,7 +317,7 @@ func TestAPatchClaimIsAnchoredToItsLines(t *testing.T) {
 	m := measured("api", runner.Go, 1, 4)
 	m.Hits = coverage.LineHits{"a.go": {3: 0, 4: 0}}
 
-	got := patchFindings(t.TempDir(), m, map[string][]int{"a.go": {3, 4}})
+	got := patchFindings(failedPatch, t.TempDir(), m, map[string][]int{"a.go": {3, 4}})
 	if len(got) != 1 || got[0].Anchor != finding.AnchorLine {
 		t.Errorf("a stretch of changed lines anchored %q, want line", got[0].Anchor)
 	}
@@ -419,5 +423,50 @@ func TestAFailingCRAPRowClaimsTheWorstFewAndCountsTheRest(t *testing.T) {
 		if !strings.Contains(detail, f.Message) {
 			t.Errorf("the row's detail is not a rendering of its claims, missing %q", f.Message)
 		}
+	}
+}
+
+// A gate emits findings exactly where it makes a claim the author must clear.
+// A component whose new code cleared its own baseline has untested lines too,
+// and a claim on each of them would fire on ordinary work.
+func TestOnlyAFailingPatchRowMakesAClaim(t *testing.T) {
+	t.Parallel()
+	m := measured("api", runner.Go, 1, 4)
+	m.Hits = coverage.LineHits{"a.go": {3: 0}}
+	scoped := map[string][]int{"a.go": {3}}
+
+	for _, status := range []ui.Status{ui.StatusPass, ui.StatusNew, ui.StatusUnmeasured, ui.StatusContext} {
+		row := ui.Row{Status: status, Label: "patch(api)"}
+		if got := patchFindings(row, t.TempDir(), m, scoped); len(got) != 0 {
+			t.Errorf("a %q row made %d claim(s): %+v", status, len(got), got)
+		}
+	}
+	if got := patchFindings(failedPatch, t.TempDir(), m, scoped); len(got) != 1 {
+		t.Errorf("a failing row made %d claims, want 1", len(got))
+	}
+}
+
+// Two stretches of identical untested code in one file are alike in everything
+// a fingerprint reads, and only source order separates them. Unnumbered they
+// are one claim, and the second goes unreported.
+func TestTwoIdenticalStretchesInOneFileAreTwoClaims(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package a\n\nfirst()\n\nfirst()\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := measured("api", runner.Go, 1, 4)
+	m.Hits = coverage.LineHits{"a.go": {3: 0, 5: 0}}
+
+	got := patchFindings(failedPatch, dir, m, map[string][]int{"a.go": {3, 5}})
+	if len(got) != 2 {
+		t.Fatalf("%d claims, want 2 — line 4 is unchanged, so these are two stretches", len(got))
+	}
+	if got[0].Site != got[1].Site {
+		t.Fatalf("the fixture is wrong, the two stretches must read alike: %q and %q", got[0].Site, got[1].Site)
+	}
+	if got[0].Fingerprint() == got[1].Fingerprint() {
+		t.Errorf("two stretches share the fingerprint %s", got[0].Fingerprint())
 	}
 }
