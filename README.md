@@ -74,7 +74,8 @@ repository — all summed from one measurement per component, so they cannot dis
 component needs `@vitest/coverage-v8` (or `-istanbul`) in its own dependencies; lydite will not add
 a dependency to the repository it is about to gate.
 
-See [AGENTS.md](AGENTS.md#coverage) for how the baseline is computed, cached and carried forward.
+See [`.agents/references/coverage.md`](.agents/references/coverage.md) for how the baseline is
+computed, cached and carried forward.
 
 ## Components
 
@@ -155,14 +156,16 @@ so a big component and a small one contribute in proportion to their size. That 
 headline, and it is deliberately blind to a small component with no tests at all — `coverage.floor`
 is the opt-in gate for that second question.
 
-See [AGENTS.md](AGENTS.md#configuration) for the full schema and merge semantics.
+See [`.agents/references/configuration.md`](.agents/references/configuration.md) for the full
+schema and merge semantics.
 
 Note there are no toolchain *versions* in there. lydite makes sure the Go, Rust and Node runtimes
 its checks need are present at the version each ecosystem requires, and it reads that version from
 the files your repo already has — the `go`/`toolchain` directives in every `go.mod` it discovers,
 `rust-toolchain.toml`, `engines.node` or `.nvmrc`. A toolchain already on PATH that satisfies the
 declared version is used as-is, so on a normal CI runner this costs nothing. See
-[AGENTS.md](AGENTS.md#toolchains) for what gets provisioned and how.
+[`.agents/references/toolchains.md`](.agents/references/toolchains.md) for what gets provisioned
+and how.
 
 ## GitHub Actions
 
