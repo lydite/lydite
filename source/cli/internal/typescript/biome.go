@@ -68,7 +68,8 @@ type biomeDiagnostic struct {
 //
 // The same merge is a real limitation in the other direction, and there is no
 // way to close it from here: a nested config could set `"security": "off"` and
-// silently narrow what lydite checks. It is called out in AGENTS.md.
+// silently narrow what lydite checks. It is called out in
+// .agents/references/linters.md.
 //
 // Everything that is *not* a rule opinion is kept: a file lydite could not
 // actually lint is worth knowing about, and dropping it is worse than a false

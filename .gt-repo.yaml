@@ -29,8 +29,8 @@ dependabot:
       One of the tool version pins. lydite pins every tool it runs, and these
       manifests exist so those pins are visible to Dependabot rather than frozen
       in Go constants nothing ever ages out — a security scanner that is itself
-      years out of date keeps reporting [PASS]. See AGENTS.md, "Tool version
-      pins".
+      years out of date keeps reporting [PASS]. See
+      .agents/references/tool-pins.md.
 
       A pin directory is deliberately not a component, so nothing scans or tests
       it. A cargo pin is the exception: cargo refuses a [package] manifest with

@@ -34,7 +34,7 @@ const goBootstrapMin = "v1.21"
 // outside any module to fetch gosec and govulncheck, does not consult it. So
 // those tools got built with whatever Go the runner shipped, and a
 // govulncheck built by an older Go rejects newer source outright — the exact
-// failure AGENTS.md records against wardnet's CI, worked around there by
+// failure .agents/references/ci.md records against wardnet's CI, worked around there by
 // pinning `go-version` in every workflow. An explicit GOTOOLCHAIN fixes it at
 // the source instead of in each consumer's YAML.
 //
@@ -88,7 +88,7 @@ func provisionGo(ctx context.Context, req Requirement, ambient string, present b
 // silently switch to whatever minimum it declares. golang.org/x/vuln@v1.6.0
 // declares `go >= 1.25.0`, so an `auto` runner with Go 1.26 installed builds
 // govulncheck with go1.25 — and a govulncheck built by an older Go rejects
-// newer source outright. That is the exact failure AGENTS.md records against
+// newer source outright. That is the exact failure .agents/references/ci.md records against
 // wardnet's CI, and it reproduces on a runner whose ambient toolchain is
 // perfectly correct.
 //

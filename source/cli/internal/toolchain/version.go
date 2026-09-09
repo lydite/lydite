@@ -64,8 +64,8 @@ func olderThan(have, want string) bool {
 // one rust-toolchain.toml per crate — to the single toolchain that has to
 // serve all of them. Taking the max rather than the first found is what makes
 // a monorepo whose modules declare different versions work: the newer
-// language version can build the older module, never the reverse. AGENTS.md
-// already records this rule for wardnet's two Go modules ("if they ever
+// language version can build the older module, never the reverse.
+// .agents/references/toolchains.md already records this rule for wardnet's two Go modules ("if they ever
 // diverge this must track the newer of the two").
 func maxVersion(a, b string) string {
 	switch {
