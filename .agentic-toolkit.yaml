@@ -5,3 +5,5 @@ extends:
   - github.com/pedromvgomes/agentic-toolkit.git/stacks/rtk.yaml
 skills:
   - ./.agents/skills/bump-version
+memory:
+  agent: claudecode
