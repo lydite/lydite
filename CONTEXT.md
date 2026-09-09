@@ -84,9 +84,15 @@ Derived data that can be regenerated on demand by re-running the tool that produ
 **Projection**:
 A pre-computed rollup derived from the **Ledger**, existing so the dashboard reads one small file instead of walking every partition. Regenerable by definition, so it is a **Cache** in every respect except that its source is the ledger rather than a scanner.
 
+**Finding**:
+A located claim about the code that one edit clears. That definition is what decides who may make one: a **Gate** that names a function above the **CRAP index** threshold, a surviving **Mutant**, a scanner's rule firing at a site, a stretch of new code no test reached. Per line is not a finding — a large untested addition is one thing to do rather than hundreds, and neighbouring lines have nothing to tell them apart — and neither is an **Orphan**, whose one edit is to the component declaration rather than to the file a reader would be pointed at.
+A finding is identified by what it is about and never by where it sits: an edit above it moves its line while changing nothing it claims. That identity is content-derived, so a tool rewording its own diagnostic does not make a second finding of the first.
+_Note_: a finding is descriptive and never a verdict. A **Gate** that failed has already voted, and counting its findings as well would count it twice.
+_Avoid_: "issue", "violation" and "error" — the first is a ticket, the second asserts a rule was broken where several gates assert only a measurement, and the third is what a run returns when it cannot reach an answer at all.
+
 **Finding snapshot**:
-The full set of findings from the most recent run — rule, path, severity, message — overwritten on every run. A **Cache**, not a **Ledger**: it is fully regenerable by re-scanning, and only the latest one is ever of interest. It answers "what is wrong right now, and where?"; the ledger answers "is this getting better?". Keeping findings out of the ledger is what lets quality history stay small enough to retain forever.
-_Note_: because snapshots are not retained, "when did this finding first appear?" is deliberately unanswerable today. Answering it later means adding stable per-finding fingerprints and promoting findings to a ledger of their own — an additive change, which is why the split is the cheaper starting point.
+The full set of **Finding**s from the most recent run, overwritten on every run. A **Cache**, not a **Ledger**: it is fully regenerable by re-scanning, and only the latest one is ever of interest. It answers "what is wrong right now, and where?"; the ledger answers "is this getting better?". Keeping findings out of the ledger is what lets quality history stay small enough to retain forever.
+_Note_: because snapshots are not retained, "when did this finding first appear?" is deliberately unanswerable today. Answering it later means promoting findings to a ledger of their own, keyed by the identity each one already carries — an additive change, which is why the split is the cheaper starting point.
 
 **Gap**:
 An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.

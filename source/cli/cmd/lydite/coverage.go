@@ -20,6 +20,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/crap"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
@@ -466,7 +467,8 @@ func ungatedComponentRows(rep *ui.Report, ms []measurement) {
 		// own, because the two are one question about one component: a reader
 		// asking about it should not have to pair rows separated by every
 		// other component's.
-		rep.Add(crapRow(m, nil, false))
+		row, _ := crapRow(m, nil, false)
+		rep.Add(row)
 	}
 }
 
@@ -558,16 +560,19 @@ func gatedRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir stri
 	// Patch is computed before any row is added so each component's coverage
 	// and patch land together. A reader asking about one component should not
 	// have to pair two rows separated by every other component's.
-	patch, parts, err := patchRows(ctx, cmd, dir, base, ms, snap.Coverage, cfg)
+	patch, parts, patchFound, err := patchRows(ctx, cmd, dir, base, ms, snap.Coverage, cfg)
 	if err != nil {
 		return err
 	}
+	rep.AddFindings(patchFound...)
 	for _, m := range ms {
 		rep.Add(componentRow(m, snap.Coverage, cfg.Coverage.Tolerance))
 		if row, ok := patch[m.Name]; ok {
 			rep.Add(row)
 		}
-		rep.Add(crapRow(m, snap.CRAP, true))
+		row, findings := crapRow(m, snap.CRAP, true)
+		rep.Add(row)
+		rep.AddFindings(findings...)
 	}
 	// The two rows no shard can produce. Both sum every component, so a run
 	// responsible for part of the declaration answers about the part and
@@ -911,7 +916,7 @@ func baseTreeBaseline(w io.Writer, base string, ms []measurement, tails map[stri
 // component having an entry in it: an ungated run renders context, and a gated
 // run with no entry renders new. Without the distinction a workflow that never
 // reads a baseline is indistinguishable from one whose every component is new.
-func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) ui.Row {
+func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row, []finding.Finding) {
 	label := "crap(" + m.Name + ")"
 	// A language lydite has no complexity source for is context and never
 	// amber: nothing about this repository could make the row green, so
@@ -919,7 +924,7 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) ui.Row {
 	// reader to skim past it. It is still a row, because a component silently
 	// absent reads as one that scored clean.
 	if !m.scorable() {
-		return ui.Row{Status: ui.StatusContext, Label: label, Value: "not scored — " + noComplexitySource(m)}
+		return ui.Row{Status: ui.StatusContext, Label: label, Value: "not scored — " + noComplexitySource(m)}, nil
 	}
 	if !m.Scored() {
 		row := unmeasuredRow(label, m.CRAPWhy)
@@ -929,15 +934,15 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) ui.Row {
 		if base, ok := baseline[m.Name]; ok && m.Carryable {
 			row.Value += fmt.Sprintf(" — carrying the baseline's %d forward", base.Above)
 		}
-		return row
+		return row, nil
 	}
 	counts := crapValue(m.CRAP)
 	base, hasBase := baseline[m.Name]
 	switch {
 	case !gated:
-		return ui.Row{Status: ui.StatusContext, Label: label, Value: counts}
+		return ui.Row{Status: ui.StatusContext, Label: label, Value: counts}, nil
 	case !hasBase:
-		return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", no baseline yet"}
+		return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", no baseline yet"}, nil
 	case base.Producer != m.Producer:
 		// New, and never regressed, for the reason a coverage comparison
 		// refuses the same pair: the coverage half of every score was taken
@@ -945,15 +950,55 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) ui.Row {
 		// definition rather than debt anybody added.
 		return ui.Row{Status: ui.StatusNew, Label: label,
 			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
-				counts, producerName(m.Producer), producerName(base.Producer))}
+				counts, producerName(m.Producer), producerName(base.Producer))}, nil
 	case m.CRAP.Above() > base.Above:
+		findings := crapFindings(m)
 		return ui.Row{Status: ui.StatusFail, Label: label,
 			Value:  fmt.Sprintf("%s, baseline %d — %d more", counts, base.Above, m.CRAP.Above()-base.Above),
-			Detail: worstFunctions(m.CRAP)}
+			Detail: worstFunctions(findings, m.CRAP.Above())}, findings
 	default:
 		return ui.Row{Status: ui.StatusPass, Label: label,
-			Value: fmt.Sprintf("%s, baseline %d", counts, base.Above)}
+			Value: fmt.Sprintf("%s, baseline %d", counts, base.Above)}, nil
 	}
+}
+
+// crapFindings is the claim a failing CRAP row makes, one per function over
+// the threshold.
+//
+// A gate emits findings exactly when it makes a claim the author must clear,
+// which for CRAP is when the count rose. The functions already above the
+// threshold on a passing row are debt this change did not add, and reporting
+// them per site would put a claim on every pull request about code nobody
+// touched — a gate that fires on ordinary work is one that gets switched off.
+//
+// The site is the function's own name, which crap.Function already carries
+// with its receiver, so the claim survives the function moving down its file.
+//
+// It names the same worst few the row does, and no more. The gate is cleared
+// by bringing any one of them under the threshold, so a longer list is not
+// more actionable — and a component carrying hundreds of functions in standing
+// debt would otherwise put every one of them into the document on every run
+// that regressed by one, which is a document that grows with the debt rather
+// than with the change.
+func crapFindings(m measurement) []finding.Finding {
+	over := m.CRAP.Over[:min(len(m.CRAP.Over), worstOffenders)]
+	out := make([]finding.Finding, 0, len(over))
+	for _, f := range over {
+		out = append(out, finding.Finding{
+			Gate:      "crap",
+			Component: m.Name,
+			Path:      f.File,
+			Line:      f.Line,
+			Message: fmt.Sprintf("%s — %.1f (complexity %d, %.1f%% covered)",
+				f.Name, f.Value, f.Complexity, f.Lines.Percent()),
+			Detail: []string{fmt.Sprintf(
+				"Above the CRAP threshold of %d. Testing it or taking it apart clears the gate.",
+				crap.Threshold)},
+			Site: f.Name,
+		})
+	}
+	finding.Number(out)
+	return out
 }
 
 // crapValue renders a score the way every row shows it.
@@ -983,13 +1028,12 @@ const worstOffenders = 5
 // — a function renamed or moved would read as one fixed and one introduced. So
 // the row says what is over the threshold now, and any one of them coming under
 // it clears the gate.
-func worstFunctions(rep crap.Report) []string {
+func worstFunctions(findings []finding.Finding, over int) []string {
 	out := []string{"the count may not rise; testing or splitting any one of these clears it"}
-	for _, f := range rep.Over[:min(len(rep.Over), worstOffenders)] {
-		out = append(out, fmt.Sprintf("%s:%d %s — %.1f (complexity %d, %.1f%% covered)",
-			f.File, f.Line, f.Name, f.Value, f.Complexity, f.Lines.Percent()))
+	for _, f := range findings {
+		out = append(out, fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message))
 	}
-	if rest := len(rep.Over) - worstOffenders; rest > 0 {
+	if rest := over - len(findings); rest > 0 {
 		out = append(out, fmt.Sprintf("and %d more above %d", rest, crap.Threshold))
 	}
 	return out
@@ -1230,7 +1274,7 @@ func composedRow(label string, current []measurement, carried map[string]bool, b
 // is reported as unmeasured, never skipped in silence. A silent skip reads as
 // "patch coverage passed" in the pull request comment, which is what
 // wardnet/wardnet#957 shipped while Codecov failed the same diff.
-func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []measurement, baseline gitstate.Baseline, cfg config.Config) (map[string]ui.Row, []patchPart, error) {
+func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []measurement, baseline gitstate.Baseline, cfg config.Config) (map[string]ui.Row, []patchPart, []finding.Finding, error) {
 	byComponent := map[string]ui.Row{}
 	wanted := map[runner.Lang]bool{
 		runner.Go:         cfg.Coverage.Patch.Go.Enabled,
@@ -1244,17 +1288,18 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 		}
 	}
 	if len(exts) == 0 {
-		return byComponent, nil, nil
+		return byComponent, nil, nil, nil
 	}
 	// One diff for every component, partitioned below. All of them measure
 	// the same range, and asking git once per component would pay for the
 	// same walk N times to get N subsets of one answer.
 	changed, err := coverage.ChangedLines(ctx, dir, base, exts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var parts []patchPart
+	var findings []finding.Finding
 	for _, m := range ms {
 		if !wanted[m.Lang] {
 			continue
@@ -1288,10 +1333,61 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 		// baseline taken by another instrument is as incomparable here as it
 		// is there, and an unmeasured base already renders as new.
 		base, _ := comparableBase(m, baseline)
-		byComponent[m.Name] = patchRow(label, hit, total, base.LineCount, cfg.Coverage.Patch.Tolerance)
+		row := patchRow(label, hit, total, base.LineCount, cfg.Coverage.Patch.Tolerance)
+		byComponent[m.Name] = row
+		findings = append(findings, patchFindings(row, dir, m, scoped)...)
 		parts = append(parts, patchPart{Name: m.Name, Lang: m.Lang, Hit: hit, Total: total, Base: base.LineCount})
 	}
-	return byComponent, parts, nil
+	return byComponent, parts, findings, nil
+}
+
+// patchFindings is the claim a failing patch row makes, one per contiguous
+// stretch of untested new code.
+//
+// A gate emits findings exactly when it makes a claim the author must clear.
+// A component whose patch coverage cleared its own baseline has untested new
+// lines too, and putting a claim on each of them would fire on ordinary work.
+//
+// The site is the stretch's own text rather than where it sits, so inserting
+// code above it does not report it as something new. Its two ends stand for
+// the whole: they identify the stretch, they survive an edit inside it — the
+// same block, still untested — and they keep a claim about three hundred lines
+// from carrying three hundred lines of them. Its length is deliberately not an
+// ingredient, or adding one untested line to an untested block would orphan
+// the claim already made about it.
+//
+// A stretch whose source cannot be read keeps its claim and loses only what
+// tells it from a neighbour, which the ordinal then supplies. The row has
+// already gated on it, and dropping the claim to protect its identity would
+// hide a failure lydite found.
+func patchFindings(row ui.Row, dir string, m measurement, scoped map[string][]int) []finding.Finding {
+	if row.Status != ui.StatusFail {
+		return nil
+	}
+	var out []finding.Finding
+	src := finding.NewSource(dir)
+	for _, run := range coverage.Uncovered(scoped, m.Hits) {
+		out = append(out, finding.Finding{
+			Gate:      "patch",
+			Component: m.Name,
+			Path:      run.File,
+			Line:      run.First,
+			EndLine:   run.Last,
+			Message:   fmt.Sprintf("%d new line(s) here are covered by no test", run.Lines),
+			Detail: []string{
+				"Patch coverage gates this component against its own aggregate baseline, so a test reaching these lines clears it.",
+			},
+			Site: src.Line(run.File, run.First) + "\x1f" + src.Line(run.File, run.Last),
+		})
+	}
+	finding.Number(out)
+	// Every stretch is made of changed lines by construction, so this
+	// establishes what is already true rather than discovering it. It is
+	// asked anyway, so that the one rule deciding how a claim reaches a
+	// change has one implementation and a producer cannot quietly stop
+	// obeying it.
+	finding.Anchored(out, scoped)
+	return out
 }
 
 // composedRows renders the two figures over the repository as a whole:

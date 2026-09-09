@@ -21,6 +21,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/mutation"
@@ -242,9 +243,10 @@ type mutationOptions struct {
 // componentMutation is one component's outcome, kept alongside its row so the
 // summary counts what the rows say.
 type componentMutation struct {
-	summary mutation.Summary
-	elapsed time.Duration
-	ran     bool
+	summary  mutation.Summary
+	elapsed  time.Duration
+	ran      bool
+	findings []finding.Finding
 }
 
 // runMutation plans every selected component, runs its mutants and adds the
@@ -290,30 +292,49 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 		rows[i], results[i] = mutateComponent(ctx, plans[i], cfg, envs.For(plans[i].c.Name), slots, opts)
 	})
 
-	// The same rule runComponents applies, for the same reason: under
-	// cancellation lydite cannot tell a suite that failed from one that was
-	// killed, and a red row blaming a CI job timeout on the repository's
-	// tests is the worst available answer.
 	if ctx.Err() != nil {
-		for _, i := range index {
-			if rows[i].Status != ui.StatusFail {
-				continue
-			}
-			rows[i] = ui.Row{
-				Status: ui.StatusUnmeasured,
-				Label:  rows[i].Label,
-				Value:  "not completed",
-				Detail: []string{"the run was interrupted before this component finished"},
-				Log:    rows[i].Log,
-			}
-			results[i] = componentMutation{}
-		}
+		withdrawInterrupted(rows, results, index)
 	}
 
 	rep.Add(scheduleRow(ctx, outcome, len(plans), opts.limit))
 	addRows(rep, rows, ordered, skipped, mutationLabel)
+	// In plan order, so two runs of one declaration hand the same document to
+	// whatever anchors these. A component the interrupt above reset carries
+	// none: under cancellation a survivor cannot be told from a mutant whose
+	// suite was killed, and a claim nobody can stand behind is worse than
+	// none.
+	for _, r := range results {
+		rep.AddFindings(r.findings...)
+	}
 	if opts.summary {
 		rep.Add(mutationSummaryRow(results))
+	}
+}
+
+// withdrawInterrupted takes back every failing verdict a cancelled run reached.
+//
+// The same rule runComponents applies, for the same reason: under cancellation
+// lydite cannot tell a suite that failed from one that was killed, and a red
+// row blaming a CI job timeout on the repository's tests is the worst available
+// answer.
+//
+// The component's findings go with the row. A survivor is a claim that the
+// suite passed with the code changed that way, and a suite that was killed
+// established no such thing — so a claim left behind here would be one nobody
+// can stand behind, anchored to a line, on a pull request.
+func withdrawInterrupted(rows []ui.Row, results []componentMutation, index []int) {
+	for _, i := range index {
+		if rows[i].Status != ui.StatusFail {
+			continue
+		}
+		rows[i] = ui.Row{
+			Status: ui.StatusUnmeasured,
+			Label:  rows[i].Label,
+			Value:  "not completed",
+			Detail: []string{"the run was interrupted before this component finished"},
+			Log:    rows[i].Log,
+		}
+		results[i] = componentMutation{}
 	}
 }
 
@@ -529,7 +550,9 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 		s.Add(r)
 	}
 	out = componentMutation{summary: s, elapsed: time.Since(baselineStarted), ran: true}
-	return mutationRow(label, log, s, results, out.elapsed), out
+	row, findings := mutationRow(label, c.Name, c.Dir, log, s, results, scoped, out.elapsed)
+	out.findings = findings
+	return row, out
 }
 
 // backendFor is the isolation strategy one language's mutants are run under.
@@ -717,11 +740,11 @@ func sortedFiles(m map[string][]int) []string {
 // every mutant was unviable or acknowledged, so nothing was established about
 // the suite, and a green row from a gate that examined nothing is
 // indistinguishable from one that examined everything.
-func mutationRow(label string, log *componentLog, s mutation.Summary, results []mutation.Result, elapsed time.Duration) ui.Row {
+func mutationRow(label, component, dir string, log *componentLog, s mutation.Summary, results []mutation.Result, changed map[string][]int, elapsed time.Duration) (ui.Row, []finding.Finding) {
 	killed, total := s.Score()
 	if total == 0 {
 		return detailed(unmeasuredRow(label, fmt.Sprintf(
-			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log)
+			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log), nil
 	}
 	// The elapsed time is in the value rather than under the row, because it
 	// is what a later runtime budget would be a multiple of and the fold has
@@ -734,16 +757,17 @@ func mutationRow(label string, log *componentLog, s mutation.Summary, results []
 	}
 	survivors := mutation.Survivors(results)
 	if len(survivors) == 0 {
-		return row
+		return row, nil
 	}
 	row.Status = ui.StatusFail
 	row.Value = fmt.Sprintf("%d of %d mutant(s) survived in %s", len(survivors), total, elapsed.Round(time.Second))
+	findings := mutationFindings(component, dir, survivors, changed)
 	// Every survivor, not a sample: the author's next action is to write an
 	// assertion for each one, and a truncated list makes that a second run to
 	// discover the rest.
 	row.Detail = nil
-	for _, r := range survivors {
-		row.Detail = append(row.Detail, r.Mutant.String())
+	for _, f := range findings {
+		row.Detail = append(row.Detail, f.Message)
 	}
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
@@ -754,7 +778,50 @@ func mutationRow(label string, log *componentLog, s mutation.Summary, results []
 	if log.Rel != "" {
 		row.Detail = append(row.Detail, "full output: "+log.Rel)
 	}
-	return row
+	return row, findings
+}
+
+// mutationFindings is the claim a failing mutation row makes, one per
+// survivor.
+//
+// A mutant that was killed is evidence the suite works and no claim about the
+// code, so only survivors become findings — the rule every gate here follows,
+// that findings are emitted exactly where a claim is made the author must
+// clear. An acknowledged mutant is not among them either: a human has already
+// read that claim and answered it in the source.
+//
+// The site is what the mutant did rather than where it did it: the operator,
+// the text replaced and the text replacing it. Two identical comparisons in
+// one file produce two mutants alike in all of that, which is what the ordinal
+// separates.
+//
+// Paths are made relative to the scan root, because a mutant's own path is
+// relative to the component it came from and a claim that names one file from
+// two roots is two claims.
+func mutationFindings(component, dir string, survivors []mutation.Result, changed map[string][]int) []finding.Finding {
+	out := make([]finding.Finding, 0, len(survivors))
+	for _, r := range survivors {
+		m := r.Mutant
+		out = append(out, finding.Finding{
+			Gate:      "mutation",
+			Component: component,
+			Path:      path.Join(dir, m.Path),
+			Line:      m.Line,
+			Message:   m.String(),
+			Detail: []string{
+				"This mutant survived: the suite passed with the code changed this way.",
+				"Write the assertion that fails when it is, or declare the mutant equivalent with " +
+					annotationMarker + " beside it.",
+			},
+			Site: string(m.Operator) + "\x1f" + finding.Normalise(m.Original) + "\x1f" + finding.Normalise(m.Mutated),
+		})
+	}
+	finding.Number(out)
+	// A mutant exists only on a line the change touched, so this establishes
+	// what generation already guaranteed. It is asked anyway, so the rule
+	// deciding how a claim reaches a change has one implementation.
+	finding.Anchored(out, changed)
+	return out
 }
 
 // aside names the mutants that are in the run and not in the denominator.

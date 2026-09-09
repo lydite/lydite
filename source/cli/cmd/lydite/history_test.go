@@ -482,6 +482,7 @@ func TestAPredecessorThatIsNotAnAncestorIsAGapOfUnknownWidth(t *testing.T) {
 	}
 	if gap == nil {
 		t.Fatal("no gap was recorded across an unrelated history")
+		return
 	}
 	if gap.Missing != 0 || !strings.Contains(gap.Reason, "not an ancestor") {
 		t.Errorf("the gap = %+v, want an unestablished width and the reason why", gap)

@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -462,4 +464,85 @@ func PatchPercent(changed map[string][]int, hits LineHits) (hit, total int) {
 		}
 	}
 	return hit, total
+}
+
+// Run is a stretch of changed lines the report covers with no test.
+//
+// It is the unit a patch-coverage claim is made about, and it is deliberately
+// coarser than the line the gate counts. A three-hundred-line untested
+// addition is one thing to do and not three hundred, neighbouring uncovered
+// lines have nothing to tell them apart, and a claim per line is a surface
+// nobody reads.
+type Run struct {
+	File        string
+	First, Last int
+	// Lines is how many lines between First and Last the report speaks for
+	// and reports as uncovered. It is not the span: a comment or a blank line
+	// written inside an untested block lies between the two ends and counts
+	// towards neither side of PatchPercent, so a claim measured by the span
+	// would say more lines are untested than a gate ever counted.
+	Lines int
+}
+
+// Uncovered groups the changed lines no test reached into contiguous runs.
+//
+// A run ends where the change does or where cover resumes: at a changed line
+// the report says was executed, or at a line the change never touched, since
+// unchanged code between two untested stretches makes them two stretches. A
+// changed line the report knows nothing about — a comment, a blank, an import
+// — neither extends a run nor breaks one, exactly as it counts towards neither
+// side of PatchPercent.
+//
+// It consults no function boundary, and that is a limit rather than an
+// oversight: lydite parses Go and reads lcov for the other two, so a rule that
+// asked which function a line was in would answer for one language and guess
+// for the rest. Breaking at unchanged code is what a function boundary would
+// mostly have bought anyway, since a change that stops and resumes elsewhere
+// has left the first place behind.
+func Uncovered(changed map[string][]int, hits LineHits) []Run {
+	var runs []Run
+	for _, file := range slices.Sorted(maps.Keys(changed)) {
+		fileHits, ok := hits[file]
+		if !ok {
+			continue
+		}
+		lines := slices.Clone(changed[file])
+		slices.Sort(lines)
+		// A line named twice is one line. Left in, the second copy reads as a
+		// gap against the first — the run flushes and reopens — and one
+		// stretch is reported as two overlapping claims.
+		lines = slices.Compact(lines)
+
+		open := false
+		var first, last, prev, count int
+		flush := func() {
+			if open {
+				runs = append(runs, Run{File: file, First: first, Last: last, Lines: count})
+				open = false
+			}
+		}
+		for _, line := range lines {
+			if open && line != prev+1 {
+				// Unchanged code sits between this line and the last one the
+				// change touched, so whatever was untested before it ended
+				// there.
+				flush()
+			}
+			prev = line
+			hitCount, coverable := fileHits[line]
+			switch {
+			case !coverable:
+				// Nothing the report speaks for. It cannot end a run, or a
+				// comment written inside an untested block would split it.
+			case hitCount > 0:
+				flush()
+			case open:
+				last, count = line, count+1
+			default:
+				open, first, last, count = true, line, line, 1
+			}
+		}
+		flush()
+	}
+	return runs
 }

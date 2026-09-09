@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/orphan"
@@ -165,8 +167,12 @@ func newScanCmd() *cobra.Command {
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
-				for _, row := range resultRows(dir, labelled(results, c.Name)) {
+				attributed := labelled(results, c.Name, c.Dir)
+				for _, row := range resultRows(dir, attributed) {
 					rep.Add(row)
+				}
+				for _, r := range attributed {
+					rep.AddFindings(r.Findings...)
 				}
 			}
 
@@ -258,17 +264,30 @@ func langEnabled(l runner.Lang, cfg config.Config) bool {
 	return false
 }
 
-// labelled names each of a component's results for the component that
-// produced them — `gosec(cli)`, `cargo clippy(api)`.
+// labelled attributes each of a component's results to the component that
+// produced them — `gosec(cli)`, `cargo clippy(api)` — in the row's name and in
+// every located claim beneath it.
 //
 // The name and never the directory: component.validate enforces unique names
 // and not unique directories, so the name is the only one of the two unique
 // by construction. It also matches how `lydite test` labels its own rows, so
 // a scan row and a test row about one component carry the same token.
-func labelled(results []executil.Result, component string) []executil.Result {
+//
+// A finding's path is rebased onto the scan root at the same time, because a
+// check runs inside its component and reports paths relative to there, while
+// every other producer names a file from the root. One file named from two
+// roots is two claims, and only one of them can be anchored.
+func labelled(results []executil.Result, component, dir string) []executil.Result {
 	out := make([]executil.Result, 0, len(results))
 	for _, r := range results {
 		r.Name += "(" + component + ")"
+		findings := make([]finding.Finding, len(r.Findings))
+		for i, f := range r.Findings {
+			f.Component = component
+			f.Path = path.Join(dir, f.Path)
+			findings[i] = f
+		}
+		r.Findings = findings
 		out = append(out, r)
 	}
 	return out
@@ -409,6 +428,9 @@ func resultRows(root string, results []executil.Result) []ui.Row {
 func report(cmd *cobra.Command, rep *ui.Report, root string, results []executil.Result, asJSON, noColor bool) error {
 	for _, row := range resultRows(root, results) {
 		rep.Add(row)
+	}
+	for _, r := range results {
+		rep.AddFindings(r.Findings...)
 	}
 	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
