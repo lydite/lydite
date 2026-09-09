@@ -366,6 +366,7 @@ func TestKeyDistinguishesAmbientToolchainVersions(t *testing.T) {
 	env := ensureOne(t, dir, runner.Go, Overrides{}, &bytes.Buffer{})
 	if env == nil {
 		t.Fatal("an ambient Go that satisfies the declaration still has GOTOOLCHAIN to pin")
+		return
 	}
 	if env.Resolved == "" {
 		t.Fatal("the resolved toolchain is unrecorded, so every ambient Go hashes to one key")
