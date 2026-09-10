@@ -28,10 +28,14 @@ type fakeReviews struct {
 	replyStatus       int
 	reviewStatus      int
 	fileCommentStatus int
-	deleted           []string
-	replied           []string
-	reviews           []map[string]any
-	fileComments      []map[string]any
+	// fileCommentsBeforeFailure lets a run post this many file threads before
+	// the platform starts refusing, which is the only way the count of what
+	// did not land differs from the count of what was asked for.
+	fileCommentsBeforeFailure int
+	deleted                   []string
+	replied                   []string
+	reviews                   []map[string]any
+	fileComments              []map[string]any
 }
 
 func (f *fakeReviews) start(t *testing.T) {
@@ -63,7 +67,7 @@ func (f *fakeReviews) start(t *testing.T) {
 			f.deleted = append(f.deleted, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
 		case strings.Contains(r.URL.Path, "/pulls/") && strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodPost:
-			if f.fileCommentStatus != 0 {
+			if f.fileCommentStatus != 0 && len(f.fileComments) >= f.fileCommentsBeforeFailure {
 				w.WriteHeader(f.fileCommentStatus)
 				return
 			}
@@ -418,11 +422,15 @@ func TestARefusedThreadIsAnsweredOnceHoweverManyCommentsItHas(t *testing.T) {
 	forge.start(t)
 	opsPath := filepath.Join(t.TempDir(), "threads.json")
 
-	if _, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true); err != nil {
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true)
+	if err != nil {
 		t.Fatalf("runThreads: %v", err)
 	}
 	if len(forge.replied) != 1 {
 		t.Fatalf("the thread was answered %d times: %+v", len(forge.replied), forge.replied)
+	}
+	if !strings.Contains(out, "0 opened, 1 closed, 1 answered") {
+		t.Fatalf("one refusal was counted as more than one:\n%s", out)
 	}
 }
 
@@ -554,5 +562,28 @@ func TestTheAppliedRowCountsARefusalOnce(t *testing.T) {
 	}
 	if !strings.Contains(out, "0 opened, 0 closed, 1 answered") {
 		t.Fatalf("the counts do not add up to what happened:\n%s", out)
+	}
+}
+
+// Each file thread that landed is one fewer claim lost, so a run that posted
+// two of three names one rather than three.
+func TestEveryFileThreadThatLandedIsOneFewerClaimLost(t *testing.T) {
+	first := located("b.ts", 400)
+	first.Anchor = finding.AnchorFile
+	second := located("c.ts", 500)
+	second.Anchor = finding.AnchorFile
+	forge := &fakeReviews{
+		fileCommentStatus:         http.StatusUnprocessableEntity,
+		fileCommentsBeforeFailure: 1,
+	}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	_, _, err := runThreadsCmd(t, []string{reportsWith(t, first, second)}, opsPath, true)
+	if err == nil {
+		t.Fatal("a thread that could not be opened must fail the run")
+	}
+	if !strings.Contains(err.Error(), "1 located finding(s) reached no surface") {
+		t.Fatalf("the count ignores the thread that landed: %v", err)
 	}
 }
