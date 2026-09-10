@@ -1,11 +1,16 @@
 // Package forge talks to the hosting platform: the commit statuses a
 // referral is published as, the permission that decides whose word resolves
-// one, and the comments both are explained in.
+// one, the comments both are explained in, and the review threads a located
+// finding becomes.
 //
 // It is deliberately small and hand-rolled over net/http rather than a
 // generated client. lydite's dependency set is part of its argument — every
 // tool it runs is pinned to a manifest something can age out — and a client
-// covering six calls is cheaper to audit than one covering the platform.
+// covering ten calls is cheaper to audit than one covering the platform.
+// Ten is four more than the surface this package was written for, and the
+// widening is real: the argument is that ten named calls still fit on one
+// screen and every one of them is reachable from a line of lydite's own, not
+// that the number is small.
 //
 // Nothing here decides anything. What a status means, and which comment may
 // change one, belong to internal/clearance, so that the rules are testable
@@ -140,6 +145,15 @@ func (e *APIError) Error() string {
 func NotFound(err error) bool {
 	var api *APIError
 	return errors.As(err, &api) && api.Status == http.StatusNotFound
+}
+
+// Forbidden reports whether err is a 403. The platform refuses to delete a
+// comment another identity authored, and that refusal is an answer rather
+// than a failure: the thread is left standing with a reply in it, which is
+// the same path a thread somebody else spoke in takes.
+func Forbidden(err error) bool {
+	var api *APIError
+	return errors.As(err, &api) && api.Status == http.StatusForbidden
 }
 
 func readMessage(r io.Reader) string {

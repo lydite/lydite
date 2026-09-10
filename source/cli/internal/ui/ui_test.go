@@ -236,7 +236,7 @@ func TestFindingKeysArePartOfTheContract(t *testing.T) {
 		Gate: "mutation", Component: "cli", Path: "internal/runner/runner.go",
 		Line: 412, EndLine: 414, Rule: "G306", Severity: "high",
 		Message: "a survivor", Detail: []string{"< -> >="},
-		Site: "relational < >=", Ordinal: 1, Anchor: finding.AnchorLine,
+		Site: "relational < >=", Ordinal: 1, Row: "mutation(cli)", Anchor: finding.AnchorLine,
 	})
 	if err := rep.WriteJSON(&buf); err != nil {
 		t.Fatalf("WriteJSON: %v", err)
@@ -255,7 +255,7 @@ func TestFindingKeysArePartOfTheContract(t *testing.T) {
 	}
 	for _, key := range []string{
 		"gate", "component", "path", "line", "end_line", "rule",
-		"severity", "message", "detail", "site", "ordinal", "anchor",
+		"severity", "message", "detail", "site", "ordinal", "row", "anchor",
 	} {
 		if _, ok := one[key]; !ok {
 			t.Errorf("the finding is missing the %q key: %s", key, buf.String())

@@ -1,0 +1,388 @@
+// Package threads turns the located claims a run made into the review threads
+// that carry them, as a document a transport applies.
+//
+// It is the second half of the surface. The standing comment carries what is
+// true of the change; a thread carries what is true of a line, and a reader
+// clears one by editing the code under it. What decides which claims go where
+// is the anchor a producer already decided (see internal/finding): the comment
+// takes the ones that reach the change nowhere, the review takes the rest, and
+// no claim appears in both.
+//
+// Nothing here talks to a hosting platform. Delta reads the claims and the
+// threads already standing, and answers with the operations that reconcile
+// them; applying those is a transport's job, and there are two of them — the
+// relay, under lydite's own identity, and `lydite threads --apply` under the
+// workflow's token. One delta implementation and two dumb transports is the
+// whole shape: matching fingerprints and deciding what may be deleted are
+// lydite's vocabulary, and a second copy of them in a Worker is a copy one
+// release behind forever.
+package threads
+
+import (
+	"fmt"
+	"strings"
+
+	"lydite/lydite/internal/finding"
+)
+
+// Version is the ops document's own. It is lydite's private wire between the
+// command that computes a delta and whatever applies it, both of which ship
+// together — so a reader that does not recognise the version refuses the whole
+// document rather than applying the half it understands.
+const Version = 1
+
+// markerPrefix opens the HTML comment every thread lydite writes begins with.
+//
+// Matching on the marker and never on the author, for ui.Marker's reason: the
+// author is whoever's token posted it, and ADR 0022 makes that change in both
+// directions — a repository that installs the app hands over from
+// `github-actions[bot]`, and one that removes it hands back.
+const markerPrefix = "<!-- lydite:finding:"
+
+const markerSuffix = " -->"
+
+// Marker is the token that identifies which finding a thread is about.
+//
+// The token is the fingerprint itself, version prefix included, rather than a
+// second identifier derived beside it: two ids for one claim is two things to
+// keep in step, and the one nobody reads is the one that drifts.
+func Marker(fingerprint string) string {
+	return markerPrefix + fingerprint + markerSuffix
+}
+
+// FingerprintIn returns the token a body's marker carries, or "".
+//
+// It accepts any token and returns it verbatim, including one from a
+// fingerprint formula this binary has never emitted. That is what makes a
+// formula bump self-heal: a thread written under the old formula matches no
+// current finding, so it takes the path a cleared finding takes — deleted
+// where lydite is alone in it — and the new claim is posted fresh. No
+// migration, and nothing to recognise a version by.
+func FingerprintIn(body string) string {
+	_, rest, found := strings.Cut(body, markerPrefix)
+	if !found {
+		return ""
+	}
+	raw, _, found := strings.Cut(rest, markerSuffix)
+	if !found {
+		return ""
+	}
+	token := strings.TrimSpace(raw)
+	if token == "" || strings.ContainsAny(token, " \t\n") {
+		return ""
+	}
+	return token
+}
+
+// Comment is one review comment as a hosting platform reports it.
+type Comment struct {
+	ID   int64
+	Body string
+	Path string
+	// Line is where the platform currently shows the comment. It is zero for
+	// an outdated one, which is the same thing Outdated says and is kept
+	// separate because a transport reads it from a different field.
+	Line int
+	// Outdated is a thread whose anchor the change has moved out from under:
+	// the platform hides it behind a "Show outdated" toggle, so a thread that
+	// blocks the merge becomes one the author cannot see.
+	Outdated bool
+	// InReplyTo is the root comment this is a reply to, or zero for a root.
+	InReplyTo int64
+}
+
+// Thread is a root comment and the replies under it.
+type Thread struct {
+	Root    Comment
+	Replies []Comment
+}
+
+// Fingerprint is the claim this thread was opened about.
+func (t Thread) Fingerprint() string { return FingerprintIn(t.Root.Body) }
+
+// Sole reports whether lydite is the only participant.
+//
+// Every comment lydite writes into a thread carries the marker, so a comment
+// without one is somebody else's — which is what this asks, without asking who
+// authored anything. The author would answer wrongly the moment the identity
+// changes, and ADR 0022 makes that happen in both directions.
+//
+// It governs both branches of a thread's life. A cleared finding whose thread
+// lydite is alone in is deleted; one somebody has spoken in is replied to and
+// left standing, because deleting it would take their words with it. An
+// outdated thread is moved only under the same rule, and for the same reason.
+func (t Thread) Sole() bool {
+	if FingerprintIn(t.Root.Body) == "" {
+		return false
+	}
+	for _, reply := range t.Replies {
+		if FingerprintIn(reply.Body) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Threads groups a flat listing of review comments into threads, in the order
+// their roots appear.
+//
+// A reply whose root is not in the listing is dropped rather than promoted to
+// a root of its own: it is a fragment of a thread this page did not reach, and
+// treating it as a root would make lydite the sole participant in a thread it
+// cannot see the whole of.
+func Threads(comments []Comment) []Thread {
+	at := map[int64]int{}
+	var out []Thread
+	for _, c := range comments {
+		if c.InReplyTo == 0 {
+			at[c.ID] = len(out)
+			out = append(out, Thread{Root: c})
+		}
+	}
+	for _, c := range comments {
+		if c.InReplyTo == 0 {
+			continue
+		}
+		if i, ok := at[c.InReplyTo]; ok {
+			out[i].Replies = append(out[i].Replies, c)
+		}
+	}
+	return out
+}
+
+// Create opens a thread on a line, or on a file.
+type Create struct {
+	Fingerprint string `json:"fingerprint"`
+	Path        string `json:"path"`
+	// Line is the line to anchor to, and is zero when Subject is "file".
+	Line int `json:"line,omitempty"`
+	// Subject is "line" or "file", which is how far the claim reaches into
+	// the change. A hosting platform that anchors to a diff cannot put a
+	// comment on a line the change did not touch, and pointing at a nearby
+	// one it did would be the surface lying about where the problem is.
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+// Reply adds to a thread that is being left standing.
+type Reply struct {
+	Comment int64  `json:"comment"`
+	Body    string `json:"body"`
+}
+
+// Delete removes one comment lydite wrote.
+//
+// Refused is what to say instead when the platform will not delete it. An
+// identity may only delete comments it authored, so a repository that
+// installed the app after lydite had already written threads under its own
+// `github-actions[bot]` has threads neither identity can clear — the handover
+// corner case ADR 0031 states rather than engineers around. The body travels
+// with the operation rather than being composed by whatever applies it,
+// because a transport that writes its own prose is a second place lydite's
+// words live.
+type Delete struct {
+	Comment int64  `json:"comment"`
+	Refused string `json:"refused"`
+}
+
+// Ops is everything one run changes about a pull request's threads.
+//
+// It is lydite's own shape and a private wire: it is written to the path
+// --ops names rather than into .lydite-reports/, because nothing about it is
+// promised to a consumer and a command that reaches no verdict writes no
+// report document — `lydite test plan` is the precedent.
+type Ops struct {
+	Version     int      `json:"version"`
+	PullRequest int      `json:"pull_request"`
+	Head        string   `json:"head"`
+	Create      []Create `json:"create,omitempty"`
+	Reply       []Reply  `json:"reply,omitempty"`
+	Delete      []Delete `json:"delete,omitempty"`
+}
+
+// Located is the findings a review can carry: the ones that reach the change
+// at a line or at a file.
+//
+// The partition against the standing comment needs no coordination between the
+// two renderers, because it is a partition on the anchor and the anchor is
+// already in the document. Everything else is AnchorNowhere, and the comment
+// takes exactly that.
+func Located(findings []finding.Finding) []finding.Finding {
+	var out []finding.Finding
+	for _, f := range findings {
+		if f.Anchor == finding.AnchorLine || f.Anchor == finding.AnchorFile {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// Dedup keeps the first finding under each fingerprint and names the rest.
+//
+// Two claims with one fingerprint are one claim, and posting both would put
+// two threads on one line that neither delta nor reader can tell apart. The
+// input is documents several runs wrote, folded or not, so this cannot rest on
+// any one producer having deduplicated: a local run writes every command's
+// document into one directory with no fold at all.
+func Dedup(findings []finding.Finding) (kept []finding.Finding, dropped []string) {
+	seen := map[string]bool{}
+	for _, f := range findings {
+		fp := f.Fingerprint()
+		if seen[fp] {
+			dropped = append(dropped, fp)
+			continue
+		}
+		seen[fp] = true
+		kept = append(kept, f)
+	}
+	return kept, dropped
+}
+
+// Delta is the operations that reconcile the threads standing on a pull
+// request with the claims this run makes.
+//
+// Three things happen, and one predicate governs two of them:
+//
+//   - A claim with no thread gets one.
+//   - A thread whose claim is gone is deleted where lydite is the only
+//     participant, and replied to and left standing where anyone else spoke.
+//   - A thread the change has made outdated is deleted and reopened at the
+//     line the claim is on now, under the same rule.
+//
+// An outdated thread is moved rather than left because the platform collapses
+// one behind a "Show outdated" toggle: a thread that blocks the merge becomes
+// a thread the author cannot see, which is worse than the notification a
+// repost costs. A fixed claim leaves no per-finding record, which is accepted
+// — per-finding history is a later, additive step that the fingerprint is
+// what makes possible.
+//
+// A thread lydite did not write — no marker — is not lydite's to touch, and is
+// left out of every list.
+func Delta(findings []finding.Finding, threads []Thread, pull int, head string) Ops {
+	ops := Ops{Version: Version, PullRequest: pull, Head: head}
+	claims := map[string]finding.Finding{}
+	order := make([]string, 0, len(findings))
+	for _, f := range findings {
+		fp := f.Fingerprint()
+		if _, ok := claims[fp]; !ok {
+			order = append(order, fp)
+		}
+		claims[fp] = f
+	}
+
+	standing := map[string]bool{}
+	for _, t := range threads {
+		fp := t.Fingerprint()
+		if fp == "" {
+			continue
+		}
+		f, current := claims[fp]
+		switch {
+		case !current:
+			ops.close(t, cleared(fp))
+		case !t.Root.Outdated:
+			standing[fp] = true
+		case t.Sole():
+			// Deleted and reopened, so the loop below writes it again at
+			// the line the claim is on now. The refusal body says it moved
+			// rather than that it cleared: a delete the platform will not
+			// do leaves this thread standing beside the new one, and the
+			// claim is still true.
+			ops.close(t, moved(fp, f))
+		default:
+			// Somebody is in this thread, so it stays where it is with
+			// their words in it, outdated and all.
+			standing[fp] = true
+			ops.Reply = append(ops.Reply, Reply{Comment: t.Root.ID, Body: moved(fp, f)})
+		}
+	}
+
+	for _, fp := range order {
+		if standing[fp] {
+			continue
+		}
+		f := claims[fp]
+		create := Create{Fingerprint: fp, Path: f.Path, Subject: "file", Body: Body(f)}
+		if f.Anchor == finding.AnchorLine {
+			create.Subject, create.Line = "line", f.Line
+		}
+		ops.Create = append(ops.Create, create)
+	}
+	return ops
+}
+
+// close ends a thread: deleted where lydite is alone in it, and answered where
+// it is not.
+//
+// The replies are deleted before the root, so a refusal partway through leaves
+// a thread with its root still standing rather than a headless run of replies
+// the platform shows under nothing.
+func (o *Ops) close(t Thread, body string) {
+	if !t.Sole() {
+		o.Reply = append(o.Reply, Reply{Comment: t.Root.ID, Body: body})
+		return
+	}
+	for i := len(t.Replies) - 1; i >= 0; i-- {
+		o.Delete = append(o.Delete, Delete{Comment: t.Replies[i].ID, Refused: body})
+	}
+	o.Delete = append(o.Delete, Delete{Comment: t.Root.ID, Refused: body})
+}
+
+// Body is what a thread's root comment says.
+//
+// The marker first, so the line a transport checks is the first one, and the
+// row's label after it: a reader arriving at a line wants to know which gate
+// is talking before they read what it says.
+func Body(f finding.Finding) string {
+	var b strings.Builder
+	b.WriteString(Marker(f.Fingerprint()))
+	b.WriteString("\n**")
+	b.WriteString(label(f))
+	b.WriteString("** — ")
+	b.WriteString(f.Message)
+	for _, line := range f.Detail {
+		b.WriteString("\n\n")
+		b.WriteString(line)
+	}
+	if f.Anchor == finding.AnchorFile {
+		fmt.Fprintf(&b, "\n\n_%s:%d — this change does not touch that line, so the thread sits on the file._",
+			f.Path, f.Line)
+	}
+	return b.String()
+}
+
+// cleared is what lydite says in a thread it is finishing with.
+//
+// It carries the marker, so a thread lydite has spoken in twice is still one
+// lydite is alone in — the predicate reads the marker and not the author, and
+// a reply without one would make lydite a stranger in its own thread.
+func cleared(fingerprint string) string {
+	return Marker(fingerprint) + "\nThis no longer reports on the change: either the code cleared it, or the gate that made it did not run.\n\n" +
+		"lydite cannot resolve a thread — that needs a permission it deliberately does not hold — so this one is yours to close."
+}
+
+// moved says a thread has come adrift from the line it is about.
+//
+// It is what a thread gets instead of being reopened when somebody else is in
+// it: their words are worth more than the anchor, and deleting the thread to
+// move it would take them with it.
+func moved(fingerprint string, f finding.Finding) string {
+	return Marker(fingerprint) + fmt.Sprintf(
+		"\nStill reported, and the change has moved it: it is at `%s:%d` now. This thread stays here because it is not lydite's alone to move.",
+		f.Path, f.Line)
+}
+
+// label names the row a claim was made by, falling back to the gate.
+//
+// A document written by a lydite that did not record the row still has the
+// gate, which is the part a reader needs; the label is the fuller answer and
+// not the only one.
+func label(f finding.Finding) string {
+	if f.Row != "" {
+		return f.Row
+	}
+	if f.Component != "" {
+		return f.Gate + "(" + f.Component + ")"
+	}
+	return f.Gate
+}

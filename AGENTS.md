@@ -37,7 +37,7 @@ again, and that file arrives on its own when you read anything in that subtree.
 | [`mutation.md`](.agents/references/mutation.md) | `internal/mutation` or `lydite mutation` |
 | [`output-grammar.md`](.agents/references/output-grammar.md) | `internal/ui`, a row, a status, or the `--json` document |
 | [`referral-and-clearance.md`](.agents/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge`, or `.lydite/exemptions.yml` |
-| [`surface.md`](.agents/references/surface.md) | `lydite publish`, the standing comment, or `source/cloud-services/pr-relay` |
+| [`surface.md`](.agents/references/surface.md) | `lydite publish`, the standing comment, `lydite threads`, `internal/threads`, or `source/cloud-services/pr-relay` |
 | [`semgrep.md`](.agents/references/semgrep.md) | `internal/semgrep`, or `--diff-base` |
 | [`actions.md`](.agents/references/actions.md) | `.github/actions/`, or anything that has to land in `lydite/actions` too |
 | [`design.md`](.agents/references/design.md) | `assets/` or `docs/design/` |
@@ -97,7 +97,11 @@ source/cli/internal/ui/           # the output grammar every command renders thr
                                   #   and the standing PR comment (see Surface)
 source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see Referral)
 source/cli/internal/clearance/    # the comment surface and the clearance decision (see Clearance)
-source/cli/internal/forge/        # the hosting platform: commit statuses, permission, comments
+source/cli/internal/threads/      # the review threads a located finding becomes: the marker, the
+                                  #   delta, and the operations document two transports apply
+                                  #   (see Surface)
+source/cli/internal/forge/        # the hosting platform: commit statuses, permission, comments,
+                                  #   and the review calls a thread is made of
 source/cli/internal/component/    # .lydite/components.yml: what a repo builds and tests (see Components)
 source/cli/internal/orphan/       # source files under no component and no exclude (see The orphan gate)
 source/cli/internal/pathmatch/    # the anchored path-pattern syntax both declarations are written in
@@ -166,8 +170,8 @@ scripts/install.sh                # curl|sh installer shipped with every release
 
 ## Status
 
-All eight subcommands (`scan`, `test`, `mutation`, `review`, `publish`, `clearance`, `version`,
-`update`) are fully implemented, plus `test plan`, `test merge`, `test record` and
+All nine subcommands (`scan`, `test`, `mutation`, `review`, `publish`, `threads`, `clearance`,
+`version`, `update`) are fully implemented, plus `test plan`, `test merge`, `test record` and
 `mutation merge` — every check
 is a real tool invocation (not a stub). Every scanner pins its own tool version and installs it into
 a lydite-managed cache directory rather than trusting whatever's already on the machine (see each
@@ -181,10 +185,12 @@ on the next run — has been exercised end to end against a real git repository,
 hand-written report fixture.
 
 `lydite publish` renders the standing pull-request comment from the documents those runs wrote,
-and `source/cloud-services/pr-relay` posts it under lydite's own App with no credential in the
-CI job (see Surface). The relay is written and tested and **not yet deployed**: until
-`vars.LYDITE_RELAY_URL` is set, every comment goes through the `github-token` fallback, which is
-a supported path rather than a temporary one.
+`lydite threads` turns every finding that reaches the change into a review thread on its line,
+and `source/cloud-services/pr-relay` writes both under lydite's own App with no credential in
+the CI job (see Surface). No finding appears in both surfaces. The relay is written and tested
+and **not yet deployed**: until `vars.LYDITE_RELAY_URL` is set, every comment and every thread
+goes through the `github-token` fallback, which is a supported path rather than a temporary
+one.
 
 `lydite test record` also appends this commit's scalars to the quality-history ledger on the
 same branch, in the same commit — coverage, CRAP and test counts per component, with an

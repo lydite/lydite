@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
@@ -136,6 +137,10 @@ type section struct {
 // no comment-rendering code of its own any more.
 func (s section) render(title string) ui.CommentSection {
 	out := ui.CommentSection{Status: worst(s.doc.Rows), Title: title, Summary: counts(s.doc.Rows)}
+	byRow := map[string][]finding.Finding{}
+	for _, f := range s.doc.Findings {
+		byRow[f.Row] = append(byRow[f.Row], f)
+	}
 	for _, row := range s.doc.Rows {
 		out.Rows = append(out.Rows, ui.CommentRow{Status: row.Status, Check: row.Label, Result: row.Value})
 	}
@@ -163,7 +168,7 @@ func (s section) render(title string) ui.CommentSection {
 		}
 		out.Details = append(out.Details, ui.CommentDetail{
 			Title: row.Label,
-			Lines: failureLines(s.dir, row),
+			Lines: detailFor(s.dir, row, byRow[row.Label]),
 			Log:   row.Log,
 		})
 	}
@@ -172,6 +177,50 @@ func (s section) render(title string) ui.CommentSection {
 			fmt.Sprintf("%d further result(s) are in the run's artifact rather than here", rest))
 	}
 	return out
+}
+
+// detailFor is what a failing row says in the comment, once the claims that
+// have a line of their own have been taken out of it.
+//
+// A finding that reaches the change is a thread on the line it is about, and
+// repeating it here would be the same claim in two places — one of which a
+// reader cannot resolve and neither of which says which is the real one. So
+// the comment keeps the claims that reach the change nowhere, and counts the
+// rest rather than listing them: a reader has to be told the section is not
+// the whole story, or a failing row with every claim on a line reads as a row
+// with nothing under it.
+//
+// The narrowing is unconditional. It does not ask whether threads are being
+// posted, because a developer running `lydite publish` locally has to read
+// exactly the comment a reviewer sees — the parity property ADR 0023 exists
+// for, and one that a comment rendered differently depending on a hosting
+// platform would lose.
+//
+// A row with no findings at all quotes what it always did. It is what every
+// gate that emits none still has, and what the row's own author chose to put
+// next to the verdict.
+//
+// The cost is that a row's asides — "3 did not compile" — leave the comment
+// with the rest of the Detail, because a row renders one or the other. They
+// are still on the terminal and in the log the row names.
+func detailFor(dir string, row ui.Row, found []finding.Finding) []string {
+	if len(found) == 0 {
+		return failureLines(dir, row)
+	}
+	var lines []string
+	var located int
+	for _, f := range found {
+		if f.Anchor != finding.AnchorNowhere {
+			located++
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message))
+	}
+	if located > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"%d finding(s) reach a line of this change, and are threads on those lines rather than rows here.", located))
+	}
+	return lines
 }
 
 // detailCap is how many rows get their output quoted in one section.

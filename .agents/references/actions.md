@@ -10,14 +10,16 @@ release moves.
 
 **What is here is the dogfood, and the two are deliberately the same shape.**
 `.github/workflows/lydite-pr.yml` runs those four concerns through the local composites in
-`.github/actions/` — `lydite-binary`, `lydite-reports`, `lydite-comment`. The one difference is
-that `lydite-binary` uses the binary the pull request built, because a dogfood against the last
+`.github/actions/` — `lydite-binary`, `lydite-reports`, `lydite-comment` and `lydite-threads`.
+The one difference is that `lydite-binary` uses the binary the pull request built, because a dogfood against the last
 release tests the last release. When the shape here changes, that repository is where the change
 has to land as well; nothing enforces it.
 
-**A consumer's comment is rendered by `lydite publish` and nothing else.** The posting step takes
-a file and a marker and knows nothing about coverage, components or verdicts, which is what stops
-a refinement to the comment becoming a two-repository release. It is also why a sticky-comment
+**A consumer's comment is rendered by `lydite publish` and nothing else, and its review threads
+are computed by `lydite threads` and nothing else.** The posting step takes a file and a marker
+and knows nothing about coverage, components or verdicts; `lydite-threads` takes report
+directories and an operations file and knows nothing about fingerprints. That is what stops a
+refinement to either surface becoming a two-repository release. It is also why a sticky-comment
 action earns nothing: the marker upsert is twenty lines of `gh api`, and the relay does the same
 thing on the authenticated path.
 
@@ -29,7 +31,9 @@ something non-blocking, and the history it offers is what
 measurements are made, rather than reconstructed by a third party from uploads.
 
 **Only `publish` authenticates**, and the split matters: `id-token: write` for the relay, and
-`pull-requests: write` for the fallback path alone. Every other job holds a read-only token, which
+`pull-requests: write` for the fallback paths and for reading the threads already standing —
+the delta is computed with the job's own token on both paths, which is a read the job could
+already make. Every other job holds a read-only token, which
 is what lets `test` run a pull request's own suites and `setup`/`teardown` shell without holding
 anything that can write.
 

@@ -66,7 +66,7 @@ referred — including a correct one.`,
 			// verdict, so the status a machine reads and the report a person
 			// reads are the same value rather than two derivations of it.
 			if doPublish {
-				target, err := resolvePublishTarget(eventPath)
+				target, err := resolveTarget("--publish", eventPath)
 				if err != nil {
 					return err
 				}

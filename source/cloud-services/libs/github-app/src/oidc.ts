@@ -105,12 +105,15 @@ export async function verifyActionsToken(
 }
 
 /**
- * Reads the pull-request number out of the ref a merge run was triggered for.
+ * Reads the pull-request number out of the ref a pull-request run was
+ * triggered for.
  *
- * `refs/pull/<n>/merge` is what `pull_request` events check out, and it is the
- * only statement of which pull request a run belongs to that the run itself
- * cannot choose. A ref of any other shape yields nothing, which is what makes
- * a push build unable to comment.
+ * `refs/pull/<n>/merge` is what a `pull_request` event checks out and
+ * `refs/pull/<n>/head` is what a workflow that asks for the head revision
+ * gets; both are accepted, because both are the platform's own statement of
+ * which pull request a run belongs to and neither is a thing the run can
+ * choose. A ref of any other shape yields nothing, which is what makes a push
+ * build unable to write anywhere.
  */
 export function pullRequestFromRef(ref: string): number | undefined {
   const match = /^refs\/pull\/(\d+)\/(merge|head)$/.exec(ref);

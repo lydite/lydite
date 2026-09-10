@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/threads"
 )
 
 // HeadSHA resolves a pull request's current head.
@@ -206,4 +207,143 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(runes[:max-1]) + "…"
+}
+
+// ReviewComment is one comment on a pull request's diff, as the platform
+// reports it.
+//
+// Position and Line are two different questions and both are asked. Line is
+// where the comment sits in the current diff; position comes back null when
+// the change has moved out from under the comment, which is the only way to
+// learn that the platform has collapsed a thread behind its "show outdated"
+// toggle — a thread that blocks a merge and that the author cannot see.
+//
+// SubjectType is what keeps that reading honest. A comment on a whole file has
+// no position by construction rather than by the change having moved, so the
+// null alone would report every file-level thread as outdated and take it down
+// and repost it on every push.
+type reviewComment struct {
+	ID          int64  `json:"id"`
+	Body        string `json:"body"`
+	Path        string `json:"path"`
+	Line        *int   `json:"line"`
+	Position    *int   `json:"position"`
+	SubjectType string `json:"subject_type"`
+	InReplyTo   int64  `json:"in_reply_to_id"`
+}
+
+// ReviewComments lists every comment on a pull request's diff, replies
+// included.
+//
+// One listing rather than a query per finding: the delta needs the whole set
+// to decide what has no thread yet, and asking per fingerprint would be one
+// request per claim to learn the same thing.
+//
+// The walk is capped the way the conversation's is. A pull request with more
+// review comments than this has a thread lydite cannot see, and the delta
+// treats what it cannot see as absent — which reposts a claim rather than
+// deleting somebody's thread, the safe direction of the two.
+func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]threads.Comment, error) {
+	var out []threads.Comment
+	for page := 1; page <= 10; page++ {
+		var comments []reviewComment
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100&page=%d",
+			escape(repo.Owner), escape(repo.Name), number, page)
+		if err := c.do(ctx, "GET", path, nil, &comments); err != nil {
+			return nil, fmt.Errorf("reading the review comments on %s#%d: %w", repo, number, err)
+		}
+		for _, rc := range comments {
+			out = append(out, threads.Comment{
+				ID: rc.ID, Body: rc.Body, Path: rc.Path,
+				Line:      derefOr(rc.Line, 0),
+				Outdated:  rc.Position == nil && rc.SubjectType != "file",
+				InReplyTo: rc.InReplyTo,
+			})
+		}
+		if len(comments) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
+// CreateReview opens every new thread in one review.
+//
+// One review and not one comment each, because a review notifies once however
+// many lines it touches, and a run that opens twelve threads individually
+// sends twelve emails about one push. The event is COMMENT and never
+// REQUEST_CHANGES or APPROVE: review approval is a different mechanism with
+// different rules about who may give one, and lydite must not touch it.
+//
+// A comment must anchor inside the diff's own hunks — the API answers 422 for
+// a line outside them, where the web UI would have let a human comment. That
+// is why a finding's anchor is decided by the gate that made it, against the
+// changed-line map: those lines are a strict subset of what the platform
+// accepts, so "lydite says anchorable" implies "the platform takes it" and
+// never the reverse.
+func (c *Client) CreateReview(ctx context.Context, repo Repo, number int, head string, comments []threads.Create) error {
+	if len(comments) == 0 {
+		return nil
+	}
+	type reviewInput struct {
+		Path        string `json:"path"`
+		Body        string `json:"body"`
+		Line        int    `json:"line,omitempty"`
+		SubjectType string `json:"subject_type,omitempty"`
+	}
+	body := map[string]any{"event": "COMMENT"}
+	if head != "" {
+		body["commit_id"] = head
+	}
+	inputs := make([]reviewInput, 0, len(comments))
+	for _, create := range comments {
+		in := reviewInput{Path: create.Path, Body: create.Body}
+		if create.Subject == "file" {
+			in.SubjectType = "file"
+		} else {
+			in.Line = create.Line
+		}
+		inputs = append(inputs, in)
+	}
+	body["comments"] = inputs
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "POST", path, body, nil); err != nil {
+		return fmt.Errorf("opening %d thread(s) on %s#%d: %w", len(comments), repo, number, err)
+	}
+	return nil
+}
+
+// ReplyToReviewComment adds to a thread rather than opening one.
+//
+// It is outside the review, because a review's comments[] can only open
+// threads. A run is therefore one review plus a call per thread it leaves
+// standing.
+func (c *Client) ReplyToReviewComment(ctx context.Context, repo Repo, number int, id int64, body string) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies",
+		escape(repo.Owner), escape(repo.Name), number, id)
+	if err := c.do(ctx, "POST", path, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("replying to review comment %d on %s#%d: %w", id, repo, number, err)
+	}
+	return nil
+}
+
+// DeleteReviewComment removes one comment lydite wrote.
+//
+// An identity may only delete what it authored, so this is refused for a
+// thread the other identity opened — the handover between lydite's app and a
+// consumer's own bot. The caller answers a refusal by replying instead, which
+// is the same path a thread somebody else spoke in takes.
+func (c *Client) DeleteReviewComment(ctx context.Context, repo Repo, id int64) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", escape(repo.Owner), escape(repo.Name), id)
+	if err := c.do(ctx, "DELETE", path, nil, nil); err != nil {
+		return fmt.Errorf("deleting review comment %d on %s: %w", id, repo, err)
+	}
+	return nil
+}
+
+func derefOr(p *int, fallback int) int {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }

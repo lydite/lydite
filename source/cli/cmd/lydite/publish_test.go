@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/ui"
 )
 
@@ -326,5 +327,72 @@ func TestTheCommentCarriesMutationAfterTheOtherThreeConcerns(t *testing.T) {
 	body := comment.Render()
 	if !strings.Contains(body, "1 of 9 mutant(s) survived") {
 		t.Errorf("the survivor does not reach the comment:\n%s", body)
+	}
+}
+
+// reportDirWithFindings writes a report directory whose document carries both
+// rows and the located claims the run made.
+func reportDirWithFindings(t *testing.T, command string, rows []ui.Row, found []finding.Finding) string {
+	t.Helper()
+	root := t.TempDir()
+	rep := ui.NewReport(command)
+	for _, row := range rows {
+		rep.Add(row)
+	}
+	rep.AddFindings(found...)
+	saveDocument(root, rep)
+	return reportsDir(root)
+}
+
+// A claim that reaches a line of the change is a thread on that line, so the
+// comment says how many there are rather than repeating them. Repeating one
+// would put the same claim in two places, only one of which a reader can
+// resolve.
+func TestTheCommentLeavesLocatedFindingsToTheReview(t *testing.T) {
+	row := ui.Row{Status: ui.StatusFail, Label: "mutation(cli)", Value: "2 of 8 mutant(s) survived",
+		Detail: []string{"a survivor", "another survivor", "3 did not compile"}}
+	dir := reportDirWithFindings(t, "mutation", []ui.Row{row}, []finding.Finding{
+		{Gate: "mutation", Component: "cli", Path: "a.go", Line: 12, Message: "a survivor",
+			Site: "one", Row: "mutation(cli)", Anchor: finding.AnchorLine},
+		{Gate: "mutation", Component: "cli", Path: "b.go", Line: 40, Message: "an unreachable survivor",
+			Site: "two", Row: "mutation(cli)"},
+	})
+
+	body := buildComment([]string{dir}, "").Render()
+	if !strings.Contains(body, "an unreachable survivor") {
+		t.Errorf("a claim that reaches the change nowhere must stay in the comment:\n%s", body)
+	}
+	if strings.Contains(body, "a survivor\n") {
+		t.Errorf("a claim with a line of its own is repeated here:\n%s", body)
+	}
+	if !strings.Contains(body, "1 finding(s) reach a line of this change") {
+		t.Errorf("the comment does not say what it is leaving out:\n%s", body)
+	}
+}
+
+// The narrowing does not ask whether threads are being posted, so a developer
+// running publish locally reads exactly the comment a reviewer sees — the
+// parity ADR 0023 exists for.
+func TestARowWhoseClaimsAreAllLocatedStillSaysSo(t *testing.T) {
+	row := ui.Row{Status: ui.StatusFail, Label: "biome(cli)", Value: "failed", Detail: []string{"a finding"}}
+	dir := reportDirWithFindings(t, "scan", []ui.Row{row}, []finding.Finding{
+		{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3, Message: "a finding",
+			Site: "one", Row: "biome(cli)", Anchor: finding.AnchorLine},
+	})
+	body := buildComment([]string{dir}, "").Render()
+	if !strings.Contains(body, "1 finding(s) reach a line of this change") {
+		t.Fatalf("a row with every claim on a line reads as a row with nothing under it:\n%s", body)
+	}
+}
+
+// A gate that emits no findings still quotes what its author put next to the
+// verdict, which for several checks is the only place their output exists.
+func TestARowWithNoFindingsQuotesItsOwnDetail(t *testing.T) {
+	row := ui.Row{Status: ui.StatusFail, Label: "cargo clippy(engine)", Value: "failed",
+		Detail: []string{"error: this is the only copy of this text"}}
+	dir := reportDirWithFindings(t, "scan", []ui.Row{row}, nil)
+	body := buildComment([]string{dir}, "").Render()
+	if !strings.Contains(body, "the only copy of this text") {
+		t.Fatalf("a row with no findings lost its detail:\n%s", body)
 	}
 }

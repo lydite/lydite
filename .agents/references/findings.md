@@ -107,6 +107,26 @@ exists to cover, and neither edit is in the function.
 every other producer names a file from the root. One file named from two roots is two claims,
 and only one of them can be anchored.
 
+## A finding names its row, and that decides which surface renders it
+
+`Finding.Row` is the label of the row that made the claim, written by the producer that already
+holds both. It is a label rather than a nesting, and it is carried rather than parsed: a finding
+still carries its own gate and component, so nothing has to take `gosec(cli)` apart. It takes no
+part in the fingerprint — relabelling a row is not finding something new.
+
+What reads it is the standing comment. A failing row renders its detail from that row's
+**unanchored** findings plus a line counting the located ones, and a row with no findings quotes
+`Row.Detail` exactly as before. The located ones are threads on their own lines (see Surface),
+and **no finding appears in both** — a partition on `Anchor`, which is already in the document,
+so the two renderers need no knowledge of each other. The narrowing is unconditional: a
+developer running `lydite publish` locally reads exactly the comment a reviewer sees.
+
+The cost is that a row's non-finding asides — mutation's `3 did not compile` — leave the comment
+with the rest of that row's `Detail`. They stay on the terminal and in the log the row names.
+This partly reverses [ADR 0030](../../docs/adr/0030-findings-are-data-in-the-report-document.md)'s
+removal of the row link, which
+[ADR 0031](../../docs/adr/0031-a-located-finding-is-a-review-thread.md) states as an amendment.
+
 ## The fold carries them through
 
 `readShards` carries every shard's findings into the folded report unchanged. They need no

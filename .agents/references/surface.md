@@ -1,12 +1,16 @@
-# Surface: `lydite publish`, and the identity that posts it
+# Surface: `lydite publish`, `lydite threads`, and the identity that posts them
 
-> **The reference for `lydite publish`, the standing comment, and `source/cloud-services/pr-relay`.**
+> **The reference for `lydite publish`, the standing comment, `lydite threads` and the review
+> threads, `internal/threads`, and `source/cloud-services/pr-relay`.**
 
 Every gate lydite has reports to a job log; the **Surface** is where the verdict reaches the
-person whose change it is about. There is exactly one: a standing pull-request comment carrying
-the referral, the scan, the suites and the mutants as one collapsible section
-each. See
-[ADR 0023](../../docs/adr/0023-one-standing-comment-rendered-by-the-cli.md) for the surface and
+person whose change it is about. There are two of them, and one rule separates them: **the
+comment carries what is true of the change; the review carries what is true of a line.** The
+comment is a standing pull-request comment carrying the referral, the scan, the suites and the
+mutants as one collapsible section each; the review is one thread per finding that reaches the
+change, on the line or the file it is about. See
+[ADR 0023](../../docs/adr/0023-one-standing-comment-rendered-by-the-cli.md) for the comment,
+[ADR 0031](../../docs/adr/0031-a-located-finding-is-a-review-thread.md) for the threads, and
 [ADR 0022](../../docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md) for the identity.
 
 **`lydite publish` renders and posts nothing.** `--reports <dir>` (repeatable), `--out
@@ -60,11 +64,20 @@ over instead of leaving two standing verdicts.
 
 ## The relay, and the fallback
 
-`source/cloud-services/pr-relay` posts on a consumer's behalf so that **no CI job holds a
+`source/cloud-services/pr-relay` writes on a consumer's behalf so that **no CI job holds a
 credential**. The job presents the GitHub Actions OIDC token; the relay verifies signature (JWKS),
 `iss`, a declared `aud` and `exp`, takes the repository from the `repository` claim and never
-from the body, reads the pull-request number out of `ref`, mints an installation token narrowed
-to that one repository and to `pull_requests: write`, posts, and discards it. It stores nothing.
+from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge` and
+`refs/pull/<n>/head` both), mints an installation token narrowed to that one repository and to
+`pull_requests: write`, writes, and discards it. It stores nothing.
+
+Two endpoints. `POST /comment` upserts the standing comment by its marker; `POST /review`
+applies the operations document `lydite threads` computed. Before applying anything, `/review`
+lists the pull request's own review comments and **refuses the whole request if any `reply` or
+`delete` names an id outside that set** — a comment id is a number the caller supplies while
+`ref` is the only thing a run cannot choose, and refusing the whole document rather than the one
+operation stops the answer being usable to probe which ids exist. It answers with an outcome per
+operation, so a posted review and a refused delete are distinguishable.
 
 That takes the comment write out of the job that runs the repository's code: with no writable
 token there, the worst a pull request's own suite can provoke through the relay is a wrong comment
@@ -91,3 +104,66 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
   installed nothing still gets the surface. That is why "not installed" is an *answer* and not
   an error.
 
+## The threads
+
+**`lydite threads` owns the fetch, the delta and the apply.** It reads `--reports` (repeatable),
+lists the threads already standing on the pull request, computes what reconciles them with this
+run's located findings, and **always** writes that to `--ops <file>`. It applies it only under
+`--apply`. The relay's `POST /review` applies the identical document, so there is one
+implementation of what a fingerprint matches and what may be deleted, and two transports that
+decide nothing — the argument that keeps the comment's renderer in the CLI, applied to the
+threads.
+
+**The ops document is not a report document.** It goes to `--ops <file>` and never into
+`.lydite-reports/`: nothing about it is promised to a consumer, and `lydite test plan` is the
+precedent for a command that reaches no verdict writing none. It is versioned, and a reader that
+does not recognise the version refuses the whole of it rather than applying the half it
+understands.
+
+**Reading the prior state uses the job's own token on both paths.** The delta has to be computed
+somewhere that can read the pull request, and the publish job already holds
+`pull-requests: write` for the comment's fallback — so this costs no new credential. What the
+relay takes over is the *write*, which is the half ADR 0022 is about.
+
+**`lydite publish` stays pure.** Nothing about a hosting platform enters it, which is why the
+threads are a separate command rather than a flag on that one.
+
+**The marker is `<!-- lydite:finding:<fingerprint> -->`**, and the token after the prefix *is*
+the fingerprint, version prefix included. The parser accepts any token and returns it verbatim,
+so a thread written under a formula this binary never emitted is simply one matching no current
+finding — which is what makes a formula bump self-heal in one round of delete-and-repost. Every
+comment lydite writes into a thread carries the marker, including its replies, which is what
+lets the sole-participant rule read the marker rather than an author.
+
+**`lydite is the only participant` governs both branches of a thread's life.** A claim that is
+gone deletes its thread where lydite is alone in it, and is replied to and left standing where
+anyone else spoke. A thread the change has made outdated is deleted and reopened at the current
+line under the same rule — because the platform collapses an outdated thread behind its "show
+outdated" toggle, so a thread that blocks the merge becomes one the author cannot see, which is
+worse than the notification a repost costs. A delete the platform refuses takes the
+someone-else-spoke path, which is why a delete operation carries the body to post instead.
+
+**A review the platform refuses fails the publish job**, naming how many located findings
+reached no surface. The findings still reach the terminal, the job log and the uploaded
+`.lydite-reports/` artifact; a run that quietly posted nothing would read as a change with
+nothing wrong with it.
+
+**A review comment must anchor inside the diff's own `@@` hunks.** The web UI lets a human
+comment anywhere in a changed file and the API answers `422 line must be part of the diff`.
+Hunks carry three lines of context and `coverage.ChangedLines` is `--unified=0`, so lydite's set
+is a strict subset — *"lydite says anchorable" implies "the platform accepts it"*, never the
+reverse. `subject_type: file` is how a file-anchored claim is posted.
+
+**One review per run**, `POST /pulls/{n}/reviews` with `comments[]`, event **COMMENT** — never
+REQUEST_CHANGES or APPROVE, because review approval is a different mechanism with different
+rules about who may give one. Replies and deletions are individual calls outside it, so a run is
+one review plus N state changes.
+
+**lydite can never resolve a thread.** `resolveReviewThread` needs `Contents: write`, which is
+exactly what ADR 0022's two-App split forbids. A thread is therefore a *soft gate*: it blocks
+the merge, and any writer clears it without touching the code.
+
+**`lydite threads` dedups by fingerprint on read**, first occurrence wins, the drop named on
+stderr. It consumes documents a local run wrote with no fold at all, so it cannot rest on the
+fold having deduplicated — the fold's own duplication is
+[#123](https://github.com/lydite/lydite/issues/123).

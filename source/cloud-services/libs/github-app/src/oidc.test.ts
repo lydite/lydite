@@ -84,9 +84,15 @@ describe("pullRequestFromRef", () => {
     expect(pullRequestFromRef("refs/pull/42/merge")).toBe(42);
   });
 
+  // A workflow that checks out the head revision rather than the merge gets
+  // this ref, and it names the same pull request the merge ref does.
+  it("reads the number a head run was triggered for", () => {
+    expect(pullRequestFromRef("refs/pull/42/head")).toBe(42);
+  });
+
   // A push build has no pull request, and must not be able to name one.
   it("yields nothing for a ref that is not a pull request's", () => {
-    for (const ref of ["refs/heads/main", "refs/tags/v1.0.0", "refs/pull/x/merge", ""]) {
+    for (const ref of ["refs/heads/main", "refs/tags/v1.0.0", "refs/pull/x/merge", "refs/pull/42/rebase", ""]) {
       expect(pullRequestFromRef(ref)).toBeUndefined();
     }
   });

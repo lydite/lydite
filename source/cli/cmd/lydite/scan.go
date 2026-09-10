@@ -171,9 +171,7 @@ func newScanCmd() *cobra.Command {
 				for _, row := range resultRows(dir, attributed) {
 					rep.Add(row)
 				}
-				for _, r := range attributed {
-					rep.AddFindings(r.Findings...)
-				}
+				rep.AddFindings(findingsOf(attributed)...)
 			}
 
 			var results []executil.Result
@@ -414,6 +412,25 @@ func resultRows(root string, results []executil.Result) []ui.Row {
 	return rows
 }
 
+// findingsOf is every check's located claims, each naming the row that made
+// it.
+//
+// The label is the check's own name, taken from the same field resultRows
+// renders a row's label from rather than rebuilt beside it. A finding whose
+// row label does not match the row's is one the standing comment cannot
+// partition: it would be rendered there as well as on the line a thread
+// anchors it to, or dropped from both.
+func findingsOf(results []executil.Result) []finding.Finding {
+	var out []finding.Finding
+	for _, r := range results {
+		for _, f := range r.Findings {
+			f.Row = r.Name
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // report renders one row per check in the grammar docs/design/tokens.md
 // specifies, and returns the run's exit code as an error so the process
 // reflects the verdict.
@@ -429,9 +446,7 @@ func report(cmd *cobra.Command, rep *ui.Report, root string, results []executil.
 	for _, row := range resultRows(root, results) {
 		rep.Add(row)
 	}
-	for _, r := range results {
-		rep.AddFindings(r.Findings...)
-	}
+	rep.AddFindings(findingsOf(results)...)
 	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {

@@ -194,3 +194,22 @@ The footer carries the version and the base commit. The reference design's
 footer also claims parity with the reader's local run; nothing can establish that yet
 ([#27](https://github.com/lydite/lydite/issues/27)), so it is absent rather than
 asserted.
+
+## Amended by ADR 0031: one standing comment, plus one thread per located finding
+
+[ADR 0031](0031-a-located-finding-is-a-review-thread.md) makes the surface two
+things rather than one: this standing comment, and a review thread on the line
+of every finding that reaches the change. **No finding appears in both** — the
+comment carries what is true of the change, a thread carries what is true of a
+line — so a failing row renders its unanchored findings and a count of the rest.
+
+The argument above survives intact, and is what limits the amendment. A standing
+comment cannot be resolved per finding, cannot anchor to a line, and keeps no
+record of any one of them across pushes; those are the three things a located
+claim needs and the three this decision cannot give it. Everything else it says
+still holds — the renderer is still the CLI's, the posting step is still
+content-agnostic, and `lydite publish` is still pure.
+
+The parity property is what makes the narrowing unconditional. `publish` drops
+located findings whether or not any thread is being posted, so a developer
+running it locally still reads exactly what a reviewer sees.
