@@ -25,10 +25,12 @@ type fakeReviews struct {
 	// deleteStatus is what a DELETE answers, so the refusal path a handover
 	// between two identities produces is reachable in a test.
 	deleteStatus int
+	replyStatus  int
 	reviewStatus int
 	deleted      []string
 	replied      []string
 	reviews      []map[string]any
+	fileComments []map[string]any
 }
 
 func (f *fakeReviews) start(t *testing.T) {
@@ -46,6 +48,10 @@ func (f *fakeReviews) start(t *testing.T) {
 			f.reviews = append(f.reviews, body)
 			w.WriteHeader(http.StatusCreated)
 		case strings.HasSuffix(r.URL.Path, "/replies"):
+			if f.replyStatus != 0 {
+				w.WriteHeader(f.replyStatus)
+				return
+			}
 			f.replied = append(f.replied, r.URL.Path)
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodDelete:
@@ -55,6 +61,11 @@ func (f *fakeReviews) start(t *testing.T) {
 			}
 			f.deleted = append(f.deleted, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(r.URL.Path, "/pulls/") && strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodPost:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.fileComments = append(f.fileComments, body)
+			w.WriteHeader(http.StatusCreated)
 		case strings.Contains(r.URL.Path, "/pulls/") && strings.HasSuffix(r.URL.Path, "/comments"):
 			if r.URL.Query().Get("page") == "1" {
 				_ = json.NewEncoder(w).Encode(f.existing)
@@ -313,5 +324,162 @@ func TestAFileLevelThreadIsNotMistakenForAnOutdatedOne(t *testing.T) {
 	ops := readOps(t, opsPath)
 	if len(ops.Delete) != 0 || len(ops.Create) != 0 {
 		t.Fatalf("the standing file thread was churned: %+v", ops)
+	}
+}
+
+// A review's comments are drafts with no subject-type field and a required
+// position, so the platform refuses a file-anchored claim inside one and
+// accepts it as a comment of its own.
+func TestAFileAnchoredClaimIsPostedOutsideTheReview(t *testing.T) {
+	onLine := located("a.ts", 3)
+	onFile := located("b.ts", 400)
+	onFile.Anchor = finding.AnchorFile
+	forge := &fakeReviews{}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	if _, _, err := runThreadsCmd(t, []string{reportsWith(t, onLine, onFile)}, opsPath, true); err != nil {
+		t.Fatalf("runThreads: %v", err)
+	}
+	if len(forge.reviews) != 1 {
+		t.Fatalf("expected one review, got %+v", forge.reviews)
+	}
+	comments, ok := forge.reviews[0]["comments"].([]any)
+	if !ok || len(comments) != 1 {
+		t.Fatalf("only the line claim belongs in the review: %+v", forge.reviews[0])
+	}
+	if len(forge.fileComments) != 1 || forge.fileComments[0]["subject_type"] != "file" {
+		t.Fatalf("the file claim did not become a thread of its own: %+v", forge.fileComments)
+	}
+}
+
+// The platform answers a delete of another identity's comment with 404 where
+// this one cannot see it, so that path must answer the thread rather than
+// fail the run.
+func TestADeleteRefusedAsNotFoundIsAnsweredInstead(t *testing.T) {
+	gone := located("b.ts", 9)
+	forge := &fakeReviews{
+		existing:     []map[string]any{{"id": 101, "body": threads.Body(gone), "path": "b.ts", "line": 9, "position": 1}},
+		deleteStatus: http.StatusNotFound,
+	}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	if _, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true); err != nil {
+		t.Fatalf("a delete the platform will not do is an answer, not a failure: %v", err)
+	}
+	if len(forge.replied) != 1 {
+		t.Fatalf("the thread was left saying nothing: %+v", forge.replied)
+	}
+}
+
+// A comment that is really gone answers the reply with 404 too, which is the
+// state the delete was asking for.
+func TestACommentThatIsAlreadyGoneIsNotAFailure(t *testing.T) {
+	gone := located("b.ts", 9)
+	forge := &fakeReviews{
+		existing:     []map[string]any{{"id": 101, "body": threads.Body(gone), "path": "b.ts", "line": 9, "position": 1}},
+		deleteStatus: http.StatusNotFound,
+		replyStatus:  http.StatusNotFound,
+	}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true)
+	if err != nil {
+		t.Fatalf("a comment already gone is the state asked for: %v", err)
+	}
+	if strings.Contains(out, "refused") {
+		t.Fatalf("nothing was refused: %q", out)
+	}
+}
+
+// The flags are the command's whole interface, and a workflow that names one
+// the binary does not carry fails before it has done anything.
+func TestTheThreadsFlagsAreWiredToTheRun(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	dir := t.TempDir()
+	opsPath := filepath.Join(dir, "ops.json")
+
+	cmd := newThreadsCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{
+		"--reports", reportsWith(t, located("a.ts", 3)),
+		"--ops", opsPath,
+		"--event", pullRequestEvent(t),
+		"--apply",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("threads: %v\n%s", err, out.String())
+	}
+	if ops := readOps(t, opsPath); len(ops.Create) != 1 {
+		t.Fatalf("--reports and --ops did not reach the run: %+v", ops)
+	}
+	if len(forge.reviews) != 1 {
+		t.Fatalf("--apply did not reach the run: %+v", forge.reviews)
+	}
+}
+
+// Neither flag has a default that could stand in for it: a run that wrote its
+// operations somewhere nobody named is one whose threads never get posted.
+func TestThreadsRefusesWithNoReportsAndNoOpsFile(t *testing.T) {
+	for _, args := range [][]string{
+		{"--ops", "ops.json"},
+		{"--reports", "somewhere"},
+	} {
+		cmd := newThreadsCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("%v was accepted", args)
+		}
+	}
+}
+
+// The report is how a reader of the job log knows what the run decided, and
+// each row answers a different question: what was found, what was already
+// standing, and what is about to change.
+func TestTheRunReportsWhatItFoundAndPlanned(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	nowhere := located("b.ts", 9)
+	nowhere.Anchor = finding.AnchorNowhere
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t, located("a.ts", 3), nowhere)}, opsPath, false)
+	if err != nil {
+		t.Fatalf("runThreads: %v", err)
+	}
+	for _, want := range []string{"findings", "1 located of 2", "threads", "0 standing", "plan", "1 to open"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+}
+
+// The counts are what a reader checks the run against, so a delete answered
+// instead of done has to move from one column to the other rather than being
+// counted twice or not at all.
+func TestTheAppliedRowCountsARefusalOnce(t *testing.T) {
+	gone := located("b.ts", 9)
+	forge := &fakeReviews{
+		existing:     []map[string]any{{"id": 101, "body": threads.Body(gone), "path": "b.ts", "line": 9, "position": 1}},
+		deleteStatus: http.StatusForbidden,
+	}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true)
+	if err != nil {
+		t.Fatalf("runThreads: %v", err)
+	}
+	if !strings.Contains(out, "0 opened, 0 closed, 1 answered") {
+		t.Fatalf("the counts do not add up to what happened:\n%s", out)
 	}
 }

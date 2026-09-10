@@ -16,6 +16,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/semgrep"
@@ -808,5 +809,43 @@ func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
 	}
 	if !sawRunRow {
 		t.Fatalf("rows = %+v, want the run to say no check ran rather than reporting a pass over amber rows", doc.Rows)
+	}
+}
+
+// A check's located claims reach the document naming the row that made them,
+// which is what lets the standing comment tell the claims it keeps from the
+// ones a thread carries.
+func TestACheckSFindingsReachTheDocumentNamingTheirRow(t *testing.T) {
+	rep := ui.NewReport("scan")
+	record(rep, t.TempDir(), []executil.Result{{
+		Name: "biome(cli)", Err: errors.New("failed"),
+		Findings: []finding.Finding{{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3,
+			Message: "a finding", Site: "one", Anchor: finding.AnchorLine}},
+	}})
+	found := rep.Findings()
+	if len(found) != 1 {
+		t.Fatalf("the check's claim did not reach the document: %+v", found)
+	}
+	if found[0].Row != "biome(cli)" {
+		t.Errorf("the claim does not name the row that made it: %q", found[0].Row)
+	}
+	if rows := rep.Rows(); len(rows) != 1 || rows[0].Label != "biome(cli)" {
+		t.Errorf("the row went missing with it: %+v", rows)
+	}
+}
+
+// A component's checks report paths relative to the component, and every
+// other producer names a file from the scan root: one file named from two
+// roots is two claims, and only one of them can be anchored.
+func TestAComponentSFindingsAreRebasedOntoTheScanRoot(t *testing.T) {
+	got := labelled([]executil.Result{{
+		Name:     "biome",
+		Findings: []finding.Finding{{Gate: "biome", Path: "src/a.ts", Line: 3}},
+	}}, "web", "source/web")
+	if got[0].Findings[0].Path != "source/web/src/a.ts" {
+		t.Errorf("the path was not rebased: %q", got[0].Findings[0].Path)
+	}
+	if got[0].Findings[0].Component != "web" {
+		t.Errorf("the claim does not name its component: %q", got[0].Findings[0].Component)
 	}
 }

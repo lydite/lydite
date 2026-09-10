@@ -175,17 +175,14 @@ func writeOps(path string, document threads.Ops) error {
 func applyOps(ctx context.Context, target publishTarget, document threads.Ops, rep *ui.Report, stderr io.Writer) error {
 	var refused int
 	for _, del := range document.Delete {
-		err := target.Client.DeleteReviewComment(ctx, target.Repo, del.Comment)
-		if err == nil {
-			continue
-		}
-		if !forge.Forbidden(err) {
+		answered, err := takeDown(ctx, target, del)
+		if err != nil {
 			return err
 		}
-		refused++
-		_, _ = fmt.Fprintf(stderr, "warning: comment %d was written by another identity and cannot be deleted; answering it instead\n", del.Comment)
-		if err := target.Client.ReplyToReviewComment(ctx, target.Repo, target.Number, del.Comment, del.Refused); err != nil {
-			return err
+		if answered {
+			refused++
+			_, _ = fmt.Fprintf(stderr,
+				"warning: comment %d was written by another identity and cannot be deleted; answering it instead\n", del.Comment)
 		}
 	}
 	for _, reply := range document.Reply {
@@ -193,7 +190,7 @@ func applyOps(ctx context.Context, target publishTarget, document threads.Ops, r
 			return err
 		}
 	}
-	if err := target.Client.CreateReview(ctx, target.Repo, target.Number, document.Head, document.Create); err != nil {
+	if err := openThreads(ctx, target, document); err != nil {
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "review",
 			Value:  fmt.Sprintf("refused — %d located finding(s) reached no surface", len(document.Create)),
 			Detail: []string{err.Error(), "they are in this job's log and in the uploaded " + runner.ReportDir + " directory"}})
@@ -205,5 +202,54 @@ func applyOps(ctx context.Context, target publishTarget, document threads.Ops, r
 		value += fmt.Sprintf(" — %d delete(s) refused by the platform", refused)
 	}
 	rep.Add(ui.Row{Status: ui.StatusPass, Label: "applied", Value: value})
+	return nil
+}
+
+// takeDown removes one comment, and reports whether it had to be answered
+// instead.
+//
+// The platform refuses a delete of another identity's comment with a 403 when
+// this one can see the comment and a 404 when it cannot, so both take the
+// answering path. A reply that is itself unfound settles which of the two a
+// 404 was: the comment is gone, the state the delete was asking for, and
+// there is nothing left to say to it.
+func takeDown(ctx context.Context, target publishTarget, del threads.Delete) (bool, error) {
+	err := target.Client.DeleteReviewComment(ctx, target.Repo, del.Comment)
+	switch {
+	case err == nil:
+		return false, nil
+	case !forge.Forbidden(err) && !forge.NotFound(err):
+		return false, err
+	}
+	replyErr := target.Client.ReplyToReviewComment(ctx, target.Repo, target.Number, del.Comment, del.Refused)
+	switch {
+	case replyErr == nil:
+		return true, nil
+	case forge.NotFound(replyErr):
+		return false, nil
+	default:
+		return false, replyErr
+	}
+}
+
+// openThreads posts the new threads: the line-anchored ones in one review, and
+// the file-anchored ones one at a time.
+//
+// The split is the platform's. A review's comments are drafts with no
+// `subjectType` field and a required position, so a claim about a whole file
+// is refused inside one and accepted on its own — which makes a run one review
+// plus a call per file-level thread.
+func openThreads(ctx context.Context, target publishTarget, document threads.Ops) error {
+	if err := target.Client.CreateReview(ctx, target.Repo, target.Number, document.Head, document.Create); err != nil {
+		return err
+	}
+	for _, create := range document.Create {
+		if create.Subject != "file" {
+			continue
+		}
+		if err := target.Client.CreateFileComment(ctx, target.Repo, target.Number, document.Head, create); err != nil {
+			return err
+		}
+	}
 	return nil
 }

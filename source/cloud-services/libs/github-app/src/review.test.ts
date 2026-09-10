@@ -45,8 +45,10 @@ describe("the membership set", () => {
 
 describe("applying an operations document", () => {
   // A review notifies once however many lines it touches, and twelve
-  // individually posted comments are twelve notifications about one push.
-  it("opens every new thread in one review, as a comment and never an approval", async () => {
+  // individually posted comments are twelve notifications about one push. A
+  // file-anchored claim cannot ride in one: a review's comments are drafts
+  // with no subjectType field and a required position.
+  it("opens line threads in one review and a file thread on its own", async () => {
     const { fetcher, calls } = github(ok);
     const ops: ReviewOps = {
       version: 1,
@@ -63,11 +65,33 @@ describe("applying an operations document", () => {
     const body = reviews[0]?.body as { event: string; commit_id: string; comments: unknown[] };
     expect(body.event).toBe("COMMENT");
     expect(body.commit_id).toBe("abc123");
-    expect(body.comments).toEqual([
-      { path: "a.go", body: "one", line: 12 },
-      { path: "b.go", body: "two", subject_type: "file" },
-    ]);
+    expect(body.comments).toEqual([{ path: "a.go", body: "one", line: 12 }]);
+
+    const files = calls.filter((c) => c.url.endsWith("/pulls/7/comments"));
+    expect(files).toHaveLength(1);
+    expect(files[0]?.body).toEqual({
+      path: "b.go",
+      body: "two",
+      subject_type: "file",
+      commit_id: "abc123",
+    });
+
     expect(outcomes).toEqual([{ op: "create", ref: 2, status: "done" }]);
+  });
+
+  // Nothing to anchor to a line means no review at all, rather than an empty
+  // one the platform would refuse.
+  it("posts no review when every new thread is about a file", async () => {
+    const { fetcher, calls } = github(ok);
+    await applyReview(
+      "t",
+      "lydite/lydite",
+      7,
+      { version: 1, create: [{ path: "b.go", subject: "file", body: "two" }] },
+      fetcher,
+    );
+    expect(calls.filter((c) => c.url.endsWith("/reviews"))).toHaveLength(0);
+    expect(calls).toHaveLength(1);
   });
 
   it("posts no review when there is nothing to open", async () => {
@@ -107,12 +131,27 @@ describe("applying an operations document", () => {
     expect(reply?.body).toEqual({ body: "it cleared" });
   });
 
-  // A comment somebody removed by hand is already in the state the document
-  // asks for.
-  it("treats a comment that is already gone as deleted", async () => {
-    const { fetcher } = github((_url, method) =>
-      method === "DELETE" ? new Response("gone", { status: 404 }) : ok(),
+  // A delete is refused with 404 rather than 403 where the identity cannot
+  // see the comment at all, so both take the answering path.
+  it("answers a delete refused as not found", async () => {
+    const { fetcher, calls } = github((_url, method) =>
+      method === "DELETE" ? new Response("no", { status: 404 }) : ok(),
     );
+    const outcomes = await applyReview(
+      "t",
+      "lydite/lydite",
+      7,
+      { version: 1, delete: [{ comment: 5, refused: "it cleared" }] },
+      fetcher,
+    );
+    expect(outcomes).toEqual([{ op: "delete", ref: 5, status: "refused", detail: "answered instead" }]);
+    expect(calls.some((c) => c.url.includes("/comments/5/replies"))).toBe(true);
+  });
+
+  // A reply that is itself unfound settles which of the two a 404 was: the
+  // comment is gone, which is the state the delete was asking for.
+  it("treats a comment that is already gone as deleted", async () => {
+    const { fetcher } = github(() => new Response("gone", { status: 404 }));
     const outcomes = await applyReview("t", "lydite/lydite", 7, { version: 1, delete: [{ comment: 5 }] }, fetcher);
     expect(outcomes).toEqual([{ op: "delete", ref: 5, status: "done" }]);
   });

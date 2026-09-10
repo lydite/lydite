@@ -260,6 +260,9 @@ func TestAFileAnchoredBodyNamesTheLineItCannotReach(t *testing.T) {
 	if !strings.Contains(body, "crap(cli)") {
 		t.Fatalf("the body does not name the row that reported it: %q", body)
 	}
+	if !strings.Contains(body, "a claim") {
+		t.Fatalf("the body does not say what the claim is: %q", body)
+	}
 }
 
 // A document written by a lydite that recorded no row still says which gate

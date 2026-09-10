@@ -245,10 +245,10 @@ type reviewComment struct {
 // deleting somebody's thread, the safe direction of the two.
 func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]threads.Comment, error) {
 	var out []threads.Comment
-	for page := 1; page <= 10; page++ {
+	for page := range reviewPages {
 		var comments []reviewComment
-		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100&page=%d",
-			escape(repo.Owner), escape(repo.Name), number, page)
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d",
+			escape(repo.Owner), escape(repo.Name), number, reviewPerPage, page+1)
 		if err := c.do(ctx, "GET", path, nil, &comments); err != nil {
 			return nil, fmt.Errorf("reading the review comments on %s#%d: %w", repo, number, err)
 		}
@@ -260,14 +260,23 @@ func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]t
 				InReplyTo: rc.InReplyTo,
 			})
 		}
-		if len(comments) < 100 {
+		if len(comments) < reviewPerPage {
 			break
 		}
 	}
 	return out, nil
 }
 
-// CreateReview opens every new thread in one review.
+// reviewPages and reviewPerPage bound the walk. They are a `range` and a page
+// size rather than a loop condition and an increment, so there is no boundary
+// to shift and no step to drop: the walk visits exactly this many pages or
+// stops at the first short one.
+const (
+	reviewPages   = 10
+	reviewPerPage = 100
+)
+
+// CreateReview opens every line-anchored thread in one review.
 //
 // One review and not one comment each, because a review notifies once however
 // many lines it touches, and a run that opens twelve threads individually
@@ -275,40 +284,62 @@ func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]t
 // REQUEST_CHANGES or APPROVE: review approval is a different mechanism with
 // different rules about who may give one, and lydite must not touch it.
 //
+// The review carries no body of its own. A summary line above the threads
+// would be a second standing verdict beside the comment that already carries
+// one, reposted on every push.
+//
 // A comment must anchor inside the diff's own hunks — the API answers 422 for
 // a line outside them, where the web UI would have let a human comment. That
 // is why a finding's anchor is decided by the gate that made it, against the
 // changed-line map: those lines are a strict subset of what the platform
 // accepts, so "lydite says anchorable" implies "the platform takes it" and
 // never the reverse.
+//
+// **A file-anchored claim cannot travel here.** A review's comments are
+// `DraftPullRequestReviewComment`, which has no `subjectType` field and
+// requires a position — the API answers 422 for both. So CreateFileComment
+// opens those one at a time, and a run is one review plus a call per thread
+// that is about a file rather than a line.
 func (c *Client) CreateReview(ctx context.Context, repo Repo, number int, head string, comments []threads.Create) error {
-	if len(comments) == 0 {
-		return nil
-	}
 	type reviewInput struct {
-		Path        string `json:"path"`
-		Body        string `json:"body"`
-		Line        int    `json:"line,omitempty"`
-		SubjectType string `json:"subject_type,omitempty"`
-	}
-	body := map[string]any{"event": "COMMENT"}
-	if head != "" {
-		body["commit_id"] = head
+		Path string `json:"path"`
+		Body string `json:"body"`
+		Line int    `json:"line"`
 	}
 	inputs := make([]reviewInput, 0, len(comments))
 	for _, create := range comments {
-		in := reviewInput{Path: create.Path, Body: create.Body}
 		if create.Subject == "file" {
-			in.SubjectType = "file"
-		} else {
-			in.Line = create.Line
+			continue
 		}
-		inputs = append(inputs, in)
+		inputs = append(inputs, reviewInput{Path: create.Path, Body: create.Body, Line: create.Line})
 	}
-	body["comments"] = inputs
+	if len(inputs) == 0 {
+		return nil
+	}
+	body := map[string]any{"event": "COMMENT", "comments": inputs}
+	if head != "" {
+		body["commit_id"] = head
+	}
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", escape(repo.Owner), escape(repo.Name), number)
 	if err := c.do(ctx, "POST", path, body, nil); err != nil {
-		return fmt.Errorf("opening %d thread(s) on %s#%d: %w", len(comments), repo, number, err)
+		return fmt.Errorf("opening %d thread(s) on %s#%d: %w", len(inputs), repo, number, err)
+	}
+	return nil
+}
+
+// CreateFileComment opens a thread on a whole file.
+//
+// `subject_type: file` is accepted here and refused inside a review, which is
+// why this exists separately. It needs the revision explicitly: a comment with
+// no line has nothing else that places it.
+func (c *Client) CreateFileComment(ctx context.Context, repo Repo, number int, head string, create threads.Create) error {
+	body := map[string]any{"path": create.Path, "body": create.Body, "subject_type": "file"}
+	if head != "" {
+		body["commit_id"] = head
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "POST", path, body, nil); err != nil {
+		return fmt.Errorf("opening a thread on %s in %s#%d: %w", create.Path, repo, number, err)
 	}
 	return nil
 }
@@ -331,8 +362,10 @@ func (c *Client) ReplyToReviewComment(ctx context.Context, repo Repo, number int
 //
 // An identity may only delete what it authored, so this is refused for a
 // thread the other identity opened — the handover between lydite's app and a
-// consumer's own bot. The caller answers a refusal by replying instead, which
-// is the same path a thread somebody else spoke in takes.
+// consumer's own bot. The refusal is a 403 where the identity can see the
+// comment and a 404 where it cannot, which is why the caller treats both the
+// same way: answer it by replying, and read a reply that is also unfound as
+// the comment simply being gone.
 func (c *Client) DeleteReviewComment(ctx context.Context, repo Repo, id int64) error {
 	path := fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", escape(repo.Owner), escape(repo.Name), id)
 	if err := c.do(ctx, "DELETE", path, nil, nil); err != nil {

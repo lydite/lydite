@@ -385,6 +385,24 @@ func TestARowWhoseClaimsAreAllLocatedStillSaysSo(t *testing.T) {
 	}
 }
 
+// A row whose every claim reaches the change nowhere says nothing about
+// threads, because there are none: a count of zero is a sentence a reader has
+// to read and discard.
+func TestARowWithNoLocatedFindingsCountsNothing(t *testing.T) {
+	row := ui.Row{Status: ui.StatusFail, Label: "crap(cli)", Value: "1 more"}
+	dir := reportDirWithFindings(t, "test", []ui.Row{row}, []finding.Finding{
+		{Gate: "crap", Component: "cli", Path: "a.go", Line: 40, Message: "a complex function",
+			Site: "one", Row: "crap(cli)"},
+	})
+	body := buildComment([]string{dir}, "").Render()
+	if !strings.Contains(body, "a complex function") {
+		t.Fatalf("the claim is not in the comment:\n%s", body)
+	}
+	if strings.Contains(body, "reach a line of this change") {
+		t.Fatalf("a count of nothing was rendered:\n%s", body)
+	}
+}
+
 // A gate that emits no findings still quotes what its author put next to the
 // verdict, which for several checks is the only place their output exists.
 func TestARowWithNoFindingsQuotesItsOwnDetail(t *testing.T) {

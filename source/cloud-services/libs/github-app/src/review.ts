@@ -88,20 +88,28 @@ export async function reviewCommentIds(
 /**
  * Applies one operations document, answering per operation.
  *
- * The order is deletions, then replies, then the one review that opens
- * everything new. A run is one review plus N state changes: a review notifies
- * once however many lines it touches, while opening twelve threads
- * individually sends twelve notifications about one push.
+ * The order is deletions, then replies, then the threads to open. A run is one
+ * review plus N state changes: a review notifies once however many lines it
+ * touches, while opening twelve threads individually sends twelve
+ * notifications about one push.
  *
  * The event is COMMENT and never REQUEST_CHANGES or APPROVE. Review approval
  * is a different mechanism with different rules about who may give one, and
- * lydite must not touch it.
+ * lydite must not touch it. The review carries no body of its own: a summary
+ * above the threads would be a second standing verdict beside the comment that
+ * already carries one.
  *
- * A delete the platform refuses is an outcome rather than a failure: an
+ * A file-anchored claim is posted on its own. A review's comments are drafts
+ * with no `subjectType` field and a required position, so the API refuses one
+ * inside a review and accepts it as a comment of its own.
+ *
+ * A delete the platform will not do is an outcome rather than a failure: an
  * identity may only delete comments it authored, so a repository that
  * installed the app after its own bot had already written threads has threads
- * neither identity can take down. The document carries what to say in that
- * case, so this composes no prose of its own.
+ * neither identity can take down. It answers 403 where this identity can see
+ * the comment and 404 where it cannot, so both are answered with a reply — and
+ * a reply that is itself unfound settles that the comment is simply gone. The
+ * document carries what to say, so this composes no prose of its own.
  */
 export async function applyReview(
   token: string,
@@ -118,32 +126,35 @@ export async function applyReview(
       method: "DELETE",
       headers: apiHeaders(`Bearer ${token}`),
     });
-    if (response.ok || response.status === 404) {
+    if (response.ok) {
       outcomes.push({ op: "delete", ref: id, status: "done" });
       continue;
     }
-    if (response.status !== 403) {
+    if (response.status !== 403 && response.status !== 404) {
       throw new Error(`deleting a review comment answered ${response.status}`);
     }
-    await reply(token, repository, pull, id, op.refused ?? "", fetcher);
-    outcomes.push({ op: "delete", ref: id, status: "refused", detail: "answered instead" });
+    const answered = await reply(token, repository, pull, id, op.refused ?? "", fetcher);
+    outcomes.push(
+      answered
+        ? { op: "delete", ref: id, status: "refused", detail: "answered instead" }
+        : { op: "delete", ref: id, status: "done" },
+    );
   }
 
   for (const op of ops.reply ?? []) {
     const id = op.comment as number;
-    await reply(token, repository, pull, id, op.body ?? "", fetcher);
+    if (!(await reply(token, repository, pull, id, op.body ?? "", fetcher))) {
+      throw new Error("replying to a review comment answered 404");
+    }
     outcomes.push({ op: "reply", ref: id, status: "done" });
   }
 
   const create = ops.create ?? [];
-  if (create.length > 0) {
+  const onLines = create.filter((op) => op.subject !== "file");
+  if (onLines.length > 0) {
     const body: Record<string, unknown> = {
       event: "COMMENT",
-      comments: create.map((op) =>
-        op.subject === "file"
-          ? { path: op.path, body: op.body, subject_type: "file" }
-          : { path: op.path, body: op.body, line: op.line },
-      ),
+      comments: onLines.map((op) => ({ path: op.path, body: op.body, line: op.line })),
     };
     if (ops.head) {
       body.commit_id = ops.head;
@@ -154,14 +165,33 @@ export async function applyReview(
       body: JSON.stringify(body),
     });
     if (!response.ok) {
-      throw new Error(`opening ${create.length} thread(s) answered ${response.status}`);
+      throw new Error(`opening ${onLines.length} thread(s) answered ${response.status}`);
     }
+  }
+
+  for (const op of create.filter((each) => each.subject === "file")) {
+    const body: Record<string, unknown> = { path: op.path, body: op.body, subject_type: "file" };
+    if (ops.head) {
+      body.commit_id = ops.head;
+    }
+    const response = await fetcher(`${GITHUB_API}/repos/${repository}/pulls/${pull}/comments`, {
+      method: "POST",
+      headers: { ...apiHeaders(`Bearer ${token}`), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`opening a thread on a file answered ${response.status}`);
+    }
+  }
+
+  if (create.length > 0) {
     outcomes.push({ op: "create", ref: create.length, status: "done" });
   }
 
   return outcomes;
 }
 
+/** Replies to one thread, answering false when the comment is not there. */
 async function reply(
   token: string,
   repository: string,
@@ -169,7 +199,7 @@ async function reply(
   id: number,
   body: string,
   fetcher: typeof fetch,
-): Promise<void> {
+): Promise<boolean> {
   const response = await fetcher(
     `${GITHUB_API}/repos/${repository}/pulls/${pull}/comments/${id}/replies`,
     {
@@ -178,7 +208,11 @@ async function reply(
       body: JSON.stringify({ body }),
     },
   );
+  if (response.status === 404) {
+    return false;
+  }
   if (!response.ok) {
     throw new Error(`replying to a review comment answered ${response.status}`);
   }
+  return true;
 }

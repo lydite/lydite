@@ -118,7 +118,10 @@ which is why the operation carries a body.
 GitHub collapses an outdated thread behind its "Show outdated" toggle, so a
 thread that blocks the merge becomes a thread the author cannot see. That is
 worse than the notification a repost costs. `position` comes back null while
-`original_line` still holds, which is how it is detected.
+`original_line` still holds, which is how it is detected — read together with
+`subject_type`, because a comment on a whole file has no position by
+construction rather than by the change having moved, and the null alone would
+take every file-level thread down and repost it on every push.
 
 A fixed claim leaves no per-finding record. That is accepted:
 [ADR 0009](0009-quality-history-storage-and-access.md)'s per-finding history is a
@@ -157,6 +160,30 @@ which ids exist.
 
 It answers with an outcome per operation, so a posted review and a refused
 delete are distinguishable.
+
+## What the platform actually accepts
+
+Three things were settled against GitHub rather than against a forum summary, on a scratch
+review on this pull request.
+
+**A review with `comments[]`, `event: COMMENT` and no `body` is accepted.** The review therefore
+carries no summary of its own, which it should not: that would be a second standing verdict
+beside the comment that already holds one, reposted on every push.
+
+**A file-anchored claim cannot travel in that review.** A review's comments are
+`DraftPullRequestReviewComment`, which has no `subjectType` field and requires a non-null
+position; the API answers 422 for both. `subject_type: file` is accepted on
+`POST /pulls/{n}/comments`, with an explicit `commit_id`. So "one review per run" holds for the
+line-anchored claims, and a run is that review plus a call per file-level thread — which is the
+shape the replies and deletions were already in.
+
+**A delete the platform will not do answers 403 or 404.** 403 where the identity can see a
+comment it did not author, and 404 where it cannot — the latter observed with a read-scoped
+identity, which is the half testable here; the App against the bot is not, since the App is
+registered and not installed. Both take the answering path, and a reply that is itself unfound
+settles which of the two a 404 was: the comment is gone, which is the state the delete was
+asking for. Nothing in the design turns on the distinction, which is why it was worth knowing
+that the branch is reachable rather than dead code.
 
 ## A review that cannot be posted fails the job
 

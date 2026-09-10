@@ -140,7 +140,9 @@ gone deletes its thread where lydite is alone in it, and is replied to and left 
 anyone else spoke. A thread the change has made outdated is deleted and reopened at the current
 line under the same rule — because the platform collapses an outdated thread behind its "show
 outdated" toggle, so a thread that blocks the merge becomes one the author cannot see, which is
-worse than the notification a repost costs. A delete the platform refuses takes the
+worse than the notification a repost costs. Outdated is a null `position` read together with
+`subject_type`: a comment on a whole file has no position by construction rather than by the
+change having moved, and the null alone would churn every file-level thread on every push. A delete the platform refuses takes the
 someone-else-spoke path, which is why a delete operation carries the body to post instead.
 
 **A review the platform refuses fails the publish job**, naming how many located findings
@@ -152,12 +154,25 @@ nothing wrong with it.
 comment anywhere in a changed file and the API answers `422 line must be part of the diff`.
 Hunks carry three lines of context and `coverage.ChangedLines` is `--unified=0`, so lydite's set
 is a strict subset — *"lydite says anchorable" implies "the platform accepts it"*, never the
-reverse. `subject_type: file` is how a file-anchored claim is posted.
+reverse.
 
-**One review per run**, `POST /pulls/{n}/reviews` with `comments[]`, event **COMMENT** — never
-REQUEST_CHANGES or APPROVE, because review approval is a different mechanism with different
-rules about who may give one. Replies and deletions are individual calls outside it, so a run is
-one review plus N state changes.
+**One review per run for the line-anchored claims**, `POST /pulls/{n}/reviews` with `comments[]`,
+event **COMMENT** — never REQUEST_CHANGES or APPROVE, because review approval is a different
+mechanism with different rules about who may give one. The review carries no body of its own: a
+summary above the threads would be a second standing verdict beside the comment that already
+holds one, and a review with `comments[]`, `event: COMMENT` and no `body` is accepted (verified
+against the platform).
+
+**A file-anchored claim cannot travel in that review.** A review's comments are
+`DraftPullRequestReviewComment`, which has no `subjectType` field and requires a position, and
+the API answers 422 for both — verified. `subject_type: file` is accepted on
+`POST /pulls/{n}/comments` instead, with an explicit `commit_id`. So a run is one review plus a
+call per file-level thread, plus the replies and deletions.
+
+**A delete the platform will not do answers 403 or 404**, and both take the answering path: 403
+where the identity can see the comment it did not author, 404 where it cannot (verified against
+a read-scoped identity). A reply that is itself unfound settles which of the two a 404 was — the
+comment is simply gone, which is the state the delete was asking for.
 
 **lydite can never resolve a thread.** `resolveReviewThread` needs `Contents: write`, which is
 exactly what ADR 0022's two-App split forbids. A thread is therefore a *soft gate*: it blocks
