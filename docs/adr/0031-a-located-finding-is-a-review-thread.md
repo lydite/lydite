@@ -98,13 +98,28 @@ it understands.
 A `delete` operation carries the body to post if the platform refuses it. The
 shape sketched during design was a bare comment id, and it cannot be: the
 refusal path replies, and a transport composing its own prose is a second place
-lydite's words live — the thing this decision exists to prevent.
+lydite's words live — the thing this decision exists to prevent. One operation
+per thread carries it, because a refusal is refused for the whole thread at
+once and a body on each of its comments would answer one thread as many times
+as it has comments.
 
 ## One predicate governs both branches of a thread's life
 
 **lydite is the only participant**, read off the marker in every comment of the
 thread and never off an author. The author is whoever's token posted it, and
 ADR 0022 makes that change in both directions.
+
+**The marker has to open the body.** The platform's quote-reply copies the raw
+markdown of the comment it answers, HTML comment included, so a marker read
+from anywhere in a body would make a reviewer who quoted a thread invisible to
+this rule — and their words would be deleted with it. The standing comment's
+posting step already checks the same way.
+
+**Whatever lydite says in a thread it leaves standing, it says once.** Nothing
+ever takes such a thread down — it is somebody else's conversation, and lydite
+cannot resolve one — so a reply that did not check for itself would land on
+every run for as long as the pull request is open, which is the churn the
+fingerprint exists to prevent.
 
 | Situation | lydite is alone | Somebody else spoke |
 |---|---|---|
@@ -187,7 +202,9 @@ that the branch is reachable rather than dead code.
 
 ## A review that cannot be posted fails the job
 
-Never a silent green. The run says how many located findings reached no surface,
+Never a silent green. The run says how many located findings reached no surface
+— what was asked for less what landed, since a review that posted and one file
+thread the platform then refused has lost one claim rather than all of them —
 and fails; the findings are still in the terminal, in the job log and in the
 uploaded `.lydite-reports/` artifact. The memory store already records
 `relay-audience-mismatch-degrades-silently` as a standing hazard of this design,
@@ -242,6 +259,13 @@ The publish job now makes one more round trip on the ordinary path, and two when
 the relay is tried and falls back: the delta is recomputed rather than the
 document replayed, because threads may have moved while the relay was being
 tried and a stale document would answer a thread that is no longer there.
+
+Reading the threads already standing is capped at ten pages, and reaching the
+cap is a refusal rather than a shorter answer. Comments come back in creation
+order, so a truncated listing can hand back a thread whose root is inside the
+window and whose replies are past it — which the sole-participant rule would
+read as lydite's own and delete a reviewer's words with. A pull request with
+more review comments than that gets a run that says so.
 
 `lydite threads` dedups by fingerprint on read, first occurrence wins, and names
 the drop on stderr. It consumes documents a local run wrote with no fold at all,

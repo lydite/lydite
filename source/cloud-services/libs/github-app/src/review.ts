@@ -117,7 +117,10 @@ export async function reviewCommentIds(
  * neither identity can take down. It answers 403 where this identity can see
  * the comment and 404 where it cannot, so both are answered with a reply — and
  * a reply that is itself unfound settles that the comment is simply gone. The
- * document carries what to say, so this composes no prose of its own.
+ * document carries what to say, so this composes no prose of its own, and it
+ * says it on one operation per thread: a refusal is refused for the whole
+ * thread at once, so answering each of its comments would answer one thread as
+ * many times as it has comments.
  */
 export async function applyReview(
   token: string,
@@ -141,7 +144,14 @@ export async function applyReview(
     if (response.status !== 403 && response.status !== 404) {
       throw new Error(`deleting a review comment answered ${response.status}`);
     }
-    const answered = await reply(token, repository, pull, id, op.refused ?? "", fetcher);
+    if (!op.refused) {
+      // Nothing to say, so nothing is posted. A 404 is the comment being
+      // gone, which is the state the delete asked for; a 403 is a refusal
+      // whose answer the thread's root carries instead.
+      outcomes.push({ op: "delete", ref: id, status: response.status === 404 ? "done" : "refused" });
+      continue;
+    }
+    const answered = await reply(token, repository, pull, id, op.refused, fetcher);
     outcomes.push(
       answered
         ? { op: "delete", ref: id, status: "refused", detail: "answered instead" }

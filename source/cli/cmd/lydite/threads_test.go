@@ -377,8 +377,52 @@ func TestAFileThreadThePlatformRefusesFailsTheRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("a thread that could not be opened must fail the run")
 	}
-	if !strings.Contains(err.Error(), "reached no surface") {
+	if !strings.Contains(err.Error(), "1 located finding(s) reached no surface") {
 		t.Fatalf("the error does not say what was lost: %v", err)
+	}
+}
+
+// A review that landed and one file thread the platform then refused has lost
+// one claim, not all of them: a count of everything sends a reader looking for
+// threads that are on the pull request.
+func TestOnlyTheClaimsThatDidNotLandAreCountedAsLost(t *testing.T) {
+	onFile := located("b.ts", 400)
+	onFile.Anchor = finding.AnchorFile
+	forge := &fakeReviews{fileCommentStatus: http.StatusUnprocessableEntity}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t, located("a.ts", 3), onFile)}, opsPath, true)
+	if err == nil {
+		t.Fatal("a thread that could not be opened must fail the run")
+	}
+	if !strings.Contains(err.Error(), "1 located finding(s) reached no surface") {
+		t.Fatalf("the count includes claims that did land: %v", err)
+	}
+	if !strings.Contains(out, "1 located finding(s) reached no surface") {
+		t.Fatalf("the row says otherwise:\n%s", out)
+	}
+}
+
+// One refusal answers one thread. A reply's delete carries no body, so a
+// thread of three comments is not answered three times.
+func TestARefusedThreadIsAnsweredOnceHoweverManyCommentsItHas(t *testing.T) {
+	gone := located("b.ts", 9)
+	forge := &fakeReviews{
+		existing: []map[string]any{
+			{"id": 101, "body": threads.Body(gone), "path": "b.ts", "line": 9, "position": 1},
+			{"id": 102, "body": threads.Marker(gone.Fingerprint()) + "\nstill", "path": "b.ts", "in_reply_to_id": 101, "position": 1},
+		},
+		deleteStatus: http.StatusForbidden,
+	}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	if _, _, err := runThreadsCmd(t, []string{reportsWith(t)}, opsPath, true); err != nil {
+		t.Fatalf("runThreads: %v", err)
+	}
+	if len(forge.replied) != 1 {
+		t.Fatalf("the thread was answered %d times: %+v", len(forge.replied), forge.replied)
 	}
 }
 

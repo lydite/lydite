@@ -50,7 +50,7 @@ func Marker(fingerprint string) string {
 	return markerPrefix + fingerprint + markerSuffix
 }
 
-// FingerprintIn returns the token a body's marker carries, or "".
+// FingerprintIn returns the token the marker opening a body carries, or "".
 //
 // It accepts any token and returns it verbatim, including one from a
 // fingerprint formula this binary has never emitted. That is what makes a
@@ -58,8 +58,15 @@ func Marker(fingerprint string) string {
 // current finding, so it takes the path a cleared finding takes — deleted
 // where lydite is alone in it — and the new claim is posted fresh. No
 // migration, and nothing to recognise a version by.
+//
+// The marker has to be the first thing in the body, which is what the
+// standing comment's posting step already checks for. A marker anywhere would
+// read a person's quoted reply as lydite's own: the platform's quote-reply
+// copies the raw markdown of the comment being answered, HTML comment
+// included, so a reviewer quoting a thread would make themselves invisible to
+// the sole-participant rule and have their words deleted with it.
 func FingerprintIn(body string) string {
-	_, rest, found := strings.Cut(body, markerPrefix)
+	rest, found := strings.CutPrefix(body, markerPrefix)
 	if !found {
 		return ""
 	}
@@ -293,7 +300,7 @@ func Delta(findings []finding.Finding, threads []Thread, pull int, head string) 
 			// Somebody is in this thread, so it stays where it is with
 			// their words in it, outdated and all.
 			standing[fp] = true
-			ops.Reply = append(ops.Reply, Reply{Comment: t.Root.ID, Body: moved(fp, f)})
+			ops.answer(t, moved(fp, f))
 		}
 	}
 
@@ -318,15 +325,36 @@ func Delta(findings []finding.Finding, threads []Thread, pull int, head string) 
 // a thread with its root still standing rather than a headless run of replies
 // the platform shows under nothing. Their order among themselves says nothing
 // — what matters is that the root goes last.
+//
+// Only the root's delete carries what to say if the platform refuses it. A
+// refusal is refused for the whole thread at once — one identity cannot delete
+// another's comments — so a body on every operation would answer one thread
+// as many times as it has comments, on every run for as long as it stands.
 func (o *Ops) close(t Thread, body string) {
 	if !t.Sole() {
-		o.Reply = append(o.Reply, Reply{Comment: t.Root.ID, Body: body})
+		o.answer(t, body)
 		return
 	}
 	for _, reply := range t.Replies {
-		o.Delete = append(o.Delete, Delete{Comment: reply.ID, Refused: body})
+		o.Delete = append(o.Delete, Delete{Comment: reply.ID})
 	}
 	o.Delete = append(o.Delete, Delete{Comment: t.Root.ID, Refused: body})
+}
+
+// answer says something in a thread that is being left standing, once.
+//
+// A thread lydite has already said this in is left alone. Nothing takes such a
+// thread down — it is somebody else's conversation, and lydite cannot resolve
+// one — so without this the same sentence would be posted on every run for as
+// long as the pull request is open, which is the notification churn the
+// fingerprint exists to prevent.
+func (o *Ops) answer(t Thread, body string) {
+	for _, reply := range t.Replies {
+		if reply.Body == body {
+			return
+		}
+	}
+	o.Reply = append(o.Reply, Reply{Comment: t.Root.ID, Body: body})
 }
 
 // Body is what a thread's root comment says.

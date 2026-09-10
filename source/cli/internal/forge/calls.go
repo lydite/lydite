@@ -239,10 +239,13 @@ type reviewComment struct {
 // to decide what has no thread yet, and asking per fingerprint would be one
 // request per claim to learn the same thing.
 //
-// The walk is capped the way the conversation's is. A pull request with more
-// review comments than this has a thread lydite cannot see, and the delta
-// treats what it cannot see as absent — which reposts a claim rather than
-// deleting somebody's thread, the safe direction of the two.
+// The walk is capped, and reaching the cap is an error rather than a shorter
+// answer. A truncated listing is not safely partial: comments come back in
+// creation order, so a thread whose root is inside the window and whose
+// replies are past it arrives with only lydite's own comments in it — and
+// the sole-participant rule would then delete a reviewer's words along with
+// it. Refusing says so instead of guessing, which is what a pull request with
+// more review comments than this deserves.
 func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]threads.Comment, error) {
 	var out []threads.Comment
 	for page := range reviewPages {
@@ -261,10 +264,12 @@ func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]t
 			})
 		}
 		if len(comments) < reviewPerPage {
-			break
+			return out, nil
 		}
 	}
-	return out, nil
+	return nil, fmt.Errorf("%s#%d has more than %d review comments, which is more than lydite reads: "+
+		"a thread it cannot see whole is one it could take a reviewer's words down with",
+		repo, number, reviewPages*reviewPerPage)
 }
 
 // reviewPages and reviewPerPage bound the walk. They are a `range` and a page

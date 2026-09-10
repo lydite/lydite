@@ -278,6 +278,30 @@ func TestReviewCommentsWalksEveryPage(t *testing.T) {
 	}
 }
 
+// A listing that ran out of pages is not a shorter answer: a thread whose
+// root is inside the window and whose replies are past it arrives with only
+// lydite's own comments in it, and the sole-participant rule would then take
+// a reviewer's words down with it.
+func TestReviewCommentsRefusesAListingItCouldNotFinish(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		full := make([]map[string]any, 100)
+		for i := range full {
+			full[i] = map[string]any{"id": i + 1, "body": "a", "position": 1}
+		}
+		_ = json.NewEncoder(w).Encode(full)
+	})
+	got, err := client.ReviewComments(context.Background(), repo, 7)
+	if err == nil {
+		t.Fatalf("a truncated listing was returned as an answer: %d comments", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refusal must carry no half-read listing: %d comments", len(got))
+	}
+	if !strings.Contains(err.Error(), "more than 1000 review comments") {
+		t.Errorf("the refusal does not say what happened: %v", err)
+	}
+}
+
 // Outdated is what tells a thread the change has moved out from under from
 // one still on its line, and the platform says so by dropping `position`. A
 // comment on a whole file has no position by construction, so the null alone

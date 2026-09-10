@@ -190,11 +190,13 @@ func applyOps(ctx context.Context, target publishTarget, document threads.Ops, r
 			return err
 		}
 	}
-	if err := openThreads(ctx, target, document); err != nil {
+	posted, err := openThreads(ctx, target, document)
+	if err != nil {
+		lost := len(document.Create) - posted
 		rep.Add(ui.Row{Status: ui.StatusFail, Label: "review",
-			Value:  fmt.Sprintf("refused — %d located finding(s) reached no surface", len(document.Create)),
+			Value:  fmt.Sprintf("refused — %d located finding(s) reached no surface", lost),
 			Detail: []string{err.Error(), "they are in this job's log and in the uploaded " + runner.ReportDir + " directory"}})
-		return fmt.Errorf("%d located finding(s) reached no surface: %w", len(document.Create), err)
+		return fmt.Errorf("%d located finding(s) reached no surface: %w", lost, err)
 	}
 	value := fmt.Sprintf("%d opened, %d closed, %d answered",
 		len(document.Create), len(document.Delete)-refused, len(document.Reply)+refused)
@@ -220,6 +222,11 @@ func takeDown(ctx context.Context, target publishTarget, del threads.Delete) (bo
 		return false, nil
 	case !forge.Forbidden(err) && !forge.NotFound(err):
 		return false, err
+	case del.Refused == "":
+		// A refusal is refused for the whole thread at once, and only one
+		// operation in it carries what to say. The rest are left as they
+		// are rather than answered again.
+		return false, nil
 	}
 	replyErr := target.Client.ReplyToReviewComment(ctx, target.Repo, target.Number, del.Comment, del.Refused)
 	switch {
@@ -233,23 +240,37 @@ func takeDown(ctx context.Context, target publishTarget, del threads.Delete) (bo
 }
 
 // openThreads posts the new threads: the line-anchored ones in one review, and
-// the file-anchored ones one at a time.
+// the file-anchored ones one at a time. It answers with how many reached the
+// pull request.
 //
 // The split is the platform's. A review's comments are drafts with no
 // `subjectType` field and a required position, so a claim about a whole file
 // is refused inside one and accepted on its own — which makes a run one review
 // plus a call per file-level thread.
-func openThreads(ctx context.Context, target publishTarget, document threads.Ops) error {
-	if err := target.Client.CreateReview(ctx, target.Repo, target.Number, document.Head, document.Create); err != nil {
-		return err
+//
+// The count is what the failure names, and it is what was posted rather than
+// what was asked for: a review that landed and one file thread the platform
+// then refused has lost one claim, not all of them, and a row saying otherwise
+// sends a reader looking for threads that are on the pull request.
+func openThreads(ctx context.Context, target publishTarget, document threads.Ops) (int, error) {
+	var onLines int
+	for _, create := range document.Create {
+		if create.Subject != "file" {
+			onLines++
+		}
 	}
+	if err := target.Client.CreateReview(ctx, target.Repo, target.Number, document.Head, document.Create); err != nil {
+		return 0, err
+	}
+	posted := onLines
 	for _, create := range document.Create {
 		if create.Subject != "file" {
 			continue
 		}
 		if err := target.Client.CreateFileComment(ctx, target.Repo, target.Number, document.Head, create); err != nil {
-			return err
+			return posted, err
 		}
+		posted++
 	}
-	return nil
+	return posted, nil
 }

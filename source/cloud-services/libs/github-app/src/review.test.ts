@@ -145,6 +145,25 @@ describe("applying an operations document", () => {
     expect(reply?.body).toEqual({ body: "it cleared" });
   });
 
+  // A refusal is refused for the whole thread at once, and only one operation
+  // in it carries what to say. Answering each of its comments would answer one
+  // thread as many times as it has comments.
+  it("answers a refused thread once, on the operation carrying the body", async () => {
+    const { fetcher, calls } = github((_url, method) =>
+      method === "DELETE" ? new Response("no", { status: 403 }) : ok(),
+    );
+    await applyReview(
+      "t",
+      "lydite/lydite",
+      7,
+      { version: 1, delete: [{ comment: 8 }, { comment: 7, refused: "it cleared" }] },
+      fetcher,
+    );
+    const replies = calls.filter((c) => c.url.includes("/replies"));
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.url).toContain("/comments/7/replies");
+  });
+
   // A delete is refused with 404 rather than 403 where the identity cannot
   // see the comment at all, so both take the answering path.
   it("answers a delete refused as not found", async () => {

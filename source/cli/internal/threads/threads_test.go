@@ -158,8 +158,8 @@ func TestAClearedClaimDeletesItsOwnThread(t *testing.T) {
 	if ops.Delete[2].Comment != 7 {
 		t.Fatalf("the root must go last: %+v", ops.Delete)
 	}
-	if ops.Delete[0].Refused == "" {
-		t.Error("a delete carries what to say when the platform refuses it")
+	if ops.Delete[2].Refused == "" {
+		t.Error("the root's delete carries what to say when the platform refuses it")
 	}
 	if len(ops.Reply) != 0 {
 		t.Errorf("a deleted thread needs no reply: %+v", ops.Reply)
@@ -283,5 +283,89 @@ func TestABodyWithNoRowFallsBackToTheGate(t *testing.T) {
 	f.Component = ""
 	if !strings.Contains(Body(f), "**crap**") {
 		t.Fatalf("got %q", Body(f))
+	}
+}
+
+// The platform's quote-reply copies the raw markdown of the comment it
+// answers, marker and all. A marker anywhere in the body would read that as
+// lydite's own comment, and the thread would be deleted with the reviewer's
+// words in it.
+func TestAQuotedReplyIsNotLyditeSpeaking(t *testing.T) {
+	f := claim("mutation", "a.go", 12, finding.AnchorLine)
+	quoted := "> " + Marker(f.Fingerprint()) + "\n> **mutation(cli)** — a claim\n\nwhy?"
+	if got := FingerprintIn(quoted); got != "" {
+		t.Fatalf("a quoted marker carried a fingerprint: %q", got)
+	}
+	thread := Thread{
+		Root:    Comment{ID: 7, Body: Body(f)},
+		Replies: []Comment{{ID: 8, Body: quoted, InReplyTo: 7}},
+	}
+	if thread.Sole() {
+		t.Fatal("a reviewer who quoted the thread is still in it")
+	}
+	if ops := Delta(nil, []Thread{thread}, 42, "abc"); len(ops.Delete) != 0 {
+		t.Fatalf("their words were taken down with it: %+v", ops.Delete)
+	}
+}
+
+// Nothing ever takes down a thread somebody else spoke in, so a reply lydite
+// has already made must not be made again: otherwise the same sentence lands
+// on every run for as long as the pull request is open.
+func TestAThreadIsAnsweredOnceAndNotOnEveryRun(t *testing.T) {
+	gone := claim("mutation", "a.go", 12, finding.AnchorLine)
+	said := cleared(gone.Fingerprint())
+	thread := Thread{
+		Root: Comment{ID: 7, Body: Body(gone)},
+		Replies: []Comment{
+			{ID: 8, Body: "not convinced", InReplyTo: 7},
+			{ID: 9, Body: said, InReplyTo: 7},
+		},
+	}
+	if ops := Delta(nil, []Thread{thread}, 42, "abc"); len(ops.Reply) != 0 {
+		t.Fatalf("lydite said it twice: %+v", ops.Reply)
+	}
+}
+
+// The same rule for a thread that has come adrift: it is told once where the
+// claim went, and told again only when the answer has changed.
+func TestAnOutdatedThreadIsToldWhereTheClaimWentOnce(t *testing.T) {
+	f := claim("mutation", "a.go", 12, finding.AnchorLine)
+	thread := Thread{
+		Root: Comment{ID: 7, Body: Body(f), Outdated: true},
+		Replies: []Comment{
+			{ID: 8, Body: "why?", InReplyTo: 7},
+			{ID: 9, Body: moved(f.Fingerprint(), f), InReplyTo: 7},
+		},
+	}
+	if ops := Delta([]finding.Finding{f}, []Thread{thread}, 42, "abc"); len(ops.Reply) != 0 {
+		t.Fatalf("lydite said it twice: %+v", ops.Reply)
+	}
+	f.Line = 40
+	ops := Delta([]finding.Finding{f}, []Thread{thread}, 42, "abc")
+	if len(ops.Reply) != 1 || !strings.Contains(ops.Reply[0].Body, "a.go:40") {
+		t.Fatalf("the thread was not told the claim had moved again: %+v", ops.Reply)
+	}
+}
+
+// A refusal is refused for the whole thread at once, so one operation in it
+// carries what to say. A body on each would answer one thread as many times
+// as it has comments.
+func TestOnlyTheRootsDeleteCarriesWhatToSayIfItIsRefused(t *testing.T) {
+	gone := claim("mutation", "a.go", 12, finding.AnchorLine)
+	thread := Thread{
+		Root: Comment{ID: 7, Body: Body(gone)},
+		Replies: []Comment{
+			{ID: 8, Body: Marker(gone.Fingerprint()) + "\nstill here", InReplyTo: 7},
+		},
+	}
+	ops := Delta(nil, []Thread{thread}, 42, "abc")
+	if len(ops.Delete) != 2 {
+		t.Fatalf("got %+v", ops.Delete)
+	}
+	if ops.Delete[0].Refused != "" {
+		t.Errorf("a reply's delete must carry no body: %+v", ops.Delete[0])
+	}
+	if ops.Delete[1].Refused == "" {
+		t.Errorf("the root's delete carries what to say: %+v", ops.Delete[1])
 	}
 }

@@ -133,7 +133,10 @@ the fingerprint, version prefix included. The parser accepts any token and retur
 so a thread written under a formula this binary never emitted is simply one matching no current
 finding — which is what makes a formula bump self-heal in one round of delete-and-repost. Every
 comment lydite writes into a thread carries the marker, including its replies, which is what
-lets the sole-participant rule read the marker rather than an author.
+lets the sole-participant rule read the marker rather than an author. **The marker has to open
+the body**: the platform's quote-reply copies the raw markdown of the comment it answers, HTML
+comment included, so a marker read from anywhere would make a reviewer who quoted a thread
+invisible to that rule and have their words deleted with it.
 
 **`lydite is the only participant` governs both branches of a thread's life.** A claim that is
 gone deletes its thread where lydite is alone in it, and is replied to and left standing where
@@ -143,7 +146,17 @@ outdated" toggle, so a thread that blocks the merge becomes one the author canno
 worse than the notification a repost costs. Outdated is a null `position` read together with
 `subject_type`: a comment on a whole file has no position by construction rather than by the
 change having moved, and the null alone would churn every file-level thread on every push. A delete the platform refuses takes the
-someone-else-spoke path, which is why a delete operation carries the body to post instead.
+someone-else-spoke path, which is why the root's delete carries the body to post instead — one
+per thread, because a refusal is refused for the whole thread at once.
+
+**Whatever lydite says in a thread it leaves standing, it says once.** Nothing ever takes such a
+thread down, so a reply that did not check for itself would land on every run for as long as the
+pull request is open.
+
+**Reading the threads already standing is capped at ten pages, and reaching the cap is a
+refusal.** Comments come back in creation order, so a truncated listing can hand back a thread
+whose root is inside the window and whose replies are past it — which the sole-participant rule
+would read as lydite's own.
 
 **A review the platform refuses fails the publish job**, naming how many located findings
 reached no surface. The findings still reach the terminal, the job log and the uploaded

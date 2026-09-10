@@ -403,6 +403,20 @@ func TestARowWithNoLocatedFindingsCountsNothing(t *testing.T) {
 	}
 }
 
+// Which rule fired is what a reader acts on, and a scanner's claims reach the
+// change nowhere — so the comment is the only surface that ever carries them.
+func TestAScannersClaimNamesTheRuleThatFired(t *testing.T) {
+	row := ui.Row{Status: ui.StatusFail, Label: "biome(cli)", Value: "failed"}
+	dir := reportDirWithFindings(t, "scan", []ui.Row{row}, []finding.Finding{
+		{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3, Rule: "lint/suspicious/noExplicitAny",
+			Message: "avoid any", Site: "one", Row: "biome(cli)"},
+	})
+	body := buildComment([]string{dir}, "").Render()
+	if !strings.Contains(body, "lint/suspicious/noExplicitAny") {
+		t.Fatalf("the rule is not in the comment:\n%s", body)
+	}
+}
+
 // A gate that emits no findings still quotes what its author put next to the
 // verdict, which for several checks is the only place their output exists.
 func TestARowWithNoFindingsQuotesItsOwnDetail(t *testing.T) {

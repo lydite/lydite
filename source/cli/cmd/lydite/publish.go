@@ -214,13 +214,27 @@ func detailFor(dir string, row ui.Row, found []finding.Finding) []string {
 			located++
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message))
+		lines = append(lines, claimLine(f))
 	}
 	if located > 0 {
 		lines = append(lines, fmt.Sprintf(
 			"%d finding(s) reach a line of this change, and are threads on those lines rather than rows here.", located))
 	}
 	return lines
+}
+
+// claimLine is one unanchored claim, as the comment shows it.
+//
+// The rule is carried when the gate has one. It is what a reader acts on for
+// a scanner's finding — which rule fired, not only that something did — and
+// it is the one part of the prose a row used to render that no other surface
+// carries: a scanner's claims reach the change nowhere, so they are always
+// here rather than on a line.
+func claimLine(f finding.Finding) string {
+	if f.Rule == "" {
+		return fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message)
+	}
+	return fmt.Sprintf("%s:%d %s %s", f.Path, f.Line, f.Rule, f.Message)
 }
 
 // detailCap is how many rows get their output quoted in one section.
