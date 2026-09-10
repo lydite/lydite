@@ -314,16 +314,17 @@ func Delta(findings []finding.Finding, threads []Thread, pull int, head string) 
 // close ends a thread: deleted where lydite is alone in it, and answered where
 // it is not.
 //
-// The replies are deleted before the root, so a refusal partway through leaves
+// Every reply is deleted before the root, so a refusal partway through leaves
 // a thread with its root still standing rather than a headless run of replies
-// the platform shows under nothing.
+// the platform shows under nothing. Their order among themselves says nothing
+// — what matters is that the root goes last.
 func (o *Ops) close(t Thread, body string) {
 	if !t.Sole() {
 		o.Reply = append(o.Reply, Reply{Comment: t.Root.ID, Body: body})
 		return
 	}
-	for i := len(t.Replies) - 1; i >= 0; i-- {
-		o.Delete = append(o.Delete, Delete{Comment: t.Replies[i].ID, Refused: body})
+	for _, reply := range t.Replies {
+		o.Delete = append(o.Delete, Delete{Comment: reply.ID, Refused: body})
 	}
 	o.Delete = append(o.Delete, Delete{Comment: t.Root.ID, Refused: body})
 }

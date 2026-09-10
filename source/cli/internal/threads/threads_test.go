@@ -139,17 +139,24 @@ func TestAStandingThreadIsLeftAlone(t *testing.T) {
 	}
 }
 
-// A cleared claim takes its thread with it when lydite is alone in it, replies
-// first so a refusal partway through never leaves a headless run of replies.
+// A cleared claim takes its thread with it when lydite is alone in it, and
+// the root goes last so a refusal partway through never leaves a headless run
+// of replies the platform shows under nothing.
 func TestAClearedClaimDeletesItsOwnThread(t *testing.T) {
 	gone := claim("mutation", "a.go", 12, finding.AnchorLine)
 	thread := Thread{
-		Root:    Comment{ID: 7, Body: Body(gone)},
-		Replies: []Comment{{ID: 8, Body: Marker(gone.Fingerprint()) + "\nstill here", InReplyTo: 7}},
+		Root: Comment{ID: 7, Body: Body(gone)},
+		Replies: []Comment{
+			{ID: 8, Body: Marker(gone.Fingerprint()) + "\nstill here", InReplyTo: 7},
+			{ID: 9, Body: Marker(gone.Fingerprint()) + "\nand here", InReplyTo: 7},
+		},
 	}
 	ops := Delta(nil, []Thread{thread}, 42, "abc")
-	if len(ops.Delete) != 2 || ops.Delete[0].Comment != 8 || ops.Delete[1].Comment != 7 {
-		t.Fatalf("the replies must go before the root: %+v", ops.Delete)
+	if len(ops.Delete) != 3 {
+		t.Fatalf("every comment in the thread goes: %+v", ops.Delete)
+	}
+	if ops.Delete[2].Comment != 7 {
+		t.Fatalf("the root must go last: %+v", ops.Delete)
 	}
 	if ops.Delete[0].Refused == "" {
 		t.Error("a delete carries what to say when the platform refuses it")
