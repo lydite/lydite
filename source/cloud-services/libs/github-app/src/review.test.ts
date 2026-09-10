@@ -112,6 +112,20 @@ describe("applying an operations document", () => {
     expect(calls.map((c) => c.method)).toEqual(["DELETE", "POST"]);
   });
 
+  // Every operation is answered for, so a caller reading the outcomes can
+  // tell what the run actually did from what it asked for.
+  it("answers for a reply as well as for a delete and a review", async () => {
+    const { fetcher } = github(ok);
+    const outcomes = await applyReview(
+      "t",
+      "lydite/lydite",
+      7,
+      { version: 1, reply: [{ comment: 6, body: "b" }] },
+      fetcher,
+    );
+    expect(outcomes).toEqual([{ op: "reply", ref: 6, status: "done" }]);
+  });
+
   // An identity may only delete what it authored, so a refusal is the
   // handover between lydite's app and a consumer's own bot rather than a
   // malfunction — and the thread is answered instead of vanishing silently.
@@ -161,5 +175,47 @@ describe("applying an operations document", () => {
     await expect(
       applyReview("t", "lydite/lydite", 7, { version: 1, create: [{ path: "a.go", line: 1, subject: "line", body: "x" }] }, fetcher),
     ).rejects.toThrow("500");
+  });
+});
+
+describe("what it refuses to guess about", () => {
+  // A page it could not read is a thread it cannot see, and guessing would
+  // delete somebody's thread or repost a claim already standing.
+  it("raises a delete the platform answered with something else", async () => {
+    const { fetcher } = github((_url, method) =>
+      method === "DELETE" ? new Response("no", { status: 500 }) : ok(),
+    );
+    await expect(
+      applyReview("t", "lydite/lydite", 7, { version: 1, delete: [{ comment: 5 }] }, fetcher),
+    ).rejects.toThrow("500");
+  });
+
+  // A reply is the whole of what a thread left standing says, so one that
+  // never landed must not read as one that did.
+  it("raises a reply to a thread that is not there", async () => {
+    const { fetcher } = github(() => new Response("gone", { status: 404 }));
+    await expect(
+      applyReview("t", "lydite/lydite", 7, { version: 1, reply: [{ comment: 6, body: "b" }] }, fetcher),
+    ).rejects.toThrow("404");
+  });
+
+  it("raises a reply the platform answered with something else", async () => {
+    const { fetcher } = github(() => new Response("no", { status: 500 }));
+    await expect(
+      applyReview("t", "lydite/lydite", 7, { version: 1, reply: [{ comment: 6, body: "b" }] }, fetcher),
+    ).rejects.toThrow("500");
+  });
+
+  it("raises a file thread the platform refused", async () => {
+    const { fetcher } = github(() => new Response("no", { status: 422 }));
+    await expect(
+      applyReview(
+        "t",
+        "lydite/lydite",
+        7,
+        { version: 1, create: [{ path: "b.go", subject: "file", body: "x" }] },
+        fetcher,
+      ),
+    ).rejects.toThrow("422");
   });
 });

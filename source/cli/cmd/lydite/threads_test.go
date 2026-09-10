@@ -24,13 +24,14 @@ type fakeReviews struct {
 	existing []map[string]any
 	// deleteStatus is what a DELETE answers, so the refusal path a handover
 	// between two identities produces is reachable in a test.
-	deleteStatus int
-	replyStatus  int
-	reviewStatus int
-	deleted      []string
-	replied      []string
-	reviews      []map[string]any
-	fileComments []map[string]any
+	deleteStatus      int
+	replyStatus       int
+	reviewStatus      int
+	fileCommentStatus int
+	deleted           []string
+	replied           []string
+	reviews           []map[string]any
+	fileComments      []map[string]any
 }
 
 func (f *fakeReviews) start(t *testing.T) {
@@ -62,6 +63,10 @@ func (f *fakeReviews) start(t *testing.T) {
 			f.deleted = append(f.deleted, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
 		case strings.Contains(r.URL.Path, "/pulls/") && strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodPost:
+			if f.fileCommentStatus != 0 {
+				w.WriteHeader(f.fileCommentStatus)
+				return
+			}
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.fileComments = append(f.fileComments, body)
@@ -234,8 +239,8 @@ func TestApplyOpensDeletesAndAnswers(t *testing.T) {
 	if len(forge.replied) != 1 || !strings.Contains(forge.replied[0], "/102/replies") {
 		t.Fatalf("the thread somebody spoke in was not answered: %+v", forge.replied)
 	}
-	if !strings.Contains(out, "applied") {
-		t.Fatalf("the report does not say what was applied: %q", out)
+	if !strings.Contains(out, "1 opened, 1 closed, 1 answered") {
+		t.Fatalf("the counts do not add up to what happened: %q", out)
 	}
 }
 
@@ -348,8 +353,32 @@ func TestAFileAnchoredClaimIsPostedOutsideTheReview(t *testing.T) {
 	if !ok || len(comments) != 1 {
 		t.Fatalf("only the line claim belongs in the review: %+v", forge.reviews[0])
 	}
+	if first, ok := comments[0].(map[string]any); !ok || first["path"] != "a.ts" {
+		t.Fatalf("the review carries the wrong claim: %+v", comments[0])
+	}
 	if len(forge.fileComments) != 1 || forge.fileComments[0]["subject_type"] != "file" {
 		t.Fatalf("the file claim did not become a thread of its own: %+v", forge.fileComments)
+	}
+	if forge.fileComments[0]["path"] != "b.ts" {
+		t.Fatalf("the wrong claim was posted as a file thread: %+v", forge.fileComments[0])
+	}
+}
+
+// A file thread the platform refuses is a claim that reached no surface, and
+// the run must say so rather than pass with it lost.
+func TestAFileThreadThePlatformRefusesFailsTheRun(t *testing.T) {
+	onFile := located("b.ts", 400)
+	onFile.Anchor = finding.AnchorFile
+	forge := &fakeReviews{fileCommentStatus: http.StatusUnprocessableEntity}
+	forge.start(t)
+	opsPath := filepath.Join(t.TempDir(), "threads.json")
+
+	_, _, err := runThreadsCmd(t, []string{reportsWith(t, onFile)}, opsPath, true)
+	if err == nil {
+		t.Fatal("a thread that could not be opened must fail the run")
+	}
+	if !strings.Contains(err.Error(), "reached no surface") {
+		t.Fatalf("the error does not say what was lost: %v", err)
 	}
 }
 

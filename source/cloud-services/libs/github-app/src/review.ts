@@ -48,8 +48,16 @@ export interface Outcome {
   detail?: string;
 }
 
-const PAGES = 10;
 const PER_PAGE = 100;
+
+/**
+ * The pages the walk visits, as a list rather than a loop bound.
+ *
+ * A `for (let page = 1; page <= PAGES; page++)` carries a boundary and a step
+ * that can each be shifted without any listing noticing; a list of the page
+ * numbers has neither.
+ */
+const PAGES = Array.from({ length: 10 }, (_, index) => index + 1);
 
 /**
  * Every review comment currently on a pull request, by id.
@@ -66,7 +74,7 @@ export async function reviewCommentIds(
   fetcher: typeof fetch = fetch,
 ): Promise<Set<number>> {
   const ids = new Set<number>();
-  for (let page = 1; page <= PAGES; page++) {
+  for (const page of PAGES) {
     const response = await fetcher(
       `${GITHUB_API}/repos/${repository}/pulls/${pull}/comments?per_page=${PER_PAGE}&page=${page}`,
       { headers: apiHeaders(`Bearer ${token}`) },

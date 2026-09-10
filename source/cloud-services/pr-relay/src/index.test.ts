@@ -288,6 +288,11 @@ describe("applying a review", () => {
     }) as typeof fetch;
     const response = await postReview(token, { version: 1, create: [] }, broken);
     expect(response.status).toBe(502);
-    expect(JSON.stringify(await response.json())).not.toContain("upstream detail");
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    // Each endpoint says which of its own writes did not happen, so a reader
+    // of the job log is not told the comment failed when the review did.
+    expect(body).toContain("review");
+    expect(body).not.toContain("comment");
   });
 });
