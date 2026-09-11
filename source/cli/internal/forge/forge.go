@@ -6,11 +6,14 @@
 // It is deliberately small and hand-rolled over net/http rather than a
 // generated client. lydite's dependency set is part of its argument — every
 // tool it runs is pinned to a manifest something can age out — and a client
-// covering ten calls is cheaper to audit than one covering the platform.
-// Ten is four more than the surface this package was written for, and the
-// widening is real: the argument is that ten named calls still fit on one
-// screen and every one of them is reachable from a line of lydite's own, not
-// that the number is small.
+// covering twelve calls is cheaper to audit than one covering the platform.
+//
+// Twelve is every method here that reaches the platform, which is the only
+// figure a reader can check against the file — UpsertComment is not among
+// them, because it composes two that are. The widening over the surface this
+// package was written for is real, and the argument is that twelve named
+// calls still fit on one screen and every one of them is reachable from a
+// line of lydite's own, not that the number is small.
 //
 // Nothing here decides anything. What a status means, and which comment may
 // change one, belong to internal/clearance, so that the rules are testable
