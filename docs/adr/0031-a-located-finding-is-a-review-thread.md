@@ -264,12 +264,22 @@ items of debt. The only bound is mechanical: one review per run.
 
 ## The costs, stated
 
-`internal/forge` grows from six calls to ten — list review comments, create a
-review, reply to a comment, delete a comment. Its stance is that *a client
-covering six calls is cheaper to audit than one covering the platform*, and four
-more is a real widening. The argument survives at the new size: ten named calls
-still fit on one screen and every one is reachable from a line of lydite's own.
-It is stated rather than quietly deleted.
+`internal/forge` grows from seven calls to twelve — list review comments,
+create a review, open a thread on a file, reply to a comment, delete a
+comment. Its stance is that *a client covering six calls is cheaper to audit
+than one covering the platform*, and five more is a real widening. The
+argument survives at the new size: twelve named calls still fit on one screen
+and every one is reachable from a line of lydite's own. It is stated rather
+than quietly deleted.
+
+Four of the five additions were foreseen. The fifth is the one the platform
+imposed: a file-anchored claim cannot ride inside a review, so opening one is
+its own call.
+
+The stance said *six* and there were seven, so the figure was already off by
+one before any of this ([#125](https://github.com/lydite/lydite/issues/125)). It is now stated as what it counts — every method that
+reaches the platform — because a number nobody can reproduce from the file is
+a number that drifts again the next time somebody adds a call.
 
 The publish job now makes one more round trip on the ordinary path, and two when
 the relay is tried and falls back: the delta is recomputed rather than the
