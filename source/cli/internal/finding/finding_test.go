@@ -102,6 +102,58 @@ func TestIdenticalSitesInOneFileAreToldApart(t *testing.T) {
 	}
 }
 
+// Two claims with one fingerprint are one claim, wherever the copies came
+// from: two shards measuring one component, a re-run job, or a report
+// directory holding several commands' documents.
+func TestDedupKeepsTheFirstUnderEachFingerprint(t *testing.T) {
+	first := base()
+	moved := first
+	moved.Line = 998
+	other := base()
+	other.Path = "internal/ui/report.go"
+
+	kept, dropped := Dedup([]Finding{first, moved, other})
+
+	if len(kept) != 2 || kept[0].Line != first.Line {
+		t.Fatalf("the first occurrence did not win: %+v", kept)
+	}
+	if len(dropped) != 1 || dropped[0] != first.Fingerprint() {
+		t.Fatalf("the drop was not named: %+v", dropped)
+	}
+}
+
+// The copies arrive one producer at a time, so a set answers against
+// everything collected before rather than within one batch.
+func TestASetCollapsesAcrossTheCallsItWasFilledBy(t *testing.T) {
+	var set Set
+	if dropped := set.Add(base()); len(dropped) != 0 {
+		t.Fatalf("the first copy was dropped: %+v", dropped)
+	}
+	if dropped := set.Add(base()); len(dropped) != 1 {
+		t.Fatalf("a copy added by a later call survived: %+v", set.Findings())
+	}
+	if got := set.Findings(); len(got) != 1 {
+		t.Fatalf("the set holds %d copies of one claim", len(got))
+	}
+}
+
+// Two identical comparisons on two lines are two claims. finding.Number gives
+// them ordinals 0 and 1 and the ordinal is a fingerprint ingredient, so a
+// collapse on fingerprint leaves both standing — which is what makes it safe
+// to collapse at all.
+func TestDedupKeepsTwoDistinctClaimsOnOneSite(t *testing.T) {
+	findings := []Finding{
+		{Gate: "mutation", Component: "cli", Path: "a.go", Line: 10, Site: "relational < >="},
+		{Gate: "mutation", Component: "cli", Path: "a.go", Line: 40, Site: "relational < >="},
+	}
+	Number(findings)
+
+	kept, dropped := Dedup(findings)
+	if len(kept) != 2 || len(dropped) != 0 {
+		t.Fatalf("kept %d of two distinct claims, dropping %+v", len(kept), dropped)
+	}
+}
+
 func TestNumberingIsStableAcrossRuns(t *testing.T) {
 	build := func() []Finding {
 		return []Finding{

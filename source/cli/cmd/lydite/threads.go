@@ -77,7 +77,7 @@ func runThreads(cmd *cobra.Command, reports []string, opsPath, eventPath string,
 	rep := ui.NewReport("threads")
 
 	found, missing := readFindings(reports)
-	located, dropped := threads.Dedup(threads.Located(found))
+	located, dropped := finding.Dedup(threads.Located(found))
 	for _, fp := range dropped {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: %s was reported twice and one copy is dropped; one claim is one thread\n", fp)

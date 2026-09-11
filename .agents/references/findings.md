@@ -127,10 +127,31 @@ This partly reverses [ADR 0030](../../docs/adr/0030-findings-are-data-in-the-rep
 removal of the row link, which
 [ADR 0031](../../docs/adr/0031-a-located-finding-is-a-review-thread.md) states as an amendment.
 
-## The fold carries them through
+## A report holds each claim once
 
-`readShards` carries every shard's findings into the folded report unchanged. They need no
-folding rule of their own: a shard reports exactly the components it was responsible for, so
-each claim is made once, and the duplicate a matrix could produce is already caught as a
-declared component with two rows.
+`ui.Report.AddFindings` collects on the fingerprint and keeps the first under each, through
+`finding.Set` — the one implementation of the rule, which `lydite threads` reaches too. Every
+producer already goes through `AddFindings`, so the fold, the patch gate, the mutation run and
+the scan are all covered by the one gate, and a consumer of the document never sees a claim
+twice.
+
+The drop is silent. A duplicate is lydite's plumbing rather than a gate result, and a row
+announcing one would sit among rows about the code; the document holding each claim once is
+what a reader can observe. `lydite threads` is the exception that names its drops on stderr,
+because it consumes documents a local run wrote with no fold at all and a duplicate there is
+the operator's evidence that two commands wrote into one directory.
+
+**The ordinal is what makes this safe.** `finding.Number` runs per producer, before the claims
+reach a report, and `Ordinal` is a fingerprint ingredient — so two genuinely distinct claims
+alike in gate, component, path and site (two identical comparisons on two lines) carry ordinals
+0 and 1, hash differently, and both survive. Only a repeat of one claim collapses. A producer
+that means to state one claim twice cannot, and none does.
+
+Dedup happens at `AddFindings` and not earlier because `scan`'s `labelled` sets `Component` and
+rebases `Path` after its parser numbered the findings, and both are ingredients: a fingerprint
+taken before labelling is not the fingerprint the document carries.
+
+`readShards` needs no folding rule beyond this. A shard reports exactly the components it was
+responsible for, so each claim is meant to be made once; what `AddFindings` catches is a report
+directory holding several documents, a re-run job, and a component two shards both measured.
 

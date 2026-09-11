@@ -226,6 +226,50 @@ func TestJSONKeysArePartOfTheContract(t *testing.T) {
 	}
 }
 
+// The document several producers write into is the one every consumer reads,
+// and a claim in it twice is a sentence said twice — so a report collects on
+// the fingerprint and a repeat is dropped wherever it arrives from.
+func TestAReportHoldsEachClaimOnce(t *testing.T) {
+	claim := finding.Finding{
+		Gate: "crap", Component: "cli", Path: "a.go", Line: 10, Site: "first()",
+	}
+	moved := claim
+	moved.Line = 40
+
+	rep := NewReport("test")
+	rep.AddFindings(claim)
+	rep.AddFindings(moved, finding.Finding{
+		Gate: "crap", Component: "cli", Path: "b.go", Line: 1, Site: "other()",
+	})
+
+	got := rep.Findings()
+	if len(got) != 2 {
+		t.Fatalf("the report holds %d claims, want 2: %+v", len(got), got)
+	}
+	if got[0].Line != 10 {
+		t.Errorf("the first occurrence did not win: %+v", got[0])
+	}
+}
+
+// Two identical comparisons on two lines are two claims, not one reported
+// twice: finding.Number gives them different ordinals and the ordinal is a
+// fingerprint ingredient. Collapse them and a gate silently stops reporting
+// the second of every pair it finds.
+func TestTwoClaimsOnOneSiteBothReachTheReport(t *testing.T) {
+	claims := []finding.Finding{
+		{Gate: "mutation", Component: "cli", Path: "a.go", Line: 10, Site: "relational < >="},
+		{Gate: "mutation", Component: "cli", Path: "a.go", Line: 40, Site: "relational < >="},
+	}
+	finding.Number(claims)
+
+	rep := NewReport("mutation")
+	rep.AddFindings(claims...)
+
+	if got := rep.Findings(); len(got) != 2 {
+		t.Fatalf("the report holds %d of two distinct claims: %+v", len(got), got)
+	}
+}
+
 // A finding's keys are what a consumer anchors, counts and tracks by, so they
 // are as much a contract as the row's are. A field renamed here silently stops
 // a thread finding the finding it belongs to.

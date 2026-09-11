@@ -241,3 +241,51 @@ func (a Anchor) reach() int {
 		return 0
 	}
 }
+
+// Set collects findings under their fingerprints, keeping the first of each.
+//
+// Two claims with one fingerprint are one claim. A document holding both puts
+// the same sentence twice in front of a reader and, once the claims become
+// threads, two threads on one line that neither a delta nor a person can tell
+// apart. Only a repeat collapses: Number gives two genuinely distinct claims
+// alike in gate, component, path and site the ordinals 0 and 1, so they hash
+// differently and both survive.
+//
+// A set rather than a function over one slice, because the duplicate is
+// almost never inside a producer's batch: it is a component measured by two
+// shards, a re-run job, or a report directory holding several documents, so a
+// copy is a duplicate only against everything collected before it.
+//
+// The zero Set is ready to use.
+type Set struct {
+	seen map[string]bool
+	kept []Finding
+}
+
+// Add collects each finding whose fingerprint is new, and names the rest.
+func (s *Set) Add(findings ...Finding) (dropped []string) {
+	for _, f := range findings {
+		fp := f.Fingerprint()
+		if s.seen[fp] {
+			dropped = append(dropped, fp)
+			continue
+		}
+		if s.seen == nil {
+			s.seen = map[string]bool{}
+		}
+		s.seen[fp] = true
+		s.kept = append(s.kept, f)
+	}
+	return dropped
+}
+
+// Findings returns what has been collected, in the order it arrived.
+func (s *Set) Findings() []Finding { return s.kept }
+
+// Dedup keeps the first finding under each fingerprint and names the rest.
+// It is Set for a caller that holds the whole set already.
+func Dedup(findings []Finding) (kept []Finding, dropped []string) {
+	var s Set
+	dropped = s.Add(findings...)
+	return s.Findings(), dropped
+}

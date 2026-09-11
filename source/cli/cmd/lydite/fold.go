@@ -42,10 +42,14 @@ type shardInput struct {
 // readShards reads each named directory's report for one command, adding a row
 // per directory so a folded report says what it was folded from.
 //
-// Every shard's findings are carried through unchanged. They need no folding
+// Every shard's findings are carried through as they are, and need no folding
 // rule of their own: a shard reports exactly the components it was responsible
-// for, so each claim is made once, and the duplicate a shard matrix could
-// produce is already caught as a component with two rows.
+// for, so each claim is meant to be made once, and the duplicate a shard matrix
+// could produce is already caught as a component with two rows. What repeats a
+// claim anyway — two shards that both measured one component, a re-run job, a
+// directory holding several documents — AddFindings collapses on the
+// fingerprint, so the folded document holds each claim once whatever reached
+// it.
 //
 // alongside reads whatever else that command's shards wrote beside the report
 // and says so on the same row — `lydite test` writes measurements, and nothing

@@ -282,6 +282,34 @@ func TestTheFoldCarriesEveryShardsClaims(t *testing.T) {
 	}
 }
 
+// A component measured by two shards, or a re-run job, hands the fold two
+// documents making the same claim. The folded document is the only one
+// anything downstream reads, and a claim in it twice is a sentence said twice
+// and, once claims become threads, two threads on one line.
+func TestTheFoldHoldsARepeatedClaimOnce(t *testing.T) {
+	t.Parallel()
+	claim := finding.Finding{
+		Gate: "patch", Component: "api", Path: "api/a.go", Line: 3,
+		Message: "untested", Site: "first()",
+	}
+	dirs := make([]string, 2)
+	for i := range dirs {
+		root := t.TempDir()
+		dirs[i] = reportsDir(root)
+		shard := ui.NewReport("test")
+		shard.Add(ui.Row{Status: ui.StatusFail, Label: "patch(api)", Value: "failed"})
+		shard.AddFindings(claim)
+		saveDocument(root, shard)
+	}
+
+	rep := ui.NewReport("test")
+	readShards(rep, dirs, "test", nil)
+
+	if got := rep.Findings(); len(got) != 1 {
+		t.Fatalf("the fold carries %d copies of one claim, want 1: %+v", len(got), got)
+	}
+}
+
 // A claim defaults to unanchorable and a producer that can prove otherwise
 // says so. That direction is what keeps a claim in the standing comment rather
 // than offered to a platform that would refuse it.
