@@ -51,6 +51,13 @@ into something a shell then executes.
 every time instead of editing the standing one, and the relay and the fallback would orphan each
 other's comments rather than handing over.
 
+**And it is matched at the start of a body, never anywhere in it** — `startswith`, not
+`contains`. The platform's quote-reply copies the raw markdown of the comment it answers, HTML
+comment included, so a person quoting the verdict would otherwise be the comment the next run
+`PATCH`es wholesale. The rule lives in three places because one upsert does: `forge.FindComment`,
+the relay's `findComment`, and this action's `jq`. Fixing two of the three is how it was last got
+wrong.
+
 **The pull-request comment carries no logo.** It identified whose verdict it was while the
 comment arrived under a consumer's own `github-actions[bot]`; the App is that identity now, so a
 mark above the verdict restates the byline and spends a row of a reader's screen doing it. Any

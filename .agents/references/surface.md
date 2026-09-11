@@ -61,7 +61,8 @@ every other command's results take — the document it wrote — because renderi
 two derivations of one answer. `ui.Marker` is `<!-- lydite:results -->`: one comment per change,
 upserted by the marker rather than by author, which is what lets the relay and the fallback hand
 over instead of leaving two standing verdicts. It has to **open** the body, or a person quoting
-the verdict becomes the comment the next run replaces.
+the verdict becomes the comment the next run replaces — and that rule lives in three places,
+because one upsert does: the CLI, the relay, and the composite action's fallback.
 
 ## The relay, and the fallback
 
@@ -138,8 +139,9 @@ lets the sole-participant rule read the marker rather than an author. **The mark
 the body**: the platform's quote-reply copies the raw markdown of the comment it answers, HTML
 comment included, so a marker read from anywhere would make a reviewer who quoted a thread
 invisible to that rule and have their words deleted with it. The standing comment is upserted
-by the same rule, in `FindComment` and in the relay, so a person quoting lydite's verdict is
-not the comment the next run replaces.
+by the same rule in all three implementations of it — `forge.FindComment`, the relay's
+`findComment`, and the `github-token` fallback's `jq` in `.github/actions/lydite-comment` — so
+a person quoting lydite's verdict is not the comment the next run replaces.
 
 **`lydite is the only participant` governs both branches of a thread's life.** A claim that is
 gone deletes its thread where lydite is alone in it, and is replied to and left standing where

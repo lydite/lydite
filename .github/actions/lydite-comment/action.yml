@@ -102,9 +102,23 @@ runs:
         # Found by the marker and not by author, which is what lets the relay
         # later take over a comment this path posted rather than orphaning it
         # and leaving two standing verdicts on the pull request.
+        #
+        # The marker has to *open* the body, and `startswith` rather than
+        # `contains` is the whole of what keeps this from writing over
+        # somebody. The platform's quote-reply copies the raw markdown of the
+        # comment it answers, HTML comment included, so on a pull request
+        # lydite has not commented on yet, a person quoting the verdict would
+        # otherwise be the comment this step PATCHes wholesale — with the
+        # `pull-requests: write` token above. `lydite publish` writes the
+        # marker as the body's first line, which the case statement above has
+        # already checked, so nothing lydite posts is lost by asking.
+        #
+        # The same rule, in the same words, lives in forge.FindComment and in
+        # the relay's findComment. Three implementations of one upsert is what
+        # ADR 0022's two identities cost; they have to agree.
         existing=$(gh api --paginate \
           "repos/${REPO}/issues/${NUMBER}/comments" \
-          --jq "map(select(.body | contains(\"${marker}\"))) | .[0].id // empty")
+          --jq "map(select((.body // \"\") | startswith(\"${marker}\"))) | .[0].id // empty")
 
         if [ -n "$existing" ]; then
           gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" \

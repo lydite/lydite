@@ -15,6 +15,10 @@ import { GITHUB_API, apiHeaders } from "./app.js";
  * author of the comment the next run replaces wholesale. Every comment lydite
  * renders opens with it, so nothing of lydite's is lost by asking.
  *
+ * The same rule is in forge.FindComment and in the `github-token` fallback's
+ * jq. One upsert with three implementations is what the two identities cost,
+ * and they have to agree.
+ *
  * The listing is capped. A conversation long enough that lydite's comment is
  * off the end of it is one where posting a fresh comment is the better failure
  * than editing the wrong one.

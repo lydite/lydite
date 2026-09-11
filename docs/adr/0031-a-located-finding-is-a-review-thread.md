@@ -114,13 +114,22 @@ markdown of the comment it answers, HTML comment included, so a marker read
 from anywhere in a body would make a reviewer who quoted a thread invisible to
 this rule — and their words would be deleted with it.
 
-The standing comment is found by the same rule, and was not: `FindComment` and
-the relay's `findComment` matched the marker anywhere, so a person quoting
-lydite's verdict on a pull request lydite had not yet commented on was the
-author of the comment the next run replaced wholesale. Both now require it to
-open the body. Every comment lydite renders does — `ui.Comment.Render` writes
-it first — so nothing of lydite's is lost by asking, and a person editing the
-prose below it still does not detach it.
+The standing comment is found by the same rule, and was not. **One upsert has
+three implementations** — `forge.FindComment`, the relay's `findComment`, and
+the `github-token` fallback's `jq` in `.github/actions/lydite-comment` — and
+each matched the marker anywhere, so a person quoting lydite's verdict on a
+pull request lydite had not yet commented on was the author of the comment the
+next run replaced wholesale. All three now require it to open the body. Every
+comment lydite renders does — `ui.Comment.Render` writes it first, and the
+action already refuses a body whose first line is not the marker — so nothing
+of lydite's is lost by asking, and a person editing the prose below it still
+does not detach it.
+
+Three implementations of one upsert is what ADR 0022's two identities cost:
+the relay writes as the app, the fallback as the consumer's own bot, and the
+CLI is what a person runs by hand. They have to agree, and the way this one
+was found is that two of them were fixed and the third — the only one in force
+until the relay is deployed — was not.
 
 **Whatever lydite says in a thread it leaves standing, it says once.** Nothing
 ever takes such a thread down — it is somebody else's conversation, and lydite

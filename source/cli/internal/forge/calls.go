@@ -138,6 +138,10 @@ type Comment struct {
 // holding `pull-requests: write`. Every comment lydite renders opens with it
 // (ui.Comment.Render writes it first), so nothing of lydite's is lost by
 // asking.
+//
+// The same rule is in the relay's findComment and in the `github-token`
+// fallback's jq. One upsert with three implementations is what ADR 0022's two
+// identities cost, and they have to agree.
 func (c *Client) FindComment(ctx context.Context, repo Repo, number int, marker string) (*Comment, error) {
 	// A busy pull request holds more comments than one page, and the
 	// sticky one is the oldest lydite wrote — so the walk has to reach the
