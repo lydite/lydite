@@ -36,7 +36,7 @@ func (e ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code)
 type Report struct {
 	command  string
 	rows     []Row
-	findings []finding.Finding
+	findings finding.Set
 	started  time.Time
 }
 
@@ -53,7 +53,7 @@ func (r *Report) Add(row Row) { r.rows = append(r.rows, row) }
 // Rows returns what has been added so far.
 func (r *Report) Rows() []Row { return r.rows }
 
-// AddFindings appends located claims a gate made.
+// AddFindings collects located claims a gate made.
 //
 // They sit beside the rows rather than on one, because a finding carries its
 // own gate and component and so needs no row to be understood, and because a
@@ -63,10 +63,18 @@ func (r *Report) Rows() []Row { return r.rows }
 //
 // Findings never vote. The rows hold the verdict, and a gate that already
 // failed a row would otherwise be counted twice.
-func (r *Report) AddFindings(f ...finding.Finding) { r.findings = append(r.findings, f...) }
+//
+// A claim already in the report is not added again, on the fingerprint that
+// identifies it (see internal/finding). One producer rarely repeats itself;
+// the fold does, because a component measured by two shards hands over two
+// documents making the same claim, and a folded document is what every other
+// consumer reads. The drop is silent: a duplicate is not a gate result, and a
+// row announcing one would be a row about lydite's plumbing among rows about
+// the code. The document holding each claim once is the observable.
+func (r *Report) AddFindings(f ...finding.Finding) { r.findings.Add(f...) }
 
 // Findings returns every located claim added so far.
-func (r *Report) Findings() []finding.Finding { return r.findings }
+func (r *Report) Findings() []finding.Finding { return r.findings.Findings() }
 
 // Command names the run. It is what the document is keyed by on disk, so a
 // caller saving one does not have to restate a name the report already holds
@@ -242,7 +250,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		Exit:       r.ExitCode(),
 		DurationMS: time.Since(r.started).Milliseconds(),
 		Rows:       rows,
-		Findings:   r.findings,
+		Findings:   r.findings.Findings(),
 	})
 }
 

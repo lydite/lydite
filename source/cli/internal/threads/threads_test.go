@@ -90,21 +90,6 @@ func TestOnlyLocatedClaimsReachAReview(t *testing.T) {
 	}
 }
 
-// A document a local run wrote has no fold at all, so two shards' copies of
-// one claim arrive here and only one may become a thread.
-func TestDedupKeepsTheFirstUnderEachFingerprint(t *testing.T) {
-	f := claim("crap", "a.go", 10, finding.AnchorFile)
-	second := f
-	second.Line = 40
-	kept, dropped := Dedup([]finding.Finding{f, second, claim("patch", "b.go", 1, finding.AnchorLine)})
-	if len(kept) != 2 || kept[0].Line != 10 {
-		t.Fatalf("the first occurrence did not win: %+v", kept)
-	}
-	if len(dropped) != 1 || dropped[0] != f.Fingerprint() {
-		t.Fatalf("the drop was not named: %+v", dropped)
-	}
-}
-
 // A claim with no thread gets one, on the line when the change touches it and
 // on the file when it does not.
 func TestAClaimWithNoThreadIsOpened(t *testing.T) {

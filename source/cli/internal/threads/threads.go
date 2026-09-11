@@ -224,27 +224,6 @@ func Located(findings []finding.Finding) []finding.Finding {
 	return out
 }
 
-// Dedup keeps the first finding under each fingerprint and names the rest.
-//
-// Two claims with one fingerprint are one claim, and posting both would put
-// two threads on one line that neither delta nor reader can tell apart. The
-// input is documents several runs wrote, folded or not, so this cannot rest on
-// any one producer having deduplicated: a local run writes every command's
-// document into one directory with no fold at all.
-func Dedup(findings []finding.Finding) (kept []finding.Finding, dropped []string) {
-	seen := map[string]bool{}
-	for _, f := range findings {
-		fp := f.Fingerprint()
-		if seen[fp] {
-			dropped = append(dropped, fp)
-			continue
-		}
-		seen[fp] = true
-		kept = append(kept, f)
-	}
-	return kept, dropped
-}
-
 // Delta is the operations that reconcile the threads standing on a pull
 // request with the claims this run makes.
 //

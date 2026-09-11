@@ -197,6 +197,6 @@ exactly what ADR 0022's two-App split forbids. A thread is therefore a *soft gat
 the merge, and any writer clears it without touching the code.
 
 **`lydite threads` dedups by fingerprint on read**, first occurrence wins, the drop named on
-stderr. It consumes documents a local run wrote with no fold at all, so it cannot rest on the
-fold having deduplicated — the fold's own duplication is
-[#123](https://github.com/lydite/lydite/issues/123).
+stderr. It reaches `finding.Dedup`, the same primitive every report collects through. It keeps
+its own call because it consumes documents a local run wrote with no fold at all, where several
+commands' documents land in one directory and no report ever saw them together.
