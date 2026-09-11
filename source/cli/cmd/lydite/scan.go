@@ -14,6 +14,7 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
@@ -71,9 +72,22 @@ func newScanCmd() *cobra.Command {
 			// every finding already collected — minutes of clippy and gosec
 			// traded for one sentence about a shallow checkout, which is the
 			// reason typescript.Check stopped returning an error too.
-			baseSHA := ""
-			if cfg.Semgrep.Enabled {
-				baseSHA, err = resolveDiffBase(ctx, dir, diffBase, baseBranch)
+			baseSHA, err := resolveDiffBase(ctx, dir, diffBase, baseBranch)
+			if err != nil {
+				return err
+			}
+			// The lines the change touched, so a claim on one becomes a
+			// review thread rather than a row in the standing comment. Asked
+			// once and partitioned by path afterwards: every check measures
+			// the same range, and asking git per component is the same answer
+			// computed N times.
+			//
+			// Empty without --diff-base, which leaves every claim
+			// unanchorable — the honest answer for a scan over a whole
+			// repository, which reaches no change at all.
+			var changed map[string][]int
+			if baseSHA != "" {
+				changed, err = coverage.ChangedLines(ctx, dir, baseSHA)
 				if err != nil {
 					return err
 				}
@@ -167,12 +181,12 @@ func newScanCmd() *cobra.Command {
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
-				record(rep, dir, labelled(results, c.Name, c.Dir))
+				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
 			}
 
 			var results []executil.Result
 			if cfg.Semgrep.Enabled {
-				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, baseSHA))
+				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, semgrepBase(baseSHA)))
 			}
 
 			// A run in which no check ran says so, in a row of its own.
@@ -203,7 +217,7 @@ func newScanCmd() *cobra.Command {
 				})
 			}
 
-			return report(cmd, rep, dir, results, asJSON, noColor)
+			return report(cmd, rep, dir, changed, results, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory to scan")
@@ -338,33 +352,68 @@ func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.
 	return gaps
 }
 
+// semgrepBase is the diff base Semgrep is given, which is none when a token is
+// set.
+//
+// `semgrep ci` scopes itself to the diff already, and passing --baseline-commit
+// on top of that is redundant. The rule lives here rather than in the resolver
+// because the resolved base has a second reader now: a finding's anchor, which
+// a Semgrep token says nothing about.
+func semgrepBase(baseSHA string) string {
+	if os.Getenv(semgrep.AppTokenEnv) != "" {
+		return ""
+	}
+	return baseSHA
+}
+
 // resolveDiffBase turns the --diff-base flag into a commit SHA for Semgrep's
 // scan-mode --baseline-commit. "auto" resolves the same merge-base
 // `lydite coverage` already gates against, so a PR's scan and coverage agree
 // on what "this change" means; any other non-empty value is passed through as
 // a literal ref.
 //
-// It's skipped entirely when SEMGREP_APP_TOKEN is set, because `semgrep ci`
-// scopes itself to the diff already — resolving a merge-base there would cost
-// a `git fetch` whose result nothing reads, and would newly require a full
-// checkout depth from token-bearing consumers that don't need one today.
+// It is resolved whenever --diff-base is given, including for a run carrying a
+// SEMGREP_APP_TOKEN and a run with Semgrep switched off. The base has a second
+// reader besides Semgrep: it is what decides whether a finding reaches a line
+// of the change, and so whether it becomes a review thread or a row in the
+// standing comment. A token says `semgrep ci` scopes itself; it says nothing
+// about where gosec's claims belong.
+//
+// The cost is real and is the point: every consumer passing `--diff-base
+// auto` needs a full-history checkout to resolve the merge-base, a token in
+// the environment notwithstanding. Asking for a diff-scoped scan and getting
+// claims that reach no line is what the alternative buys.
 func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (string, error) {
-	if diffBase == "" || os.Getenv(semgrep.AppTokenEnv) != "" {
+	if diffBase == "" {
 		return "", nil
 	}
-	if diffBase != "auto" {
-		return diffBase, nil
+	if diffBase == "auto" {
+		// Deliberately an error, not a silent full-repo scan: falling back
+		// would reintroduce exactly the surprise this flag exists to remove —
+		// a scan that quietly changes scope, and starts blocking on findings
+		// the PR never touched. A shallow checkout is a fixable CI
+		// misconfiguration (fetch-depth: 0), so say so.
+		baseSHA, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+		if err != nil {
+			return "", fmt.Errorf("--diff-base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
+		}
+		diffBase = baseSHA
 	}
-	// Deliberately an error, not a silent full-repo scan: falling back would
-	// reintroduce exactly the surprise this flag exists to remove — a scan
-	// that quietly changes scope, and starts blocking on findings the PR
-	// never touched. A shallow checkout is a fixable CI misconfiguration
-	// (fetch-depth: 0), so say so.
-	baseSHA, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
-	if err != nil {
-		return "", fmt.Errorf("--diff-base auto: %w (a full-history checkout is required — set fetch-depth: 0)", err)
+	// Resolved to a commit before it reaches anything, so what a tool is given
+	// is a SHA and never the caller's string. The anchor reads this base by
+	// handing it to `git diff <base>..HEAD`, where a value beginning with `-`
+	// is a position git parses as an option — `--diff-base --output=/tmp/x`
+	// would make git write the diff to a path of the caller's choosing.
+	// --end-of-options is what stops that here, and resolving once is what
+	// makes verifying it here sufficient for every later invocation.
+	// resolveReviewBase does the same for --base, and executil.RunQuiet's own
+	// doc names this as the caller's duty.
+	rev := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--verify", "--quiet", "--end-of-options", diffBase+"^{commit}")
+	resolved := strings.TrimSpace(rev.Output)
+	if !rev.Ok() || resolved == "" {
+		return "", fmt.Errorf("--diff-base %q does not name a commit", diffBase)
 	}
-	return baseSHA, nil
+	return resolved, nil
 }
 
 // ranAnyCheck reports whether any row records a check that executed. An
@@ -415,11 +464,16 @@ func resultRows(root string, results []executil.Result) []ui.Row {
 // results read twice — a caller that adds one and forgets the other publishes
 // a comment saying a check failed and a review with nothing on the line it
 // failed at.
-func record(rep *ui.Report, root string, results []executil.Result) {
+func record(rep *ui.Report, root string, changed map[string][]int, results []executil.Result) {
 	for _, row := range resultRows(root, results) {
 		rep.Add(row)
 	}
-	rep.AddFindings(findingsOf(results)...)
+	found := findingsOf(results)
+	// Anchored here, after labelled has rebased each path onto the scan root:
+	// the map is keyed from that root, and a claim still named from inside its
+	// component would match nothing in it.
+	finding.Anchored(found, changed)
+	rep.AddFindings(found...)
 }
 
 // findingsOf is every check's located claims, each naming the row that made
@@ -452,8 +506,8 @@ func findingsOf(results []executil.Result) []finding.Finding {
 // JSON cannot be corrupted by Biome's own chatter. Printing only a status
 // line left the developer to re-run the pinned toolchain by hand to find out
 // what was wrong, and put nothing in the PR comment either.
-func report(cmd *cobra.Command, rep *ui.Report, root string, results []executil.Result, asJSON, noColor bool) error {
-	record(rep, root, results)
+func report(cmd *cobra.Command, rep *ui.Report, root string, changed map[string][]int, results []executil.Result, asJSON, noColor bool) error {
+	record(rep, root, changed, results)
 	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {

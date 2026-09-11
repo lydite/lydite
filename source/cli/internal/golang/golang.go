@@ -44,24 +44,13 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 		// bare `✗ gosec` with the cause in neither the terminal nor --json.
 		results = append(results, executil.Result{Name: "gosec", Err: err, Detail: err.Error()})
 	} else {
-		// -exclude-generated skips files carrying the standard
-		// "Code generated ... DO NOT EDIT." header. Findings there are not
-		// actionable: the only fix is to change the generator or its input,
-		// and a `#nosec` annotation would be erased by the next regeneration.
-		// This matches how generated code is already treated elsewhere in the
-		// pipeline — golangci-lint's `exclusions: generated` and semgrep's own
-		// generated-file skip.
-		r := executil.RunEnv(ctx, dir, env.Check, bin, "-exclude-generated", "./...")
-		r.Name = "gosec"
-		results = append(results, r)
+		results = append(results, runGosec(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, toolchainKey, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
 		results = append(results, executil.Result{Name: "govulncheck", Err: err, Detail: err.Error()})
 	} else {
-		r := executil.RunEnv(ctx, dir, env.Check, bin, "./...")
-		r.Name = "govulncheck"
-		results = append(results, r)
+		results = append(results, runGovulncheck(ctx, dir, env.Check, bin))
 	}
 
 	return results

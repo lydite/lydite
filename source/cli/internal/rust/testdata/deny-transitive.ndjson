@@ -1,0 +1,2 @@
+{"fields":{"code":"banned","graphs":[{"Krate":{"name":"libc","version":"0.2.189"},"parents":[{"Krate":{"name":"time","version":"0.1.44"},"parents":[{"Krate":{"name":"auditprobe","version":"0.0.0"}}]}]}],"labels":[{"column":19,"line":4,"message":"banned here","span":"libc"}],"message":"crate 'libc = 0.2.189' is explicitly banned","severity":"error"},"type":"diagnostic"}
+{"fields":{"bans":{"errors":1,"helps":0,"notes":0,"warnings":0}},"type":"summary"}

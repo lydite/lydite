@@ -1,0 +1,60 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G703",
+			"details": "Path traversal via taint analysis",
+			"file": "{{DIR}}/main.go",
+			"code": "10: \th := md5.New()\n11: \tdata, _ := os.ReadFile(os.Args[1])\n12: \th.Write(data)\n",
+			"line": "11",
+			"column": "24",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "328",
+				"url": "https://cwe.mitre.org/data/definitions/328.html"
+			},
+			"rule_id": "G401",
+			"details": "Use of weak cryptographic primitive",
+			"file": "{{DIR}}/main.go",
+			"code": "9: func main() {\n10: \th := md5.New()\n11: \tdata, _ := os.ReadFile(os.Args[1])\n",
+			"line": "10",
+			"column": "7",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "327",
+				"url": "https://cwe.mitre.org/data/definitions/327.html"
+			},
+			"rule_id": "G501",
+			"details": "Blocklisted import crypto/md5: weak cryptographic primitive",
+			"file": "{{DIR}}/main.go",
+			"code": "3: import (\n4: \t\"crypto/md5\"\n5: \t\"fmt\"\n",
+			"line": "4",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 2,
+		"lines": 21,
+		"nosec": 0,
+		"found": 3
+	},
+	"GosecVersion": "dev"
+}

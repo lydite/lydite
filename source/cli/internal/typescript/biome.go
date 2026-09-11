@@ -198,10 +198,13 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 
 // biomeFindings is every reportable diagnostic as a located claim.
 //
-// Biome is the one check whose findings lydite already renders rather than the
-// tool, because its report goes to a file so that its own chatter cannot
-// corrupt the JSON. The claims are therefore already in hand as data, and the
-// prose under a failing row is rendered from them rather than beside them.
+// Every scanner reports its findings as data, and Biome is the one whose
+// findings lydite also *renders*: its report goes to a file so that its own
+// chatter cannot corrupt the JSON, so nothing streams and Result.Detail is the
+// only place they exist. Every other tool prints its own and leaves Detail
+// empty — see ADR 0032. The prose under this row is therefore rendered from
+// the claims rather than beside them, so a consumer anchoring and a human
+// reading see one derivation.
 //
 // The site is the rule with the text it fired on, read from the tree rather
 // than from the report: Biome states a path, a line and a category, and the

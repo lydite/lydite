@@ -206,7 +206,14 @@ func Number(findings []Finding) {
 func Anchored(findings []Finding, changed map[string][]int) {
 	for i := range findings {
 		reach := AnchorNowhere
-		if lines, ok := changed[findings[i].Path]; ok {
+		// A claim with no line locates nothing, whatever the change touched.
+		// A dependency advisory whose manifest line could not be found carries
+		// line zero deliberately — the lookup refuses to guess rather than
+		// point at code the author cannot act on — and promoting it to a file
+		// anchor because the change edited that manifest puts it on the review
+		// surface as a thread reading `go.mod:0`, which is the invented
+		// reference the refusal exists to avoid.
+		if lines, ok := changed[findings[i].Path]; ok && findings[i].Line > 0 {
 			reach = AnchorFile
 			for _, line := range lines {
 				if line >= findings[i].Line && line <= max(findings[i].Line, findings[i].EndLine) {

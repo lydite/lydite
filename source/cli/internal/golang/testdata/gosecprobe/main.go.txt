@@ -1,0 +1,14 @@
+package main
+
+import (
+	"crypto/md5"
+	"fmt"
+	"os"
+)
+
+func main() {
+	h := md5.New()
+	data, _ := os.ReadFile(os.Args[1])
+	h.Write(data)
+	fmt.Println(h.Sum(nil))
+}

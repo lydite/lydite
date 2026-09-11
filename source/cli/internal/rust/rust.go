@@ -36,9 +36,12 @@ import (
 // caller's to say, so one labelling rule covers all three languages instead of
 // three that agree until one is changed.
 func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
+	// cargo fmt gets no parser. lydite is not a formatter and must never
+	// report a formatting diff as a finding, so the row stays the whole of
+	// what this check says.
 	results := []executil.Result{
 		named("cargo fmt", executil.RunEnv(ctx, dir, env.Check, "cargo", "fmt", "--check")),
-		named("cargo clippy", executil.RunEnv(ctx, dir, env.Check, "cargo", "clippy", "--all-targets", "--", "-D", "warnings")),
+		runClippy(ctx, dir, env.Check),
 	}
 
 	if bin, err := ensure(ctx, env.Install, "cargo-audit", cargoAuditVersion); err != nil {
@@ -47,15 +50,13 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// bare `✗ cargo-audit` with the cause nowhere in the report.
 		results = append(results, executil.Result{Name: "cargo-audit", Err: err, Detail: err.Error()})
 	} else {
-		results = append(results, named("cargo-audit", executil.RunEnv(ctx, dir, env.Check, bin, "audit")))
+		results = append(results, runAudit(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, "cargo-deny", cargoDenyVersion); err != nil {
 		results = append(results, executil.Result{Name: "cargo-deny", Err: err, Detail: err.Error()})
 	} else {
-		// advisories is intentionally excluded here: cargo-audit already
-		// covers RustSec CVEs, and running both would double-report them.
-		results = append(results, named("cargo-deny", executil.RunEnv(ctx, dir, env.Check, bin, "deny", "check", "licenses", "bans")))
+		results = append(results, runDeny(ctx, dir, env.Check, bin))
 	}
 
 	return results

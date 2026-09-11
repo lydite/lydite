@@ -208,13 +208,24 @@ func detailFor(dir string, row ui.Row, found []finding.Finding) []string {
 		return failureLines(dir, row)
 	}
 	var lines []string
-	var located int
+	var located, over int
 	for _, f := range found {
 		if f.Anchor != finding.AnchorNowhere {
 			located++
 			continue
 		}
+		if len(lines) == tailLines {
+			over++
+			continue
+		}
 		lines = append(lines, claimLine(f))
+	}
+	// Bounded the way a quoted log already is. Every scanner emits findings,
+	// so one row over a repository with standing debt lists hundreds; a
+	// comment over the platform's 65,536-byte limit is refused outright, and a
+	// section that vanishes reads as a concern that passed.
+	if over > 0 {
+		lines = append(lines, fmt.Sprintf("%d more finding(s) in this row. The run's log holds all of them.", over))
 	}
 	if located > 0 {
 		lines = append(lines, fmt.Sprintf(
@@ -230,11 +241,39 @@ func detailFor(dir string, row ui.Row, found []finding.Finding) []string {
 // it is the one part of the prose a row used to render that no other surface
 // carries: a scanner's claims reach the change nowhere, so they are always
 // here rather than on a line.
+// A claim with no line is shown as the file alone. A dependency advisory whose
+// manifest line cannot be found carries line zero deliberately — the lookup
+// refuses to guess rather than pointing at code the author cannot act on — and
+// `go.mod:0` would put back exactly the invented reference that refusal
+// avoids.
 func claimLine(f finding.Finding) string {
-	if f.Rule == "" {
-		return fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message)
+	at := f.Path
+	if f.Line > 0 {
+		at = fmt.Sprintf("%s:%d", f.Path, f.Line)
 	}
-	return fmt.Sprintf("%s:%d %s %s", f.Path, f.Line, f.Rule, f.Message)
+	if f.Rule == "" {
+		return at + " " + clipClaim(f.Message)
+	}
+	return at + " " + f.Rule + " " + clipClaim(f.Message)
+}
+
+// claimRunes bounds one claim's message.
+//
+// A tool's diagnostic is a scanned repository's own text and nothing bounds it
+// at that end — semgrep's messages run to paragraphs. It is the rule
+// threads.claimText follows for the same content on the other surface, and the
+// reason is the same: a comment a platform refuses is no surface at all.
+const claimRunes = 300
+
+// clipClaim bounds a message, stated as a clamp so a message at exactly the
+// cap and one under it take the same path.
+func clipClaim(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) > claimRunes {
+		return string(runes[:claimRunes]) + "…"
+	}
+	return s
 }
 
 // detailCap is how many rows get their output quoted in one section.

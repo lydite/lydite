@@ -169,9 +169,9 @@ func TestReportableBiomeGatesOnlyOnOurGroups(t *testing.T) {
 	}
 }
 
-// Biome is the one check whose findings lydite already renders rather than the
-// tool, so its diagnostics are in hand as data. What a consumer anchors and
-// what a human reads must come from the same set.
+// Biome is the one check lydite renders rather than the tool, because nothing
+// of Biome's own reaches the terminal. What a consumer anchors and what a human
+// reads must therefore come from the same set.
 func TestBiomeDiagnosticsBecomeLocatedClaims(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "bad.ts"), []byte(

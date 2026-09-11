@@ -39,7 +39,7 @@ func Check(ctx context.Context, dir, rulesetConfig, baseSHA string) executil.Res
 	if r := ensure(ctx); !r.Ok() {
 		return r
 	}
-	return executil.Run(ctx, dir, "semgrep", buildArgs(rulesetConfig, os.Getenv(AppTokenEnv) != "", baseSHA)...)
+	return withFindings(ctx, dir, buildArgs(rulesetConfig, os.Getenv(AppTokenEnv) != "", baseSHA))
 }
 
 // buildArgs decides the semgrep subcommand and flags: `ci` (diff-aware,
