@@ -1,10 +1,15 @@
 import {
+  OPS_VERSION,
   appJwt,
+  applyReview,
   installationId,
   installationToken,
   pullRequestFromRef,
+  reviewCommentIds,
   upsertComment,
   verifyActionsToken,
+  type ActionsClaims,
+  type ReviewOps,
 } from "@lydite/github-app";
 
 export interface Env {
@@ -44,13 +49,21 @@ const production: Deps = {
 /**
  * The relay.
  *
- * It exists so that a CI job can have lydite comment on a pull request without
+ * It exists so that a CI job can have lydite write to a pull request without
  * holding a credential that could write anywhere. The job presents the OIDC
  * token GitHub minted for that run; the relay checks it, decides from the
  * verified claims which repository and which pull request may be written to,
- * mints an installation token narrowed to exactly that, posts, and discards it.
+ * mints an installation token narrowed to exactly that, writes, and discards it.
  *
- * That covers the comment and nothing else. The coverage gate runs the
+ * Two endpoints, and both write to one pull request and nothing else.
+ * `POST /comment` upserts the standing comment; `POST /review` applies the
+ * operations document `lydite threads` computed — the threads to open on the
+ * change's own lines, the ones to answer, and the ones to take down. The delta
+ * behind that document is the CLI's: this decides nothing about which thread
+ * belongs to which finding, which is what keeps lydite's vocabulary in one
+ * place rather than in a Worker one release behind it.
+ *
+ * That covers those two writes and nothing else. The coverage gate runs the
  * repository's own tests and its `setup`/`teardown` shell, and on a pull
  * request that code is the pull request's; with no writable token in the job,
  * the worst that code can do through the relay is provoke a wrong comment on
@@ -71,69 +84,98 @@ export function createRelay(deps: Deps = production) {
 export default createRelay();
 
 async function handle(request: Request, env: Env, deps: Deps): Promise<Response> {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/comment") {
-      return json(404, { error: "POST /comment" });
-    }
+  const route = new URL(request.url).pathname;
+  if (request.method !== "POST" || (route !== "/comment" && route !== "/review")) {
+    return json(404, { error: "POST /comment or POST /review" });
+  }
 
-    const presented = bearer(request);
-    if (!presented) {
-      return json(401, { error: "no Actions OIDC token was presented" });
-    }
+  const presented = bearer(request);
+  if (!presented) {
+    return json(401, { error: "no Actions OIDC token was presented" });
+  }
 
-    let claims;
-    try {
-      claims = await verifyActionsToken(presented, env.AUDIENCE, deps.fetchJwks);
-    } catch {
-      // No detail. A verifier that says which check failed tells a caller how
-      // to get closer, one attempt at a time.
-      return json(401, { error: "the Actions OIDC token did not verify" });
-    }
+  let claims: ActionsClaims;
+  try {
+    claims = await verifyActionsToken(presented, env.AUDIENCE, deps.fetchJwks);
+  } catch {
+    // No detail. A verifier that says which check failed tells a caller how
+    // to get closer, one attempt at a time.
+    return json(401, { error: "the Actions OIDC token did not verify" });
+  }
 
-    const payload = (await request.json().catch(() => ({}))) as CommentRequest;
-    if (!payload.body || !payload.marker) {
-      return json(400, { error: "a marker and a body are required" });
-    }
+  // The pull request comes from `ref`, and a submitted number only has to
+  // agree with it. A run whose ref is not a pull-request ref — a push build —
+  // has no pull request to write to, and saying so is better than letting it
+  // name one.
+  const fromRef = pullRequestFromRef(claims.ref);
+  if (!fromRef) {
+    return json(403, { error: "this run is not for a pull request, so there is nothing to write to" });
+  }
 
-    // The pull request comes from `ref`, and the submitted number only has to
-    // agree with it. A run whose ref is not a pull-request ref — a push build —
-    // has no pull request to comment on, and saying so is better than letting
-    // it name one.
-    const fromRef = pullRequestFromRef(claims.ref);
-    if (!fromRef) {
-      return json(403, { error: "this run is not for a pull request, so there is nothing to comment on" });
-    }
-    if (payload.pull_request !== undefined && payload.pull_request !== fromRef) {
-      return json(403, { error: "the pull request submitted is not the one this run is for" });
-    }
+  const payload = (await request.json().catch(() => ({}))) as CommentRequest & ReviewOps;
+  if (payload.pull_request !== undefined && payload.pull_request !== fromRef) {
+    return json(403, { error: "the pull request submitted is not the one this run is for" });
+  }
+  if (route === "/comment" && (!payload.body || !payload.marker)) {
+    return json(400, { error: "a marker and a body are required" });
+  }
+  if (route === "/review" && payload.version !== OPS_VERSION) {
+    // Refused whole rather than half-applied. A document from a newer lydite
+    // may mean something this does not know, and applying the operations it
+    // recognises would leave a pull request in a state neither side asked
+    // for.
+    return json(400, { error: `this relay applies version ${OPS_VERSION} operation documents` });
+  }
 
-    try {
-      const jwt = await appJwt(env.LYDITE_APP_ID, env.LYDITE_APP_PRIVATE_KEY);
-      const installation = await installationId(jwt, claims.repository, deps.fetcher);
-      if (installation === undefined) {
-        // An answer, not a failure. The client's next move is its own token,
-        // and telling it so is what makes the fallback a designed path rather
-        // than an error being papered over.
-        return json(409, {
-          error: "the lydite app is not installed on this repository",
-          fallback: "post with the workflow's own token",
-        });
-      }
-      const token = await installationToken(jwt, installation, claims.repository, deps.fetcher);
+  try {
+    const jwt = await appJwt(env.LYDITE_APP_ID, env.LYDITE_APP_PRIVATE_KEY);
+    const installation = await installationId(jwt, claims.repository, deps.fetcher);
+    if (installation === undefined) {
+      // An answer, not a failure. The client's next move is its own token,
+      // and telling it so is what makes the fallback a designed path rather
+      // than an error being papered over.
+      return json(409, {
+        error: "the lydite app is not installed on this repository",
+        fallback: "post with the workflow's own token",
+      });
+    }
+    const token = await installationToken(jwt, installation, claims.repository, deps.fetcher);
+
+    if (route === "/comment") {
       const outcome = await upsertComment(
         token,
         claims.repository,
         fromRef,
-        payload.marker,
-        payload.body,
+        payload.marker as string,
+        payload.body as string,
         deps.fetcher,
       );
       return json(200, { repository: claims.repository, pull_request: fromRef, comment: outcome });
-    } catch {
-      // The reason is deliberately not relayed. It is about lydite's own
-      // credentials and GitHub's answers to them, neither of which is the
-      // caller's to see.
-      return json(502, { error: "the comment could not be posted" });
     }
+
+    // Every id the document names has to belong to this pull request, and
+    // the whole request is refused if one does not. A comment id is a number
+    // the caller supplies while `ref` is the one thing a run cannot choose,
+    // so this is what stops a run deleting a comment on somebody else's pull
+    // request — and refusing the whole document rather than the operation
+    // means a caller cannot use the answer to probe which ids exist.
+    const members = await reviewCommentIds(token, claims.repository, fromRef, deps.fetcher);
+    const named = [
+      ...(payload.reply ?? []).map((op) => op.comment),
+      ...(payload.delete ?? []).map((op) => op.comment),
+    ];
+    if (named.some((id) => typeof id !== "number" || !members.has(id))) {
+      return json(403, { error: "the operations name a comment that is not on this pull request" });
+    }
+
+    const outcomes = await applyReview(token, claims.repository, fromRef, payload, deps.fetcher);
+    return json(200, { repository: claims.repository, pull_request: fromRef, outcomes });
+  } catch {
+    // The reason is deliberately not relayed. It is about lydite's own
+    // credentials and GitHub's answers to them, neither of which is the
+    // caller's to see.
+    return json(502, { error: route === "/comment" ? "the comment could not be posted" : "the review could not be applied" });
+  }
 }
 
 function bearer(request: Request): string | undefined {

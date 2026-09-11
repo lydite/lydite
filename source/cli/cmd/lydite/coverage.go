@@ -952,7 +952,7 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row,
 			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
 				counts, producerName(m.Producer), producerName(base.Producer))}, nil
 	case m.CRAP.Above() > base.Above:
-		findings := crapFindings(m)
+		findings := crapFindings(label, m)
 		return ui.Row{Status: ui.StatusFail, Label: label,
 			Value:  fmt.Sprintf("%s, baseline %d — %d more", counts, base.Above, m.CRAP.Above()-base.Above),
 			Detail: worstFunctions(findings, m.CRAP.Above())}, findings
@@ -980,13 +980,14 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row,
 // debt would otherwise put every one of them into the document on every run
 // that regressed by one, which is a document that grows with the debt rather
 // than with the change.
-func crapFindings(m measurement) []finding.Finding {
+func crapFindings(label string, m measurement) []finding.Finding {
 	over := m.CRAP.Over[:min(len(m.CRAP.Over), worstOffenders)]
 	out := make([]finding.Finding, 0, len(over))
 	for _, f := range over {
 		out = append(out, finding.Finding{
 			Gate:      "crap",
 			Component: m.Name,
+			Row:       label,
 			Path:      f.File,
 			Line:      f.Line,
 			Message: fmt.Sprintf("%s — %.1f (complexity %d, %.1f%% covered)",
@@ -1370,6 +1371,7 @@ func patchFindings(row ui.Row, dir string, m measurement, scoped map[string][]in
 		out = append(out, finding.Finding{
 			Gate:      "patch",
 			Component: m.Name,
+			Row:       row.Label,
 			Path:      run.File,
 			Line:      run.First,
 			EndLine:   run.Last,

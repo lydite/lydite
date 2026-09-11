@@ -22,6 +22,7 @@ says why it is that way and what breaks if it changes.
 | `config` | [`configuration.md`](../../../.agents/references/configuration.md) |
 | `ui` | [`output-grammar.md`](../../../.agents/references/output-grammar.md), and [`surface.md`](../../../.agents/references/surface.md) for the comment |
 | `referral`, `clearance`, `forge` | [`referral-and-clearance.md`](../../../.agents/references/referral-and-clearance.md) |
+| `threads` | [`surface.md`](../../../.agents/references/surface.md), and [`findings.md`](../../../.agents/references/findings.md) for what becomes one |
 
 A `*-pin/` directory is a tool pin, not a component: see
 [`tool-pins.md`](../../../.agents/references/tool-pins.md) before adding one.

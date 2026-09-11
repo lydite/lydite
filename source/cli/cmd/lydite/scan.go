@@ -167,13 +167,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
-				attributed := labelled(results, c.Name, c.Dir)
-				for _, row := range resultRows(dir, attributed) {
-					rep.Add(row)
-				}
-				for _, r := range attributed {
-					rep.AddFindings(r.Findings...)
-				}
+				record(rep, dir, labelled(results, c.Name, c.Dir))
 			}
 
 			var results []executil.Result
@@ -414,6 +408,39 @@ func resultRows(root string, results []executil.Result) []ui.Row {
 	return rows
 }
 
+// record puts one batch of check results into the report: a row each, and the
+// located claims they made.
+//
+// One call and not a pair, because the rows and the findings are the same
+// results read twice — a caller that adds one and forgets the other publishes
+// a comment saying a check failed and a review with nothing on the line it
+// failed at.
+func record(rep *ui.Report, root string, results []executil.Result) {
+	for _, row := range resultRows(root, results) {
+		rep.Add(row)
+	}
+	rep.AddFindings(findingsOf(results)...)
+}
+
+// findingsOf is every check's located claims, each naming the row that made
+// it.
+//
+// The label is the check's own name, taken from the same field resultRows
+// renders a row's label from rather than rebuilt beside it. A finding whose
+// row label does not match the row's is one the standing comment cannot
+// partition: it would be rendered there as well as on the line a thread
+// anchors it to, or dropped from both.
+func findingsOf(results []executil.Result) []finding.Finding {
+	var out []finding.Finding
+	for _, r := range results {
+		for _, f := range r.Findings {
+			f.Row = r.Name
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // report renders one row per check in the grammar docs/design/tokens.md
 // specifies, and returns the run's exit code as an error so the process
 // reflects the verdict.
@@ -426,12 +453,7 @@ func resultRows(root string, results []executil.Result) []ui.Row {
 // line left the developer to re-run the pinned toolchain by hand to find out
 // what was wrong, and put nothing in the PR comment either.
 func report(cmd *cobra.Command, rep *ui.Report, root string, results []executil.Result, asJSON, noColor bool) error {
-	for _, row := range resultRows(root, results) {
-		rep.Add(row)
-	}
-	for _, r := range results {
-		rep.AddFindings(r.Findings...)
-	}
+	record(rep, root, results)
 	saveDocument(root, rep)
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, asJSON, ui.ColorEnabled(out, noColor)); err != nil {

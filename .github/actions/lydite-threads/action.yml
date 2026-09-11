@@ -1,0 +1,112 @@
+# Reconciles the pull request's review threads with the run's located
+# findings: through the relay, or with the workflow's own token.
+#
+# The delta is `lydite threads`' either way. It reads the report directories,
+# fetches the threads already standing, and writes the operations document;
+# what differs between the two paths is only who applies it. That is the whole
+# shape — one delta implementation and two transports that decide nothing —
+# and it is why the relay never learns which fingerprint belongs to which
+# thread.
+#
+# Reading the prior state uses this job's own token on both paths. The job
+# already holds `pull-requests: write` for the comment's fallback, so nothing
+# new is granted here; what the relay takes over is the write, which is the
+# half ADR 0022 is about.
+#
+# The fallback is required rather than a stopgap, and there are two ways into
+# it: no relay configured, and a relay that answers that the app is not
+# installed on this repository. A consumer who has installed nothing still
+# gets its threads, from `github-actions[bot]`, and the only thing they lose
+# is whose name is on them.
+#
+# Nothing here interpolates an expression into a `run:` body. Every value
+# arrives through `env:` and is referenced as a shell variable — Semgrep's
+# yaml.github-actions.security.run-shell-injection rule has caught that exact
+# mistake in a lydite action before.
+name: lydite threads
+description: Open, answer and close the review threads a run's located findings call for
+
+inputs:
+  reports:
+    description: report directories to read, one per line
+    required: true
+  ops-file:
+    description: file to write the operations document to
+    required: false
+    default: threads.json
+  relay:
+    description: the relay's origin; empty falls straight back to the workflow's token
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - id: compute
+      if: inputs.relay != ''
+      shell: bash
+      env:
+        REPORTS: ${{ inputs.reports }}
+        OPS: ${{ inputs.ops-file }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        args=()
+        while IFS= read -r dir; do
+          [ -n "$dir" ] && args+=(--reports "$dir")
+        done <<< "$REPORTS"
+        lydite threads "${args[@]}" --ops "$OPS"
+
+    - id: relay
+      if: inputs.relay != ''
+      shell: bash
+      env:
+        OPS: ${{ inputs.ops-file }}
+        RELAY: ${{ inputs.relay }}
+      run: |
+        set -euo pipefail
+
+        # The OIDC token is requested for the relay's own origin as the
+        # audience, so a token minted here cannot be replayed against another
+        # service — and the relay refuses one whose audience is not its own.
+        token=$(curl -fsS \
+          -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${RELAY}" | jq -r '.value')
+
+        # The document goes as it was written. The repository is deliberately
+        # not sent — the relay takes it from the verified claim, so there is
+        # nothing here that could name another one.
+        status=$(curl -sS -o "${RUNNER_TEMP}/relay-review.json" -w '%{http_code}' \
+          -X POST "${RELAY}/review" \
+          -H "Authorization: Bearer ${token}" \
+          -H 'content-type: application/json' \
+          --data-binary "@${OPS}") || status=000
+
+        if [ "$status" = "200" ]; then
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+          cat "${RUNNER_TEMP}/relay-review.json"
+          exit 0
+        fi
+        echo "applied=false" >> "$GITHUB_OUTPUT"
+        echo "the relay answered ${status}; falling back to this workflow's token" >&2
+        cat "${RUNNER_TEMP}/relay-review.json" >&2 || true
+
+    # The delta is recomputed rather than the document replayed, because the
+    # threads may have moved while the relay was being tried and a stale
+    # document would answer a thread that is no longer there. It ends in a
+    # non-zero exit when the platform refuses the review, which fails the job:
+    # a run whose located findings reached no surface must never read as a
+    # change with nothing wrong with it.
+    - if: steps.relay.outputs.applied != 'true'
+      shell: bash
+      env:
+        REPORTS: ${{ inputs.reports }}
+        OPS: ${{ inputs.ops-file }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        args=()
+        while IFS= read -r dir; do
+          [ -n "$dir" ] && args+=(--reports "$dir")
+        done <<< "$REPORTS"
+        lydite threads "${args[@]}" --ops "$OPS" --apply

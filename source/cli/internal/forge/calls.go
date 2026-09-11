@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/threads"
 )
 
 // HeadSHA resolves a pull request's current head.
@@ -122,12 +123,25 @@ type Comment struct {
 	} `json:"user"`
 }
 
-// FindComment returns the first comment containing marker, or nil.
+// FindComment returns the first comment opening with marker, or nil.
 //
 // The marker is an HTML comment in the body rather than a match on the
 // author, because the author is whoever's token the workflow runs under and
 // that is not lydite's to rely on. Matching on our own text also means a
-// person editing the comment's prose does not detach it.
+// person editing the comment's prose below it does not detach it.
+//
+// It has to be the first thing in the body, and that is the whole of what
+// keeps this from writing over somebody. The platform's quote-reply copies
+// the raw markdown of the comment it answers, HTML comment included, so a
+// marker matched anywhere would make a person quoting lydite's verdict the
+// author of the comment the next run replaces wholesale — with a token
+// holding `pull-requests: write`. Every comment lydite renders opens with it
+// (ui.Comment.Render writes it first), so nothing of lydite's is lost by
+// asking.
+//
+// The same rule is in the relay's findComment and in the `github-token`
+// fallback's jq. One upsert with three implementations is what ADR 0022's two
+// identities cost, and they have to agree.
 func (c *Client) FindComment(ctx context.Context, repo Repo, number int, marker string) (*Comment, error) {
 	// A busy pull request holds more comments than one page, and the
 	// sticky one is the oldest lydite wrote — so the walk has to reach the
@@ -140,7 +154,7 @@ func (c *Client) FindComment(ctx context.Context, repo Repo, number int, marker 
 			return nil, fmt.Errorf("reading comments on %s#%d: %w", repo, number, err)
 		}
 		for _, comment := range comments {
-			if strings.Contains(comment.Body, marker) {
+			if strings.HasPrefix(comment.Body, marker) {
 				return &comment, nil
 			}
 		}
@@ -206,4 +220,181 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(runes[:max-1]) + "…"
+}
+
+// ReviewComment is one comment on a pull request's diff, as the platform
+// reports it.
+//
+// Position and Line are two different questions and both are asked. Line is
+// where the comment sits in the current diff; position comes back null when
+// the change has moved out from under the comment, which is the only way to
+// learn that the platform has collapsed a thread behind its "show outdated"
+// toggle — a thread that blocks a merge and that the author cannot see.
+//
+// SubjectType is what keeps that reading honest. A comment on a whole file has
+// no position by construction rather than by the change having moved, so the
+// null alone would report every file-level thread as outdated and take it down
+// and repost it on every push.
+type reviewComment struct {
+	ID          int64  `json:"id"`
+	Body        string `json:"body"`
+	Path        string `json:"path"`
+	Line        *int   `json:"line"`
+	Position    *int   `json:"position"`
+	SubjectType string `json:"subject_type"`
+	InReplyTo   int64  `json:"in_reply_to_id"`
+}
+
+// ReviewComments lists every comment on a pull request's diff, replies
+// included.
+//
+// One listing rather than a query per finding: the delta needs the whole set
+// to decide what has no thread yet, and asking per fingerprint would be one
+// request per claim to learn the same thing.
+//
+// The walk is capped, and reaching the cap is an error rather than a shorter
+// answer. A truncated listing is not safely partial: comments come back in
+// creation order, so a thread whose root is inside the window and whose
+// replies are past it arrives with only lydite's own comments in it — and
+// the sole-participant rule would then delete a reviewer's words along with
+// it. Refusing says so instead of guessing, which is what a pull request with
+// more review comments than this deserves.
+func (c *Client) ReviewComments(ctx context.Context, repo Repo, number int) ([]threads.Comment, error) {
+	var out []threads.Comment
+	for page := range reviewPages {
+		var comments []reviewComment
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d",
+			escape(repo.Owner), escape(repo.Name), number, reviewPerPage, page+1)
+		if err := c.do(ctx, "GET", path, nil, &comments); err != nil {
+			return nil, fmt.Errorf("reading the review comments on %s#%d: %w", repo, number, err)
+		}
+		for _, rc := range comments {
+			out = append(out, threads.Comment{
+				ID: rc.ID, Body: rc.Body, Path: rc.Path,
+				Line:      derefOr(rc.Line, 0),
+				Outdated:  rc.Position == nil && rc.SubjectType != "file",
+				InReplyTo: rc.InReplyTo,
+			})
+		}
+		if len(comments) < reviewPerPage {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("%s#%d has more than %d review comments, which is more than lydite reads: "+
+		"a thread it cannot see whole is one it could take a reviewer's words down with",
+		repo, number, reviewPages*reviewPerPage)
+}
+
+// reviewPages and reviewPerPage bound the walk. They are a `range` and a page
+// size rather than a loop condition and an increment, so there is no boundary
+// to shift and no step to drop: the walk visits exactly this many pages or
+// stops at the first short one.
+const (
+	reviewPages   = 10
+	reviewPerPage = 100
+)
+
+// CreateReview opens every line-anchored thread in one review.
+//
+// One review and not one comment each, because a review notifies once however
+// many lines it touches, and a run that opens twelve threads individually
+// sends twelve emails about one push. The event is COMMENT and never
+// REQUEST_CHANGES or APPROVE: review approval is a different mechanism with
+// different rules about who may give one, and lydite must not touch it.
+//
+// The review carries no body of its own. A summary line above the threads
+// would be a second standing verdict beside the comment that already carries
+// one, reposted on every push.
+//
+// A comment must anchor inside the diff's own hunks — the API answers 422 for
+// a line outside them, where the web UI would have let a human comment. That
+// is why a finding's anchor is decided by the gate that made it, against the
+// changed-line map: those lines are a strict subset of what the platform
+// accepts, so "lydite says anchorable" implies "the platform takes it" and
+// never the reverse.
+//
+// **A file-anchored claim cannot travel here.** A review's comments are
+// `DraftPullRequestReviewComment`, which has no `subjectType` field and
+// requires a position — the API answers 422 for both. So CreateFileComment
+// opens those one at a time, and a run is one review plus a call per thread
+// that is about a file rather than a line.
+func (c *Client) CreateReview(ctx context.Context, repo Repo, number int, head string, comments []threads.Create) error {
+	type reviewInput struct {
+		Path string `json:"path"`
+		Body string `json:"body"`
+		Line int    `json:"line"`
+	}
+	inputs := make([]reviewInput, 0, len(comments))
+	for _, create := range comments {
+		if create.Subject == "file" {
+			continue
+		}
+		inputs = append(inputs, reviewInput{Path: create.Path, Body: create.Body, Line: create.Line})
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	body := map[string]any{"event": "COMMENT", "comments": inputs}
+	if head != "" {
+		body["commit_id"] = head
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "POST", path, body, nil); err != nil {
+		return fmt.Errorf("opening %d thread(s) on %s#%d: %w", len(inputs), repo, number, err)
+	}
+	return nil
+}
+
+// CreateFileComment opens a thread on a whole file.
+//
+// `subject_type: file` is accepted here and refused inside a review, which is
+// why this exists separately. It needs the revision explicitly: a comment with
+// no line has nothing else that places it.
+func (c *Client) CreateFileComment(ctx context.Context, repo Repo, number int, head string, create threads.Create) error {
+	body := map[string]any{"path": create.Path, "body": create.Body, "subject_type": "file"}
+	if head != "" {
+		body["commit_id"] = head
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "POST", path, body, nil); err != nil {
+		return fmt.Errorf("opening a thread on %s in %s#%d: %w", create.Path, repo, number, err)
+	}
+	return nil
+}
+
+// ReplyToReviewComment adds to a thread rather than opening one.
+//
+// It is outside the review, because a review's comments[] can only open
+// threads. A run is therefore one review plus a call per thread it leaves
+// standing.
+func (c *Client) ReplyToReviewComment(ctx context.Context, repo Repo, number int, id int64, body string) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies",
+		escape(repo.Owner), escape(repo.Name), number, id)
+	if err := c.do(ctx, "POST", path, map[string]string{"body": body}, nil); err != nil {
+		return fmt.Errorf("replying to review comment %d on %s#%d: %w", id, repo, number, err)
+	}
+	return nil
+}
+
+// DeleteReviewComment removes one comment lydite wrote.
+//
+// An identity may only delete what it authored, so this is refused for a
+// thread the other identity opened — the handover between lydite's app and a
+// consumer's own bot. The refusal is a 403 where the identity can see the
+// comment and a 404 where it cannot, which is why the caller treats both the
+// same way: answer it by replying, and read a reply that is also unfound as
+// the comment simply being gone.
+func (c *Client) DeleteReviewComment(ctx context.Context, repo Repo, id int64) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", escape(repo.Owner), escape(repo.Name), id)
+	if err := c.do(ctx, "DELETE", path, nil, nil); err != nil {
+		return fmt.Errorf("deleting review comment %d on %s: %w", id, repo, err)
+	}
+	return nil
+}
+
+func derefOr(p *int, fallback int) int {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }

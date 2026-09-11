@@ -140,6 +140,7 @@ _Avoid_: "fixture" and "test data" for the repository as a whole — both sugges
 **Gate**:
 A check a change must satisfy to merge, which the change's author clears by doing more work — adding an assertion that kills a surviving mutant, raising patch coverage. Gates are meant to be iterated against, including by an agent, because every way of satisfying one improves the code. Contrast **Referral**.
 _Note_: a gate that could not run must never render as one that passed, and a measurement taken without being gated must not render as one either. Both are distinct statuses in the report and in `--json`, because a workflow that forgot to ask for a gate otherwise reports the same green as one that ran it.
+_Note_: a review thread on a **Finding** is a *soft gate*. It blocks the merge while it is unresolved, and any writer can clear it without touching the code — which is what makes a false positive survivable rather than an argument about whether to switch the gate off. lydite opens and closes its own threads and can never resolve one: resolving needs a permission the **Relay** deliberately does not hold.
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
 
 **Referral**:
@@ -162,7 +163,8 @@ The human is someone with write access to the repository, established from the h
 _Avoid_: "approval" — GitHub's review approval is a different mechanism, with different rules about who may give one.
 
 **Surface**:
-Where lydite's verdict is put in front of the person whose change it is about. There is exactly one: a standing comment on the pull request, carrying every concern lydite has — the **Referral**, the scan, the suites and coverage — as one collapsible section each, replaced in place on every push rather than appended to. It is rendered from the report documents the runs wrote, so it can never disagree with what the terminal printed.
+Where lydite's verdict is put in front of the person whose change it is about. There are two, and one rule separates them: **the comment carries what is true of the change; the review carries what is true of a line.** The comment is a standing one on the pull request, carrying every concern lydite has — the **Referral**, the scan, the suites and coverage — as one collapsible section each, replaced in place on every push rather than appended to. The review is one thread per **Finding** that reaches the change, sitting on the line or the file it is about. Both are rendered from the report documents the runs wrote, so neither can disagree with what the terminal printed.
+_Note_: no finding appears in both. Which surface a finding belongs to is decided by how precisely it reaches the change, which the **Gate** that made it already recorded — so the two renderers need no knowledge of each other. A finding that reaches the change nowhere is the comment's.
 _Note_: a concern the surface could not read renders as a section saying so. A section that quietly disappears is indistinguishable from a concern that passed, which is the one way a surface lies — the same rule a **Gate** that could not run follows.
 _Note_: the **Clearance** status is not part of the surface and does not wait for it. A commit status is published as soon as the referral is decided, so a human can begin resolving one while the suites are still running.
 _Avoid_: "report" for the surface — a report is what a run prints, and `lydite report` is separately claimed by the dashboard. Also "the surface" for `docs/design/`'s surface *specifications*, which are the drawings rather than the thing.

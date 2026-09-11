@@ -539,14 +539,22 @@ jobs:
           pattern: lydite-reports-*
           path: reports
 
+      # One list, two consumers. The comment and the threads are rendered
+      # from the same directories, and a finding is in exactly one of them —
+      # the comment carries what is true of the change, a thread what is true
+      # of a line — so a list that differed between the two would drop a
+      # finding from both surfaces or put it in each.
       - name: render the comment
+        id: render
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           shopt -s nullglob
           args=()
+          dirs=()
           for dir in reports/*/; do
             args+=(--reports "${dir%/}")
+            dirs+=("${dir%/}")
           done
           if [ "${#args[@]}" -eq 0 ]; then
             echo "no report directories were uploaded; there is nothing to publish" >&2
@@ -556,9 +564,28 @@ jobs:
           echo "::group::the comment"
           cat comment.md
           echo "::endgroup::"
+          # The delimiter form, and generated per run: the value is a list of
+          # directory names, and the single-line form lets a newline in one
+          # open a second output entry.
+          delim="LYDITE_REPORTS_$(openssl rand -hex 16)"
+          {
+            echo "dirs<<${delim}"
+            printf '%s\n' "${dirs[@]}"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/lydite-comment
         with:
           body-file: comment.md
           pull-request: ${{ github.event.pull_request.number }}
+          relay: ${{ vars.LYDITE_RELAY_URL }}
+
+      # After the comment, so a run that can post only one of the two posts
+      # the one carrying the verdict. A thread the platform refuses fails this
+      # job, which is what keeps a change whose findings reached no surface
+      # from reading as a change with nothing wrong with it.
+      - uses: ./.github/actions/lydite-threads
+        with:
+          reports: ${{ steps.render.outputs.dirs }}
+          ops-file: threads.json
           relay: ${{ vars.LYDITE_RELAY_URL }}

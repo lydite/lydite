@@ -20,21 +20,28 @@ type publishTarget struct {
 	Number int
 }
 
-// resolvePublishTarget reads the platform's environment.
+// resolveTarget reads the platform's environment on behalf of what names
+// itself in `what` — a flag, or a command.
 //
-// Every missing piece is an error rather than a quiet skip. A publishing
-// step that silently does nothing is indistinguishable from one that worked,
-// and the failure it hides — no token, no permission, the wrong event — is
-// exactly the failure that leaves a pull request with no verdict on it
-// while the job reports success.
-func resolvePublishTarget(eventPath string) (publishTarget, error) {
+// Every missing piece is an error rather than a quiet skip. A step that
+// silently does nothing is indistinguishable from one that worked, and the
+// failure it hides — no token, no permission, the wrong event — is exactly the
+// failure that leaves a pull request with no verdict on it while the job
+// reports success.
+//
+// One implementation for every command that writes to a pull request, so a
+// verdict and the threads under it can never be about two different
+// revisions: the head is read from the event payload and not from the
+// checkout, which on a pull_request event is a merge commit that exists on no
+// branch.
+func resolveTarget(what, eventPath string) (publishTarget, error) {
 	token := firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
 	if token == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)")
+		return publishTarget{}, fmt.Errorf("%s needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)", what)
 	}
 	slug := os.Getenv("GITHUB_REPOSITORY")
 	if slug == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_REPOSITORY, which the platform sets for every job")
+		return publishTarget{}, fmt.Errorf("%s needs GITHUB_REPOSITORY, which the platform sets for every job", what)
 	}
 	repo, err := forge.ParseRepo(slug)
 	if err != nil {
@@ -44,14 +51,14 @@ func resolvePublishTarget(eventPath string) (publishTarget, error) {
 		eventPath = os.Getenv("GITHUB_EVENT_PATH")
 	}
 	if eventPath == "" {
-		return publishTarget{}, fmt.Errorf("--publish needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout")
+		return publishTarget{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
 	}
 	event, err := forge.LoadPullRequestEvent(eventPath)
 	if err != nil {
 		return publishTarget{}, err
 	}
 	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
-		return publishTarget{}, fmt.Errorf("the event at %s names no pull request: --publish belongs on a pull_request trigger", eventPath)
+		return publishTarget{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", eventPath, what)
 	}
 	return publishTarget{
 		Client: forge.New(token),

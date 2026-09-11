@@ -761,7 +761,7 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	row.Status = ui.StatusFail
 	row.Value = fmt.Sprintf("%d of %d mutant(s) survived in %s", len(survivors), total, elapsed.Round(time.Second))
-	findings := mutationFindings(component, dir, survivors, changed)
+	findings := mutationFindings(label, component, dir, survivors, changed)
 	// Every survivor, not a sample: the author's next action is to write an
 	// assertion for each one, and a truncated list makes that a second run to
 	// discover the rest.
@@ -798,13 +798,14 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 // Paths are made relative to the scan root, because a mutant's own path is
 // relative to the component it came from and a claim that names one file from
 // two roots is two claims.
-func mutationFindings(component, dir string, survivors []mutation.Result, changed map[string][]int) []finding.Finding {
+func mutationFindings(label, component, dir string, survivors []mutation.Result, changed map[string][]int) []finding.Finding {
 	out := make([]finding.Finding, 0, len(survivors))
 	for _, r := range survivors {
 		m := r.Mutant
 		out = append(out, finding.Finding{
 			Gate:      "mutation",
 			Component: component,
+			Row:       label,
 			Path:      path.Join(dir, m.Path),
 			Line:      m.Line,
 			Message:   m.String(),

@@ -154,7 +154,7 @@ describe("the relay's trust boundary", () => {
     expect((await post(token, {})).status).toBe(400);
   });
 
-  it("answers only POST /comment", async () => {
+  it("answers only the two endpoints it has", async () => {
     const relay = createRelay({ fetchJwks: keys.jwks, fetcher: githubStub() });
     const response = await relay.fetch(new Request("https://pr.lydite.org/"), env);
     expect(response.status).toBe(404);
@@ -168,5 +168,131 @@ describe("the relay's trust boundary", () => {
     for (const leak of ["audience", "aud", "exp", "issuer", "signature", "kid"]) {
       expect(body.toLowerCase()).not.toContain(leak);
     }
+  });
+});
+
+// Every review call the relay would make, answered locally. `existing` is the
+// pull request's own review comments, which is the set an operation's id has
+// to be in.
+function reviewStub(existing: number[] = [5]): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    const target = String(url);
+    if (target.endsWith("/installation")) {
+      return Response.json({ id: 42 });
+    }
+    if (target.includes("/access_tokens")) {
+      return Response.json({ token: "ghs_test" });
+    }
+    if (target.includes("/pulls/7/comments?")) {
+      return Response.json(existing.map((id) => ({ id })));
+    }
+    if (target.endsWith("/pulls/7/reviews") || target.includes("/replies")) {
+      return Response.json({ id: 1 });
+    }
+    if (init?.method === "DELETE") {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`the relay called something unexpected: ${target}`);
+  }) as typeof fetch;
+}
+
+function postReview(
+  token: string | undefined,
+  body: unknown,
+  fetcher: typeof fetch = reviewStub(),
+): Promise<Response> {
+  const relay = createRelay({ fetchJwks: keys.jwks, fetcher });
+  return relay.fetch(
+    new Request("https://pr.lydite.org/review", {
+      method: "POST",
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+}
+
+describe("applying a review", () => {
+  it("answers per operation, so a posted review and a refused delete are told apart", async () => {
+    const token = await keys.sign(claims());
+    const response = await postReview(token, {
+      version: 1,
+      head: "abc",
+      create: [{ path: "a.go", line: 3, subject: "line", body: "a claim" }],
+      delete: [{ comment: 5, refused: "cleared" }],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      repository: "lydite/proving-ground",
+      pull_request: 7,
+      outcomes: [
+        { op: "delete", ref: 5, status: "done" },
+        { op: "create", ref: 1, status: "done" },
+      ],
+    });
+  });
+
+  // A comment id is a number the caller supplies, and `ref` is the only thing
+  // a run cannot choose. Refusing the whole document rather than the one
+  // operation is what stops the answer being used to probe which ids exist.
+  it("refuses the whole document when an id is not on this pull request", async () => {
+    const token = await keys.sign(claims());
+    const response = await postReview(token, {
+      version: 1,
+      delete: [{ comment: 5 }, { comment: 999 }],
+      create: [{ path: "a.go", line: 3, subject: "line", body: "x" }],
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("refuses a document version it does not apply", async () => {
+    const token = await keys.sign(claims());
+    expect((await postReview(token, { version: 99, create: [] })).status).toBe(400);
+    expect((await postReview(token, { create: [] })).status).toBe(400);
+  });
+
+  it("takes the pull request from the ref and not from the document", async () => {
+    const token = await keys.sign(claims({ ref: "refs/pull/7/merge" }));
+    expect((await postReview(token, { version: 1, pull_request: 9 })).status).toBe(403);
+  });
+
+  it("refuses a run that is not for a pull request", async () => {
+    const token = await keys.sign(claims({ ref: "refs/heads/main" }));
+    expect((await postReview(token, { version: 1 })).status).toBe(403);
+  });
+
+  it("refuses a request presenting no token", async () => {
+    expect((await postReview(undefined, { version: 1 })).status).toBe(401);
+  });
+
+  // Not installed is an answer, so the client falls back to its own token
+  // rather than reporting a failure — the same designed path the comment has.
+  it("says the app is not installed rather than failing", async () => {
+    const token = await keys.sign(claims());
+    const notInstalled = (async (url: unknown) =>
+      String(url).endsWith("/installation")
+        ? new Response("no", { status: 404 })
+        : Response.json({})) as typeof fetch;
+    const response = await postReview(token, { version: 1 }, notInstalled);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ fallback: expect.any(String) });
+  });
+
+  it("says nothing about lydite's own credentials when a call fails", async () => {
+    const token = await keys.sign(claims());
+    const broken = (async (url: unknown) => {
+      const target = String(url);
+      if (target.endsWith("/installation")) return Response.json({ id: 42 });
+      if (target.includes("/access_tokens")) return Response.json({ token: "ghs_test" });
+      return new Response("upstream detail", { status: 500 });
+    }) as typeof fetch;
+    const response = await postReview(token, { version: 1, create: [] }, broken);
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    // Each endpoint says which of its own writes did not happen, so a reader
+    // of the job log is not told the comment failed when the review did.
+    expect(body).toContain("review");
+    expect(body).not.toContain("comment");
   });
 });

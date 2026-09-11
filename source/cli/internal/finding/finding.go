@@ -116,6 +116,22 @@ type Finding struct {
 	// mutants alike in everything a line number is excluded from, and without
 	// this they are one finding reported once.
 	Ordinal int `json:"ordinal"`
+	// Row is the label of the report row that made this claim, written by the
+	// producer that already holds both. It is the one link back, and it is a
+	// label rather than a nesting: a finding still carries its own gate and
+	// component, so nothing has to parse `gosec(cli)` back apart to know what
+	// this is about.
+	//
+	// What reads it is the standing comment, which renders a failing row's
+	// detail from that row's unanchored findings and counts the located ones
+	// it is leaving to the review. Without it the two surfaces cannot
+	// partition one row's claims between them, and the comment would repeat
+	// what a thread already says on the line.
+	//
+	// It takes no part in the fingerprint. A row's label carries a component
+	// and a gate that are already ingredients, and relabelling a row is not
+	// finding something new.
+	Row string `json:"row,omitempty"`
 	// Anchor is how precisely this can be attached to the change.
 	Anchor Anchor `json:"anchor,omitempty"`
 }

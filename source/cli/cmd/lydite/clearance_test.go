@@ -242,7 +242,7 @@ func TestPublishNeedsThePlatformsEnvironmentRatherThanSkipping(t *testing.T) {
 			if missing == "GITHUB_TOKEN" {
 				t.Setenv("GH_TOKEN", "")
 			}
-			if _, err := resolvePublishTarget(""); err == nil {
+			if _, err := resolveTarget("--publish", ""); err == nil {
 				t.Fatalf("publishing without %s was accepted, so a run could report success having posted nothing", missing)
 			}
 		})
