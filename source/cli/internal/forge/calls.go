@@ -123,12 +123,21 @@ type Comment struct {
 	} `json:"user"`
 }
 
-// FindComment returns the first comment containing marker, or nil.
+// FindComment returns the first comment opening with marker, or nil.
 //
 // The marker is an HTML comment in the body rather than a match on the
 // author, because the author is whoever's token the workflow runs under and
 // that is not lydite's to rely on. Matching on our own text also means a
-// person editing the comment's prose does not detach it.
+// person editing the comment's prose below it does not detach it.
+//
+// It has to be the first thing in the body, and that is the whole of what
+// keeps this from writing over somebody. The platform's quote-reply copies
+// the raw markdown of the comment it answers, HTML comment included, so a
+// marker matched anywhere would make a person quoting lydite's verdict the
+// author of the comment the next run replaces wholesale — with a token
+// holding `pull-requests: write`. Every comment lydite renders opens with it
+// (ui.Comment.Render writes it first), so nothing of lydite's is lost by
+// asking.
 func (c *Client) FindComment(ctx context.Context, repo Repo, number int, marker string) (*Comment, error) {
 	// A busy pull request holds more comments than one page, and the
 	// sticky one is the oldest lydite wrote — so the walk has to reach the
@@ -141,7 +150,7 @@ func (c *Client) FindComment(ctx context.Context, repo Repo, number int, marker 
 			return nil, fmt.Errorf("reading comments on %s#%d: %w", repo, number, err)
 		}
 		for _, comment := range comments {
-			if strings.Contains(comment.Body, marker) {
+			if strings.HasPrefix(comment.Body, marker) {
 				return &comment, nil
 			}
 		}

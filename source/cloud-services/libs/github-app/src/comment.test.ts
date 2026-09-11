@@ -27,6 +27,26 @@ describe("upsertComment", () => {
     });
   });
 
+  // The platform's quote-reply copies the raw markdown of the comment it
+  // answers, marker and all. Matching one anywhere in a body would make a
+  // person quoting lydite's verdict the author of the comment the next run
+  // replaces wholesale.
+  it("never writes over a comment that merely quotes the marker", async () => {
+    const calls: { url: string; method: string }[] = [];
+    const outcome = await upsertComment("t", "lydite/lydite", 3, MARKER, "new body", async (url, init) => {
+      calls.push({ url: String(url), method: init?.method ?? "GET" });
+      if (String(url).includes("/comments?")) {
+        return Response.json([{ id: 1, body: `> ${MARKER}\n> the verdict\n\nI disagree` }]);
+      }
+      return Response.json({ id: 9 });
+    });
+    expect(outcome).toBe("created");
+    expect(calls.at(-1)).toEqual({
+      url: "https://api.github.com/repos/lydite/lydite/issues/3/comments",
+      method: "POST",
+    });
+  });
+
   it("creates one when no comment carries the marker", async () => {
     const outcome = await upsertComment("t", "lydite/lydite", 3, MARKER, "body", async (url, init) => {
       if (String(url).includes("/comments?")) {

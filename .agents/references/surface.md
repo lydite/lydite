@@ -60,7 +60,8 @@ publishes within seconds of a push (ADR 0015). Its verdict reaches the comment b
 every other command's results take — the document it wrote — because rendering it twice would be
 two derivations of one answer. `ui.Marker` is `<!-- lydite:results -->`: one comment per change,
 upserted by the marker rather than by author, which is what lets the relay and the fallback hand
-over instead of leaving two standing verdicts.
+over instead of leaving two standing verdicts. It has to **open** the body, or a person quoting
+the verdict becomes the comment the next run replaces.
 
 ## The relay, and the fallback
 
@@ -136,7 +137,9 @@ comment lydite writes into a thread carries the marker, including its replies, w
 lets the sole-participant rule read the marker rather than an author. **The marker has to open
 the body**: the platform's quote-reply copies the raw markdown of the comment it answers, HTML
 comment included, so a marker read from anywhere would make a reviewer who quoted a thread
-invisible to that rule and have their words deleted with it.
+invisible to that rule and have their words deleted with it. The standing comment is upserted
+by the same rule, in `FindComment` and in the relay, so a person quoting lydite's verdict is
+not the comment the next run replaces.
 
 **`lydite is the only participant` governs both branches of a thread's life.** A claim that is
 gone deletes its thread where lydite is alone in it, and is replied to and left standing where

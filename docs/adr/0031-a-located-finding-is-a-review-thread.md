@@ -112,8 +112,15 @@ ADR 0022 makes that change in both directions.
 **The marker has to open the body.** The platform's quote-reply copies the raw
 markdown of the comment it answers, HTML comment included, so a marker read
 from anywhere in a body would make a reviewer who quoted a thread invisible to
-this rule — and their words would be deleted with it. The standing comment's
-posting step already checks the same way.
+this rule — and their words would be deleted with it.
+
+The standing comment is found by the same rule, and was not: `FindComment` and
+the relay's `findComment` matched the marker anywhere, so a person quoting
+lydite's verdict on a pull request lydite had not yet commented on was the
+author of the comment the next run replaced wholesale. Both now require it to
+open the body. Every comment lydite renders does — `ui.Comment.Render` writes
+it first — so nothing of lydite's is lost by asking, and a person editing the
+prose below it still does not detach it.
 
 **Whatever lydite says in a thread it leaves standing, it says once.** Nothing
 ever takes such a thread down — it is somebody else's conversation, and lydite

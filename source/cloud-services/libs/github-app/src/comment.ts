@@ -1,12 +1,19 @@
 import { GITHUB_API, apiHeaders } from "./app.js";
 
 /**
- * Creates or edits the one comment carrying the marker.
+ * Creates or edits the one comment opening with the marker.
  *
  * Found by a marker in the body rather than by author, because the author is
  * whoever's token posted it — which is the whole point of the relay being able
  * to take over from a consumer's own `github-actions[bot]` without orphaning
  * the comment it already posted.
+ *
+ * The marker has to be the first thing in the body, and that is the whole of
+ * what keeps this from writing over somebody. The platform's quote-reply
+ * copies the raw markdown of the comment it answers, HTML comment included, so
+ * a marker matched anywhere would make a person quoting lydite's verdict the
+ * author of the comment the next run replaces wholesale. Every comment lydite
+ * renders opens with it, so nothing of lydite's is lost by asking.
  *
  * The listing is capped. A conversation long enough that lydite's comment is
  * off the end of it is one where posting a fresh comment is the better failure
@@ -54,7 +61,7 @@ async function findComment(
       throw new Error(`listing comments answered ${response.status}`);
     }
     const comments = (await response.json()) as { id: number; body?: string }[];
-    const found = comments.find((comment) => comment.body?.includes(marker));
+    const found = comments.find((comment) => comment.body?.startsWith(marker));
     if (found) {
       return found.id;
     }

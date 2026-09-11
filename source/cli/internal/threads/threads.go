@@ -59,12 +59,12 @@ func Marker(fingerprint string) string {
 // where lydite is alone in it — and the new claim is posted fresh. No
 // migration, and nothing to recognise a version by.
 //
-// The marker has to be the first thing in the body, which is what the
-// standing comment's posting step already checks for. A marker anywhere would
-// read a person's quoted reply as lydite's own: the platform's quote-reply
-// copies the raw markdown of the comment being answered, HTML comment
-// included, so a reviewer quoting a thread would make themselves invisible to
-// the sole-participant rule and have their words deleted with it.
+// The marker has to be the first thing in the body, which is the rule the
+// standing comment is found by too. A marker anywhere would read a person's
+// quoted reply as lydite's own: the platform's quote-reply copies the raw
+// markdown of the comment being answered, HTML comment included, so a
+// reviewer quoting a thread would make themselves invisible to the
+// sole-participant rule and have their words deleted with it.
 func FingerprintIn(body string) string {
 	rest, found := strings.CutPrefix(body, markerPrefix)
 	if !found {

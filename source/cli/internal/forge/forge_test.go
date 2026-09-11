@@ -13,6 +13,7 @@ import (
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/threads"
+	"lydite/lydite/internal/ui"
 )
 
 func serve(t *testing.T, handler http.HandlerFunc) *Client {
@@ -246,9 +247,10 @@ func TestACommentOnAnIssueIsNotOnAPullRequest(t *testing.T) {
 	}
 }
 
-// A pull request with more review comments than one page has them all read:
-// the delta treats a thread it cannot see as absent, which reposts a claim
-// rather than deleting somebody's thread.
+// Every page of a pull request's review comments is read. Exhausting the cap
+// is a refusal rather than a shorter answer — see
+// TestReviewCommentsRefusesAListingItCouldNotFinish — so a listing that comes
+// back is the whole of what is standing.
 func TestReviewCommentsWalksEveryPage(t *testing.T) {
 	var asked []string
 	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
@@ -436,5 +438,29 @@ func TestForbiddenTellsARefusalFromAFailure(t *testing.T) {
 	}
 	if NotFound(err) {
 		t.Errorf("a 403 is not a 404: %v", err)
+	}
+}
+
+// The platform's quote-reply copies the raw markdown of the comment it
+// answers, marker and all. Matching one anywhere in a body would make a
+// person quoting lydite's verdict the author of the comment the next run
+// replaces wholesale.
+func TestUpsertNeverWritesOverAQuotedMarker(t *testing.T) {
+	var posted []string
+	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "body": "> " + ui.Marker + "\n> the verdict\n\nI disagree"},
+			})
+			return
+		}
+		posted = append(posted, r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+	})
+	if err := client.UpsertComment(context.Background(), repo, 7, ui.Marker, ui.Marker+"\nthe verdict"); err != nil {
+		t.Fatalf("UpsertComment: %v", err)
+	}
+	if len(posted) != 1 || !strings.HasSuffix(posted[0], "/issues/7/comments") {
+		t.Fatalf("a person's comment was edited instead of a fresh one posted: %v", posted)
 	}
 }
