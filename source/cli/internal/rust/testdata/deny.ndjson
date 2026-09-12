@@ -1,0 +1,4 @@
+{"fields":{"code":"no-license-field","graphs":[{"Krate":{"name":"auditprobe","version":"0.0.0"}}],"message":"license expression was not specified in manifest for crate 'auditprobe = 0.0.0'","severity":"warning"},"type":"diagnostic"}
+{"fields":{"code":"unlicensed","graphs":[{"Krate":{"name":"auditprobe","version":"0.0.0"}}],"labels":[{"column":9,"line":2,"message":"","span":"auditprobe"}],"message":"a valid license expression could not be retrieved for the crate","severity":"warning"},"type":"diagnostic"}
+{"fields":{"code":"unlicensed","graphs":[{"Krate":{"name":"auditprobe","version":"0.0.0"}}],"message":"auditprobe = 0.0.0 is unlicensed","severity":"error"},"type":"diagnostic"}
+{"fields":{"bans":{"errors":0,"helps":0,"notes":0,"warnings":0},"licenses":{"errors":1,"helps":7,"notes":0,"warnings":2}},"type":"summary"}

@@ -55,7 +55,8 @@ line-keyed identity reports the same finding as new on every push. `site` is con
 
 | Gate | `site` |
 |---|---|
-| a scanner (`biome`, and each tool #111 adds) | the rule with the source text it fired on, read from the tree rather than from the report |
+| a scanner over source (`biome`, `gosec`, `semgrep`, `cargo clippy`) | the rule with the source text it fired on, read from the tree rather than from the report |
+| a scanner over dependencies (`cargo-audit`, `cargo-deny`, `govulncheck`) | the advisory's own identifier with the package and version — **not** the line's text. See below |
 | `crap` | the function's name with its receiver, which `crap.Function.Name` already carries |
 | `mutation` | the operator with the text it replaced and the text replacing it |
 | `patch` | the stretch's two ends. Its length is deliberately not an ingredient, or adding one untested line to an untested block would orphan the claim already made about it |
@@ -63,6 +64,36 @@ line-keyed identity reports the same finding as new on every push. `site` is con
 **`ordinal` is the disambiguator that is not a line number.** Two identical comparisons on two
 lines produce two mutants alike in everything a fingerprint reads; without it they are one claim
 and the second survives unreported. It counts identical sites within one file in source order.
+
+### A dependency advisory is identified by the advisory, not by its line
+
+**This is the one place a scanner's `site` is not read from the source it fired on.**
+`cargo-audit`, `cargo-deny` and `govulncheck` claim things about a package rather than about a
+line someone wrote, and they are located at the `Cargo.lock` stanza or the `go.mod` require
+naming that package — because the one edit that clears such a claim is the bump, and editing the
+call site clears nothing. A standard-library advisory is located at the `go` directive, since a
+toolchain bump is the edit.
+
+A lockfile line reads `name = "time"`. Two advisories against one crate would share that text, so
+a site read from the line would make them one claim and `finding.Set` would drop the second; the
+ordinal cannot save it, because that separates a repeat in source order and these are two
+different claims. So the site is `RUSTSEC-2020-0071␟time 0.1.44` — stable across exactly what
+should not re-identify it: a lockfile reordering, a line moving, the advisory being reworded.
+
+**A line that cannot be found is `Line: 0` and unanchorable**, never a guess. That is a module no
+manifest names because it was resolved transitively, or a lockfile lydite could not read. Since
+[ADR 0031](../../docs/adr/0031-a-located-finding-is-a-review-thread.md) a guessed line is a
+thread on unrelated code, and the standing comment is a correct home for a claim reaching no
+line.
+
+**One advisory against two modules is two claims.** A record routinely names the standard
+library and the `golang.org/x/...` module the same code is vendored from; when both are in the
+build, two bumps on two manifest lines clear them. The site is the pair, so a producer
+collapsing its tool's repeats must collapse on the pair too — `govulncheck` emits several
+messages per advisory at increasing trace depth, and keying that collapse on the id alone drops
+a claim the fingerprint was keeping.
+
+See [ADR 0032](../../docs/adr/0032-every-scanner-reports-its-findings-as-data.md).
 
 **Message and severity are excluded** — a tool that rewords or reclassifies its own diagnostic
 has not found something different, and orphaning every anchor on a tool upgrade is the failure
@@ -140,6 +171,15 @@ announcing one would sit among rows about the code; the document holding each cl
 what a reader can observe. `lydite threads` is the exception that names its drops on stderr,
 because it consumes documents a local run wrote with no fold at all and a duplicate there is
 the operator's evidence that two commands wrote into one directory.
+
+**A producer that receives one claim twice must collapse it itself.** `cargo clippy
+--all-targets` compiles a crate as a library and again as its own test harness and reports every
+lint under both, identical in target, span, rule and rendered text alike. Neither the fingerprint
+nor `finding.Set` can help: `finding.Number` gives the two copies ordinals 0 and 1 — which is
+exactly how it keeps two real occurrences of one rule on one line apart — so they hash
+differently and both survive. The clippy parser therefore collapses on file, span and rule
+**before** numbering, so the ordinals are counted over the real claims. Uncollapsed it is double
+the count and two review threads on one line.
 
 **The ordinal is what makes this safe.** `finding.Number` runs per producer, before the claims
 reach a report, and `Ordinal` is a fingerprint ingredient — so two genuinely distinct claims

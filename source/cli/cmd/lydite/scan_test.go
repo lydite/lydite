@@ -24,30 +24,96 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
-// The "auto" path needs a real repo with an origin/main to resolve against, so
-// it's left to the integration surface; what's worth pinning here is the two
-// branches that decide whether git is consulted at all.
+// The "auto" path needs an origin to resolve against, so it is left to the
+// integration surface; what is pinned here is that nothing reaches git as the
+// caller wrote it.
+//
+// A SEMGREP_APP_TOKEN does not short-circuit this. The base has a second
+// reader — a finding's anchor, which decides whether a claim becomes a review
+// thread — and a token says only that `semgrep ci` scopes itself.
 func TestResolveDiffBase(t *testing.T) {
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(context.Background(), repo, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+	}
+	run("init", "-b", "main", ".")
+	run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "one")
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), repo, "git", "rev-parse", "HEAD").Output)
+
+	t.Run("unset means scan everything", func(t *testing.T) {
+		got, err := resolveDiffBase(context.Background(), repo, "", "")
+		if err != nil || got != "" {
+			t.Errorf("resolveDiffBase(\"\") = %q, %v, want \"\", nil", got, err)
+		}
+	})
+
+	t.Run("a ref resolves to the commit it names", func(t *testing.T) {
+		got, err := resolveDiffBase(context.Background(), repo, "main", "")
+		if err != nil {
+			t.Fatalf("resolveDiffBase(\"main\") returned %v", err)
+		}
+		if got != head {
+			t.Errorf("resolveDiffBase(\"main\") = %q, want the SHA %q — a tool must be given the commit, not the caller's string", got, head)
+		}
+	})
+
+	t.Run("a token does not take the base away — the anchor reads it too", func(t *testing.T) {
+		t.Setenv(semgrep.AppTokenEnv, "tok")
+		got, err := resolveDiffBase(context.Background(), repo, "main", "")
+		if err != nil || got != head {
+			t.Errorf("resolveDiffBase(\"main\") = %q, %v, want the SHA", got, err)
+		}
+	})
+
+	// The anchor hands this base to `git diff <base>..HEAD`, where a value
+	// beginning with `-` is a position git parses as an option:
+	// `--diff-base --output=/tmp/x` would make git write the diff to a path of
+	// the caller's choosing.
+	t.Run("an option-shaped base is refused rather than handed to git", func(t *testing.T) {
+		for _, base := range []string{"--output=/tmp/pwned", "-x", "--upload-pack=touch /tmp/pwned"} {
+			got, err := resolveDiffBase(context.Background(), repo, base, "")
+			if err == nil {
+				t.Errorf("resolveDiffBase(%q) = %q, want an error", base, got)
+			}
+			// No base alongside the error. A caller that reads the value
+			// before the error must scan everything rather than diff against
+			// a string git refused.
+			if got != "" {
+				t.Errorf("resolveDiffBase(%q) = %q beside its error, want no base", base, got)
+			}
+		}
+	})
+
+	t.Run("a ref that names no commit is refused", func(t *testing.T) {
+		got, err := resolveDiffBase(context.Background(), repo, "no/such/ref", "")
+		if err == nil {
+			t.Error("resolveDiffBase accepted a ref that names no commit")
+		}
+		if got != "" {
+			t.Errorf("resolveDiffBase = %q beside its error, want no base", got)
+		}
+	})
+}
+
+// `semgrep ci` derives its own diff base from the CI environment, so passing
+// --baseline-commit on top of that is redundant. The rule is Semgrep's alone,
+// and lives where Semgrep is invoked rather than where the base is resolved.
+func TestSemgrepBase(t *testing.T) {
 	cases := []struct {
-		name     string
-		diffBase string
-		appToken string
-		want     string
+		name, appToken, base, want string
 	}{
-		{"unset means scan everything", "", "", ""},
-		{"literal ref passes through", "origin/release", "", "origin/release"},
-		{"a token short-circuits auto — semgrep ci scopes itself", "auto", "tok", ""},
-		{"a token short-circuits a literal ref too", "origin/release", "tok", ""},
+		{"no token: Semgrep gets the base", "", "origin/release", "origin/release"},
+		{"a token: semgrep ci scopes itself", "tok", "origin/release", ""},
+		{"no base to give", "", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(semgrep.AppTokenEnv, tc.appToken)
-			got, err := resolveDiffBase(context.Background(), t.TempDir(), tc.diffBase, "")
-			if err != nil {
-				t.Fatalf("resolveDiffBase(%q) returned %v", tc.diffBase, err)
-			}
-			if got != tc.want {
-				t.Errorf("resolveDiffBase(%q) = %q, want %q", tc.diffBase, got, tc.want)
+			if got := semgrepBase(tc.base); got != tc.want {
+				t.Errorf("semgrepBase(%q) = %q, want %q", tc.base, got, tc.want)
 			}
 		})
 	}
@@ -62,7 +128,7 @@ func TestReportPrintsDetailForFailingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	err := report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
+	err := report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
 		{
 			Name:   "biome(.)",
 			Detail: "src/bad.ts:1  lint/security/noGlobalEval  eval() is dangerous\nsrc/bad.ts:4  lint/correctness/noUnusedVariables  unused",
@@ -90,7 +156,7 @@ func TestReportJSONCarriesVerdictAndDetail(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
 		{Name: "biome(.)", Detail: "src/bad.ts:1  noGlobalEval", Err: errors.New("1 finding(s)")},
 	}, true, false)
 	var got struct {
@@ -125,7 +191,7 @@ func TestReportDetailCannotForgeAStatusLine(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
 		{Name: "biome(.)", Detail: "✓ biome(.) ... passed", Err: errors.New("1 finding(s)")},
 	}, false, true)
 	statusLines := 0
@@ -145,7 +211,7 @@ func TestReportPrintsNoDetailForPassingOrStreamingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
 		{Name: "biome(.)", Detail: "should not appear"},
 		{Name: "semgrep", Output: "already streamed to the terminal", Err: errors.New("findings")},
 	}, false, true)
@@ -817,7 +883,7 @@ func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
 // ones a thread carries.
 func TestACheckSFindingsReachTheDocumentNamingTheirRow(t *testing.T) {
 	rep := ui.NewReport("scan")
-	record(rep, t.TempDir(), []executil.Result{{
+	record(rep, t.TempDir(), nil, []executil.Result{{
 		Name: "biome(cli)", Err: errors.New("failed"),
 		Findings: []finding.Finding{{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3,
 			Message: "a finding", Site: "one", Anchor: finding.AnchorLine}},
@@ -847,5 +913,52 @@ func TestAComponentSFindingsAreRebasedOntoTheScanRoot(t *testing.T) {
 	}
 	if got[0].Findings[0].Component != "web" {
 		t.Errorf("the claim does not name its component: %q", got[0].Findings[0].Component)
+	}
+}
+
+// A scanner's claim on a line the change touched is a review thread on that
+// line. Without an anchor every claim lydite makes about a repository's
+// security lands in the standing comment, whatever the change did.
+func TestAScanSClaimOnAChangedLineIsAnchoredToIt(t *testing.T) {
+	rep := ui.NewReport("scan")
+	changed := map[string][]int{"source/cli/a.go": {3, 4}}
+	record(rep, t.TempDir(), changed, labelled([]executil.Result{{
+		Name: "gosec", Err: errors.New("failed"),
+		Findings: []finding.Finding{
+			{Gate: "gosec", Path: "a.go", Line: 3, Message: "on a changed line", Site: "one"},
+			{Gate: "gosec", Path: "a.go", Line: 40, Message: "elsewhere in a changed file", Site: "two"},
+			{Gate: "gosec", Path: "b.go", Line: 1, Message: "in a file the change never touched", Site: "three"},
+		},
+	}}, "cli", "source/cli"))
+
+	got := map[string]finding.Anchor{}
+	for _, f := range rep.Findings() {
+		got[f.Message] = f.Anchor
+	}
+	want := map[string]finding.Anchor{
+		"on a changed line":                  finding.AnchorLine,
+		"elsewhere in a changed file":        finding.AnchorFile,
+		"in a file the change never touched": finding.AnchorNowhere,
+	}
+	for message, wantAnchor := range want {
+		if got[message] != wantAnchor {
+			t.Errorf("%q anchored %q, want %q", message, got[message], wantAnchor)
+		}
+	}
+}
+
+// A scan with no --diff-base reaches no change at all, so every claim it makes
+// belongs in the standing comment rather than on a line of somebody's pull
+// request. It is the shape `lydite-baseline.yml` runs on main.
+func TestAScanOverAWholeRepositoryAnchorsNothing(t *testing.T) {
+	rep := ui.NewReport("scan")
+	record(rep, t.TempDir(), nil, []executil.Result{{
+		Name: "gosec(cli)", Err: errors.New("failed"),
+		Findings: []finding.Finding{{Gate: "gosec", Path: "a.go", Line: 3, Message: "a claim", Site: "one"}},
+	}})
+	for _, f := range rep.Findings() {
+		if f.Anchor != finding.AnchorNowhere {
+			t.Errorf("anchor = %q, want the claim unanchorable", f.Anchor)
+		}
 	}
 }

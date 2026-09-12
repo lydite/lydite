@@ -336,6 +336,119 @@ func (o *Ops) answer(t Thread, body string) {
 	o.Reply = append(o.Reply, Reply{Comment: t.Root.ID, Body: body})
 }
 
+// messageRunes bounds the claim line, for the reason detailBytes bounds the
+// quote: the text is a tool's rendering of somebody else's source, and a
+// comment a platform refuses is no surface at all.
+const messageRunes = 500
+
+// claimText neutralises one line of a scanned repository's own text for a
+// comment lydite posts under its own App identity.
+//
+// The claim line is prose rather than a quote, so it cannot be fenced the way
+// writeDetail fences the detail beneath it — and it carries the same untrusted
+// content. A tool reproduces author-written strings verbatim: clippy renders a
+// `compile_error!` or a `#[deprecated(note = …)]`, and a component's label is
+// whatever `.lydite/components.yml` says. Left raw, a pull-request author
+// writes HTML or Markdown into a merge-gating thread — an image beacon, a link,
+// or a fabricated line claiming the run passed.
+//
+// Four things are taken away and nothing else. HTML is escaped, because a
+// hosting platform renders it and that is what an image beacon needs. Markdown's
+// link and image syntax is escaped, because it reaches the network with no HTML
+// at all. Newlines collapse to spaces, because Markdown's block constructs — a
+// heading, a list, a table, a rule — all need the start of a line, and a claim
+// is one line by construction. The result is bounded. Inline emphasis survives
+// and is left alone: it renders as decoration inside a sentence a reader can
+// see, and it cannot forge structure or reach the network.
+//
+// The standing comment needs none of this because it already fences what it
+// renders — CommentDetail.render quotes every claim line — so this is the same
+// rule reaching the same content on the other surface.
+func claimText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	// The backslash first, and the order is the whole of why this works: the
+	// escape below is a backslash, so text arriving with one already in it
+	// would otherwise turn `\[` into `\\[` — which CommonMark reads as an
+	// escaped backslash followed by a live bracket, handing back the syntax
+	// this is removing. A scanned repository does not get to pre-escape
+	// lydite's escape.
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	// Markdown's link and image syntax reaches the network without any HTML:
+	// `[text](url)` is a live hyperlink and `![alt](url)` fetches a remote
+	// image the moment the comment renders. Escaping the three characters that
+	// open them is enough, and leaves the text readable.
+	for _, c := range []string{"[", "]", "!"} {
+		s = strings.ReplaceAll(s, c, "\\"+c)
+	}
+	runes := []rune(s)
+	if len(runes) > messageRunes {
+		return string(runes[:messageRunes]) + "…"
+	}
+	return s
+}
+
+// detailLines and detailBytes bound what a repository lydite does not own can
+// put into a comment lydite posts under its own identity.
+//
+// A hosting platform refuses a comment over a size limit — GitHub's is 65536
+// bytes — and a refused comment is no surface at all. The quoted text is a
+// tool's own rendering of somebody else's source: clippy's diagnostic, gosec's
+// excerpt, cargo-deny's dependency graph, none of them bounded by anything at
+// their end. It is the rule finding.Source already follows for a Site, and the
+// standing comment for its quoted output.
+const (
+	detailLines = 40
+	detailBytes = 4000
+)
+
+// fence opens and closes the quoted block, and fenceEscape is what a line
+// holding one is rewritten to.
+const (
+	fence       = "```"
+	fenceEscape = "'''"
+)
+
+// writeDetail quotes a finding's detail under its claim.
+//
+// Fenced, and the fence is what makes this safe to render at all: the lines
+// are source from a repository lydite does not own, and source contains
+// anything source contains — a line shaped like a heading, a table row, an
+// HTML comment, or lydite's own marker. Unfenced, a pull-request author writes
+// Markdown into a merge-gating thread posted under lydite's App identity.
+// ui.CommentDetail.render states the same rule for the standing comment, and
+// this is the same content reaching the other surface.
+//
+// The fence itself is rewritten rather than escaped, for the reason it is
+// there: a line holding one would otherwise close the block and hand the rest
+// of the quote back to the Markdown renderer.
+func writeDetail(b *strings.Builder, detail []string) {
+	if len(detail) == 0 {
+		return
+	}
+	b.WriteString("\n\n" + fence + "\n")
+	written, truncated := 0, false
+	for i, line := range detail {
+		if i >= detailLines || written+len(line)+1 > detailBytes {
+			truncated = true
+			break
+		}
+		safe := strings.ReplaceAll(line, fence, fenceEscape)
+		b.WriteString(safe)
+		b.WriteByte('\n')
+		written += len(safe) + 1
+	}
+	b.WriteString(fence)
+	if truncated {
+		// Said rather than silent: a reader has to know the quote stops short
+		// of what the tool reported, or they act on a call path that appears
+		// to end where it does not.
+		b.WriteString("\n\n_Quoted output truncated. The run's log holds all of it._")
+	}
+}
+
 // Body is what a thread's root comment says.
 //
 // The marker first, so the line a transport checks is the first one, and the
@@ -345,16 +458,13 @@ func Body(f finding.Finding) string {
 	var b strings.Builder
 	b.WriteString(Marker(f.Fingerprint()))
 	b.WriteString("\n**")
-	b.WriteString(label(f))
+	b.WriteString(claimText(label(f)))
 	b.WriteString("** — ")
-	b.WriteString(f.Message)
-	for _, line := range f.Detail {
-		b.WriteString("\n\n")
-		b.WriteString(line)
-	}
+	b.WriteString(claimText(f.Message))
+	writeDetail(&b, f.Detail)
 	if f.Anchor == finding.AnchorFile {
 		fmt.Fprintf(&b, "\n\n_%s:%d — this change does not touch that line, so the thread sits on the file._",
-			f.Path, f.Line)
+			claimText(f.Path), f.Line)
 	}
 	return b.String()
 }
@@ -375,9 +485,12 @@ func cleared(fingerprint string) string {
 // it: their words are worth more than the anchor, and deleting the thread to
 // move it would take them with it.
 func moved(fingerprint string, f finding.Finding) string {
+	// The path through claimText, not a code span: a filename is the scanned
+	// repository's own text, and a backtick in one closes the span and hands
+	// the rest of the sentence back to the renderer.
 	return Marker(fingerprint) + fmt.Sprintf(
-		"\nStill reported, and the change has moved it: it is at `%s:%d` now. This thread stays here because it is not lydite's alone to move.",
-		f.Path, f.Line)
+		"\nStill reported, and the change has moved it: it is at %s:%d now. This thread stays here because it is not lydite's alone to move.",
+		claimText(f.Path), f.Line)
 }
 
 // label names the row a claim was made by, falling back to the gate.

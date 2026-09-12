@@ -1,0 +1,7 @@
+package sub
+
+import "os/exec"
+
+func Run(name string) error {
+	return exec.Command(name, "-l").Run()
+}

@@ -354,3 +354,253 @@ func TestOnlyTheRootsDeleteCarriesWhatToSayIfItIsRefused(t *testing.T) {
 		t.Errorf("the root's delete carries what to say: %+v", ops.Delete[1])
 	}
 }
+
+func TestBodyFencesAFindingsDetail(t *testing.T) {
+	// The lines are source from a repository lydite does not own, quoted into
+	// a merge-gating comment posted under lydite's own App identity. Unfenced,
+	// a pull-request author writes Markdown into it.
+	body := Body(finding.Finding{
+		Gate: "gosec", Path: "main.go", Line: 3, Message: "a claim",
+		Detail: []string{"## not a heading", "| not | a table |"},
+	})
+	if !strings.Contains(body, "\n```\n## not a heading\n") {
+		t.Errorf("body = %q, want the detail inside a fence", body)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), "```") {
+		t.Errorf("body = %q, want the fence closed", body)
+	}
+}
+
+func TestBodyRewritesAFenceInsideTheQuotedSource(t *testing.T) {
+	// A line holding a fence would otherwise close the block and hand the
+	// rest of the quote back to the Markdown renderer — which is the whole of
+	// what the fence was protecting against.
+	body := Body(finding.Finding{
+		Gate: "cargo clippy", Path: "src/lib.rs", Line: 1, Message: "a claim",
+		Detail: []string{"``` then **bold**"},
+	})
+	if strings.Contains(body, "``` then") {
+		t.Errorf("body = %q, want the inner fence rewritten", body)
+	}
+	if !strings.Contains(body, "''' then **bold**") {
+		t.Errorf("body = %q, want the line kept with its fence rewritten", body)
+	}
+}
+
+func TestBodyBoundsWhatAScannedRepositoryCanQuoteIntoAComment(t *testing.T) {
+	// A platform refuses a comment over its size limit, and a refused comment
+	// is no surface at all. Nothing bounds a tool's own rendering at its end.
+	long := make([]string, 500)
+	for i := range long {
+		long[i] = strings.Repeat("x", 200)
+	}
+	body := Body(finding.Finding{
+		Gate: "gosec", Path: "main.go", Line: 1, Message: "a claim", Detail: long,
+	})
+	if len(body) > detailBytes+1000 {
+		t.Errorf("body is %d bytes, want it bounded near %d", len(body), detailBytes)
+	}
+	if !strings.Contains(body, "truncated") {
+		t.Error("the quote stops short of what the tool reported and does not say so")
+	}
+}
+
+func TestBodyQuotesNothingForAFindingWithNoDetail(t *testing.T) {
+	// An empty fence is a black box under a claim that had nothing to add.
+	body := Body(finding.Finding{Gate: "crap", Path: "a.go", Line: 1, Message: "a claim"})
+	if strings.Contains(body, "```") {
+		t.Errorf("body = %q, want no fence at all", body)
+	}
+}
+
+func TestBodyNeutralisesTheClaimLine(t *testing.T) {
+	// A tool reproduces author-written strings verbatim — clippy renders a
+	// compile_error! — so the claim line carries the scanned repository's own
+	// text into a merge-gating comment posted under lydite's App identity.
+	// The line is prose and cannot be fenced the way the quote beneath it is.
+	body := Body(finding.Finding{
+		Gate: "cargo clippy", Path: "src/lib.rs", Line: 1,
+		Message: `<img src=x onerror=alert(1)> & <b>bold</b>`,
+	})
+	if strings.Contains(body, "<img") || strings.Contains(body, "<b>") {
+		t.Errorf("body = %q, want the HTML escaped — a platform renders it, which is what a beacon needs", body)
+	}
+	if !strings.Contains(body, "&lt;img") || !strings.Contains(body, "&amp;") {
+		t.Errorf("body = %q, want the text kept with its HTML escaped", body)
+	}
+}
+
+func TestBodyKeepsAForgedClaimOnOneLine(t *testing.T) {
+	// Markdown's block constructs all need the start of a line, so a claim
+	// that stays on one cannot forge a heading, a table, a rule — or a line
+	// saying the run passed.
+	body := Body(finding.Finding{
+		Gate: "cargo clippy", Path: "src/lib.rs", Line: 1,
+		Message: "a claim\n\n## All checks passed\n\n| x | y |",
+	})
+	claim := strings.SplitN(body, "\n", 2)[1]
+	if strings.Contains(strings.SplitN(claim, "\n", 2)[0], "\n") {
+		t.Fatal("the claim line was split")
+	}
+	if strings.Contains(body, "\n## All checks passed") {
+		t.Errorf("body = %q, want no forged heading at the start of a line", body)
+	}
+}
+
+func TestBodyBoundsTheClaimLine(t *testing.T) {
+	body := Body(finding.Finding{
+		Gate: "cargo clippy", Path: "src/lib.rs", Line: 1,
+		Message: strings.Repeat("x", 5000),
+	})
+	if len(body) > messageRunes+500 {
+		t.Errorf("body is %d bytes, want the claim bounded near %d", len(body), messageRunes)
+	}
+}
+
+func TestBodyNeutralisesMarkdownThatReachesTheNetwork(t *testing.T) {
+	// A link and an image need no HTML at all: `[t](url)` is a live hyperlink
+	// and `![a](url)` fetches a remote image the moment the comment renders.
+	// The text is the scanned repository's — clippy reproduces a
+	// `#[deprecated(note = …)]` string into its diagnostic.
+	body := Body(finding.Finding{
+		Gate: "cargo clippy", Path: "src/lib.rs", Line: 1,
+		Message: "![beacon](https://example.invalid/x.png) [click](https://example.invalid)",
+	})
+	if strings.Contains(body, "![beacon](") || strings.Contains(body, "[click](") {
+		t.Errorf("body = %q, want the link and image syntax escaped", body)
+	}
+
+}
+
+func TestBodyNeutralisesAPathTheScannedRepositoryNamed(t *testing.T) {
+	// A filename is the scanned repository's text too, and reaches the same
+	// comment — in the file-anchored suffix and in the moved notice.
+	f := finding.Finding{
+		Gate: "gosec", Path: "![beacon](https://example.invalid/x.png).go", Line: 3,
+		Message: "a claim", Anchor: finding.AnchorFile,
+	}
+	if body := Body(f); strings.Contains(body, "![beacon](") {
+		t.Errorf("Body = %q, want the path neutralised", body)
+	}
+	if note := moved("v1:abc", f); strings.Contains(note, "![beacon](") {
+		t.Errorf("moved = %q, want the path neutralised", note)
+	}
+}
+
+func TestClaimTextTakesAwayWhatRendersOrFetches(t *testing.T) {
+	backslash := "\\"
+	cases := []struct {
+		name, in, want string
+	}{
+		{"plain text is untouched", "a claim about md5", "a claim about md5"},
+		{"HTML is escaped", "<img src=x> & <b>", "&lt;img src=x&gt; &amp; &lt;b&gt;"},
+		{
+			"a link is escaped",
+			"[click](http://example.invalid)",
+			backslash + "[click" + backslash + "](http://example.invalid)",
+		},
+		{
+			"an image is escaped",
+			"![a](http://example.invalid)",
+			backslash + "!" + backslash + "[a" + backslash + "](http://example.invalid)",
+		},
+		{
+			// Text arriving with a backslash already in it must not be able to
+			// pre-escape lydite's escape: escaping the bracket first would turn
+			// `\[` into `\\[`, which CommonMark reads as an escaped backslash
+			// followed by a live bracket.
+			"a pre-escaped link cannot reconstitute itself",
+			backslash + "[click" + backslash + "](http://example.invalid)",
+			backslash + backslash + backslash + "[click" +
+				backslash + backslash + backslash + "](http://example.invalid)",
+		},
+		{"newlines collapse, so no block construct can start a line", "a\n\n## forged", "a ## forged"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claimText(tc.in); got != tc.want {
+				t.Errorf("claimText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaimTextClipsAtExactlyTheCap(t *testing.T) {
+	// A message at exactly the cap is kept whole; one rune over is clipped.
+	// The boundary is the whole of what the cap means, so it is stated rather
+	// than approached.
+	at := claimText(strings.Repeat("x", messageRunes))
+	if len([]rune(at)) != messageRunes || strings.HasSuffix(at, "…") {
+		t.Errorf("a message at the cap was clipped: %d runes", len([]rune(at)))
+	}
+	over := claimText(strings.Repeat("x", messageRunes+1))
+	if !strings.HasSuffix(over, "…") {
+		t.Error("a message one rune over the cap was not clipped")
+	}
+	if len([]rune(over)) != messageRunes+1 {
+		t.Errorf("clipped to %d runes, want the cap plus the ellipsis", len([]rune(over)))
+	}
+}
+
+func TestWriteDetailKeepsExactlyTheLineCap(t *testing.T) {
+	// detailLines lines are kept whole; the next one is what starts the
+	// count. A boundary off by one either drops a line nobody was told about
+	// or says "1 more" when there is none.
+	exact := make([]string, detailLines)
+	for i := range exact {
+		exact[i] = "x"
+	}
+	var b strings.Builder
+	writeDetail(&b, exact)
+	if strings.Contains(b.String(), "truncated") {
+		t.Error("a detail at exactly the line cap was truncated")
+	}
+	if got := strings.Count(b.String(), "\nx"); got != detailLines {
+		t.Errorf("kept %d lines, want %d", got, detailLines)
+	}
+
+	var over strings.Builder
+	writeDetail(&over, append(append([]string(nil), exact...), "x"))
+	if !strings.Contains(over.String(), "truncated") {
+		t.Error("a detail one line over the cap was not truncated")
+	}
+}
+
+func TestWriteDetailCountsTheNewlineItWrites(t *testing.T) {
+	// The running total counts each line plus the newline written after it.
+	// A line filling the cap exactly therefore does not fit, because writing
+	// it costs one byte more than the line itself — and a total that counted
+	// the line alone would let the quote run past the cap by one byte per
+	// line, which is what the cap exists to prevent.
+	var b strings.Builder
+	writeDetail(&b, []string{strings.Repeat("x", detailBytes)})
+	if !strings.Contains(b.String(), "truncated") {
+		t.Error("a line filling the cap was quoted whole, so its newline was not counted")
+	}
+	if strings.Contains(b.String(), strings.Repeat("x", detailBytes)) {
+		t.Error("the line that did not fit was written anyway")
+	}
+
+	// One byte under, it fits with its newline exactly.
+	var fits strings.Builder
+	writeDetail(&fits, []string{strings.Repeat("x", detailBytes-1)})
+	if strings.Contains(fits.String(), "truncated") {
+		t.Error("a line that fits with its newline was truncated")
+	}
+
+	// And the running total is what holds the whole quote inside the cap. A
+	// total that counted less per line than was written would pass the check
+	// on each line and still overrun, which is the one thing the cap exists
+	// to stop.
+	var many strings.Builder
+	lines := make([]string, detailLines+5)
+	for i := range lines {
+		lines[i] = strings.Repeat("x", 100)
+	}
+	writeDetail(&many, lines)
+	quoted := many.String()
+	body, _, _ := strings.Cut(strings.TrimPrefix(quoted, "\n\n"+fence+"\n"), fence)
+	if len(body) > detailBytes {
+		t.Errorf("the quote ran to %d bytes, want it held inside %d", len(body), detailBytes)
+	}
+}

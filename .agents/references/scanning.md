@@ -81,8 +81,53 @@ declaration. `installCargoTools` installs *lydite's* pinned runners and gets the
 because `cargo install` reads `CARGO_HOME`, `CARGO_REGISTRIES_*`, `CARGO_NET_*` and
 `RUSTC_WRAPPER`.
 
-**Semgrep is unchanged**: it is root-scoped and component-independent, so it runs once over the
-scan root whatever the declaration says.
+**Every check reports its findings as data, through a side channel.** The tool keeps printing
+exactly what it printed before and lydite reads a structured copy purely to populate
+`Result.Findings` — so `Result.Detail` stays empty for every tool that prints its own findings,
+and what a reader needs beyond the one-line claim travels per finding in `Finding.Detail`.
+Biome is the exception it already was: its report goes to a file so its own chatter cannot
+corrupt the JSON, so nothing streams and `Detail` is the only place its findings exist. See
+[ADR 0032](../../docs/adr/0032-every-scanner-reports-its-findings-as-data.md).
+
+**Three checks run their tool twice**, because it cannot write a report and print for a human in
+one invocation. For `cargo clippy`, `cargo-audit` and `cargo-deny` the second pass buys back the
+terminal output, and it is cheap — clippy's is 0.24s against a first pass of 1.76s, because cargo
+replays cached diagnostics rather than recompiling. For `govulncheck` it buys back the **verdict**:
+under `-format json` it exits 0 whether or not it found anything, while the text run exits 3, so a
+single JSON run would report every advisory and pass the check. `gosec` and Semgrep need one pass
+each — `-fmt json -out <file> -stdout -verbose text` and `--json-output=<file>` both write a copy
+rather than a replacement.
+
+**The tool's own exit status decides the row**, with two exceptions where it under-reports: gosec
+states a package that did not compile in the report rather than in its status, and Semgrep exits
+zero for a run whose rules would not load. A scan that read nothing must not render as a clean
+pass, which is the failure `reportableBiome`'s `parse` and `internalError/io` categories exist to
+catch. Both carry their reason in `Result.Detail`, which is the only place a verdict lydite
+invented can explain itself. Every parser keeps that same stance: an unrecognised category, level
+or code is reported rather than dropped, and a report that will not parse falls back to the exit
+status — a parser that silently drops what it does not recognise is how a gate stops gating.
+
+**A scan anchors what it found, against the lines the change touched.**
+`coverage.ChangedLines` is asked once and `record` anchors each check's claims —
+after `labelled` has rebased them onto the scan root, because the map is keyed
+from there. Without it every claim keeps the zero anchor and the review surface
+takes none of them, which is what `scan` did before: `threads.Located` reads the
+anchor, and a scan that set none gave it nothing. A scan with no `--diff-base`
+anchors nothing, which is correct rather than missing — it reaches no change.
+
+**The diff base is resolved whenever `--diff-base` is given**, including when
+`SEMGREP_APP_TOKEN` is set and when Semgrep is switched off. Skipping it was
+right while Semgrep was its only reader; the anchor is a second one, and a
+token says nothing about where gosec's claims belong. A token-bearing consumer
+passing `--diff-base auto` therefore now needs `fetch-depth: 0`.
+
+**`cargo fmt` gets no parser.** lydite is not a formatter and must never report a formatting diff
+as a finding (see [Linters](linters.md)). That its row still fails a Rust component contradicts
+that, and is a separate open question.
+
+**Semgrep is unchanged** in what it runs over: it is root-scoped and component-independent, so it
+runs once over the scan root whatever the declaration says. Its findings therefore carry no
+component, which is what `Finding.Component` being empty already means.
 
 **`scan` has no `--component` or `--affected`.** Selection is `lydite test`'s surface today; a scan
 that narrowed itself would need the same widening-on-ignorance argument made again, and nothing

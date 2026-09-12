@@ -247,3 +247,23 @@ func TestAnchoringRaisesAndNeverLowers(t *testing.T) {
 		t.Errorf("a second pass reaching only the file lowered the anchor to %q", findings[0].Anchor)
 	}
 }
+
+func TestAClaimWithNoLineStaysUnanchorableEvenInAChangedFile(t *testing.T) {
+	// A dependency advisory whose manifest line could not be found carries
+	// line zero on purpose. Anchoring it to the file because the change edited
+	// that manifest would make it a review thread reading `go.mod:0` — the
+	// invented reference the refusal to guess exists to avoid — and ADR 0032
+	// says such a claim belongs in the standing comment.
+	unlocated := Finding{Gate: "govulncheck", Path: "go.mod", Line: 0, Site: "GO-2020-0036\x1fstdlib"}
+	located := Finding{Gate: "govulncheck", Path: "go.mod", Line: 7, Site: "GO-2021-0061\x1fyaml"}
+	found := []Finding{unlocated, located}
+
+	Anchored(found, map[string][]int{"go.mod": {3, 4}})
+
+	if found[0].Anchor != AnchorNowhere {
+		t.Errorf("the unlocatable advisory anchored %q, want it unanchorable", found[0].Anchor)
+	}
+	if found[1].Anchor != AnchorFile {
+		t.Errorf("the located advisory anchored %q, want the file — the change touched it, but not its line", found[1].Anchor)
+	}
+}

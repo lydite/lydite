@@ -94,6 +94,11 @@ _Avoid_: "issue", "violation" and "error" — the first is a ticket, the second 
 The full set of **Finding**s from the most recent run, overwritten on every run. A **Cache**, not a **Ledger**: it is fully regenerable by re-scanning, and only the latest one is ever of interest. It answers "what is wrong right now, and where?"; the ledger answers "is this getting better?". Keeping findings out of the ledger is what lets quality history stay small enough to retain forever.
 _Note_: because snapshots are not retained, "when did this finding first appear?" is deliberately unanswerable today. Answering it later means promoting findings to a ledger of their own, keyed by the identity each one already carries — an additive change, which is why the split is the cheaper starting point.
 
+**Dependency advisory**:
+A **Finding** whose subject is a package the project depends on rather than a line the project wrote — a vulnerability record against a crate or module, a licence a dependency carries, a version a policy bans. It is located at the manifest or lockfile line naming that package, because that is where the one edit which clears it goes: editing the call site clears nothing. So a change that bumps a dependency into an advisory carries the claim on the line it touched, and a change that touches no manifest finds it in the standing comment as pre-existing debt.
+_Note_: its identity is the advisory's own identifier with the package and version, and not the text of the line it sits on. A lockfile line names a package and cannot tell two advisories against one package apart — the one place a scanner's identity is not read from the source it fired on.
+_Avoid_: "vulnerability" as the general term — licence and ban advisories are neither vulnerabilities nor security claims, and a word that covers only the first leaves the other two unnamed.
+
 **Gap**:
 An interval in the **Quality history** where a run happened but its ledger append did not land (a push race, a token scope, a branch-protection rule). Because ledger writes are non-fatal, gaps are possible by design — so they are recorded explicitly and rendered as a break in the trend line. The governing invariant is not "there are no gaps" but *the ledger never lies about its own completeness*: a chart that shows where data is missing is trustworthy, one that interpolates across a hole is not.
 

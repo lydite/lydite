@@ -1,0 +1,16 @@
+pub fn f(v: &Vec<i32>) -> i32 {
+    let mut s = 0;
+    for i in 0..v.len() {
+        s += v[i];
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn works() {
+        assert_eq!(f(&vec![1, 2]), 3);
+    }
+}
