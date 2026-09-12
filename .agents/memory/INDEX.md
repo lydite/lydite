@@ -9,21 +9,23 @@ internal/config's package doc still advertises coverage.source and the coverage 
 
 - source/cli/internal/config/config.go
 
-## fold-unions-findings-before-the-duplicate-shard-check  (gotcha, verified)
-A fold appends every shard's findings before the duplicate-row check runs, so two shards reporting one component duplicate its findings in the folded document.
+## exclusion-scope-is-a-funcdecl-or-a-mutant-span-never-a-symbol  (invariant, verified)
+The two exclusion-scope resolvers are go/ast FuncDecl attachment (coverage/CRAP, Go only) and innermost-containing mutant span (mutation, all languages) — neither resolves a symbol.
 
-- source/cli/cmd/lydite/fold.go
-- source/cli/internal/ui/report.go
+- source/cli/internal/coverage/exclude.go
+- source/cli/internal/mutation/sites.go
+
+## no-lydite-annotation-excludes-a-scanner-finding  (rationale, verified)
+The `[lydite:exclude_from_<gate>]` grammar is closed to mutation/crap/coverage on purpose — suppressing a gosec/semgrep/clippy finding is the tool's own inline annotation, not lydite's.
+
+- source/cli/internal/annotation/*.go
+- .agents/references/configuration.md
+- source/cli/internal/referral/disqualify.go
 
 ## pathmatch-seen-map-is-not-a-memo-cache  (invariant, verified)
 pathmatch's `seen` map answers false for a revisited state, which is sound only because any success short-circuits the whole recursion.
 
 - source/cli/internal/pathmatch/pathmatch.go
-
-## pullrequestfromref-also-accepts-head  (gotcha, verified)
-pullRequestFromRef accepts refs/pull/<n>/head as well as /merge, which its doc comment and every test claim omit.
-
-- source/cloud-services/libs/github-app/src/oidc.ts
 
 ## relay-audience-mismatch-degrades-silently  (gotcha, verified)
 The relay's AUDIENCE and the workflow's requested audience are two independently-edited values with no shared source, and a mismatch falls back to the bot token forever without going red.
@@ -35,9 +37,11 @@ The relay's AUDIENCE and the workflow's requested audience are two independently
 - .github/workflows/lydite-pr.yml
 
 ## rust-scan-fails-on-formatting  (gotcha, verified)
-A Rust component's scan fails on `cargo fmt --check` over the whole crate, despite the "lydite is not a formatter" stance stated for TypeScript.
+A Rust component's scan still fails on whole-crate `cargo fmt --check`, contradicting the "lydite is not a formatter" stance — a known open question, not an oversight to fix in passing.
 
 - source/cli/internal/rust/rust.go
+- .agents/references/scanning.md
+- .agents/references/linters.md
 - AGENTS.md
 
 ## terminal-and-comment-split-unmeasured-on-purpose  (rationale, verified)
