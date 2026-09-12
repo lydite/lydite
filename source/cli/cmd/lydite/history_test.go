@@ -851,3 +851,98 @@ func TestARecordingRefusesADeclarationOrConfigurationItCannotRead(t *testing.T) 
 		t.Errorf("a configuration that will not parse was recorded against: %s", out)
 	}
 }
+
+// A recording says how much of a scan it counted, and says so when it counted
+// nothing at all.
+//
+// This is the row that was missing when the count first reached production: the
+// scan job was green, the recording was green, and an absent finding count in
+// the ledger is indistinguishable from a repository with no findings. A count
+// that did not happen has to read differently from a count of nothing.
+func TestARecordingSaysWhetherItCountedAScan(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+
+	// No scan document anywhere, which is every report directory a run without
+	// a scan job writes.
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("recording: %v\n%s\n%s", err, out, errOut)
+	}
+	row := jsonRows(t, out)["findings"]
+	if row.Status != "context" {
+		t.Errorf("findings = %+v, want a context row: the count is not a gate", row)
+	}
+	// The reason, not just the absence. A recording that read no scan and one
+	// whose components have no applicable gate both counted nothing, and only
+	// the reason says which — the first is a workflow that delivered no
+	// document, the second a repository with nothing to count.
+	if !strings.Contains(row.Value, "not counted") || !strings.Contains(row.Value, documentName("scan")) {
+		t.Errorf("findings = %q, want it to say no count was made and name the document that was missing", row.Value)
+	}
+
+	// And with a scan beside the measurements, the same row says what it counted.
+	scanDocument(t, filepath.Join(root, runner.ReportDir), nil, gosecFinding("svc", "sha1.New()"))
+	out, errOut, err = runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("recording with a scan: %v\n%s\n%s", err, out, errOut)
+	}
+	row = jsonRows(t, out)["findings"]
+	if !strings.Contains(row.Value, "gate(s) counted") {
+		t.Errorf("findings = %q, want it to say how many gates were counted", row.Value)
+	}
+	if strings.Contains(row.Value, "not counted") {
+		t.Errorf("findings = %q, want a count rather than its absence", row.Value)
+	}
+}
+
+// The findings row distinguishes four outcomes, and each needs its own reason.
+//
+// A recording that read no scan, one whose components have no gate that reports
+// findings, and one that counted are three different facts, and the row is the
+// only place a reader learns which. The two zero cases in particular must not
+// collapse: the first is a workflow that delivered no document — the defect
+// #134 fixes — and the second is a repository with nothing to count, which is
+// a correct and permanent state for a consumer declaring only raw commands.
+func TestTheFindingsRowNamesWhichOfTheZeroesItIs(t *testing.T) {
+	goGates := map[string]map[string]int{"api": {golang.GateGosec: 0, golang.GateGovulncheck: 2}}
+
+	for _, tc := range []struct {
+		name         string
+		perComponent map[string]map[string]int
+		root         map[string]int
+		scanned      bool
+		want         string
+	}{
+		{"no scan was read", nil, nil, false, documentName("scan")},
+		{"nothing applies", nil, nil, true, "no declared component has a gate"},
+		// Gates but no root-scoped count: a repository with Semgrep switched
+		// off still counted something, so this is not one of the zero cases.
+		{"gates only", goGates, nil, true, "gate(s) counted"},
+		// And the mirror: a root-scoped count with no per-component gate, which
+		// is every component declaring its own command while Semgrep runs.
+		{"root only", nil, map[string]int{semgrep.Gate: 3}, true, "gate(s) counted"},
+		{"both", goGates, map[string]int{semgrep.Gate: 3}, true, "gate(s) counted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := findingsRow(tc.perComponent, tc.root, tc.scanned)
+			// Never a verdict: the count is not a gate, and an amber row here
+			// would colour every recording a consumer makes without a scan job.
+			if row.Status != ui.StatusContext {
+				t.Errorf("status = %s, want context", row.Status)
+			}
+			if !strings.Contains(row.Value, tc.want) {
+				t.Errorf("row = %q, want it to say %q", row.Value, tc.want)
+			}
+		})
+	}
+	// The counted row says how much, not merely that it counted.
+	row := findingsRow(goGates, map[string]int{semgrep.Gate: 3}, true)
+	for _, want := range []string{"2 gate(s)", "1 component(s)", "1 root-scoped"} {
+		if !strings.Contains(row.Value, want) {
+			t.Errorf("row = %q, want it to carry %q", row.Value, want)
+		}
+	}
+}

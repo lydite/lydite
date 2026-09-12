@@ -162,6 +162,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// How many claims each scanner gate made, which is the one scalar in a
 	// recording that comes from `lydite scan` rather than from `lydite test`.
 	perComponent, root := findingCounts(decl, cfg, read.found, read.scanned)
+	rep.Add(findingsRow(perComponent, root, read.scanned))
 
 	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root)
 
@@ -451,6 +452,36 @@ func historyComponents(doc measurementsDoc, perComponent map[string]map[string]i
 		}
 	}
 	return out
+}
+
+// findingsRow says how much of a scan reached the record.
+//
+// It exists because the first production run of this path recorded nothing and
+// said nothing: the scan job was green, the recording was green, and a ledger
+// holding no finding count is exactly what a repository with no findings looks
+// like. A count that silently did not happen has to be distinguishable from a
+// count of nothing, and the row is the only thing that can say which.
+//
+// Context rather than amber. The count is not a gate, and a consumer whose
+// workflow runs no scan is not one lydite should colour a recording over — the
+// row is there to be read, not to vote.
+func findingsRow(perComponent map[string]map[string]int, root map[string]int, scanned bool) ui.Row {
+	const label = "findings"
+	if !scanned {
+		return ui.Row{Status: ui.StatusContext, Label: label,
+			Value: "not counted — no report directory holds a " + documentName("scan")}
+	}
+	gates := 0
+	for _, counts := range perComponent {
+		gates += len(counts)
+	}
+	if gates == 0 && len(root) == 0 {
+		return ui.Row{Status: ui.StatusContext, Label: label,
+			Value: "not counted — no declared component has a gate that reports findings"}
+	}
+	return ui.Row{Status: ui.StatusContext, Label: label,
+		Value: fmt.Sprintf("%d gate(s) counted for %d component(s), %d root-scoped",
+			gates, len(perComponent), len(root))}
 }
 
 // historyRow says what reached the quality history.
