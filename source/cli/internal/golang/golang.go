@@ -24,6 +24,23 @@ const (
 	govulncheckPkg = "golang.org/x/vuln/cmd/govulncheck@" + govulncheckVersion
 )
 
+// The gates this package reports under. A gate's name is the label its row
+// carries and the key its finding count is recorded under, so the two are one
+// constant rather than two literals that agree until one is edited.
+const (
+	GateGosec       = "gosec"
+	GateGovulncheck = "govulncheck"
+)
+
+// FindingGates is every gate here that reports its findings as data.
+//
+// It exists so a consumer can tell a gate that found nothing from one that
+// never applied: a clean run reports no findings at all, so the set of gates
+// a language implies is the only thing that makes a zero distinguishable from
+// an absence. A fresh slice per call, because a package-level one is a
+// variable every caller can edit.
+func FindingGates() []string { return []string{GateGosec, GateGovulncheck} }
+
 // Check runs gosec and govulncheck in dir, with env on top of the caller's
 // own environment — the component's resolved Go toolchain.
 //
@@ -42,13 +59,13 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ gosec` with the cause in neither the terminal nor --json.
-		results = append(results, executil.Result{Name: "gosec", Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateGosec, Err: err, Detail: err.Error()})
 	} else {
 		results = append(results, runGosec(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, toolchainKey, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
-		results = append(results, executil.Result{Name: "govulncheck", Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateGovulncheck, Err: err, Detail: err.Error()})
 	} else {
 		results = append(results, runGovulncheck(ctx, dir, env.Check, bin))
 	}

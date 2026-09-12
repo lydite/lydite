@@ -133,7 +133,7 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 		// one: report() prints Detail under a failing row and nothing else,
 		// so a bare Err renders as `✗ biome` with the cause in neither the
 		// terminal nor --json.
-		return executil.Result{Name: "biome", Err: err, Detail: err.Error()}
+		return executil.Result{Name: GateBiome, Err: err, Detail: err.Error()}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -144,7 +144,7 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 	// an "experimental reporter" notice, which JSON parsing must not trip over.
 	r := executil.RunEnv(ctx, dir, env, biomeBin, "lint",
 		"--config-path", configPath, "--reporter", "json", "--reporter-file", outPath, ".")
-	r.Name = "biome"
+	r.Name = GateBiome
 
 	// A nested biome.json aborting the run before anything is linted must not
 	// read as a pass, and must not read as a findings failure either — it is a
@@ -228,7 +228,7 @@ func biomeFindings(dir string, report biomeReport) []finding.Finding {
 			continue
 		}
 		out = append(out, finding.Finding{
-			Gate:     "biome",
+			Gate:     GateBiome,
 			Path:     path,
 			Line:     d.Location.Start.Line,
 			Rule:     d.Category,

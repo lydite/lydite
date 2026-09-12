@@ -98,7 +98,7 @@ func gosecFindings(dir string, report gosecReport) []finding.Finding {
 			continue
 		}
 		out = append(out, finding.Finding{
-			Gate:     "gosec",
+			Gate:     GateGosec,
 			Path:     path,
 			Line:     start,
 			EndLine:  end,
@@ -339,14 +339,14 @@ func runGosec(ctx context.Context, dir string, env []string, bin string) executi
 	if err != nil {
 		// Detail as well as Err, for the reason an install failure carries
 		// one: report() prints Detail under a failing row and nothing else.
-		return executil.Result{Name: "gosec", Err: err, Detail: err.Error()}
+		return executil.Result{Name: GateGosec, Err: err, Detail: err.Error()}
 	}
 	outPath := out.Name()
 	_ = out.Close()
 	defer func() { _ = os.Remove(outPath) }()
 
 	r := executil.RunEnv(ctx, dir, env, bin, gosecArgv(outPath)...)
-	r.Name = "gosec"
+	r.Name = GateGosec
 
 	return gosecResult(r, dir, outPath)
 }

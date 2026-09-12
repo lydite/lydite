@@ -83,7 +83,8 @@ diverged.
 
 **Scalars are per component, and the repository figures are sums nobody stores.** The
 component is the unit every gate reports at, and a repository-wide number cannot say which
-component moved. Every metric is a pointer, so absent and zero are different answers: a
+component moved. The one thing stored beside the components is a root-scoped gate's finding
+count, and it is not a sum over them but a separate measurement — see below. Every metric is a pointer, so absent and zero are different answers: a
 component with no function above the CRAP threshold records zero and one lydite scores none
 of records nothing.
 
@@ -106,17 +107,46 @@ rather than by expectation. The last record and not a mean, which is a number no
 had. There is no index file: the directory listing is the index, and an index is state that
 can disagree with the files it names.
 
-**Coverage, CRAP and test counts are in; mutation and finding counts are not, for different
-reasons.** Mutation is structural: mutants come only from lines the change touched, and on
-the default branch HEAD is its own merge-base, so the one job holding a token that can push
-mutates nothing. Its results exist only on pull requests, in jobs deliberately holding no
-writable token
+**Coverage, CRAP, test counts and finding counts are in; mutation is not.** Mutation is
+structural: mutants come only from lines the change touched, and on the default branch HEAD is its
+own merge-base, so the one job holding a token that can push mutates nothing. Its results exist only
+on pull requests, in jobs deliberately holding no writable token
 ([#112](https://github.com/lydite/lydite/issues/112), and [#49](https://github.com/lydite/lydite/issues/49)
-behind it). Finding counts wait on the parsers rather than on the channel: findings travel as
-data (see [findings.md](findings.md)), and Biome is the only scanner whose report lydite reads —
-`lydite scan` streams the other seven because for a scanner the findings *are* the result, so
-a count over a component means every one of them emitting a structured report lydite renders
-the findings from ([#111](https://github.com/lydite/lydite/issues/111)).
+behind it).
+
+**A finding count is per gate, and that is not a refinement of "per component" — it is the only
+shape that can say what there is to say.** A gate has a third state the other scalars do not: it can
+apply and have found nothing, or not apply to this component's language at all. A key present at `0`
+is the first; a key absent is the second. One integer collapses them, and a series that read an
+absence as a zero would draw a clean line through a scanner that never ran — the failure "absent is
+not zero" exists to prevent, in the metric most likely to hit it. Scanner gates only: `CRAP.Above`
+already *is* the count of CRAP findings, and recording it twice makes two quantities that must agree
+into two quantities free to disagree.
+
+**The count comes from the document and the gate set comes from the tree.** A clean gate reports no
+findings, so the claims alone cannot tell a component gosec found nothing in from one gosec never
+looked at; the declaration and `.lydite/config.yml` say which gates each language implies, and they
+are read from the tree being recorded for the same reason the baseline's completeness check is. Each
+language package names its own gates, so the set cannot drift from the checks it runs, and a gate's
+name is one constant shared with the row it labels. Reading the set out of the scan's rows would
+answer more cases and cost what findings-as-data exists for — `gosec(cli)` parsed back into a gate
+and a component is the text-scraping the channel removed. **A recording that read no scan document
+records no count at all**, never a nought per gate: a nought says the gate ran.
+
+**A root-scoped gate's count sits beside the components, in `root_findings`, and is not a sum over
+them.** Semgrep runs once over the whole scan root, so its claims name no component, and nothing
+invents one — which component contains a path is an ownership question the declaration does not
+answer, and a claim outside every component would have nowhere to go. The projection carries it for
+the same reason it carries the components.
+
+**The channel is `scan.json`**, read out of each `--reports` directory beside the measurements;
+`measurements.json` keeps its single writer. `lydite-baseline.yml` therefore runs a `scan` job beside
+its measure matrix, with **no `--diff-base`** — on the default branch there is no change to scope to,
+so the count is the repository's standing total — and `record` needs it while keeping
+`if: !cancelled()`, because a red scan on the default branch is the most interesting thing a finding
+history can hold and no later run can fill the hole. A measurements document is still required and a
+scan document is not: only the first names the tree that binds the recording to the checkout. See
+[ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md).
 
 **The dashboard is not this slice.** `source/web/` is still empty, the hosted read path is
 [ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work, and per-finding

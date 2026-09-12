@@ -9,10 +9,18 @@ import (
 	"testing"
 	"time"
 
+	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/typescript"
+	"lydite/lydite/internal/ui"
 )
 
 // historyOn reads back every record the state branch holds for the month a
@@ -360,7 +368,7 @@ func TestOnlyAComponentWithNoScalarAtAllIsDropped(t *testing.T) {
 		},
 		Tests: map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
 	}
-	got := historyComponents(doc)
+	got := historyComponents(doc, nil)
 
 	for _, name := range []string{"measured", "scored", "red"} {
 		if _, ok := got[name]; !ok {
@@ -443,7 +451,7 @@ func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
 	records, why := historyRecords(context.Background(), t.TempDir(), "main",
 		measurementsDoc{Components: map[string]componentMeasurement{
 			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
-		}})
+		}}, nil, nil)
 	if records != nil {
 		t.Error("a fold carrying no scalar produced records")
 	}
@@ -486,5 +494,360 @@ func TestAPredecessorThatIsNotAnAncestorIsAGapOfUnknownWidth(t *testing.T) {
 	}
 	if gap.Missing != 0 || !strings.Contains(gap.Reason, "not an ancestor") {
 		t.Errorf("the gap = %+v, want an unestablished width and the reason why", gap)
+	}
+}
+
+// scanDocument plants the document `lydite scan` writes into dir, holding the
+// rows and the located claims handed in.
+//
+// Written through ui.Report rather than as literal JSON, so a test plants the
+// shape scan actually writes rather than a hand-built one that agrees with it
+// until one of the two changes.
+func scanDocument(t *testing.T, dir string, rows []ui.Row, findings ...finding.Finding) {
+	t.Helper()
+	rep := ui.NewReport("scan")
+	for _, row := range rows {
+		rep.Add(row)
+	}
+	rep.AddFindings(findings...)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(dir, documentName("scan"))) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := rep.WriteJSON(f); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gosecFinding is one claim attributed to a component, as a scanner reports it.
+func gosecFinding(component, site string) finding.Finding {
+	return finding.Finding{
+		Gate: golang.GateGosec, Component: component, Path: component + "/lib.go", Line: 5,
+		Rule: "G401", Severity: "HIGH", Message: "weak cryptographic primitive",
+		Site: "G401\x1f" + site, Row: golang.GateGosec + "(" + component + ")",
+	}
+}
+
+// A gate that ran and found nothing records nought; a gate that does not apply
+// to the component's language records no key at all.
+//
+// The distinction is the whole of why the count is a per-gate map rather than
+// one integer. A single total cannot hold it, and a series that read an absence
+// as a zero would draw a clean line through a scanner that never ran.
+func TestAScannerGateThatFoundNothingRecordsZeroAndOneThatDoesNotApplyRecordsNoKey(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	// One claim against the Go component, and one root-scoped claim Semgrep
+	// made about the repository rather than about any component.
+	scanDocument(t, filepath.Join(root, runner.ReportDir), nil,
+		gosecFinding("svc", "sha1.New()"),
+		finding.Finding{
+			Gate: semgrep.Gate, Path: "svc/lib.go", Line: 2,
+			Rule: "go.lang.security.audit", Message: "tainted input",
+			Site: "go.lang.security.audit\x1fn + 1", Row: semgrep.Gate,
+		})
+
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("recording: %v\n%s\n%s", err, out, errOut)
+	}
+	recs := historyOn(t, root)
+	if len(recs) != 1 {
+		t.Fatalf("the branch holds %d records, want the one this recording appended", len(recs))
+	}
+	svc := recs[0].Components["svc"]
+	if got := svc.Findings[golang.GateGosec]; got != 1 {
+		t.Errorf("gosec = %d, want the one claim the scan document holds", got)
+	}
+	// Zero and present: govulncheck applies to a Go component, so a component
+	// it found nothing in is a measured nought rather than a gap in the series.
+	got, ok := svc.Findings[golang.GateGovulncheck]
+	if !ok || got != 0 {
+		t.Errorf("govulncheck = %d (present %v), want a recorded nought — the gate applies and found nothing", got, ok)
+	}
+	// Absent: no Biome runs over a Go component, so a nought here would claim
+	// a scanner looked at code it cannot read.
+	if got, ok := svc.Findings[typescript.GateBiome]; ok {
+		t.Errorf("biome = %d, want no key at all: the gate does not apply to this component's language", got)
+	}
+	// Root-scoped, and beside the components rather than inside one: nothing
+	// may decide which component a repository-wide claim belongs to.
+	if got := recs[0].RootFindings[semgrep.Gate]; got != 1 {
+		t.Errorf("semgrep = %d, want the one root-scoped claim", got)
+	}
+	if _, ok := svc.Findings[semgrep.Gate]; ok {
+		t.Error("a root-scoped claim was attributed to a component")
+	}
+}
+
+// A scan that went red still records what it found, out of a directory holding
+// no measurements at all.
+//
+// Both halves are the shape the recording job is handed: the scan uploads its
+// own report directory beside the shards', and a scan on the default branch
+// that found something exits non-zero. A red scan there is the most interesting
+// thing a finding history can hold, and no later run can fill the hole — the
+// next push is a different tree.
+func TestAFailingScanInItsOwnDirectoryStillRecordsWhatItFound(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	scans := t.TempDir()
+	scanDocument(t, scans,
+		[]ui.Row{{Status: ui.StatusFail, Label: "gosec(svc)", Value: "failed"}},
+		gosecFinding("svc", "sha1.New()"), gosecFinding("svc", "md5.New()"))
+
+	out, errOut, err := runRecordCmd(t, root, "--json", "--reports", scans)
+	if err != nil {
+		t.Fatalf("recording: %v\n%s\n%s", err, out, errOut)
+	}
+	recs := historyOn(t, root)
+	if len(recs) != 1 {
+		t.Fatalf("the branch holds %d records, want the one this recording appended", len(recs))
+	}
+	if got := recs[0].Components["svc"].Findings[golang.GateGosec]; got != 2 {
+		t.Errorf("gosec = %d, want both claims the failing scan made", got)
+	}
+}
+
+// A report directory holding a scan and no measurements is the expected shape
+// of the scan job, not a malfunction, so its row is context rather than amber.
+//
+// Amber is the tag for a check that did not run, and a row that renders the
+// ordinary output of a job with it trains a reader to skip the one tag that
+// exists to be noticed.
+func TestADirectoryHoldingOnlyAScanIsNotReportedAsUnmeasured(t *testing.T) {
+	dir := t.TempDir()
+	scanDocument(t, dir, nil, gosecFinding("svc", "sha1.New()"))
+
+	rep := ui.NewReport("record")
+	read := readReports(rep, []string{dir})
+
+	if len(read.docs) != 0 || len(read.found) != 1 || !read.scanned {
+		t.Fatalf("read = %d measurements, %d findings, scanned %v; want the scan alone",
+			len(read.docs), len(read.found), read.scanned)
+	}
+	rows := rep.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("%d rows for one directory, want exactly one saying what came out of it", len(rows))
+	}
+	if rows[0].Status != ui.StatusContext {
+		t.Errorf("read row = %+v, want context: a scan with no measurements beside it is what the scan job uploads", rows[0])
+	}
+	if !strings.Contains(rows[0].Value, "1 finding(s)") {
+		t.Errorf("read row = %q, want it to say what the directory held", rows[0].Value)
+	}
+	// And silent about the measurements nobody wrote here, for the reason the
+	// row is context: a raw "no such file" under the ordinary output of a job
+	// is how a detail line stops being read.
+	if len(rows[0].Detail) != 0 {
+		t.Errorf("read row detail = %v, want nothing said about measurements this job never writes", rows[0].Detail)
+	}
+}
+
+// A report directory holding neither document still says why.
+//
+// The absence is suppressed from a row that held the other document, and this
+// is the one row where it is the whole of what there is to report: a directory
+// that yielded nothing, with no reason, is a recording quietly folding less than
+// the caller named.
+func TestAReportDirectoryHoldingNeitherDocumentStillSaysWhy(t *testing.T) {
+	dir := t.TempDir()
+
+	rep := ui.NewReport("record")
+	read := readReports(rep, []string{dir})
+
+	if len(read.docs) != 0 || read.scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want nothing from an empty directory", len(read.docs), read.scanned)
+	}
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one amber row", rows)
+	}
+	if len(rows[0].Detail) == 0 {
+		t.Error("a directory that yielded nothing was reported without a reason")
+	}
+}
+
+// No scan document means no finding counts at all, and never a nought per
+// applicable gate.
+//
+// A nought says the gate ran and found nothing. Inventing one for a scan that
+// never happened is the single thing this channel must not do: it would draw a
+// clean line through every commit whose scan job died.
+func TestNoScanDocumentRecordsNoFindingCountAtAll(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "svc", Dir: "svc", Runner: "go-test"},
+	}}
+	perComponent, root := findingCounts(decl, config.Default(), nil, false)
+	if perComponent != nil || root != nil {
+		t.Errorf("findingCounts = %v / %v, want nothing recorded for a recording that read no scan", perComponent, root)
+	}
+	// And with a scan that read clean, the same declaration records noughts.
+	perComponent, root = findingCounts(decl, config.Default(), nil, true)
+	if got, ok := perComponent["svc"][golang.GateGosec]; !ok || got != 0 {
+		t.Errorf("gosec = %d (present %v), want a recorded nought for a clean scan", got, ok)
+	}
+	if got, ok := root[semgrep.Gate]; !ok || got != 0 {
+		t.Errorf("semgrep = %d (present %v), want a recorded nought for a clean scan", got, ok)
+	}
+}
+
+// A root-scoped claim is recorded even when the gate that makes them is
+// switched off, rather than panicking on a map the configuration said would
+// never be needed.
+//
+// Semgrep off means scan runs it over nothing, so this is the shape no run
+// produces — which is exactly why the map has to be created on demand: a count
+// arriving for a gate the configuration did not expect must be recorded, and a
+// write to a nil map is a crash in the one job holding a token that can push.
+func TestARootScopedClaimIsRecordedWithItsGateSwitchedOff(t *testing.T) {
+	cfg := config.Default()
+	cfg.Semgrep.Enabled = false
+	_, root := findingCounts(component.File{}, cfg, []finding.Finding{{
+		Gate: semgrep.Gate, Path: "svc/lib.go", Line: 2, Message: "tainted input",
+		Site: "rule\x1fn + 1",
+	}}, true)
+	if got := root[semgrep.Gate]; got != 1 {
+		t.Errorf("semgrep = %d, want the claim recorded rather than dropped or panicked on", got)
+	}
+}
+
+// A report directory holding measurements and no scan says nothing about a scan.
+//
+// The detail line is where a reader is told something went wrong, so a missing
+// scan document reported there would put "no such file" under every shard of
+// every recording — which is how a detail line stops being read.
+func TestAReportDirectoryWithNoScanDocumentSaysNothingAboutOne(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMeasurements(root, measurementsDoc{Tree: "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := reportsDir(root)
+
+	rep := ui.NewReport("record")
+	read := readReports(rep, []string{dir})
+
+	if len(read.docs) != 1 || read.scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want the measurements alone", len(read.docs), read.scanned)
+	}
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context row", rows)
+	}
+	if len(rows[0].Detail) != 0 {
+		t.Errorf("read row detail = %v, want nothing said about a scan document that was never written", rows[0].Detail)
+	}
+}
+
+// A document that is there and will not parse is reported, and never read as
+// one that was never written.
+//
+// The two are opposite answers. An absent document is the shape of a job that
+// writes the other one, and says nothing a reader must act on; a document that
+// cannot be read is a measurement or a set of counts this recording was meant
+// to hold and silently does not.
+func TestADocumentThatWillNotParseIsReportedRatherThanReadAsAbsent(t *testing.T) {
+	// Measurements beside a scan that will not parse: the directory still
+	// yields its components, so the row is context and the reason travels in
+	// its detail rather than being the whole of it.
+	root := t.TempDir()
+	if err := writeMeasurements(root, measurementsDoc{Tree: "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := reportsDir(root)
+	if err := os.WriteFile(filepath.Join(dir, documentName("scan")), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := ui.NewReport("record")
+	read := readReports(rep, []string{dir})
+
+	if read.scanned {
+		t.Error("a scan document that could not be read was counted as a scan that ran")
+	}
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context row — the measurements were still folded", rows)
+	}
+	if len(rows[0].Detail) == 0 {
+		t.Error("a scan document that could not be read was reported as though none was written")
+	}
+
+	// And neither document readable: the row is amber, and every reason
+	// reaches it.
+	both := t.TempDir()
+	for _, name := range []string{measurementsName, documentName("scan")} {
+		if err := os.WriteFile(filepath.Join(both, name), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep = ui.NewReport("record")
+	read = readReports(rep, []string{both})
+	if len(read.docs) != 0 || read.scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want nothing from two unreadable documents",
+			len(read.docs), read.scanned)
+	}
+	rows = rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one amber row", rows)
+	}
+	if len(rows[0].Detail) != 2 {
+		t.Errorf("the row carries %v, want both documents' reasons", rows[0].Detail)
+	}
+}
+
+// A component with no language, and one whose language is switched off, record
+// no finding count.
+//
+// Neither has a gate that applies, so a nought for either would say a scanner
+// looked at code lydite never offered it — a component declaring its own
+// command implies no language at all, and `enabled: false` is the repository
+// saying that language's checks do not run.
+func TestAComponentWithNoApplicableGateRecordsNoCount(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "raw", Dir: "raw", Command: []string{"make", "check"}},
+		{Name: "api", Dir: "api", Runner: "go-test"},
+	}}
+	cfg := config.Default()
+	cfg.Go.Enabled = false
+	cfg.Semgrep.Enabled = false
+
+	perComponent, root := findingCounts(decl, cfg, nil, true)
+
+	if len(perComponent) != 0 {
+		t.Errorf("findingCounts = %v, want no component recorded: one declares its own command and the other's language is off", perComponent)
+	}
+	if len(root) != 0 {
+		t.Errorf("root = %v, want nothing for a scan whose only root-scoped gate is off", root)
+	}
+}
+
+// A recording refuses a declaration or a configuration it cannot read, before
+// it reads a document.
+//
+// Both say what may be recorded — which components a complete baseline covers,
+// and which of this tree's languages are checked at all — so a recording that
+// proceeded without them would decide those questions from the documents whose
+// completeness is in question.
+func TestARecordingRefusesADeclarationOrConfigurationItCannotRead(t *testing.T) {
+	broken := t.TempDir()
+	write(t, broken, component.FileName, "components: [unclosed\n")
+	if out, _, err := runRecordCmd(t, broken, "--json"); err == nil {
+		t.Errorf("a declaration that will not parse was recorded against: %s", out)
+	}
+
+	badConfig := t.TempDir()
+	write(t, badConfig, component.FileName, "components:\n  - name: api\n    dir: api\n    runner: go-test\n")
+	write(t, badConfig, config.FileName, "go: [unclosed\n")
+	if out, _, err := runRecordCmd(t, badConfig, "--json"); err == nil {
+		t.Errorf("a configuration that will not parse was recorded against: %s", out)
 	}
 }

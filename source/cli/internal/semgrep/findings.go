@@ -62,7 +62,7 @@ func findings(dir string, rep report) []finding.Finding {
 			end = r.End.Line
 		}
 		out = append(out, finding.Finding{
-			Gate:     "semgrep",
+			Gate:     Gate,
 			Path:     path,
 			Line:     r.Start.Line,
 			EndLine:  end,
@@ -138,14 +138,14 @@ func withFindings(ctx context.Context, dir string, args []string) executil.Resul
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a bare Err renders as `✗ semgrep` with the
 		// cause in neither the terminal nor --json.
-		return executil.Result{Name: "semgrep", Err: err, Detail: err.Error()}
+		return executil.Result{Name: Gate, Err: err, Detail: err.Error()}
 	}
 	outPath := out.Name()
 	_ = out.Close()
 	defer func() { _ = os.Remove(outPath) }()
 
 	r := executil.Run(ctx, dir, "semgrep", reportArgs(args, outPath)...)
-	r.Name = "semgrep"
+	r.Name = Gate
 
 	data, readErr := os.ReadFile(outPath) // #nosec G304 -- outPath is our own CreateTemp result, not user input
 	if readErr != nil {

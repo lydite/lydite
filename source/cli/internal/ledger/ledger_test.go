@@ -161,8 +161,10 @@ func TestARecordIsFoundInALaterPartOfTheSameMonth(t *testing.T) {
 func TestTheProjectionKeepsTheLastRecordOfEachDay(t *testing.T) {
 	root := t.TempDir()
 	morning := entry("a", "", "main", "2026-03-15T08:00:00Z")
+	morning.RootFindings = map[string]int{"semgrep": 5}
 	evening := entry("b", "a", "main", "2026-03-15T20:00:00Z")
 	evening.Components = map[string]Component{"cli": {Coverage: &Lines{Covered: 9, Total: 10}}}
+	evening.RootFindings = map[string]int{"semgrep": 2}
 	next := entry("c", "b", "main", "2026-03-16T09:00:00Z")
 	if _, _, err := Append(root, []Record{morning, evening, next}); err != nil {
 		t.Fatalf("Append: %v", err)
@@ -177,6 +179,12 @@ func TestTheProjectionKeepsTheLastRecordOfEachDay(t *testing.T) {
 	if rows[0].Components["cli"].Coverage.Covered != 9 {
 		t.Errorf("the first day kept %+v, want the evening record's coverage", rows[0].Components["cli"].Coverage)
 	}
+	// The root-scoped counts travel with the components, because they are
+	// what the dashboard reads and a scalar the rollup drops is one no chart
+	// can draw without walking every partition.
+	if got := rows[0].RootFindings["semgrep"]; got != 2 {
+		t.Errorf("the first day kept semgrep = %d, want the evening record's 2", got)
+	}
 }
 
 // A recording that arrives out of order must not overwrite a newer one with an
@@ -185,10 +193,14 @@ func TestTheProjectionKeepsTheLastRecordOfEachDay(t *testing.T) {
 // happened to finish.
 func TestALaterRecordIsNotOverwrittenByAnEarlierOne(t *testing.T) {
 	root := t.TempDir()
-	if _, _, err := Append(root, []Record{entry("b", "a", "main", "2026-03-15T20:00:00Z")}); err != nil {
+	later := entry("b", "a", "main", "2026-03-15T20:00:00Z")
+	later.RootFindings = map[string]int{"semgrep": 2}
+	earlier := entry("a", "", "main", "2026-03-15T08:00:00Z")
+	earlier.RootFindings = map[string]int{"semgrep": 5}
+	if _, _, err := Append(root, []Record{later}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if _, _, err := Append(root, []Record{entry("a", "", "main", "2026-03-15T08:00:00Z")}); err != nil {
+	if _, _, err := Append(root, []Record{earlier}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	rows := readRollupOrFail(t, root, "history/v1/daily/main/2026.ndjson")
@@ -197,6 +209,12 @@ func TestALaterRecordIsNotOverwrittenByAnEarlierOne(t *testing.T) {
 	}
 	if rows[0].Entries != 2 {
 		t.Errorf("the day counted %d entries, want both", rows[0].Entries)
+	}
+	// Every field the row carries, and not only the commit it is named by: a
+	// scalar written outside the ordering check is one an out-of-order job
+	// overwrites with an older commit's number while the name stays right.
+	if got := rows[0].RootFindings["semgrep"]; got != 2 {
+		t.Errorf("the day's row kept semgrep = %d, want the later record's 2", got)
 	}
 }
 

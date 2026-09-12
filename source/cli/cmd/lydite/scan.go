@@ -272,6 +272,27 @@ func langEnabled(l runner.Lang, cfg config.Config) bool {
 	return false
 }
 
+// scannerGates is the gates a language's checks report their findings under,
+// which is what makes a count of nought distinguishable from a gate that never
+// applied to a component at all.
+//
+// Each language package names its own, so the set cannot drift from the checks
+// that package runs. Derived from the language rather than from the rows a scan
+// wrote, for the reason internal/finding exists at all: a row's label is prose
+// — `gosec(cli)` — and reading a gate and a component back out of it is the
+// text-scraping the findings channel was built to remove.
+func scannerGates(lang runner.Lang) []string {
+	switch lang {
+	case runner.Rust:
+		return rust.FindingGates()
+	case runner.TypeScript:
+		return typescript.FindingGates()
+	case runner.Go:
+		return golang.FindingGates()
+	}
+	return nil
+}
+
 // labelled attributes each of a component's results to the component that
 // produced them — `gosec(cli)`, `cargo clippy(api)` — in the row's name and in
 // every located claim beneath it.

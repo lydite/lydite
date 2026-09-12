@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -11,9 +12,11 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/ui"
 )
 
@@ -96,15 +99,32 @@ cannot be recorded anywhere but where it was taken.`,
 // they must not be recorded. An error is reserved for not reaching one at all
 // — an unreadable directory, a checkout with no tree.
 func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, branch string, reports []string) error {
-	docs, err := measurementsIn(rep, reports)
+	// Read from the tree being recorded and never from the documents: the
+	// declaration says which components a complete baseline must cover and
+	// which gates each one's language implies, and taking either from the
+	// documents whose completeness is in question would make the check answer
+	// itself.
+	decl, err := component.Load(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("reading %s: %w", component.FileName, err)
 	}
-	if len(docs) == 0 {
+	// The tolerance this tree accepts, and which of its languages are checked
+	// at all. Both are that tree's own statements about itself.
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", config.FileName, err)
+	}
+	read := readReports(rep, reports)
+	// A measurements document is required and a scan document is not, because
+	// only the first names the tree it describes. That name is what binds a
+	// recording to the checkout below, so a set of directories holding scans
+	// alone could be recorded against nothing and is refused here rather than
+	// filed against a commit this command would have had to guess at.
+	if len(read.docs) == 0 {
 		return errors.New("none of the named report directories holds a " + measurementsName +
 			"\n       a `lydite test` run writes one; a run with --no-coverage does not")
 	}
-	folded, err := foldMeasurements(docs)
+	folded, err := foldMeasurements(read.docs)
 	if err != nil {
 		return err
 	}
@@ -138,12 +158,17 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	// baseline — and the run whose suite went red, which establishes no
 	// baseline by construction, is exactly the one whose test counts a history
 	// most wants.
-	history, historyWhy := historyRecords(ctx, dir, branch, folded)
+
+	// How many claims each scanner gate made, which is the one scalar in a
+	// recording that comes from `lydite scan` rather than from `lydite test`.
+	perComponent, root := findingCounts(decl, cfg, read.found, read.scanned)
+
+	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root)
 
 	// What may be recorded as a baseline, and the row that says why when
 	// nothing may. An empty snapshot is a legitimate answer here, and is what
 	// lets a refusal and an append land through the one write below.
-	record, verdict, err := baselineToRecord(ctx, dir, folded, head)
+	record, verdict, err := baselineToRecord(ctx, dir, decl, cfg, folded, head)
 	if err != nil {
 		return err
 	}
@@ -206,7 +231,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 // It writes nothing. Whether there is a baseline to land and whether there is
 // history to append are separate questions with separate answers, and the one
 // write below is what makes them one commit.
-func baselineToRecord(ctx context.Context, dir string, folded measurementsDoc, head string) (gitstate.Snapshot, ui.Row, error) {
+func baselineToRecord(ctx context.Context, dir string, decl component.File, cfg config.Config, folded measurementsDoc, head string) (gitstate.Snapshot, ui.Row, error) {
 	if len(folded.Components) == 0 {
 		// A fold with no component may still hold test counts: a run whose
 		// every suite failed establishes no baseline by construction and knows
@@ -222,14 +247,6 @@ func baselineToRecord(ctx context.Context, dir string, folded measurementsDoc, h
 			Value: "nothing to record", Detail: []string{folded.Reason}}, nil
 	}
 
-	// Read from the tree being recorded, never from the fold: the
-	// declaration says which components a complete baseline must cover, and
-	// taking that from the same document whose completeness is in question
-	// would make the check answer itself.
-	decl, err := component.Load(dir)
-	if err != nil {
-		return gitstate.Snapshot{}, ui.Row{}, fmt.Errorf("reading %s: %w", component.FileName, err)
-	}
 	if gap, blocked := missingFromRecord(decl, folded); blocked {
 		return gitstate.Snapshot{}, ui.Row{Status: ui.StatusFail, Label: "record",
 			Value: fmt.Sprintf("not recorded — %s has no entry, and a baseline missing a component gates on nothing", gap),
@@ -244,13 +261,6 @@ func baselineToRecord(ctx context.Context, dir string, folded measurementsDoc, h
 	// ever measure again — the same thing an entry left behind by a deleted
 	// component is, and it is dropped for the same reason.
 	record := declaredOnly(decl, folded.snapshot())
-
-	// The tolerance is read from the tree being recorded, because it is that
-	// tree's own statement of how much measurement noise it accepts.
-	cfg, err := config.Load(dir)
-	if err != nil {
-		return gitstate.Snapshot{}, ui.Row{}, fmt.Errorf("reading %s: %w", config.FileName, err)
-	}
 
 	// Merged onto whatever this tree already holds, never skipped because it
 	// holds something: a re-run that measured more than the last one must not
@@ -300,7 +310,8 @@ func baselineToRecord(ctx context.Context, dir string, folded measurementsDoc, h
 // branch as fetched by the attempt that is about to write — a retry fetches a
 // branch a concurrent run may have advanced, and an answer computed once would
 // have that retry declare a gap the intervening run had just filled.
-func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc) (gitstate.Records, string) {
+func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc,
+	perComponent map[string]map[string]int, root map[string]int) (gitstate.Records, string) {
 	// A branch and never a guess. History is per branch, so a record filed
 	// under a branch this checkout is not on puts one line's points on
 	// another line, and nothing downstream can tell. The caller's own
@@ -315,8 +326,11 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 	// scalar is a record naming a commit and holding no number, which is a
 	// point on no line — and there is no reason to describe a commit nothing
 	// is going to be filed against.
-	components := historyComponents(folded)
-	if len(components) == 0 {
+	components := historyComponents(folded, perComponent)
+	// The root-scoped counts are a scalar of their own and keep a recording
+	// worth making on their own: a repository whose every suite was carried and
+	// whose scan found something still has a point to put on that line.
+	if len(components) == 0 && len(root) == 0 {
 		return nil, "no component produced a scalar"
 	}
 	head, err := gitstate.DescribeCommit(ctx, dir, "HEAD")
@@ -324,13 +338,14 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 		return nil, "this commit could not be described: " + err.Error()
 	}
 	entry := ledger.Record{
-		Kind:       ledger.KindEntry,
-		At:         head.At,
-		Commit:     head.SHA,
-		Parent:     head.Parent,
-		Tree:       head.Tree,
-		Branch:     branch,
-		Components: components,
+		Kind:         ledger.KindEntry,
+		At:           head.At,
+		Commit:       head.SHA,
+		Parent:       head.Parent,
+		Tree:         head.Tree,
+		Branch:       branch,
+		Components:   components,
+		RootFindings: root,
 	}
 	return func(worktree string) ([]ledger.Record, error) {
 		if gap, ok := gapBefore(ctx, dir, worktree, branch, head); ok {
@@ -395,7 +410,10 @@ func gapBefore(ctx context.Context, dir, worktree, branch string, head gitstate.
 // affected selection established that the change could not have touched it —
 // so a flat line is the true one, and dropping it would make the series vanish
 // and reappear with whatever a change happened to touch.
-func historyComponents(doc measurementsDoc) map[string]ledger.Component {
+//
+// The per-gate finding counts come in from the side, because they are measured
+// by `lydite scan` and not by the run that wrote these measurements.
+func historyComponents(doc measurementsDoc, perComponent map[string]map[string]int) map[string]ledger.Component {
 	out := map[string]ledger.Component{}
 	for name, m := range doc.Components {
 		c := ledger.Component{Producer: m.Producer}
@@ -416,10 +434,19 @@ func historyComponents(doc measurementsDoc) map[string]ledger.Component {
 		c.Tests = &counts
 		out[name] = c
 	}
+	// The finding counts reach a component the measurements never mention, and
+	// that is the point: a scan covers every declared component whatever the
+	// suites did, so a component whose tests were carried still has a finding
+	// series.
+	for name, gates := range perComponent {
+		c := out[name]
+		c.Findings = gates
+		out[name] = c
+	}
 	// A component holding no scalar at all contributes nothing but its name,
 	// which is a point on no line.
 	for name, c := range out {
-		if c.Coverage == nil && c.CRAP == nil && c.Tests == nil {
+		if c.Coverage == nil && c.CRAP == nil && c.Tests == nil && c.Findings == nil {
 			delete(out, name)
 		}
 	}
@@ -488,27 +515,163 @@ func sameSnapshot(a, b gitstate.Snapshot) bool {
 	return sameEntries(a.Coverage, b.Coverage) && sameEntries(a.CRAP, b.CRAP)
 }
 
-// measurementsIn reads one document per named directory, adding a row for each
-// so a folded recording says what it was folded from.
+// reportsRead is what a recording's report directories hold.
 //
-// A directory holding no measurements is named and skipped rather than failing
-// the command: a run with --no-coverage writes none, and a caller passing the
-// same directory list to `record` as to `publish` is doing something
-// reasonable.
-func measurementsIn(rep *ui.Report, reports []string) ([]measurementsDoc, error) {
-	var docs []measurementsDoc
+// Two documents and not one, because the two are written by different commands
+// in different jobs: `lydite test` writes what it measured, `lydite scan`
+// writes what it found, and a recording folds both. A directory holding only
+// one of them is the ordinary shape of each of those jobs rather than a
+// malfunction.
+type reportsRead struct {
+	// docs is every measurements document read, which is what the baseline and
+	// the tree binding are folded from.
+	docs []measurementsDoc
+	// found is every located claim the scan documents made.
+	found []finding.Finding
+	// scanned says that some directory held a readable scan document, which is
+	// what separates a gate that found nothing from a scan that never ran. A
+	// count of nought and no scan at all are the same empty list of findings,
+	// and only this tells them apart.
+	scanned bool
+}
+
+// readReports reads both documents out of each named directory, adding a row
+// for each so a folded recording says what it was folded from.
+//
+// A directory holding neither is named and skipped rather than failing the
+// command: a run with --no-coverage writes no measurements, and a caller
+// passing the same directory list to `record` as to `publish` is doing
+// something reasonable.
+//
+// One row per directory whatever it held, because the row answers "what came
+// out of here" and a directory that answers twice is one a reader has to add
+// up themselves.
+func readReports(rep *ui.Report, reports []string) reportsRead {
+	var out reportsRead
 	for _, dir := range reports {
-		doc, err := readMeasurements(dir)
-		if err != nil {
+		var held, detail []string
+
+		// A document that is simply not there says nothing a reader must act
+		// on: each of these jobs writes one of the two, so the other's absence
+		// is that job's shape rather than news. A document that is there and
+		// will not parse is the opposite, and is the only thing these branches
+		// report — a scan whose claims stay absent, or measurements that would
+		// have been folded, each with the reason nothing else would say.
+		doc, docErr := readMeasurements(dir)
+		switch {
+		case docErr == nil:
+			out.docs = append(out.docs, doc)
+			held = append(held, fmt.Sprintf("%d component(s) for %s", len(doc.Components), shortSHA(doc.Tree)))
+		case !errors.Is(docErr, os.ErrNotExist):
+			detail = append(detail, docErr.Error())
+		}
+
+		scan, scanErr := readDocument(documentPath(dir, "scan"))
+		switch {
+		case scanErr == nil:
+			out.found = append(out.found, scan.Findings...)
+			out.scanned = true
+			held = append(held, fmt.Sprintf("%d finding(s) from scan", len(scan.Findings)))
+		case !errors.Is(scanErr, os.ErrNotExist):
+			detail = append(detail, scanErr.Error())
+		}
+
+		if len(held) == 0 {
+			// Nothing came out of this directory at all, so why is the whole of
+			// what the row has to say — a plain absence included. That is the
+			// one place it is worth reporting: a directory that held the other
+			// document is not missing anything, and this one is missing both.
+			if len(detail) == 0 {
+				detail = []string{docErr.Error()}
+			}
 			rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "read(" + dir + ")",
-				Value: "no measurements", Detail: []string{err.Error()}})
+				Value: "no measurements", Detail: detail})
 			continue
 		}
+		// Context and not amber. A directory holding a scan and no
+		// measurements is what the scan job uploads, and rendering the
+		// expected shape of a job as an amber row trains a reader to skip the
+		// tag that exists to be noticed.
 		rep.Add(ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
-			Value: fmt.Sprintf("%d component(s) for %s", len(doc.Components), shortSHA(doc.Tree))})
-		docs = append(docs, doc)
+			Value: strings.Join(held, ", "), Detail: detail})
 	}
-	return docs, nil
+	return out
+}
+
+// findingCounts is how many claims each scanner gate made: per component, and
+// over the repository for the gates that are root-scoped.
+//
+// The counts come from the scan documents and the GATE SET comes from the tree,
+// and that split is the whole of what makes the numbers readable. A clean gate
+// reports no findings at all, so a count on its own cannot tell a Go component
+// gosec found nothing in from one gosec never looked at — while the
+// declaration and the configuration together say exactly which gates each
+// component's language implies. A gate that applies records 0; one that does
+// not is not a key, which is ADR 0029's "absent is not zero" for a quantity a
+// single integer cannot express.
+//
+// Nothing at all is returned when no scan document was read. Every applicable
+// gate would otherwise record nought, which says the gate ran and found
+// nothing — the one thing a recording must not invent about a scan that never
+// happened.
+//
+// Two limits, both stated rather than worked around. A scanner that crashed —
+// a component that would not build — found no claims, so it records 0 like a
+// clean one; the red scan is in the document's rows and its verdict, and the
+// ledger holds scalars rather than verdicts. And two components over one
+// directory and environment are deliberately scanned once, under the first
+// one's name, so the other records 0 for gates that ran for its twin. Reading
+// the gate set from the scan's own rows would answer both and cost the thing
+// this channel exists for: the rows are prose, and `gosec(cli)` parsed back
+// into a gate and a component is the text-scraping findings-as-data removed.
+func findingCounts(decl component.File, cfg config.Config, found []finding.Finding, scanned bool) (map[string]map[string]int, map[string]int) {
+	if !scanned {
+		return nil, nil
+	}
+	perComponent := map[string]map[string]int{}
+	for _, c := range decl.Components {
+		lang := langOf(c)
+		// A component declaring its own command implies no language, and a
+		// language switched off in .lydite/config.yml is one whose checks
+		// never run. Neither has a gate that applies, so neither records a
+		// zero that would read as a clean scan.
+		if lang == "" || !langEnabled(lang, cfg) {
+			continue
+		}
+		gates := scannerGates(lang)
+		if len(gates) == 0 {
+			continue
+		}
+		counts := make(map[string]int, len(gates))
+		for _, gate := range gates {
+			counts[gate] = 0
+		}
+		perComponent[c.Name] = counts
+	}
+	var root map[string]int
+	if cfg.Semgrep.Enabled {
+		root = map[string]int{semgrep.Gate: 0}
+	}
+	for _, f := range found {
+		// A root-scoped claim names no component, and nothing here invents
+		// one: whichever component happens to contain the path is an
+		// ownership question the declaration does not answer.
+		if f.Component == "" {
+			if root == nil {
+				root = map[string]int{}
+			}
+			root[f.Gate]++
+			continue
+		}
+		// Bounded by the declaration, exactly as a baseline entry is: a claim
+		// naming a component the tree no longer declares is one nothing can
+		// ever measure again. The gate key is created rather than required,
+		// because a claim is itself proof that its gate ran.
+		if counts, ok := perComponent[f.Component]; ok {
+			counts[f.Gate]++
+		}
+	}
+	return perComponent, root
 }
 
 // missingFromRecord names a declared component the fold has no entry for.

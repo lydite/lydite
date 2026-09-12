@@ -67,7 +67,7 @@ func denyFindings(dir string, messages []denyMessage) []finding.Finding {
 		d := m.Fields
 		name, version := denySubject(d.Graphs)
 		out = append(out, finding.Finding{
-			Gate:     "cargo-deny",
+			Gate:     GateDeny,
 			Path:     cargoLockFile,
 			Line:     lock.Line(name, version),
 			Rule:     d.Code,
@@ -176,7 +176,7 @@ func denyArgv(asJSON bool) []string {
 // machine's own, and what is lydite's to get right is the invocation, which
 // denyArgv states and TestDenyArgvPutsFormatBeforeTheSubcommand asserts]
 func runDeny(ctx context.Context, dir string, env []string, bin string) executil.Result {
-	r := named("cargo-deny", executil.RunEnv(ctx, dir, env, bin, denyArgv(false)...))
+	r := named(GateDeny, executil.RunEnv(ctx, dir, env, bin, denyArgv(false)...))
 
 	// --format comes before the subcommand: cargo-deny declares it on the
 	// top-level command, and `check --format json` is rejected outright.

@@ -103,7 +103,7 @@ func govulncheckFindings(dir string, messages []govulncheckMessage) []finding.Fi
 		id, module := key[0], key[1]
 		f := richest[key]
 		out = append(out, finding.Finding{
-			Gate:     "govulncheck",
+			Gate:     GateGovulncheck,
 			Path:     goModFile,
 			Line:     mod.Line(module),
 			Rule:     id,
@@ -235,7 +235,7 @@ func govulncheckArgv(asJSON bool) []string {
 // TestGovulncheckArgvKeepsTheVerdictOnTheTextPass asserts]
 func runGovulncheck(ctx context.Context, dir string, env []string, bin string) executil.Result {
 	r := executil.RunEnv(ctx, dir, env, bin, govulncheckArgv(false)...)
-	r.Name = "govulncheck"
+	r.Name = GateGovulncheck
 
 	// RunQuiet, because this pass is data: streaming it would print the whole
 	// report a second time under the one the developer just read.
