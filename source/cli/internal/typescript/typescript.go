@@ -25,6 +25,20 @@ import (
 	"lydite/lydite/internal/executil"
 )
 
+// GateBiome is the gate this package reports under. A gate's name is the label
+// its row carries and the key its finding count is recorded under, so the two
+// are one constant rather than two literals that agree until one is edited.
+const GateBiome = "biome"
+
+// FindingGates is every gate here that reports its findings as data.
+//
+// It exists so a consumer can tell a gate that found nothing from one that
+// never applied: a clean run reports no findings at all, so the set of gates a
+// language implies is the only thing that makes a zero distinguishable from an
+// absence. A fresh slice per call, because a package-level one is a variable
+// every caller can edit.
+func FindingGates() []string { return []string{GateBiome} }
+
 // Check lints dir, with env on top of the caller's own environment — the
 // component's resolved Node toolchain.
 //
@@ -49,7 +63,7 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// failing row and nothing else, so a bare Err renders as `✗ biome`
 		// with the cause in neither the terminal nor --json — a toolchain
 		// that would not install, indistinguishable from lint findings.
-		return []executil.Result{{Name: "biome", Err: err, Detail: err.Error()}}
+		return []executil.Result{{Name: GateBiome, Err: err, Detail: err.Error()}}
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")

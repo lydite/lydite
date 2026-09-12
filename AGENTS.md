@@ -195,9 +195,12 @@ one.
 `lydite test record` also appends this commit's scalars to the quality-history ledger on the
 same branch, in the same commit — coverage, CRAP and test counts per component, with an
 explicit gap record whenever the commit before it was never recorded (see Quality history
-below). Mutation and finding counts are not yet collected, for the reasons ADR 0029 gives. The
-findings themselves travel as data beside the rows (see Findings), which is the whole of
-what a count and a per-finding history each need.
+below). A per-gate finding count rides with them, read out of the `scan.json` a `lydite scan`
+wrote: a gate that applies and found nothing records `0` and one that does not apply to the
+component's language records no key at all, while a root-scoped gate's count — Semgrep's — sits
+beside the components rather than inside one (ADR 0033). Mutation counts are not collected, for
+the structural reason ADR 0029 gives. The findings themselves travel as data beside the rows
+(see Findings), which is the whole of what a per-finding history needs.
 The dashboard that reads it is a later slice; `source/web/` is still empty.
 
 `lydite coverage` is **removed**, and so are `coverage.source`, `coverage.{go,rust}.report`,

@@ -21,6 +21,15 @@ import (
 // exactly as documented if invoked directly outside of lydite too.
 const AppTokenEnv = "SEMGREP_APP_TOKEN" // #nosec G101 -- this is an env var NAME, not a credential value
 
+// Gate is the gate this package reports under. A gate's name is the label its
+// row carries and the key its finding count is recorded under, so the two are
+// one constant rather than two literals that agree until one is edited.
+//
+// It is root-scoped: Semgrep runs once over the whole scan root rather than
+// once per component, so its claims name no component and its count belongs to
+// the repository rather than to any one of them.
+const Gate = "semgrep"
+
 // Check runs Semgrep against dir using the given ruleset config (e.g. "auto",
 // or a custom registry ref/path from .lydite/config.yml), failing on any finding.
 //
@@ -77,13 +86,13 @@ func ensure(ctx context.Context) executil.Result {
 	if executil.Available("semgrep") {
 		v := executil.Run(ctx, "", "semgrep", "--version")
 		if v.Ok() && strings.TrimSpace(v.Output) == version {
-			return executil.Result{Name: "semgrep"}
+			return executil.Result{Name: Gate}
 		}
 	}
 	r := executil.Run(ctx, "", "pipx", "install", "--force", "semgrep=="+version)
 	// Override Name: executil.Run sets it to the literal binary invoked
 	// ("pipx"), but a failure here means the Semgrep check itself never ran —
 	// report() should say so, not "pipx".
-	r.Name = "semgrep"
+	r.Name = Gate
 	return r
 }

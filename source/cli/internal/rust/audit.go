@@ -79,7 +79,7 @@ func auditFinding(lock *cargoLock, v auditVulnerability, severity string) findin
 		detail = append(detail, v.Advisory.URL)
 	}
 	return finding.Finding{
-		Gate:     "cargo-audit",
+		Gate:     GateAudit,
 		Path:     cargoLockFile,
 		Line:     lock.Line(name, version),
 		Rule:     v.Advisory.ID,
@@ -141,7 +141,7 @@ func auditArgv(asJSON bool) []string {
 // machine's own, and what is lydite's to get right is the invocation, which
 // auditArgv states and TestAuditArgvKeepsTheHumanPass asserts]
 func runAudit(ctx context.Context, dir string, env []string, bin string) executil.Result {
-	r := named("cargo-audit", executil.RunEnv(ctx, dir, env, bin, auditArgv(false)...))
+	r := named(GateAudit, executil.RunEnv(ctx, dir, env, bin, auditArgv(false)...))
 
 	data := executil.RunQuietEnv(ctx, dir, env, bin, auditArgv(true)...)
 	report, ok := parseAudit([]byte(data.Output))

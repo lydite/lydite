@@ -58,10 +58,19 @@ job running `--affected --component <slice>` under the same read-only token — 
 the same conflict closure whichever command consumes it, and mutation shares a checkout with the
 coverage gate and not a compilation. `lydite-baseline.yml` is `plan` → `measure` (the same matrix without `--affected`, since
 ADR 0016 requires the default-branch run to be complete) → one `record` job, which is the only job
-in either workflow granted `contents: write` and runs nothing from the repository. Each shard
-uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`: `publish`
-reads the latter, and a shard's document rendered as a `test` section of its own would put one
-section per shard under one heading, each answering about part of the repository.
+in either workflow granted `contents: write` and runs nothing from the repository. A `scan` job runs
+beside the matrix and feeds the same `record`: a finding count is one of the history's scalars and
+nothing else in that workflow produces one. It passes **no** `--diff-base`, because on the default
+branch there is no change to scope to — so it covers the whole repository, every claim lands
+unanchorable, and the count is the standing total rather than what one change introduced. That is
+also why it is the one lydite job needing no `fetch-depth: 0`: since ADR 0032 a base is resolved
+whenever `--diff-base` is given, and this job gives none.
+
+Each shard uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`:
+`publish` reads the latter, and a shard's document rendered as a `test` section of its own would put
+one section per shard under one heading, each answering about part of the repository. The baseline
+scan uploads under `lydite-scan-repository` for the mirror-image reason — it is not a shard, and
+`record` downloads both patterns into one directory so the fold walks them together.
 
 `ci-end2end.yml`'s `proving ground — coverage gate` job is what holds all of that to a real
 repository: the plan, a baseline miss measured in a throwaway worktree, the recording, three shards

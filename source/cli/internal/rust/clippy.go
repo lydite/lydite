@@ -89,7 +89,7 @@ func clippyFindings(dir string, messages []clippyMessage) []finding.Finding {
 		}
 		seen[key] = true
 		out = append(out, finding.Finding{
-			Gate:     "cargo clippy",
+			Gate:     GateClippy,
 			Path:     path,
 			Line:     span.LineStart,
 			EndLine:  clippyEnd(span),
@@ -183,7 +183,7 @@ func clippyArgv(asJSON bool) []string {
 // rather than lydite's invocation, which clippyArgv states and
 // TestClippyArgvIsTwoPassesOverTheSameLints asserts]
 func runClippy(ctx context.Context, dir string, env []string) executil.Result {
-	r := named("cargo clippy", executil.RunEnv(ctx, dir, env, "cargo", clippyArgv(false)...))
+	r := named(GateClippy, executil.RunEnv(ctx, dir, env, "cargo", clippyArgv(false)...))
 
 	// RunQuiet, because this pass is data: streaming it would print the whole
 	// report a second time, as JSON, under the one the developer just read.

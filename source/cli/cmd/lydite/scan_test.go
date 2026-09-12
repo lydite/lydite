@@ -17,10 +17,13 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
+	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
 )
 
@@ -960,5 +963,41 @@ func TestAScanOverAWholeRepositoryAnchorsNothing(t *testing.T) {
 		if f.Anchor != finding.AnchorNowhere {
 			t.Errorf("anchor = %q, want the claim unanchorable", f.Anchor)
 		}
+	}
+}
+
+// Each language names the gates its checks report findings under, and a
+// language lydite runs no check for names none.
+//
+// The set is what makes a recorded nought mean "this gate found nothing" rather
+// than "this gate never looked", so a language gaining a scanner that does not
+// reach this list records a permanent nought for a check that is running.
+func TestEachLanguageNamesTheGatesThatReportItsFindings(t *testing.T) {
+	for _, tc := range []struct {
+		lang runner.Lang
+		want []string
+	}{
+		{runner.Go, []string{golang.GateGosec, golang.GateGovulncheck}},
+		{runner.Rust, []string{rust.GateClippy, rust.GateAudit, rust.GateDeny}},
+		{runner.TypeScript, []string{typescript.GateBiome}},
+	} {
+		got := scannerGates(tc.lang)
+		for _, gate := range tc.want {
+			if !slices.Contains(got, gate) {
+				t.Errorf("%s names %v, want it to include %s", tc.lang, got, gate)
+			}
+		}
+	}
+	// cargo fmt is excluded on purpose. lydite is not a formatter, so a
+	// formatting diff is never a finding — and a gate named here with no
+	// parser behind it records a nought on every commit as though it had
+	// looked.
+	if got := scannerGates(runner.Rust); slices.Contains(got, rust.GateFmt) {
+		t.Errorf("rust names %v, want cargo fmt left out: lydite reports no formatting diff as a finding", got)
+	}
+	// A language lydite checks nothing for. Its components record no count at
+	// all, which is the honest answer rather than a nought.
+	if got := scannerGates(runner.Lang("cobol")); got != nil {
+		t.Errorf("an unchecked language names %v, want nothing", got)
 	}
 }

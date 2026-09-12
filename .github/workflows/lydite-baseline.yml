@@ -1,7 +1,7 @@
 # lydite-baseline — this file is yours.
 #
-# Records this repository's per-component coverage on the `lydite` branch,
-# after a change has merged.
+# Records this repository's per-component coverage and quality history on the
+# `lydite` branch, after a change has merged.
 #
 # It exists because recording needs `contents: write` and measuring needs to run
 # the repository's own test suite, and those two must not be the same job on a
@@ -21,6 +21,11 @@
 # so the numbers it emits are the branch's to choose, and `lydite test record`
 # verifies no number. What makes this workflow safe is where it runs, not which
 # command it uses. See lydite/lydite#49 and docs/adr/0025.
+#
+# A scan job runs beside the matrix, because a finding count is a scalar the
+# history holds and nothing else in this workflow produces one. It is not a
+# shard and uploads its reports under its own prefix; `record` downloads both
+# and folds them together.
 #
 # It shards the way `lydite-pr.yml` does — `plan` groups the components,
 # a matrix runs them, and one `record` folds every shard's measurements. No
@@ -178,15 +183,54 @@ jobs:
           name: ${{ matrix.shard.name }}
           prefix: lydite-shard
 
+  # What the repository's standing findings are, so the quality history holds a
+  # finding count beside the coverage, CRAP and test counts. `record` reads the
+  # scan document out of this job's report directory.
+  #
+  # It mirrors lydite-pr.yml's scan job with one deliberate difference: no
+  # --diff-base. On the default branch there is no change to scope to, so this
+  # covers the whole repository, every claim lands unanchorable, and the count
+  # is the repository's standing total rather than what one change introduced.
+  #
+  # And therefore no fetch-depth: 0. A scan resolves a base only when
+  # --diff-base is given — since ADR 0032 that resolution happens for the
+  # anchor as well as for Semgrep, so a consumer passing --diff-base auto needs
+  # the full history whether Semgrep is on or off. This job passes none, so it
+  # needs none.
+  scan:
+    name: scan
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/lydite-binary
+
+      # From the repository root, which is the scan root .lydite/ sits at.
+      - name: lydite scan
+        run: lydite scan --dir .
+
+      # Under its own prefix, because this is not a shard: `record` downloads
+      # the shards by pattern, and an artifact that matched theirs would be
+      # folded as a measurement directory it is not.
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: repository
+          prefix: lydite-scan
+
   record:
     name: record coverage baseline
-    needs: [setup, plan, measure]
-    # It runs even when a shard failed. A gate that says nothing about coverage
-    # — orphans, watch, schedule — would otherwise discard a complete set of
-    # measurements, and no later run records this tree, because the next push
-    # carries a different one. `record` refuses a fold that is partial, names
-    # another tree, or was never written, so the worst an unconditional run
-    # does is say so.
+    needs: [setup, plan, measure, scan]
+    # It runs even when a shard failed, and even when the scan went red. A gate
+    # that says nothing about coverage — orphans, watch, schedule — would
+    # otherwise discard a complete set of measurements, and no later run records
+    # this tree, because the next push carries a different one. A red scan on
+    # the default branch is the most interesting thing a finding history can
+    # hold, for exactly the same reason: the hole it would leave is permanent.
+    # `record` refuses a fold that is partial, names another tree, or was never
+    # written, so the worst an unconditional run does is say so.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -208,6 +252,14 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: lydite-shard-*
+          path: shards
+
+      # Into the same directory, so the loop below hands it to `record` as one
+      # more --reports. It holds a scan document and no measurements, which is
+      # the shape `record` folds a finding count out of.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-scan-*
           path: shards
 
       # One write after the fold, never one per shard: N pushes racing one

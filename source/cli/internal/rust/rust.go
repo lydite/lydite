@@ -28,6 +28,30 @@ import (
 	"lydite/lydite/internal/executil"
 )
 
+// The gates this package reports under. A gate's name is the label its row
+// carries and the key its finding count is recorded under, so the two are one
+// constant rather than two literals that agree until one is edited.
+const (
+	GateFmt    = "cargo fmt"
+	GateClippy = "cargo clippy"
+	GateAudit  = "cargo-audit"
+	GateDeny   = "cargo-deny"
+)
+
+// FindingGates is every gate here that reports its findings as data.
+//
+// It exists so a consumer can tell a gate that found nothing from one that
+// never applied: a clean run reports no findings at all, so the set of gates a
+// language implies is the only thing that makes a zero distinguishable from an
+// absence. A fresh slice per call, because a package-level one is a variable
+// every caller can edit.
+//
+// GateFmt is not among them, and must not be: lydite is not a formatter, so a
+// formatting diff is never a finding, and a gate listed here with no parser
+// behind it would record nought findings on every commit as though it had
+// looked.
+func FindingGates() []string { return []string{GateClippy, GateAudit, GateDeny} }
+
 // Check runs every Rust check in dir, with env on top of the caller's own
 // environment — the component's resolved toolchain, which is what decides
 // which cargo these commands find.
@@ -40,7 +64,7 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 	// report a formatting diff as a finding, so the row stays the whole of
 	// what this check says.
 	results := []executil.Result{
-		named("cargo fmt", executil.RunEnv(ctx, dir, env.Check, "cargo", "fmt", "--check")),
+		named(GateFmt, executil.RunEnv(ctx, dir, env.Check, "cargo", "fmt", "--check")),
 		runClippy(ctx, dir, env.Check),
 	}
 
@@ -48,13 +72,13 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ cargo-audit` with the cause nowhere in the report.
-		results = append(results, executil.Result{Name: "cargo-audit", Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateAudit, Err: err, Detail: err.Error()})
 	} else {
 		results = append(results, runAudit(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, "cargo-deny", cargoDenyVersion); err != nil {
-		results = append(results, executil.Result{Name: "cargo-deny", Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateDeny, Err: err, Detail: err.Error()})
 	} else {
 		results = append(results, runDeny(ctx, dir, env.Check, bin))
 	}

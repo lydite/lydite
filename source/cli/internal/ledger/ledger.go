@@ -165,6 +165,21 @@ type Record struct {
 	// these and are deliberately not stored beside them: two quantities that
 	// must agree are two quantities free to disagree.
 	Components map[string]Component `json:"components,omitempty"`
+	// RootFindings is how many claims each ROOT-SCOPED gate made, by gate
+	// name — a check that runs over the repository rather than over a
+	// component, which is Semgrep.
+	//
+	// Beside Components rather than inside one, because a root-scoped claim
+	// names no component and nothing may invent one for it: attributing
+	// Semgrep's finding in a path to whichever component happens to contain
+	// that path would be this package deciding an ownership question the
+	// declaration does not answer, and a finding outside every component
+	// would have nowhere to go at all.
+	//
+	// It is not a sum over Components and must never be read as one. The
+	// repository-wide figures ARE sums nobody stores; this is a different
+	// measurement, taken once over the whole tree.
+	RootFindings map[string]int `json:"root_findings,omitempty"`
 	// Gap says how wide the break before this record is, and is set only on a
 	// gap record.
 	Gap *Gap `json:"gap,omitempty"`
@@ -172,11 +187,12 @@ type Record struct {
 
 // Component is one component's scalars for one commit.
 //
-// Every metric is a pointer, so absent and zero are different answers. They
-// have to be: a component with no function above the CRAP threshold records
-// zero, and one lydite computes no score for records nothing — and a series
-// that read the second as the first would draw a clean line through a metric
-// nobody measured.
+// Every metric is a pointer, and every per-gate count a key that may be
+// missing, so absent and zero are different answers. They have to be: a
+// component with no function above the CRAP threshold records zero, and one
+// lydite computes no score for records nothing — and a series that read the
+// second as the first would draw a clean line through a metric nobody
+// measured.
 type Component struct {
 	// Coverage is the component's line counts.
 	Coverage *Lines `json:"coverage,omitempty"`
@@ -185,6 +201,23 @@ type Component struct {
 	CRAP *CRAP `json:"crap,omitempty"`
 	// Tests is what became of its suite's tests.
 	Tests *junit.Counts `json:"tests,omitempty"`
+	// Findings is how many located claims each scanner gate made about this
+	// component, by gate name.
+	//
+	// Per gate rather than one total, because a total cannot answer which
+	// scanner moved — the same reason the scalars are per component rather
+	// than per repository — and because absent and zero have to be different
+	// answers here in a way one integer cannot express: a gate that ran and
+	// found nothing records 0, while a gate that does not apply to this
+	// component's language is not a key at all. A series that read the second
+	// as the first would draw a clean line through a scanner that never ran.
+	//
+	// Scanner gates only. CRAP is already counted by CRAP.Above, and
+	// recording it again here would make two quantities that must agree into
+	// two quantities free to disagree; patch coverage is likewise the
+	// PatchPercent the coverage counts already carry. Mutation is absent for
+	// the structural reason docs/adr/0029 gives.
+	Findings map[string]int `json:"findings,omitempty"`
 	// Producer names the instrument that measured the coverage, for the
 	// reason a baseline entry carries one: a runner or provider bump changes
 	// what a line is, so a step in the line is a change of definition rather
@@ -463,6 +496,7 @@ func project(root string, rec Record) (string, error) {
 	// order does not overwrite a newer one with an older commit's numbers.
 	if rec.Kind == KindEntry && !rec.At.Before(row.At) {
 		row.At, row.Commit, row.Components = rec.At, rec.Commit, rec.Components
+		row.RootFindings = rec.RootFindings
 	}
 	rows[i] = row
 	// By day, ascending, through the standard library's own ordering: a file
@@ -498,6 +532,11 @@ type Rollup struct {
 	At         time.Time            `json:"at"`
 	Commit     string               `json:"commit,omitempty"`
 	Components map[string]Component `json:"components,omitempty"`
+	// RootFindings is that entry's root-scoped counts, carried here for the
+	// same reason Components is: the projection is what the dashboard reads,
+	// and a scalar the rollup drops is one no chart can draw without walking
+	// every partition.
+	RootFindings map[string]int `json:"root_findings,omitempty"`
 	// Entries and Gaps are how many records the day held, so a downsampled
 	// row still says how much it is standing in for.
 	Entries int `json:"entries"`

@@ -33,6 +33,12 @@ argument that keeps `review`'s verdict reaching the comment through its document
 being rendered twice. **Findings never vote**: the rows hold the verdict, and a gate that
 already failed a row would otherwise be counted twice.
 
+**A count of them is a scalar the quality history holds**, per gate and per component, read out of
+`scan.json` by `lydite test record` — see [quality-history.md](quality-history.md) and
+[ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md). Nothing else about a
+finding reaches the branch: the per-finding history that would need is additive and unbuilt, and
+every claim already carries the identity it would be keyed by.
+
 **The channel is a document key and deliberately not a sibling file.** `measurements.json` is
 the obvious precedent and it does not carry over: it has one writer, `lydite test`, while
 findings have three — `scan`, `test` and `mutation` — and a local run writes all three into one
