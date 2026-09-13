@@ -87,7 +87,8 @@ rename in ADR 0011 was for.
 
 The accepted cost is that `0.1.0` understates a scanner that has been hardening across six
 repositories for a long time. That is a presentation problem for the README, and it expires at
-1.0.0.
+1.0.0. The README must include a note near the install section stating that lydite was previously
+released as `wardnet/bulwark`, so that readers arriving at `0.1.0` understand the tool's history.
 
 `lydite/actions` still starts at `v1.0.0`. Its version denotes the action's input interface, which
 genuinely is stable — inherited unchanged from bulwark — and it is the ref consumers type. A `0.x`
