@@ -254,7 +254,7 @@ jobs:
           pattern: lydite-shard-*
           path: shards
 
-      # Into the same directory, so the loop below hands it to `record` as one
+      # Into the same directory, so the fold below hands it to `record` as one
       # more --reports. It holds a scan document and no measurements, which is
       # the shape `record` folds a finding count out of.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -276,13 +276,35 @@ jobs:
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
-          shopt -s nullglob
+          # Found by the documents rather than by the directory layout, because
+          # the layout is not ours to predict: actions/download-artifact gives
+          # an artifact its own subdirectory only when the pattern matched more
+          # than one, and extracts a lone match straight into `path`. There is
+          # exactly one scan job, so `lydite-scan-*` always matches once and
+          # always lands flat — putting `scan.json` where a `shards/*/` glob
+          # never looks and offering that glob the scan's own log directory
+          # instead. A fold that globs directories therefore reads a log
+          # directory, records no finding count, and stays green saying so.
+          #
+          # `record` needs the document, so the document is what is looked for.
+          # That is right whether an artifact extracted flat or nested, and it
+          # does not rest on a behaviour of the action that no test here covers.
+          # Depth 2 reaches both shapes and stops above the per-component
+          # directories, which hold logs and coverage reports rather than
+          # either of these documents.
           args=()
-          for dir in shards/*/; do
-            args+=(--reports "${dir%/}")
-          done
-          if [ "${#args[@]}" -eq 0 ]; then
-            echo "no shard uploaded a report directory; there is nothing to record" >&2
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find shards -maxdepth 2 \
+                     \( -name measurements.json -o -name scan.json \) \
+                     -exec dirname {} \; | sort -u)
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            echo "no shard uploaded a measurements or scan document; there is nothing to record" >&2
             exit 1
           fi
+          # Named out loud, because the whole defect this replaces was a fold
+          # reading a directory nobody meant it to and saying nothing.
+          printf 'folding %s\n' "${dirs[@]}"
           lydite test record --dir . --branch "$BRANCH" "${args[@]}"
