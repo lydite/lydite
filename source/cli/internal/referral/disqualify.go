@@ -113,12 +113,15 @@ const workflowDir = ".github/workflows"
 // rendering trick; this veto covers the rest of what the file can do.
 const gitAttributes = ".gitattributes"
 
-// gitleaksConfig and gitleaksIgnore are gitleaks' own suppression surfaces at
-// the scan root. lydite passes no --config, so gitleaks reads both from the
-// tree under review: an allowlist broad enough to match every path, or a
-// fingerprint an author has decided is not a secret, switches the gate off
-// exactly as removing a #nosec would — and neither is a token any one line
-// can be checked against, so the file itself is the veto.
+// gitleaksConfig and gitleaksIgnore are gitleaks' own suppression surfaces.
+// lydite passes no --config, so gitleaks discovers both at whatever
+// directory it is told to scan — matched by base name rather than a
+// repository-root path, the same way gitAttributes is, since the scan root
+// referral runs over is not always the repository root. An allowlist broad
+// enough to match every path, or a fingerprint an author has decided is not
+// a secret, switches the gate off exactly as removing a #nosec would — and
+// neither is a token any one line can be checked against, so the file
+// itself is the veto.
 const gitleaksConfig = ".gitleaks.toml"
 const gitleaksIgnore = ".gitleaksignore"
 
@@ -201,7 +204,7 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("lydite config edited", p, p)
 		case path.Base(p) == gitAttributes:
 			add("diff rendering edited", p, p)
-		case p == gitleaksConfig || p == gitleaksIgnore:
+		case path.Base(p) == gitleaksConfig || path.Base(p) == gitleaksIgnore:
 			add("secret-scan config edited", p, p)
 		case p == workflowDir || strings.HasPrefix(p, workflowDir+"/"):
 			add("CI workflow edited", p, p)

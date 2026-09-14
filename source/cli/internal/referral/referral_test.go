@@ -136,6 +136,20 @@ exemptions:
 			Change{Paths: []string{".gitleaksignore"}},
 			"secret-scan config edited",
 		},
+		{
+			// A scan rooted at a subdirectory has gitleaks discover its
+			// config there, not at the repository root — the same reason
+			// gitAttributes is matched by base name rather than a
+			// repository-root path.
+			"an edit to gitleaks' own allowlist under a scan root that is not the repository root",
+			Change{Paths: []string{"source/.gitleaks.toml"}},
+			"secret-scan config edited",
+		},
+		{
+			"an edit to gitleaks' own fingerprint ignore list under a scan root that is not the repository root",
+			Change{Paths: []string{"source/.gitleaksignore"}},
+			"secret-scan config edited",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
