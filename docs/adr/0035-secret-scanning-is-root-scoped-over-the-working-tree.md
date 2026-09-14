@@ -171,6 +171,13 @@ file are ordinals 0 and 1, so rotating the first re-identifies the second and it
 posted afresh. That is the fingerprint behaving as specified on a claim whose only honest
 distinguishing content may not be published.
 
+Cutting at the match's own start column protects a claim from its own secret and from a second
+flagged match sharing the line, but not from an assignment gitleaks' own rules never fired on —
+`export DB_PASSWORD=hunter2 API_TOKEN=<token>`, a DSN's password ahead of an `api_key` parameter.
+The prefix additionally drops everything up to and including the last run of eight or more
+value-shaped characters it contains, so an unflagged credential earlier on the line cannot ride
+along either. What survives is prose and punctuation, never something that reads as a value.
+
 **Rejected: gitleaks' own `Fingerprint`.** It is `file:rule:startline`, a line-keyed identity —
 the one thing `internal/finding` exists to not be.
 
@@ -224,6 +231,14 @@ id, and a diff of one is reviewable.
 is deliberately not passed. Adding one is a net-new suppression annotation and therefore a
 referral — which requires `gitleaks:allow` in `internal/referral`'s `suppressionMarkers`, without
 which the one opt-out this gate expects to see used most is the one that merges unattended.
+
+**Named and accepted: `.gitleaks.toml`'s own `[extend].path` is not a disqualifier.** gitleaks
+lets one config file extend another, and an edit to the extended file can widen an allowlist just
+as an edit to `.gitleaks.toml` itself can — but resolving `[extend].path` at referral time means
+parsing TOML and following a path lydite does not otherwise read, for a feature this repository's
+own `.gitleaks.toml` does not use. A repository that does extend its config is expected to name
+the extended file in its own `extra.Paths` disqualifiers (`.lydite/exemptions.yml`) until this
+gate's disqualifier resolves the reference itself.
 
 ## Consequences
 

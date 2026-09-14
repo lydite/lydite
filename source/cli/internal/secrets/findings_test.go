@@ -442,6 +442,27 @@ func TestAPrefixReadsTheLastLineOfAFileWithNoTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestASiteDropsAnEarlierAssignmentEvenWhenGitleaksDidNotFlagIt(t *testing.T) {
+	// Cutting at the earliest *flagged* match on a line only protects flagged
+	// matches from each other. A chained export, two docker -e flags or a DSN
+	// can carry a second, unflagged credential earlier on the same line —
+	// gitleaks' own entropy or pattern rules simply never fired on it — and
+	// that value is exactly as much a secret as the one gitleaks found.
+	dir := t.TempDir()
+	line := "export DB_PASSWORD=hunter2secret API_TOKEN=abcdef1234567890"
+	write(t, dir, "env.sh", line+"\n")
+	// The match starts at "API_TOKEN": one past its first byte, per gitleaks'
+	// own StartColumn convention.
+	col := strings.Index(line, "API_TOKEN") + 2
+	got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: "env.sh", StartLine: 1, StartColumn: col}})
+	if len(unplaced) != 0 || len(got) != 1 {
+		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+	}
+	if strings.Contains(got[0].Site, "hunter2secret") || strings.Contains(got[0].Site, "DB_PASSWORD") {
+		t.Errorf("site = %q, must not carry the earlier, unflagged assignment", got[0].Site)
+	}
+}
+
 func TestAPrefixIsBoundedAndNormalised(t *testing.T) {
 	dir := t.TempDir()
 	long := strings.Repeat("é", maxSiteRunes+50) + `key="secret"`

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -252,7 +253,28 @@ func (t *tree) prefix(path string, n, col int) string {
 		return ""
 	}
 	line := lines[n-1]
-	return clip(finding.Normalise(line[:prefixEnd(line, col)]))
+	return clip(finding.Normalise(trimEarlierValue(line[:prefixEnd(line, col)])))
+}
+
+// valueLike marks a run of characters shaped like a credential's own value —
+// hex, base64, a plain password — rather than surrounding code or prose.
+var valueLike = regexp.MustCompile(`[A-Za-z0-9+/_.=-]{8,}`)
+
+// trimEarlierValue drops everything up to and including the last value-shaped
+// run in cut.
+//
+// Cutting at the earliest match gitleaks flagged on a line only protects
+// flagged matches from each other. A line can also carry an assignment no
+// rule flagged — export DB_PASSWORD=hunter2 API_TOKEN=<token>, a DSN's own
+// password ahead of an api_key parameter — and that value is exactly as much
+// a secret as the one gitleaks found. Dropping it out of the prefix keeps
+// the promise the flagged match's own redaction already makes.
+func trimEarlierValue(cut string) string {
+	locs := valueLike.FindAllStringIndex(cut, -1)
+	if len(locs) == 0 {
+		return cut
+	}
+	return cut[locs[len(locs)-1][1]:]
 }
 
 func (t *tree) read(path string) []string {

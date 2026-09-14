@@ -42,9 +42,13 @@ Five properties are load-bearing and easy to weaken by accident:
   gutted, or renamed out of a test path, since `git mv foo_test.go foo_disabled.go` takes it
   out of the runner's view leaving nothing deleted and no hunk to read — an edit to
   any file under `.lydite/`, an edit to `.github/workflows/`, and an edit to
-  `.gitattributes`. gitleaks' own `.gitleaks.toml` and `.gitleaksignore` at the scan root join
-  that list too: neither is a token any one line can be checked against, so the file itself is
-  the veto. The suppression list carries the whole-file and whole-crate forms
+  `.gitattributes`. gitleaks' own `.gitleaks.toml` and `.gitleaksignore` join that list too,
+  matched by base name rather than a repository-root path since the scan root referral runs
+  over is not always the repository root: neither file is a token any one line can be checked
+  against, so the file itself is the veto. A `.gitleaks.toml` that itself extends another file
+  with `[extend].path` is a named, accepted gap — that reference is not resolved, so a
+  repository using it must name the extended file in its own `extra.Paths` (see ADR 0035). The
+  suppression list carries the whole-file and whole-crate forms
   (`#![allow(`, `#[expect(`, `@ts-nocheck`, `//nolint`, `//go:build ignore`) alongside the
   per-line ones — `gitleaks:allow` among them, clearing a secret finding outright — because the
   broad form is strictly more powerful than the narrow one it would
