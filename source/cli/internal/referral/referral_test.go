@@ -645,3 +645,22 @@ func TestGitleaksAllowIsASuppression(t *testing.T) {
 		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
 	}
 }
+
+// gitleaks reads its own inline allow with an unanchored match: it honours
+// "xgitleaks:allow" exactly as it honours "gitleaks:allow", because the
+// tool does not require the marker to start a word. A referral check that
+// required a word boundary here would accept a spelling gitleaks itself
+// still clears a finding for, and the credential the marker suppresses
+// would merge unattended.
+func TestGitleaksAllowDisqualifiesEvenWithAPrecedingIdentifierByte(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths: []string{"src/config.go"},
+		Added: []DiffLine{{Path: "src/config.go", Text: "\tkey := example // xgitleaks:allow"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Fatalf("got %+v, want one suppression added", d)
+	}
+	if !strings.Contains(d[0].Evidence, "gitleaks:allow") {
+		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
+	}
+}

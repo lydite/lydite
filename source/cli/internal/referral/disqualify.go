@@ -50,12 +50,6 @@ var suppressionTokens = []string{
 	// suppression means a change merges unread.
 	annotation.Prefix,
 	"#nosec",
-	// gitleaks' own inline allow. lydite deliberately does not pass
-	// --ignore-gitleaks-allow, so this comment clears a secret finding
-	// outright — and what it clears is an author asserting that a
-	// credential-shaped string is not a credential, which is checkable by
-	// nobody else.
-	"gitleaks:allow",
 	"//nolint",
 	"#[allow(",
 	"#![allow(",
@@ -66,6 +60,21 @@ var suppressionTokens = []string{
 	"@ts-ignore",
 	"@ts-expect-error",
 	"@ts-nocheck",
+}
+
+// substringSuppressionTokens are suppression markers whose own tool reads
+// them by plain substring, so a word boundary here would open exactly the
+// gap this package exists to close.
+//
+// gitleaks reads `gitleaks:allow` with an unanchored match: `# xgitleaks:allow`
+// clears a secret finding for gitleaks exactly as `# gitleaks:allow` does,
+// because gitleaks does not require the token to start a word. Checking it
+// with containsAny's word-boundary rule would let a change spell the marker
+// with a leading identifier character and merge unattended — the marker is
+// suppressing gitleaks's own reading of the line, not lydite's, so it is
+// lydite that has to match gitleaks's rule and not its own.
+var substringSuppressionTokens = []string{
+	"gitleaks:allow",
 }
 
 // skipTokens stop a test from running or from being counted.
@@ -157,6 +166,8 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 	for _, line := range ch.Added {
 		if tok, ok := containsAny(line.Text, suppressionTokens); ok {
 			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
+		} else if tok, ok := containsSubstring(line.Text, substringSuppressionTokens); ok {
+			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
 		}
 		if tok, ok := containsAny(line.Text, skipTokens); ok {
 			add("test disabled", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
@@ -223,6 +234,23 @@ func containsAny(text string, tokens []string) (string, bool) {
 				return t, true
 			}
 			from += i + 1
+		}
+	}
+	return "", false
+}
+
+// containsSubstring finds the first token present in text anywhere, with no
+// word-boundary check.
+//
+// For a marker whose own tool reads it the same unanchored way — gitleaks'
+// `gitleaks:allow` — a word-boundary requirement here would accept a
+// spelling the tool itself still honours, which is the gap containsAny's
+// stricter check exists to close for tokens that are Go, Rust or TypeScript
+// syntax.
+func containsSubstring(text string, tokens []string) (string, bool) {
+	for _, t := range tokens {
+		if strings.Contains(text, t) {
+			return t, true
 		}
 	}
 	return "", false
