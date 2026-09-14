@@ -38,6 +38,9 @@ go:
 semgrep:
   enabled: true
   config: auto           # override to a custom registry ref/path if needed
+secrets:
+  enabled: true           # set false to run no secret scan at all. A false positive belongs in
+                          # gitleaks' own .gitleaks.toml/.gitleaksignore at the scan root, not here.
 toolchain:
   enabled: true          # set false to keep the diagnostics but never download/install
                           # (air-gapped runners, or images that preprovision everything)

@@ -23,6 +23,8 @@ func tree(t *testing.T, statedGo, pinnedGo, statedBiome, pinnedBiome string) str
 		"internal/runner/pins.go":                    "const (\n\tgotestsumVersion = \"v1.13.0\"\n)\n",
 		"internal/typescript/biome-pin/package.json": `{"dependencies":{"@biomejs/biome":"` + pinnedBiome + `"}}`,
 		"internal/typescript/biome.json":             `{"$schema": "https://biomejs.dev/schemas/` + statedBiome + `/schema.json"}`,
+		"internal/secrets/gitleaks-pin/go.mod":       "require (\n\tgithub.com/zricethezav/gitleaks/v8 v8.30.1\n)\n",
+		"internal/secrets/pins.go":                   "const (\n\tgitleaksVersion = \"v8.30.1\"\n)\n",
 	} {
 		full := filepath.Join(root, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {

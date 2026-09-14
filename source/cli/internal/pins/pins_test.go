@@ -109,6 +109,8 @@ func TestWriteTouchesOnlyWhatDrifted(t *testing.T) {
 	write("internal/runner/pins.go", "const (\n\tgotestsumVersion = \"v1.13.0\"\n)\n")
 	write("internal/typescript/biome-pin/package.json", `{"dependencies":{"@biomejs/biome":"2.5.10"}}`)
 	write("internal/typescript/biome.json", `{"$schema": "https://biomejs.dev/schemas/2.5.10/schema.json"}`)
+	write("internal/secrets/gitleaks-pin/go.mod", "require (\n\tgithub.com/zricethezav/gitleaks/v8 v8.30.1\n)\n")
+	write("internal/secrets/pins.go", "const (\n\tgitleaksVersion = \"v8.30.1\"\n)\n")
 
 	before, err := os.Stat(filepath.Join(root, "internal/typescript/biome.json"))
 	if err != nil {
@@ -196,6 +198,8 @@ func completeTree(t *testing.T) string {
 		"internal/golang/golang.go":                  "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"v1.7.0\"\n)\n",
 		"internal/typescript/biome-pin/package.json": `{"dependencies":{"@biomejs/biome":"2.5.10"}}`,
 		"internal/typescript/biome.json":             `{"$schema": "https://biomejs.dev/schemas/2.5.10/schema.json"}`,
+		"internal/secrets/gitleaks-pin/go.mod":       "require (\n\tgithub.com/zricethezav/gitleaks/v8 v8.30.1\n)\n",
+		"internal/secrets/pins.go":                   "const (\n\tgitleaksVersion = \"v8.30.1\"\n)\n",
 	} {
 		full := filepath.Join(root, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {

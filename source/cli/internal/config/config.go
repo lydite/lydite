@@ -89,6 +89,22 @@ type Semgrep struct {
 	Config  string `yaml:"config"`
 }
 
+// Secrets is the opt-out surface for the secret-scanning gate.
+//
+// One key and deliberately nothing more granular: switched off, the gate runs
+// nothing, reports no row and records no count, exactly as a disabled language
+// does. A false positive is answered in gitleaks' own .gitleaks.toml at the
+// scan root, which this file does not duplicate — suppressing individual
+// findings is not what it is for.
+//
+// The section is named for the concern while the gate is named for the tool,
+// `gitleaks`: a row names what a reader would re-run, while a repository
+// declining this is declining secret scanning rather than a vendor. See
+// docs/adr/0035.
+type Secrets struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // PatchLanguage is the opt-out surface for one language's patch-coverage gate.
 type PatchLanguage struct {
 	Enabled bool `yaml:"enabled"`
@@ -185,12 +201,13 @@ type Config struct {
 	TypeScript TypeScriptLanguage `yaml:"typescript"`
 	Go         Language           `yaml:"go"`
 	Semgrep    Semgrep            `yaml:"semgrep"`
+	Secrets    Secrets            `yaml:"secrets"`
 	Coverage   Coverage           `yaml:"coverage"`
 	Toolchain  Toolchain          `yaml:"toolchain"`
 }
 
-// Default returns lydite's zero-config behavior: every language and Semgrep
-// enabled, no excludes, Semgrep's ruleset set to "auto", lydite producing
+// Default returns lydite's zero-config behavior: every language, Semgrep and
+// secret scanning enabled, no excludes, Semgrep's ruleset set to "auto", lydite producing
 // coverage itself, every language's patch-coverage gate enabled, and
 // toolchain provisioning on with every version taken from the repo's own
 // manifests.
@@ -200,6 +217,7 @@ func Default() Config {
 		TypeScript: TypeScriptLanguage{Language: Language{Enabled: true}, Linter: LinterBiome},
 		Go:         Language{Enabled: true},
 		Semgrep:    Semgrep{Enabled: true, Config: "auto"},
+		Secrets:    Secrets{Enabled: true},
 		Toolchain:  Toolchain{Enabled: true},
 		Coverage: Coverage{
 			Tolerance: 0.1,
