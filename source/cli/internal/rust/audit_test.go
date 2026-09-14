@@ -2,10 +2,12 @@ package rust
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 )
 
@@ -165,15 +167,78 @@ func TestAuditFallsBackToTheExitStatusOnAnUnreadableReport(t *testing.T) {
 	}
 }
 
-func TestAuditArgvKeepsTheHumanPass(t *testing.T) {
-	// --json replaces cargo-audit's report rather than copying it, which is
-	// the whole reason there are two passes. A single --json run leaves a
-	// developer with a failing row and no advisory named anywhere.
-	if got := strings.Join(auditArgv(false), " "); got != "audit" {
-		t.Errorf("human pass = %q, want no format flag", got)
+func TestAuditArgvIsOneJSONRun(t *testing.T) {
+	// One run decides the row and carries the data. --json is what makes the
+	// report parseable; without it the row fails with no advisory named
+	// anywhere, because nothing else reaches the developer.
+	if got := strings.Join(auditArgv(), " "); got != "audit --json" {
+		t.Errorf("argv = %q", got)
 	}
-	if got := strings.Join(auditArgv(true), " "); got != "audit --json" {
-		t.Errorf("data pass = %q", got)
+}
+
+func TestAuditPassesOnACleanReport(t *testing.T) {
+	r := auditResult(crateDir(t), stdoutRun(t, "audit-clean.json"))
+	if !r.Ok() {
+		t.Errorf("row failed on a clean report: %v", r.Err)
+	}
+	if len(r.Findings) != 0 {
+		t.Errorf("findings = %+v, want none", r.Findings)
+	}
+	if r.Detail != "" {
+		t.Errorf("detail = %q, want none — report() prints it under a failing row", r.Detail)
+	}
+}
+
+func TestAuditDetailIsEveryAdvisoryWithItsURLUnderIt(t *testing.T) {
+	// The JSON run is the only run, so this Detail is the whole of what a
+	// developer is told about a failing audit.
+	r := auditResult(crateDir(t), stdoutRun(t, "audit.json"))
+	if r.Ok() {
+		t.Fatal("row passed a report cargo-audit exited 1 over")
+	}
+	if len(r.Findings) != 2 {
+		t.Fatalf("got %d claims, want 2", len(r.Findings))
+	}
+	for _, f := range r.Findings {
+		if len(f.Detail) != 1 {
+			t.Fatalf("%s states %q, want the one advisory URL", f.Rule, f.Detail)
+		}
+		if !strings.Contains(r.Detail, f.Rule) || !strings.Contains(r.Detail, "\n  "+f.Detail[0]+"\n") {
+			t.Errorf("detail =\n%s\nwant %s named with its advisory URL under it", r.Detail, f.Rule)
+		}
+	}
+}
+
+func TestAuditWarningsAreClaimsOnARunThatPasses(t *testing.T) {
+	// cargo-audit exits zero over an advisory it sorts into `warnings`. The
+	// verdict is its own exit status and never a count of claims, so the row
+	// passes while still reporting what the tool found.
+	r := auditResult(fixture.Tree(t, "testdata/warnprobe"), stdoutRun(t, "audit-warnings.json"))
+	if !r.Ok() {
+		t.Errorf("row failed a run cargo-audit exited zero on: %v", r.Err)
+	}
+	if len(r.Findings) == 0 {
+		t.Error("no claims: a warning lydite drops is an advisory the tool reported and lydite did not")
+	}
+}
+
+func TestAuditFailingWithAnUnreadableReportSaysWhatItSaid(t *testing.T) {
+	// cargo-audit refuses before writing a report when it cannot read the
+	// lockfile, and says so on stderr — which under --json is the only account
+	// of the failure that exists.
+	r := auditResult(t.TempDir(), executil.Result{
+		Output: "not json at all\n",
+		Stderr: "error: Couldn't find `Cargo.lock`\n",
+		Err:    fmt.Errorf("exit status 1"),
+	})
+	if len(r.Findings) != 0 {
+		t.Fatalf("got %d claims from a report that does not parse", len(r.Findings))
+	}
+	if !strings.Contains(r.Detail, "exit status 1") {
+		t.Errorf("detail = %q, want the status cargo-audit exited with", r.Detail)
+	}
+	if !strings.Contains(r.Detail, "Couldn't find `Cargo.lock`") {
+		t.Errorf("detail = %q, want what cargo-audit said on stderr", r.Detail)
 	}
 }
 

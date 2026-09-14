@@ -148,51 +148,90 @@ func excerpt(rendered string) []string {
 	return strings.Split(rendered, "\n")
 }
 
-// clippyArgv is one of the two passes, as argv.
+// clippyArgv is the invocation, as argv.
 //
-// The pair is the decision this file makes and the thing a regression would
-// silently undo: the same lints under both, `--message-format json` on the
-// data pass alone, and `-D warnings` after the `--` on both so the verdict
-// does not depend on which pass is read. --all-targets is what compiles the
-// crate as its own test harness, which is where the double emission comes
-// from.
-func clippyArgv(asJSON bool) []string {
-	argv := []string{"clippy", "--all-targets"}
-	if asJSON {
-		argv = append(argv, "--message-format", "json")
-	}
-	return append(argv, "--", "-D", "warnings")
+// --message-format json is what makes the run readable as data, and cargo's
+// own rendered diagnostic survives inside each message rather than being lost
+// with the human stream it replaces. `-D warnings` after the `--` is what makes
+// a lint fail the run, so this argv's exit status is the row's verdict.
+// --all-targets compiles the crate as its own test harness, which is where the
+// double emission clippyFindings collapses comes from.
+func clippyArgv() []string {
+	return []string{"clippy", "--all-targets", "--message-format", "json", "--", "-D", "warnings"}
 }
 
-// runClippy runs clippy twice: once for the terminal and the verdict, once
-// for the data.
+// runClippy runs clippy once, as data.
 //
 // cargo has no flag that writes a machine-readable report to a file while
 // still printing for a human, and no output-file flag at all:
-// --message-format json replaces the stream rather than copying it. Streaming
-// that to a terminal would put a wall of JSON where a developer expects
-// clippy's own annotated source, so the first pass is the one that streams and
-// decides the row, and the second only populates Findings.
-//
-// The second pass is all but free — measured at 0.24s against the first pass's
-// 1.76s — because cargo replays the diagnostics it cached rather than
-// recompiling. --message-format is an output concern and does not invalidate
-// the build cache.
+// --message-format json replaces the stream rather than copying it. So the
+// JSON run is the only run — its exit status decides the row and its messages
+// are the findings — and what a developer reads is the Detail report() prints
+// from them, built out of the very diagnostics cargo would have rendered.
 // [lydite:exclude_from_coverage][the proving ground runs clippy over a real
 // crate on every run; a unit test here would run the machine's own cargo
 // rather than lydite's invocation, which clippyArgv states and
-// TestClippyArgvIsTwoPassesOverTheSameLints asserts]
+// TestClippyArgvIsOneJSONRunOverTheLints asserts — everything done with the
+// output is clippyResult, which the captured reports test directly]
 func runClippy(ctx context.Context, dir string, env []string) executil.Result {
-	r := named(GateClippy, executil.RunEnv(ctx, dir, env, "cargo", clippyArgv(false)...))
+	// RunQuiet, because the stream is JSON: streaming it would put a wall of
+	// machine-readable text where a developer expects clippy's own annotated
+	// source, which arrives instead as the row's Detail.
+	return clippyResult(dir, named(GateClippy, executil.RunQuietEnv(ctx, dir, env, "cargo", clippyArgv()...)))
+}
 
-	// RunQuiet, because this pass is data: streaming it would print the whole
-	// report a second time, as JSON, under the one the developer just read.
-	data := executil.RunQuietEnv(ctx, dir, env, "cargo", clippyArgv(true)...)
-	if data.Output == "" {
-		// Nothing to parse: leave the first pass's verdict and output as-is
-		// rather than inventing one.
+// clippyResult is one run read as claims, with the Detail a failing row needs
+// rendered from them.
+//
+// cargo's exit status stays the verdict and a finding count never becomes one:
+// a build that does not compile fails with diagnostics that locate nothing, and
+// a run whose report lists no claim can still be a failure that has to say why.
+func clippyResult(dir string, r executil.Result) executil.Result {
+	messages := decodeClippy(strings.NewReader(r.Output))
+	r.Findings = clippyFindings(dir, messages)
+	if r.Ok() {
 		return r
 	}
-	r.Findings = clippyFindings(dir, decodeClippy(strings.NewReader(data.Output)))
+	if detail := findingsDetail(r.Findings); detail != "" {
+		r.Detail = detail
+		return r
+	}
+	if notes := clippyNotes(messages); notes != "" {
+		r.Detail = notes
+		return r
+	}
+	r.Detail = unreadable(GateClippy, r.Err)
 	return r
+}
+
+// clippyNotes is the text of the diagnostics that locate nothing.
+//
+// cargo closes a failed build with spanless messages — "could not compile", "For
+// more information about this error" — which clippyFindings drops because a
+// claim on no line anchors nowhere. They are the whole of what a run that failed
+// without locating anything has to say, and each is emitted once per target, so
+// repeats are collapsed the way the located claims are.
+func clippyNotes(messages []clippyMessage) string {
+	seen := map[string]bool{}
+	var b strings.Builder
+	for i := range messages {
+		m := messages[i]
+		if m.Reason != "compiler-message" || m.Message == nil {
+			continue
+		}
+		if _, located := clippyPrimary(m.Message.Spans); located {
+			continue
+		}
+		text := strings.TrimRight(m.Message.Rendered, "\n")
+		if text == "" {
+			text = m.Message.Message
+		}
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		b.WriteString(text)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }

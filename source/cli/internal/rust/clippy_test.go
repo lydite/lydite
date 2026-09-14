@@ -1,11 +1,13 @@
 package rust
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 )
 
@@ -186,25 +188,101 @@ func clippyMessageOf(rule, file string, line, col int) clippyMessage {
 	return m
 }
 
-func TestClippyArgvIsTwoPassesOverTheSameLints(t *testing.T) {
-	// The pair is what keeps the terminal output and the data in agreement:
-	// the same lints under both, the format flag on the data pass alone, and
-	// `-D warnings` after the `--` on both so the verdict cannot depend on
-	// which pass is read.
-	text := strings.Join(clippyArgv(false), " ")
-	data := strings.Join(clippyArgv(true), " ")
-	if text != "clippy --all-targets -- -D warnings" {
-		t.Errorf("text pass = %q", text)
-	}
-	if data != "clippy --all-targets --message-format json -- -D warnings" {
-		t.Errorf("data pass = %q", data)
+func TestClippyArgvIsOneJSONRunOverTheLints(t *testing.T) {
+	// One run decides the row and carries the data, so the format flag and the
+	// `-D warnings` that makes a lint fatal are on the same invocation: a
+	// verdict read off a run without `-D warnings` passes a crate full of
+	// lints, and findings read off a run without --message-format do not exist.
+	got := strings.Join(clippyArgv(), " ")
+	if got != "clippy --all-targets --message-format json -- -D warnings" {
+		t.Errorf("argv = %q", got)
 	}
 	// --all-targets is what compiles the crate as its own test harness, which
 	// is where the double emission clippyFindings collapses comes from.
-	for _, argv := range [][]string{clippyArgv(false), clippyArgv(true)} {
-		if !slices.Contains(argv, "--all-targets") {
-			t.Errorf("argv = %q, want --all-targets on both passes", argv)
-		}
+	if !slices.Contains(clippyArgv(), "--all-targets") {
+		t.Errorf("argv = %q, want --all-targets", clippyArgv())
+	}
+}
+
+func TestClippyPassesOnACleanReport(t *testing.T) {
+	// A crate with no lints: cargo exits zero and its stream holds artefacts
+	// and a build summary. Nothing is claimed and nothing is printed under the
+	// row.
+	r := clippyResult(crateUnderClippy(t), stdoutRun(t, "clippy-clean.ndjson"))
+	if !r.Ok() {
+		t.Errorf("row failed on a clean report: %v", r.Err)
+	}
+	if len(r.Findings) != 0 {
+		t.Errorf("findings = %+v, want none", r.Findings)
+	}
+	if r.Detail != "" {
+		t.Errorf("detail = %q, want none — report() prints it under a failing row", r.Detail)
+	}
+}
+
+func TestClippyDetailIsEveryLintWithCargosOwnDiagnosticUnderIt(t *testing.T) {
+	// The JSON run is the only run, so nothing cargo rendered reaches the
+	// terminal on its own: what a developer reads is this Detail, and it has to
+	// carry as much as the annotated source cargo would have printed.
+	r := clippyResult(crateUnderClippy(t), stdoutRun(t, "clippy.ndjson"))
+	if r.Ok() {
+		t.Fatal("row passed a report cargo exited 101 over")
+	}
+	if len(r.Findings) != 2 {
+		t.Fatalf("got %d claims, want 2", len(r.Findings))
+	}
+	if !strings.HasPrefix(r.Detail, "src/lib.rs:1  clippy::ptr_arg  ") {
+		t.Errorf("detail =\n%s\nwant a claim line locating and naming the first lint", r.Detail)
+	}
+	if !strings.Contains(r.Detail, "\n   --> src/lib.rs:1:13") {
+		t.Errorf("detail =\n%s\nwant cargo's own rendered diagnostic indented under the claim", r.Detail)
+	}
+}
+
+func TestClippyDetailNamesACompileFailureRatherThanQuotingJSON(t *testing.T) {
+	// A crate that will not type-check fails the row on cargo's status, and the
+	// reader needs the error, not the stream it arrived in.
+	r := clippyResult(fixture.Tree(t, "testdata/brokenprobe"), stdoutRun(t, "clippy-nocompile.ndjson"))
+	if r.Ok() {
+		t.Fatal("row passed a crate that does not compile")
+	}
+	if !strings.Contains(r.Detail, "cannot add `&str` to `i32`") {
+		t.Errorf("detail =\n%s\nwant the compiler's own account of the error", r.Detail)
+	}
+	if strings.Contains(r.Detail, `{"reason"`) {
+		t.Errorf("detail =\n%s\nwant the diagnostic rather than cargo's JSON", r.Detail)
+	}
+}
+
+func TestClippyFailingWithNothingLocatedSaysWhatCargoSaid(t *testing.T) {
+	// cargo closes a failed build with a note carrying no span, which locates
+	// nothing and is therefore no claim. A row failing with empty Detail tells
+	// the reader only that something went wrong.
+	note := `{"reason":"compiler-message","message":{"level":"failure-note","message":"could not compile ` +
+		"`probe`" + `","spans":[],"rendered":"error: could not compile ` + "`probe`" + `"}}`
+	r := clippyResult(t.TempDir(), executil.Result{
+		Output: note + "\n" + note + "\n",
+		Err:    fmt.Errorf("exit status 101"),
+	})
+	if len(r.Findings) != 0 {
+		t.Fatalf("got %d claims, want none — a diagnostic with no span locates nothing", len(r.Findings))
+	}
+	// Emitted once per target, and one failure is one line.
+	if r.Detail != "error: could not compile `probe`\n" {
+		t.Errorf("detail = %q, want cargo's spanless note, stated once", r.Detail)
+	}
+}
+
+func TestClippyFailingWithAnUnreadableReportNamesTheExitStatus(t *testing.T) {
+	// cargo can fail before it writes a diagnostic at all — an unresolvable
+	// manifest, a toolchain it could not launch. The status is then the whole
+	// of what is known, and saying it beats a bare failing row.
+	r := clippyResult(t.TempDir(), executil.Result{
+		Output: "not json at all\n",
+		Err:    fmt.Errorf("exit status 101"),
+	})
+	if !strings.Contains(r.Detail, "exit status 101") {
+		t.Errorf("detail = %q, want the status cargo exited with", r.Detail)
 	}
 }
 

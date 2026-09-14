@@ -26,6 +26,7 @@ import (
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 )
 
 // The gates this package reports under. A gate's name is the label its row
@@ -92,6 +93,37 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 func named(name string, r executil.Result) executil.Result {
 	r.Name = name
 	return r
+}
+
+// findingsDetail is the claims a check made, as the text report() prints under
+// its failing row.
+//
+// Each claim is one line — path, line, rule, message — with its own detail
+// indented beneath it: clippy's rendered diagnostic, cargo-audit's advisory
+// URL, cargo-deny's dependency path. Each of these tools runs once, in JSON
+// mode, so nothing rendered for a human reaches the terminal on its own and
+// this is the only place a reader is told what was found.
+func findingsDetail(findings []finding.Finding) string {
+	var b strings.Builder
+	for _, f := range findings {
+		fmt.Fprintf(&b, "%s:%d  %s  %s\n", f.Path, f.Line, f.Rule, f.Message)
+		for _, line := range f.Detail {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+	return b.String()
+}
+
+// unreadable is what a failing run whose report names no claim says instead.
+//
+// A tool can fail without locating anything: clippy ends a broken build with a
+// note carrying no span, cargo-audit refuses before writing a report when it
+// cannot read the lockfile, and cargo-deny's status is a bitmask of which
+// checks failed (licenses 4, bans 2, 6 for both) that it can set for reasons no
+// diagnostic states. A row that fails with empty Detail leaves the reader the
+// raw JSON in the log or nothing at all, so the status is stated outright.
+func unreadable(gate string, err error) string {
+	return fmt.Sprintf("%s failed (%v) and its JSON report names no finding; the check's log holds the report.", gate, err)
 }
 
 // ensure installs cargo-<name> at the given version into a version-keyed

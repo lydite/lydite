@@ -148,46 +148,54 @@ func walkDenyGraph(g denyGraph, below []string, out *[]string) {
 // after it.
 func decodeDeny(r io.Reader) []denyMessage { return decodeNDJSON[denyMessage](r) }
 
-// denyArgv is one of the two passes, as argv.
+// denyArgv is the invocation, as argv.
 //
 // --format comes before the subcommand: cargo-deny declares it on the
 // top-level command, and `check --format json` is rejected outright. advisories
-// is excluded from both passes — cargo-audit already covers RustSec CVEs, and
-// running both would double-report them.
-func denyArgv(asJSON bool) []string {
-	argv := []string{"deny"}
-	if asJSON {
-		argv = append(argv, "--format", "json")
-	}
-	return append(argv, "check", "licenses", "bans")
+// is excluded — cargo-audit already covers RustSec CVEs, and running both would
+// double-report them.
+func denyArgv() []string {
+	return []string{"deny", "--format", "json", "check", "licenses", "bans"}
 }
 
-// runDeny runs cargo-deny twice: once for the terminal, once for the data.
+// runDeny runs cargo-deny once, as data.
 //
 // --format json replaces cargo-deny's human output rather than copying it, so
-// a single JSON run would leave a developer with a failing row and no crate
-// named anywhere. The first pass is the one that streams and decides the row,
-// and the second only populates Findings.
-//
-// advisories is intentionally excluded from both: cargo-audit already covers
-// RustSec CVEs, and running both would double-report them.
+// the JSON run is the only run: its exit status decides the row, and the crates
+// a developer reads are the Detail report() prints from the claims.
 // [lydite:exclude_from_coverage][the proving ground installs and runs the
 // pinned cargo-deny on a bare checkout; a unit test here would run the
 // machine's own, and what is lydite's to get right is the invocation, which
-// denyArgv states and TestDenyArgvPutsFormatBeforeTheSubcommand asserts]
+// denyArgv states and TestDenyArgvIsOneJSONRunWithFormatBeforeTheSubcommand
+// asserts — everything done with the output is denyResult, which the captured
+// reports test directly]
 func runDeny(ctx context.Context, dir string, env []string, bin string) executil.Result {
-	r := named(GateDeny, executil.RunEnv(ctx, dir, env, bin, denyArgv(false)...))
+	// RunQuiet is the one runner that keeps stdout and stderr apart, which this
+	// stream needs: cargo-deny writes its NDJSON to stderr.
+	return denyResult(dir, named(GateDeny, executil.RunQuietEnv(ctx, dir, env, bin, denyArgv()...)))
+}
 
-	// --format comes before the subcommand: cargo-deny declares it on the
-	// top-level command, and `check --format json` is rejected outright.
-	// The stream arrives on stderr, which is why this reads Stderr and not
-	// Output — RunQuiet is the one runner that keeps the two apart.
-	data := executil.RunQuietEnv(ctx, dir, env, bin, denyArgv(true)...)
-	if data.Stderr == "" {
-		// Nothing to parse: leave the first pass's verdict and output as-is
-		// rather than inventing one.
+// denyResult is one run read as claims, with the Detail a failing row needs
+// rendered from them.
+//
+// The NDJSON arrives on stderr and stdout stays empty under --format json, so
+// Output is taken from Stderr: Output is what the run's log is written from, and
+// the log is meant to hold the report.
+//
+// cargo-deny's exit status stays the verdict and a finding count never becomes
+// one. The status is a bitmask of which checks failed — licenses 4, bans 2, 6
+// for both — so what decides the row is Ok, never a comparison against 1, and
+// cargo-deny can set it for reasons no diagnostic in the stream states.
+func denyResult(dir string, r executil.Result) executil.Result {
+	r.Output = r.Stderr
+	r.Findings = denyFindings(dir, decodeDeny(strings.NewReader(r.Stderr)))
+	if r.Ok() {
 		return r
 	}
-	r.Findings = denyFindings(dir, decodeDeny(strings.NewReader(data.Stderr)))
+	if detail := findingsDetail(r.Findings); detail != "" {
+		r.Detail = detail
+		return r
+	}
+	r.Detail = unreadable(GateDeny, r.Err)
 	return r
 }

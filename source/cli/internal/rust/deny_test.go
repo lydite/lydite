@@ -1,10 +1,13 @@
 package rust
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/executil"
 )
 
 // denyFixture is cargo-deny's real NDJSON stream, captured from the pinned
@@ -197,24 +200,89 @@ func TestDecodeDenySkipsOnlyTheMalformedLine(t *testing.T) {
 	}
 }
 
-func TestDenyArgvPutsFormatBeforeTheSubcommand(t *testing.T) {
-	// cargo-deny declares --format on the top-level command, and
-	// `check --format json` is rejected outright.
-	data := denyArgv(true)
-	format := slices.Index(data, "--format")
-	check := slices.Index(data, "check")
+func TestDenyArgvIsOneJSONRunWithFormatBeforeTheSubcommand(t *testing.T) {
+	// One run decides the row and carries the data. --format goes on the
+	// top-level command: cargo-deny rejects `check --format json` outright, so
+	// the order is the difference between a run and a usage error.
+	argv := denyArgv()
+	format := slices.Index(argv, "--format")
+	check := slices.Index(argv, "check")
 	if format < 0 || check < 0 || format > check {
-		t.Errorf("argv = %q, want --format before the subcommand", data)
+		t.Errorf("argv = %q, want --format before the subcommand", argv)
 	}
-	if got := strings.Join(denyArgv(false), " "); got != "deny check licenses bans" {
-		t.Errorf("human pass = %q", got)
+	if got := strings.Join(argv, " "); got != "deny --format json check licenses bans" {
+		t.Errorf("argv = %q", got)
 	}
-	// advisories is excluded from both: cargo-audit already covers RustSec
-	// CVEs, and running both would double-report them.
-	for _, argv := range [][]string{denyArgv(false), denyArgv(true)} {
-		if slices.Contains(argv, "advisories") {
-			t.Errorf("argv = %q, want advisories left to cargo-audit", argv)
+	// advisories is excluded: cargo-audit already covers RustSec CVEs, and
+	// running both would double-report them.
+	if slices.Contains(argv, "advisories") {
+		t.Errorf("argv = %q, want advisories left to cargo-audit", argv)
+	}
+}
+
+func TestDenyPassesOnACleanReport(t *testing.T) {
+	r := denyResult(crateDir(t), stderrRun(t, "deny-clean.ndjson"))
+	if !r.Ok() {
+		t.Errorf("row failed on a clean report: %v", r.Err)
+	}
+	if len(r.Findings) != 0 {
+		t.Errorf("findings = %+v, want none", r.Findings)
+	}
+	if r.Detail != "" {
+		t.Errorf("detail = %q, want none — report() prints it under a failing row", r.Detail)
+	}
+}
+
+func TestDenyDetailIsEveryDiagnosticWithItsDependencyPathUnderIt(t *testing.T) {
+	// The JSON run is the only run, so this Detail is the whole of what a
+	// developer is told — and the stream is what the check's log holds, which
+	// is read from Output and arrives on stderr.
+	r := denyResult(crateDir(t), stderrRun(t, "deny.ndjson"))
+	if r.Ok() {
+		t.Fatal("row passed a report cargo-deny exited 4 over")
+	}
+	if len(r.Findings) != 3 {
+		t.Fatalf("got %d claims, want the 3 diagnostics in the stream", len(r.Findings))
+	}
+	if r.Output != r.Stderr || r.Output == "" {
+		t.Error("Output does not hold the stream: the check's log is written from it, and stdout is empty under --format json")
+	}
+	for _, f := range r.Findings {
+		if !strings.Contains(r.Detail, f.Message) {
+			t.Errorf("detail =\n%s\nwant the claim %q", r.Detail, f.Message)
 		}
+	}
+}
+
+func TestDenyFailsOnAnyNonZeroStatusAndNotOnlyOne(t *testing.T) {
+	// cargo-deny's status is a bitmask of which checks failed — licenses 4,
+	// bans 2, 6 for both — so a verdict comparing it against 1 passes every
+	// failure it reports. This capture exited 2.
+	r := denyResult(crateDir(t), stderrRun(t, "deny-transitive.ndjson"))
+	if r.Ok() {
+		t.Fatal("row passed a report cargo-deny exited 2 over")
+	}
+	if len(r.Findings) != 1 {
+		t.Fatalf("got %d claims, want the one banned crate", len(r.Findings))
+	}
+	if !strings.Contains(r.Detail, "\n  libc") {
+		t.Errorf("detail =\n%s\nwant the dependency path indented under the claim", r.Detail)
+	}
+}
+
+func TestDenyFailingWithAnUnreadableReportNamesTheExitStatus(t *testing.T) {
+	// cargo-deny can set its status for reasons no diagnostic in the stream
+	// states — a config it would not read is the standing example. A row
+	// failing with empty Detail tells the reader only that something is wrong.
+	r := denyResult(t.TempDir(), executil.Result{
+		Stderr: "not json at all\n",
+		Err:    fmt.Errorf("exit status 4"),
+	})
+	if len(r.Findings) != 0 {
+		t.Fatalf("got %d claims from a stream that does not parse", len(r.Findings))
+	}
+	if !strings.Contains(r.Detail, "exit status 4") {
+		t.Errorf("detail = %q, want the status cargo-deny exited with", r.Detail)
 	}
 }
 

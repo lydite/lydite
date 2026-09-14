@@ -116,40 +116,50 @@ func parseAudit(data []byte) (auditReport, bool) {
 	return report, true
 }
 
-// auditArgv is one of the two passes, as argv. --json is what replaces the
-// human report rather than copying it, which is the whole reason there are two.
-func auditArgv(asJSON bool) []string {
-	if asJSON {
-		return []string{"audit", "--json"}
-	}
-	return []string{"audit"}
-}
+// auditArgv is the invocation, as argv. --json replaces cargo-audit's human
+// report rather than copying it, and the report is what the row's claims and
+// its Detail are both derived from.
+func auditArgv() []string { return []string{"audit", "--json"} }
 
-// runAudit runs cargo-audit twice: once for the terminal, once for the data.
+// runAudit runs cargo-audit once, as data.
 //
-// --json replaces cargo-audit's terminal output rather than copying it: with
-// the flag, stdout is the report and stderr is empty, so a single JSON run
-// would leave a developer with a failing row and no advisory named anywhere.
-// The first pass is therefore the one that streams and decides the row, and
-// the second only populates Findings.
-//
-// It is cheap because the work is reading a lockfile against an advisory
-// database that the first pass has already fetched — measured at 1.8s against
-// the first pass's 3.1s.
+// --json puts the report on stdout and leaves stderr for cargo-audit's own
+// complaints, so the run that is parseable is the run that decides the row, and
+// the advisories a developer reads are the Detail report() prints from the
+// claims rather than a second invocation's stream.
 // [lydite:exclude_from_coverage][the proving ground installs and runs the
 // pinned cargo-audit on a bare checkout; a unit test here would run the
 // machine's own, and what is lydite's to get right is the invocation, which
-// auditArgv states and TestAuditArgvKeepsTheHumanPass asserts]
+// auditArgv states and TestAuditArgvIsOneJSONRun asserts — everything done
+// with the output is auditResult, which the captured reports test directly]
 func runAudit(ctx context.Context, dir string, env []string, bin string) executil.Result {
-	r := named(GateAudit, executil.RunEnv(ctx, dir, env, bin, auditArgv(false)...))
+	return auditResult(dir, named(GateAudit, executil.RunQuietEnv(ctx, dir, env, bin, auditArgv()...)))
+}
 
-	data := executil.RunQuietEnv(ctx, dir, env, bin, auditArgv(true)...)
-	report, ok := parseAudit([]byte(data.Output))
-	if !ok {
-		// No report to read: leave cargo-audit's own exit status and output
-		// as-is rather than inventing a verdict.
+// auditResult is one run read as claims, with the Detail a failing row needs
+// rendered from them.
+//
+// cargo-audit's exit status stays the verdict and a finding count never becomes
+// one: an advisory it sorts into `warnings` is a claim on a run it exits zero
+// for, and a run that cannot read the lockfile fails before writing a report at
+// all.
+func auditResult(dir string, r executil.Result) executil.Result {
+	if report, ok := parseAudit([]byte(r.Output)); ok {
+		r.Findings = auditFindings(dir, report)
+	}
+	if r.Ok() {
 		return r
 	}
-	r.Findings = auditFindings(dir, report)
+	if detail := findingsDetail(r.Findings); detail != "" {
+		r.Detail = detail
+		return r
+	}
+	// cargo-audit says why it would not run on stderr — an unreadable
+	// Cargo.lock, an advisory database it could not fetch — and that text is
+	// the only account of the failure anywhere, since stdout holds no report.
+	r.Detail = unreadable(GateAudit, r.Err)
+	if said := strings.TrimSpace(r.Stderr); said != "" {
+		r.Detail += "\n" + said
+	}
 	return r
 }
