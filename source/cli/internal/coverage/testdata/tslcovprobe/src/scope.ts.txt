@@ -1,0 +1,42 @@
+/** Adds two numbers, and every test covers it. */
+export function add(a: number, b: number): number {
+  return a + b;
+}
+
+/** Shells out to a foreign toolchain, so no unit test runs it. */
+// [lydite:exclude_from_coverage][it invokes a foreign toolchain; the proving
+// ground exercises it]
+export function provision(name: string): string {
+  let out = "";
+  if (name === "") {
+    out += "anonymous";
+  } else {
+    out += name;
+  }
+  out += "-provisioned";
+  return out;
+}
+
+/** Holds an arrow function, whose lines belong to the function declaring it. */
+export function tally(items: number[]): number {
+  const double = (n: number) => {
+    return n * 2;
+  };
+  return items.map(double).reduce((a, b) => a + b, 0);
+}
+
+/** A counter whose methods share one class body. */
+export class Counter {
+  private value = 0;
+
+  /** Adds one. */
+  bump(): void {
+    this.value += 1;
+  }
+
+  /** Never called by any test. */
+  // [lydite:exclude_from_coverage][the value is read only by the worker]
+  read(): number {
+    return this.value;
+  }
+}

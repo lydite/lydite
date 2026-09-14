@@ -1,0 +1,111 @@
+//! Shapes an exclusion declaration has to scope over in Rust: a free function,
+//! a method in an impl block, a generic, a closure and a nested fn item.
+
+/// Adds two numbers, and every test covers it.
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// Shells out to a foreign toolchain, so no unit test runs it.
+// [lydite:exclude_from_coverage][it invokes a foreign toolchain; the proving
+// ground exercises it]
+pub fn provision(name: &str) -> String {
+    let mut out = String::new();
+    if name.is_empty() {
+        out.push_str("anonymous");
+    } else {
+        out.push_str(name);
+    }
+    out.push_str("-provisioned");
+    out
+}
+
+/// Generic, so llvm-cov records one instantiation per type argument.
+pub fn widest<T: PartialOrd + Copy>(items: &[T]) -> Option<T> {
+    let mut best: Option<T> = None;
+    for item in items {
+        match best {
+            Some(b) if b >= *item => {}
+            _ => best = Some(*item),
+        }
+    }
+    best
+}
+
+/// Holds a closure, whose lines belong to the function that declares it.
+pub fn tally(items: &[i64]) -> i64 {
+    let double = |n: &i64| {
+        let d = n * 2;
+        d
+    };
+    items.iter().map(double).sum()
+}
+
+/// Holds a nested fn item, which is its own symbol.
+pub fn outer(n: i64) -> i64 {
+    fn inner(n: i64) -> i64 {
+        n * 3
+    }
+    inner(n)
+}
+
+/// A counter whose methods share one impl block.
+pub struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    /// Starts at zero.
+    pub fn new() -> Self {
+        Counter { value: 0 }
+    }
+
+    /// Adds one.
+    pub fn bump(&mut self) {
+        self.value += 1;
+    }
+
+    /// Never called by any test.
+    // [lydite:exclude_from_coverage][the value is read only by the binary]
+    pub fn value(&self) -> i64 {
+        self.value
+    }
+}
+
+impl Default for Counter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_sums() {
+        assert_eq!(add(2, 3), 5);
+    }
+
+    #[test]
+    fn bump_increments() {
+        let mut c = Counter::new();
+        c.bump();
+    }
+
+    #[test]
+    fn widest_over_two_types() {
+        assert_eq!(widest(&[1i64, 7, 3]), Some(7));
+        assert_eq!(widest(&[1.5f64, 0.5]), Some(1.5));
+    }
+
+    #[test]
+    fn tally_doubles() {
+        assert_eq!(tally(&[1, 2, 3]), 12);
+    }
+
+    #[test]
+    fn outer_triples() {
+        assert_eq!(outer(2), 6);
+    }
+}
