@@ -531,7 +531,7 @@ jobs:
 
       # 6. The fold over one shard, reading the directories the download left,
       # the way `lydite-pr.yml`'s `merge` job reads them. The layout is printed
-      # before anything globs it: a fold that reads the wrong directory folds
+      # before anything reads it: a fold that reads the wrong directory folds
       # something, and what separates that from a fold that read the right one
       # is which paths were there to be read.
       - name: lydite test merge (one shard, proving ground)
@@ -541,23 +541,33 @@ jobs:
         run: |
           set -uo pipefail
           find shards -maxdepth 2 | sort || echo "the download left no shards directory"
-          shopt -s nullglob
+          # The documents, not the directory layout — the discovery
+          # `lydite-pr.yml`'s `merge` job performs, over the flat layout this
+          # leg's round trip produces. Depth 2 reaches the flat shape and the
+          # nested one alike, and stops above the per-component directories,
+          # which hold logs and coverage reports rather than either document.
           args=()
-          for dir in shards/*/; do
-            args+=(--reports "${dir%/}")
-          done
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find shards -maxdepth 2 \
+                     \( -name measurements.json -o -name test.json \) \
+                     -exec dirname {} \; | sort -u)
           if [ "${#args[@]}" -eq 0 ]; then
             echo "no shard uploaded a report directory; there is nothing to fold" >&2
             exit 1
           fi
+          printf 'folding %s\n' "${dirs[@]}"
           status=0
           /tmp/lydite test merge --dir proving-ground "${args[@]}" --json > merged.json || status=$?
           echo "lydite test merge exited $status"
           cat merged.json
-          if [ "$status" -ne 0 ]; then
-            echo "the fold over one shard failed; a repository of one component folds like any other" >&2
-            exit 1
-          fi
+          # The exit code is reported and not asserted on, as on the leg over
+          # every component: the proving ground plants an uncovered probe, so
+          # the coverage and patch gates fail here by construction and a fold
+          # that exited 0 would be the surprise. What is under test is that a
+          # lone shard is found and folded at all, which is the rows below.
           python3 - "$COMPONENT" <<'PY'
           import json
           import sys

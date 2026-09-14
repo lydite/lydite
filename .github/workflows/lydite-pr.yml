@@ -420,18 +420,39 @@ jobs:
       # paths, and `publish` resolves those against the directory it is given.
       - name: lydite mutation merge
         run: |
+          # Found by the documents rather than by the directory layout, as the
+          # test fold does and for the same reason: actions/download-artifact
+          # gives an artifact its own subdirectory only when the pattern
+          # matched more than one, so a repository planning one shard leaves
+          # `mutation.json` at `mutation-shards/mutation.json`, where a
+          # `mutation-shards/*/` glob never looks — it finds that shard's
+          # per-component log directories instead. Depth 2 reaches both shapes.
+          #
+          # `merge-multiple: true` on the download is not the fix. It puts
+          # every shard's `mutation.json` at one path, and the per-shard
+          # separation it collapses is what completeness is decided from.
           shopt -s nullglob
           args=()
-          for dir in mutation-shards/*/; do
-            args+=(--reports "${dir%/}")
-          done
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find mutation-shards -maxdepth 2 \
+                     -name mutation.json \
+                     -exec dirname {} \; | sort -u)
           if [ "${#args[@]}" -eq 0 ]; then
             echo "no shard uploaded a report directory; there is nothing to fold" >&2
             exit 1
           fi
+          printf 'folding %s\n' "${dirs[@]}"
+          # The component subdirectories of each shard that was found, rather
+          # than a glob of a fixed depth: a lone shard's sit directly under
+          # `mutation-shards/`, and every other shard's one level below that.
           mkdir -p .lydite-reports
-          for logs in mutation-shards/*/*/; do
-            cp -R "$logs" .lydite-reports/
+          for dir in "${dirs[@]}"; do
+            for logs in "$dir"/*/; do
+              cp -R "$logs" .lydite-reports/
+            done
           done
           status=0
           lydite mutation merge --dir . "${args[@]}" || status=$?
@@ -484,18 +505,45 @@ jobs:
       # `publish` deliberately never downloads, and carries no tail at all.
       - name: lydite test merge
         run: |
+          # Found by the documents rather than by the directory layout, because
+          # the layout is not ours to predict: actions/download-artifact gives
+          # an artifact its own subdirectory only when the pattern matched more
+          # than one, and extracts a lone match straight into `path`. A
+          # repository planning one shard therefore leaves `measurements.json`
+          # at `shards/measurements.json`, where a `shards/*/` glob never looks
+          # — it finds that shard's per-component log directories instead and
+          # folds one of those. Depth 2 reaches both shapes and stops above the
+          # per-component directories, which hold logs and coverage reports
+          # rather than either document.
+          #
+          # `merge-multiple: true` on the download is not the fix. It puts
+          # every shard's `measurements.json` at one path, and the per-shard
+          # separation it collapses is what completeness is decided from.
           shopt -s nullglob
           args=()
-          for dir in shards/*/; do
-            args+=(--reports "${dir%/}")
-          done
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find shards -maxdepth 2 \
+                     \( -name measurements.json -o -name test.json \) \
+                     -exec dirname {} \; | sort -u)
           if [ "${#args[@]}" -eq 0 ]; then
             echo "no shard uploaded a report directory; there is nothing to fold" >&2
             exit 1
           fi
+          # Named out loud: a fold reading a directory nobody meant it to folds
+          # something, and what tells that apart from a fold that read the right
+          # one is which paths were there to be read.
+          printf 'folding %s\n' "${dirs[@]}"
+          # The component subdirectories of each shard that was found, rather
+          # than a glob of a fixed depth: a lone shard's sit directly under
+          # `shards/`, and every other shard's one level below that.
           mkdir -p .lydite-reports
-          for logs in shards/*/*/; do
-            cp -R "$logs" .lydite-reports/
+          for dir in "${dirs[@]}"; do
+            for logs in "$dir"/*/; do
+              cp -R "$logs" .lydite-reports/
+            done
           done
           status=0
           lydite test merge --dir . "${args[@]}" || status=$?
