@@ -1,6 +1,6 @@
 # `docs/design` — where the brand is authored
 
-Read [`design.md`](../../.agents/references/design.md) before touching anything here. It
+Read [`design.md`](../../agentic/references/design.md) before touching anything here. It
 carries the split that matters — `assets/` is what ships, `docs/design/source/` is where the
 brand is authored, `docs/design/reference/` is reference only — and the two things the token
 set documents but nothing implements.
