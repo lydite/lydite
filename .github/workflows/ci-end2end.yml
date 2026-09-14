@@ -588,6 +588,184 @@ jobs:
               sys.exit(f"the fold is missing exactly one row each of {missing}: it holds {labels}")
           PY
 
+      # `mutation-merge` discovers its documents independently of `merge` —
+      # a change to one fold does not prove the other — so the same flat
+      # round trip is repeated here for `mutation.json`.
+      - name: lydite mutation (one shard, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -uo pipefail
+          rm -rf proving-ground/.lydite-reports
+          status=0
+          /tmp/lydite mutation --dir proving-ground --affected --component "$COMPONENT" --stream --json > mutation-one.json || status=$?
+          echo "lydite mutation exited $status"
+          cat mutation-one.json
+
+      - name: upload the mutation shard (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-mutation-shard-${{ matrix.slug }}
+          path: proving-ground/.lydite-reports
+          include-hidden-files: true
+
+      - name: download the mutation shards (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: proving-ground-mutation-shard-${{ matrix.slug }}*
+          path: mutation-shards
+
+      - name: lydite mutation merge (one shard, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -uo pipefail
+          find mutation-shards -maxdepth 2 | sort || echo "the download left no mutation-shards directory"
+          args=()
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find mutation-shards -maxdepth 2 -name mutation.json \
+                     -exec dirname {} \; | sort -u)
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no shard uploaded a report directory; there is nothing to fold" >&2
+            exit 1
+          fi
+          printf 'folding %s\n' "${dirs[@]}"
+          status=0
+          /tmp/lydite mutation merge --dir proving-ground "${args[@]}" --json > mutation-merged.json || status=$?
+          echo "lydite mutation merge exited $status"
+          cat mutation-merged.json
+          if [ "$status" -ne 0 ]; then
+            echo "the mutation fold over one shard failed" >&2
+            exit 1
+          fi
+          python3 - "$COMPONENT" <<'PY'
+          import json
+          import sys
+
+          name = sys.argv[1]
+          with open("mutation-merged.json", encoding="utf-8") as fh:
+              labels = [row["label"] for row in json.load(fh)["rows"]]
+          if labels.count(f"mutation({name})") != 1:
+              sys.exit(f"the fold holds no mutation({name}) row: it holds {labels}")
+          PY
+
+      # `publish` chooses between the flat and nested layouts by whether a
+      # `lydite-reports-*`-named subdirectory exists at all, a different check
+      # from either fold above — exercised here in both directions, over
+      # artifacts this leg already produced.
+      #
+      # Nested: the coverage shard's directory (holding `test.json`) and the
+      # mutation shard's (holding `mutation.json`) are two real artifacts, so
+      # the download nests them the way two producing jobs would.
+      - name: upload two report directories (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-nested-${{ matrix.slug }}-a
+          path: shards
+          include-hidden-files: true
+
+      - name: upload the second report directory (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-nested-${{ matrix.slug }}-b
+          path: mutation-shards
+          include-hidden-files: true
+
+      - name: download the nested reports (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-reports-nested-${{ matrix.slug }}-*
+          path: nested-reports
+
+      # A directory with no document at all, uploaded alone: the exact shape
+      # of the regression this leg exists to catch, where a job wrote logs and
+      # died before its document — `publish` must still render it, as "holds
+      # no report document", rather than drop the section.
+      - name: create a documentless report directory (proving ground)
+        if: matrix.component != ''
+        run: |
+          set -euo pipefail
+          mkdir -p docless-source/api
+          echo "log line, no document" > docless-source/api/test.log
+
+      - name: upload the documentless report directory (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-docless-${{ matrix.slug }}
+          path: docless-source
+
+      - name: download the documentless report (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-reports-docless-${{ matrix.slug }}*
+          path: docless-reports
+
+      - name: lydite publish (one shard, proving ground)
+        if: matrix.component != ''
+        run: |
+          set -euo pipefail
+          # The same discovery `lydite-pr.yml`'s `publish` job performs,
+          # against each of the two layouts this leg produced.
+          fold_publish_dirs() {
+            local root="$1"
+            shopt -s nullglob
+            local nested=false
+            for dir in "$root"/*/; do
+              case "${dir#"$root"/}" in
+                lydite-reports-*) nested=true ;;
+              esac
+            done
+            if [ "$nested" = true ]; then
+              for dir in "$root"/*/; do echo "${dir%/}"; done
+            elif [ -d "$root" ]; then
+              echo "$root"
+            fi
+          }
+
+          base_sha=$(git -C proving-ground rev-parse HEAD)
+
+          nested_dirs=()
+          while IFS= read -r dir; do nested_dirs+=("$dir"); done \
+            < <(fold_publish_dirs nested-reports)
+          if [ "${#nested_dirs[@]}" -ne 2 ]; then
+            echo "the nested layout resolved to ${#nested_dirs[@]} directory(ies), want 2: ${nested_dirs[*]}" >&2
+            exit 1
+          fi
+          args=()
+          for dir in "${nested_dirs[@]}"; do args+=(--reports "$dir"); done
+          /tmp/lydite publish "${args[@]}" --base "$base_sha" --out nested-comment.md
+          cat nested-comment.md
+          if grep -q "holds no report document" nested-comment.md; then
+            echo "the nested comment reports a missing document where both directories hold one" >&2
+            exit 1
+          fi
+
+          flat_dirs=()
+          while IFS= read -r dir; do flat_dirs+=("$dir"); done \
+            < <(fold_publish_dirs docless-reports)
+          if [ "${#flat_dirs[@]}" -ne 1 ]; then
+            echo "the flat layout resolved to ${#flat_dirs[@]} directory(ies), want 1: ${flat_dirs[*]}" >&2
+            exit 1
+          fi
+          /tmp/lydite publish --reports "${flat_dirs[0]}" --base "$base_sha" --out flat-comment.md
+          cat flat-comment.md
+          if ! grep -q "holds no report document" flat-comment.md; then
+            echo "a flat, documentless directory did not render as holding no report document" >&2
+            exit 1
+          fi
+
       # 6. The fold over every shard. Every declared component takes exactly
       # one row, the whole-tree gates collapse to one each, and the two figures no shard can
       # produce — coverage(repo) and patch(repo) — are computed here and

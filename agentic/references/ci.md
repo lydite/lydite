@@ -105,6 +105,19 @@ ground holds is the shape of the discovery rather than the code performing it �
 there and not here leaves this leg failing against a layout the pull-request workflow has already
 learnt to read.
 
+The one-shard leg repeats this for `mutation-merge` and for `publish`, because each discovers its
+report directories with its own independent check — `mutation-merge` by the document
+(`mutation.json`) it finds, `publish` by whether a `lydite-reports-*`-named subdirectory exists at
+all — and a change proven correct for `merge`'s discovery says nothing about the other two. The
+mutation leg runs `lydite mutation` on the one declared component through the same
+`upload-artifact`/`download-artifact` round trip and asserts the fold holds that component's row.
+The publish leg goes further and builds both layouts on purpose: two real report artifacts
+downloaded together, which nests, and a directory holding only a log and no document, uploaded
+alone, which flattens — the exact shape of the regression this leg exists to catch, where a job
+wrote logs and died before its document. `lydite publish` must still render that directory, as
+"holds no report document", rather than drop the section, which is asserted directly on the
+rendered comment rather than inferred from an exit code.
+
 `ci-end2end.yml`'s `proving ground — mutation` job is the equivalent for the mutation engine, and it
 needs one thing the others do not. A green `lydite mutation` says "nothing survived", which is what
 an engine generating nothing reports too — so the probe plants two identical functions per
