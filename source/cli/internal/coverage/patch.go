@@ -217,10 +217,13 @@ func lcovReport(data []byte, baseDir string, exclude func(file string) (exclusio
 			// LH counts as hit. Taking the last would have the patch gate
 			// score it uncovered while the aggregate scored it covered, two
 			// figures disagreeing about one line. ParseGoProfile takes the
-			// max for the same reason.
-			if prev, seen := out.Executed[file][lineNo]; !seen || hitCount > prev {
-				out.Executed[file][lineNo] = hitCount
-			}
+			// max for the same reason, and the same call: a missing key reads
+			// as its zero value, and a hit count is never negative, so
+			// max(existing, hitCount) is `hitCount` the first time a line is
+			// seen and the greater of the two after — one expression rather
+			// than a comparison a reader has to convince themselves is
+			// equivalent to it whichever way the two entries tie.
+			out.Executed[file][lineNo] = max(out.Executed[file][lineNo], hitCount)
 			// Out of the denominator as well as the numerator. A declaration
 			// says this suite does not measure the function, so counting its
 			// lines as uncovered would report the author's own statement back
@@ -233,9 +236,7 @@ func lcovReport(data []byte, baseDir string, exclude func(file string) (exclusio
 				}
 				continue
 			}
-			if prev, seen := out.Hits[file][lineNo]; !seen || hitCount > prev {
-				out.Hits[file][lineNo] = hitCount
-			}
+			out.Hits[file][lineNo] = max(out.Hits[file][lineNo], hitCount)
 		case strings.HasPrefix(line, "LF:"):
 			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LF:"))); err == nil {
 				out.Lines.Total += n

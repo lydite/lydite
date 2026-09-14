@@ -2,6 +2,8 @@ package treesitter
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -226,6 +228,30 @@ func TestADeclarationThatReachesNoFunctionIsNamed(t *testing.T) {
 				t.Errorf("unused = %v, want [%d]", declared.Unused, c.line)
 			}
 		})
+	}
+}
+
+// Unused is sorted, because DeclaredExclusions builds it from a map keyed by
+// line and Go's own iteration order over one is randomized. Six entries make
+// an already-sorted iteration order astronomically unlikely by chance, so a
+// dropped sort fails this reliably rather than only sometimes.
+func TestUnusedIsSortedNotIterationOrder(t *testing.T) {
+	var src strings.Builder
+	var want []int
+	line := 1
+	for i := range 6 {
+		want = append(want, line)
+		src.WriteString(declare)
+		src.WriteString("\n")
+		fmt.Fprintf(&src, "struct S%d;\n\n", i)
+		line += 3
+	}
+	declared, err := DeclaredExclusions(runner.Rust, "lib.rs", []byte(src.String()), annotation.Coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(declared.Unused, want) {
+		t.Errorf("Unused = %v, want %v in ascending order", declared.Unused, want)
 	}
 }
 
