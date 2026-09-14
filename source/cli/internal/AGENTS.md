@@ -20,6 +20,7 @@ says why it is that way and what breaks if it changes.
 | `toolchain`, `download` | [`toolchains.md`](../../../agentic/references/toolchains.md) |
 | `pins` | [`tool-pins.md`](../../../agentic/references/tool-pins.md) |
 | `config` | [`configuration.md`](../../../agentic/references/configuration.md) |
+| `secrets` | [`scanning.md`](../../../agentic/references/scanning.md), and [`tool-pins.md`](../../../agentic/references/tool-pins.md) for the gitleaks pin |
 | `ui` | [`output-grammar.md`](../../../agentic/references/output-grammar.md), and [`surface.md`](../../../agentic/references/surface.md) for the comment |
 | `referral`, `clearance`, `forge` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |

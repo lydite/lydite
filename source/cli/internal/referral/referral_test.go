@@ -126,6 +126,30 @@ exemptions:
 			Change{Paths: []string{".github/workflows/ci.yml"}},
 			"CI workflow edited",
 		},
+		{
+			"an edit to gitleaks' own allowlist",
+			Change{Paths: []string{".gitleaks.toml"}},
+			"secret-scan config edited",
+		},
+		{
+			"an edit to gitleaks' own fingerprint ignore list",
+			Change{Paths: []string{".gitleaksignore"}},
+			"secret-scan config edited",
+		},
+		{
+			// A scan rooted at a subdirectory has gitleaks discover its
+			// config there, not at the repository root — the same reason
+			// gitAttributes is matched by base name rather than a
+			// repository-root path.
+			"an edit to gitleaks' own allowlist under a scan root that is not the repository root",
+			Change{Paths: []string{"source/.gitleaks.toml"}},
+			"secret-scan config edited",
+		},
+		{
+			"an edit to gitleaks' own fingerprint ignore list under a scan root that is not the repository root",
+			Change{Paths: []string{"source/.gitleaksignore"}},
+			"secret-scan config edited",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -614,5 +638,43 @@ func TestExemptionsPathIsRecognisedUnderAScanRoot(t *testing.T) {
 	d := Decide(Change{Paths: []string{"source/" + FileName, "src/app.go"}}, File{})
 	if len(d.Bundled) != 1 || d.Bundled[0] != "src/app.go" {
 		t.Errorf("bundled = %v, want the non-exemption path", d.Bundled)
+	}
+}
+
+// gitleaks' inline allow is a suppression like every other tool's.
+//
+// lydite does not pass --ignore-gitleaks-allow, so the comment clears the
+// secret finding outright — and what it asserts is that a credential-shaped
+// string is not a credential, which nobody but its author can check. The
+// opt-out this gate attracts most must not be the one that merges unattended.
+func TestGitleaksAllowIsASuppression(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths: []string{"src/config.go"},
+		Added: []DiffLine{{Path: "src/config.go", Text: "\tkey := example // gitleaks:allow"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Fatalf("got %+v, want one suppression added", d)
+	}
+	if !strings.Contains(d[0].Evidence, "gitleaks:allow") {
+		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
+	}
+}
+
+// gitleaks reads its own inline allow with an unanchored match: it honours
+// "xgitleaks:allow" exactly as it honours "gitleaks:allow", because the
+// tool does not require the marker to start a word. A referral check that
+// required a word boundary here would accept a spelling gitleaks itself
+// still clears a finding for, and the credential the marker suppresses
+// would merge unattended.
+func TestGitleaksAllowDisqualifiesEvenWithAPrecedingIdentifierByte(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths: []string{"src/config.go"},
+		Added: []DiffLine{{Path: "src/config.go", Text: "\tkey := example // xgitleaks:allow"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Fatalf("got %+v, want one suppression added", d)
+	}
+	if !strings.Contains(d[0].Evidence, "gitleaks:allow") {
+		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
 	}
 }
