@@ -184,10 +184,21 @@ func measureLCOV(data []byte, unitDir, dir string, lang runner.Lang) (Report, er
 		if path.IsAbs(file) || strings.HasPrefix(file, "../") {
 			return exclusions{}, nil
 		}
+		joined := filepath.Join(unitDir, filepath.FromSlash(file))
+		// A leading "../" is not the only way out: an "SF:" record holding an
+		// embedded one — "a/../../etc/passwd" — passes the check above and
+		// filepath.Join still cleans it to a path outside unitDir. The report
+		// is data this parses, not a boundary a coverage producer is trusted
+		// to keep inside the scan root on its own, so the joined path is
+		// checked against unitDir directly rather than against the string
+		// that produced it.
+		if rel, err := filepath.Rel(unitDir, joined); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return exclusions{}, nil
+		}
 		// Named with the component's directory already on it, because the hits
 		// beside it are prefixed below and an unused declaration a reader
 		// cannot open is one they cannot act on.
-		return excludedLCOVLines(filepath.Join(unitDir, filepath.FromSlash(file)), path.Join(relDir(dir), file), lang, annotation.Coverage)
+		return excludedLCOVLines(joined, path.Join(relDir(dir), file), lang, annotation.Coverage)
 	})
 	if err != nil {
 		return Report{}, err

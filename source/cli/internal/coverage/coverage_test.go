@@ -268,3 +268,28 @@ func TestAnOutOfTreeLCOVPathIsDroppedRatherThanPrefixed(t *testing.T) {
 		}
 	}
 }
+
+// An "SF:" record with an embedded "../" — not a leading one — still resolves
+// outside the component's directory once filepath.Join cleans it, and the
+// leading-"../" check above does not catch it. A declaration in the file that
+// path names must never be read: the report is data this parses, not a
+// boundary a coverage producer is trusted to keep inside the scan root.
+func TestAnEmbeddedTraversalInAnSFPathIsRefused(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "secret.rs", "// [lydite:exclude_from_coverage][leaked]\nfn f() -> i64 {\n    1\n}\n")
+	// Line 2 is where the declared function starts — the line an actual read
+	// of secret.rs would drop from both sides of the figure.
+	lcov := "SF:sub/../../secret.rs\nDA:2,1\nLF:1\nLH:1\nend_of_record\n"
+	write(t, root, "rust/.lydite-reports/coverage/lcov.info", lcov)
+
+	got, err := Measure(context.Background(), root, "rust", ".lydite-reports/coverage/lcov.info", runner.Rust, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Held, the DA record stands exactly as the tool reported it. If the
+	// traversal reached secret.rs, its declaration would drop line 1 from
+	// both sides of the figure instead.
+	if got.Lines != (LineCount{Covered: 1, Total: 1}) {
+		t.Errorf("Lines = %+v, want {1 1} — the raw DA record, unexcluded because secret.rs was never opened", got.Lines)
+	}
+}

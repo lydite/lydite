@@ -178,7 +178,7 @@ func excludedGoLines(path, name string, gate annotation.Gate) (exclusions, error
 // a parse would turn it into a syntax check. A declaration that is present and
 // malformed is still an error naming the line.
 func excludedLCOVLines(path, name string, lang runner.Lang, gate annotation.Gate) (exclusions, error) {
-	src, err := os.ReadFile(path) // #nosec G304 -- the path comes from lydite's own coverage report, under the scan root
+	src, err := os.ReadFile(path) // #nosec G304,G703 -- the only caller, measureLCOV, has already checked that this path resolves inside the component's own directory
 	if err != nil {
 		return exclusions{}, nil
 	}
