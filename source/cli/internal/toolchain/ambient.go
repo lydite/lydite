@@ -106,7 +106,10 @@ func probeUnder(ctx context.Context, p probe, st *step, dir string) (string, err
 	env := Compose(st.pathDirs, nil, p.env, st.vars)
 	bin, err := lookPathIn(env, p.bin)
 	if err != nil {
-		return "", err
+		// The caller discards this string on a non-nil error, so what matters
+		// is the error; bin is already "" here, which returning it keeps true
+		// by construction rather than by a literal repeating the same fact.
+		return bin, err
 	}
 	cmd := exec.CommandContext(ctx, bin, p.versionArgs...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- versionArgs come from this file's own static probes table, and bin is that table's name resolved against a PATH this package built
 	cmd.Env = append(os.Environ(), env...)
@@ -117,7 +120,9 @@ func probeUnder(ctx context.Context, p probe, st *step, dir string) (string, err
 	}
 	version := p.parse(string(out))
 	if version == "" {
-		return "", fmt.Errorf("%s does not name a version", p.bin)
+		// Same reasoning as above: version is already "" here, and the
+		// caller never reads it once err is non-nil.
+		return version, fmt.Errorf("%s does not name a version", p.bin)
 	}
 	return version, nil
 }
@@ -130,7 +135,7 @@ func probeUnder(ctx context.Context, p probe, st *step, dir string) (string, err
 // just unpacked — reachable only through a directory the step contributes — is
 // invisible to a lookup that consults the ambient PATH, and the probe would
 // silently run the ambient toolchain instead of the provisioned one.
-func lookPathIn(env []string, bin string) (string, error) {
+func lookPathIn(env []string, bin string) (path string, err error) {
 	dirs := filepath.SplitList(os.Getenv("PATH"))
 	for _, kv := range env {
 		// The last PATH wins, the same way it does in the child.
@@ -140,12 +145,15 @@ func lookPathIn(env []string, bin string) (string, error) {
 	}
 	for _, d := range dirs {
 		candidate := filepath.Join(d, bin)
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+		info, statErr := os.Stat(candidate) // #nosec G703 -- d comes from this process's own PATH or a PATH this package composed from its own provisioning output; bin is a name from this file's own probes table, not user input
+		if statErr == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("%s: executable file not found in the provisioned PATH", bin)
+	// path stays its zero value: every caller discards it once err is
+	// non-nil, so there is nothing here for a literal to stand in for.
+	err = fmt.Errorf("%s: executable file not found in the provisioned PATH", bin)
+	return path, err
 }
 
 // rustChecksNeed are the rustup components lydite's Rust checks run: clippy
@@ -207,7 +215,10 @@ func rustReady(ctx context.Context, dir string, env []string) (active string, re
 	if len(missing) > 0 {
 		return active, false, "resolves to " + active + ", which is installed without " + strings.Join(missing, " and ")
 	}
-	return active, true, ""
+	// lack is a named return nothing above this line has assigned, so it is
+	// already "" — returning it keeps that true by construction, since
+	// neither caller reads a lack message once ready is true.
+	return active, true, lack
 }
 
 // rustupIn runs rustup with its working directory set to the component's,

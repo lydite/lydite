@@ -465,6 +465,43 @@ func TestAnUnconfirmedInstalledVersionKeepsTheEnvironmentAndWarns(t *testing.T) 
 	}
 }
 
+// The confirming re-probe's first question is rustReady's own first question:
+// whether rustup is on PATH at all. A rustup that answers everything else and
+// then removes itself the moment it is asked to install something reaches
+// exactly that branch on the re-probe, which is otherwise only exercised by
+// the readiness check before anything is provisioned.
+func TestConfirmFallsBackWhenRustupVanishesAfterInstalling(t *testing.T) {
+	dir := unpinnedRustCrate(t)
+	bin := fakeToolchainBin(t)
+	marker := filepath.Join(t.TempDir(), "installs")
+	writeScript(t, filepath.Join(bin, "rustup"), strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1 $2" in`,
+		`"show active-toolchain") echo 'nightly-x86_64-unknown-linux-gnu' ;;`,
+		`"component list") exit 1 ;;`,
+		`"toolchain install") echo "$*" >> ` + quote(marker) + `; /bin/rm -- "$0" ;;`,
+		"*) exit 1 ;;",
+		"esac",
+		"",
+	}, "\n"))
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.Rust, Overrides{}, &log)
+	if env == nil {
+		t.Fatalf("Ensure returned no environment after a successful install; log was %q", log.String())
+	}
+	if got := env.Version(); got != "an unidentified version" {
+		t.Errorf("Version = %q, want the unpinned fallback recorded once rustup could no longer confirm anything", got)
+	}
+	out := log.String()
+	if !strings.Contains(out, "warning:") {
+		t.Errorf("log should warn that the installed version could not be confirmed once rustup vanished, got %q", out)
+	}
+	if strings.Contains(out, `recording "lydite"`) {
+		t.Errorf("a fallback string must never be confused for a real toolchain name, got %q", out)
+	}
+}
+
 // Installing is not selecting, and the confirming probe has to ask about the
 // toolchain that was selected. An override lives only in .lydite/config.yml, so
 // RUSTUP_TOOLCHAIN is the whole of the selection — asking rustup without it
