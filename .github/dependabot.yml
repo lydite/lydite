@@ -229,6 +229,23 @@ updates:
       default-days: 7
     open-pull-requests-limit: 25
 
+  # PyYAML, installed by the proving-ground coverage gate's one-component
+  # leg when the runner's own interpreter lacks it.
+  - package-ecosystem: "pip"
+    directory: "/.github/workflows/proving-ground-pyyaml"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+
   # The Workers lydite operates (source/cloud-services), as one npm
   # workspace and therefore one component.
   #

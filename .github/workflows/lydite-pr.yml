@@ -597,30 +597,34 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Found by the documents rather than by the directory layout, as both
-          # folds are: actions/download-artifact gives an artifact its own
-          # subdirectory only when the pattern matched more than one, and
-          # extracts a lone match straight into `path`. A run where a single job
-          # uploaded — every other one having been skipped — therefore leaves
-          # `scan.json` at `reports/scan.json`, where a `reports/*/` glob never
-          # looks: it finds that job's own log and component subdirectories and
-          # publishes each as a section of its own. Depth 2 reaches both shapes
-          # and stops above those subdirectories, which hold logs and coverage
-          # reports rather than any document.
-          #
-          # One name per concern `publish` renders, which is also every document
-          # a job's report directory can carry: a directory holding one and not
-          # named here is a section silently dropped from the comment.
+          # A directory per job, found structurally rather than by the
+          # documents it may hold: actions/download-artifact gives an artifact
+          # its own subdirectory, named after it, only when the pattern
+          # matched more than one — a run where a single job uploaded
+          # therefore leaves that job's own contents directly under `reports`,
+          # with no `lydite-reports-*` subdirectory to find at all. Publish
+          # renders a directory holding no document as a section saying so, so
+          # a directory a job uploaded with logs but no document must still
+          # reach it — finding by document name would drop that section
+          # instead of rendering it as missing.
           shopt -s nullglob
           args=()
           dirs=()
-          while IFS= read -r dir; do
-            args+=(--reports "$dir")
-            dirs+=("$dir")
-          done < <(find reports -maxdepth 2 \
-                     \( -name review.json -o -name scan.json \
-                        -o -name test.json -o -name mutation.json \) \
-                     -exec dirname {} \; | sort -u)
+          nested=false
+          for dir in reports/*/; do
+            case "${dir#reports/}" in
+              lydite-reports-*) nested=true ;;
+            esac
+          done
+          if [ "$nested" = true ]; then
+            for dir in reports/*/; do
+              args+=(--reports "${dir%/}")
+              dirs+=("${dir%/}")
+            done
+          elif [ -d reports ]; then
+            args+=(--reports reports)
+            dirs+=(reports)
+          fi
           if [ "${#args[@]}" -eq 0 ]; then
             echo "no report directories were uploaded; there is nothing to publish" >&2
             exit 1

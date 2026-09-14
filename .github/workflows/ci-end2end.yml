@@ -287,7 +287,11 @@ jobs:
           COMPONENT: ${{ matrix.component }}
         run: |
           set -euo pipefail
-          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          # Pinned rather than latest: the version has one home, in
+          # .github/workflows/proving-ground-pyyaml/requirements.txt, which
+          # Dependabot watches the way it watches internal/semgrep's.
+          python3 -c 'import yaml' 2>/dev/null || \
+            pip install --quiet -r .github/workflows/proving-ground-pyyaml/requirements.txt
           python3 - "$COMPONENT" <<'PY'
           import sys
 
