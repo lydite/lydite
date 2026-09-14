@@ -253,29 +253,27 @@ func (t *tree) prefix(path string, n, col int) string {
 		return ""
 	}
 	line := lines[n-1]
-	return clip(finding.Normalise(trimEarlierValue(line[:prefixEnd(line, col)])))
+	cut := clip(finding.Normalise(line[:prefixEnd(line, col)]))
+	if assignmentLike.MatchString(cut) {
+		return ""
+	}
+	return cut
 }
 
-// valueLike marks a run of characters shaped like a credential's own value —
-// hex, base64, a plain password — rather than surrounding code or prose.
-var valueLike = regexp.MustCompile(`[A-Za-z0-9+/_.=-]{8,}`)
-
-// trimEarlierValue drops everything up to and including the last value-shaped
-// run in cut.
+// assignmentLike matches a colon, an equals sign, or a quote character.
 //
 // Cutting at the earliest match gitleaks flagged on a line only protects
 // flagged matches from each other. A line can also carry an assignment no
-// rule flagged — export DB_PASSWORD=hunter2 API_TOKEN=<token>, a DSN's own
-// password ahead of an api_key parameter — and that value is exactly as much
-// a secret as the one gitleaks found. Dropping it out of the prefix keeps
-// the promise the flagged match's own redaction already makes.
-func trimEarlierValue(cut string) string {
-	locs := valueLike.FindAllStringIndex(cut, -1)
-	if len(locs) == 0 {
-		return cut
-	}
-	return cut[locs[len(locs)-1][1]:]
-}
+// rule flagged — export DB_PASSWORD=hunter2 API_TOKEN=<token>, a JSON
+// {"password": "hunter2!", "api_key": …}, a DSN's own password ahead of an
+// api_key parameter — and that value is exactly as much a secret as the one
+// gitleaks found. No length or character-class threshold on what such a
+// value looks like can be trusted — a password can be short, and it can be
+// quoted and full of punctuation — so any of these three characters ahead of
+// a match is reason enough to publish no prefix at all rather than guess
+// which part of it is safe. Checked after clipping, so a prefix's clipped-away
+// tail cannot cause the kept, and already safe, head to be discarded too.
+var assignmentLike = regexp.MustCompile(`[:='"` + "`" + `]`)
 
 func (t *tree) read(path string) []string {
 	if t.root == nil {

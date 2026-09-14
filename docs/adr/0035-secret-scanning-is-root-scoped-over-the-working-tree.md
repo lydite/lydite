@@ -173,10 +173,13 @@ distinguishing content may not be published.
 
 Cutting at the match's own start column protects a claim from its own secret and from a second
 flagged match sharing the line, but not from an assignment gitleaks' own rules never fired on —
-`export DB_PASSWORD=hunter2 API_TOKEN=<token>`, a DSN's password ahead of an `api_key` parameter.
-The prefix additionally drops everything up to and including the last run of eight or more
-value-shaped characters it contains, so an unflagged credential earlier on the line cannot ride
-along either. What survives is prose and punctuation, never something that reads as a value.
+`export DB_PASSWORD=hunter2 API_TOKEN=<token>`, a JSON `{"password": "hunter2!", "api_key": …}`,
+a DSN's password ahead of an `api_key` parameter. No length or character-class threshold on what
+such a value looks like is trusted to bound it — a password can be three characters or thirty,
+plain or quoted and full of punctuation — so the prefix is blanked outright whenever it contains
+a colon, an equals sign, or a quote character, checked after clipping so a clipped-away tail
+cannot cause an already-safe head to be discarded too. What survives is prose with none of
+those three characters in it — otherwise the site is the rule alone.
 
 **Rejected: gitleaks' own `Fingerprint`.** It is `file:rule:startline`, a line-keyed identity —
 the one thing `internal/finding` exists to not be.

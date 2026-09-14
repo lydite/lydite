@@ -448,18 +448,35 @@ func TestASiteDropsAnEarlierAssignmentEvenWhenGitleaksDidNotFlagIt(t *testing.T)
 	// can carry a second, unflagged credential earlier on the same line —
 	// gitleaks' own entropy or pattern rules simply never fired on it — and
 	// that value is exactly as much a secret as the one gitleaks found.
-	dir := t.TempDir()
-	line := "export DB_PASSWORD=hunter2secret API_TOKEN=abcdef1234567890"
-	write(t, dir, "env.sh", line+"\n")
-	// The match starts at "API_TOKEN": one past its first byte, per gitleaks'
-	// own StartColumn convention.
-	col := strings.Index(line, "API_TOKEN") + 2
-	got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: "env.sh", StartLine: 1, StartColumn: col}})
-	if len(unplaced) != 0 || len(got) != 1 {
-		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+	// Length and character-class are not trusted to bound it: a password can
+	// be eight characters or three, plain or full of punctuation inside
+	// quotes — so any of these three cases blanks the whole prefix.
+	cases := []struct {
+		name   string
+		line   string
+		secret string
+		match  string
+	}{
+		{"a long unquoted password", "export DB_PASSWORD=hunter2secret API_TOKEN=abcdef1234567890", "hunter2secret", "API_TOKEN"},
+		{"a quoted password full of punctuation", `export DB_PASSWORD='P@ssw0rd!' API_TOKEN=abcdef1234567890`, "P@ssw0rd!", "API_TOKEN"},
+		{"a password shorter than eight characters", "export DB_PASSWORD=abc API_TOKEN=abcdef1234567890", "abc", "API_TOKEN"},
+		{"a DSN password ahead of a flagged token", "postgres://app:changeme@db/app?api_key=abcdef1234567890", "changeme", "api_key"},
 	}
-	if strings.Contains(got[0].Site, "hunter2secret") || strings.Contains(got[0].Site, "DB_PASSWORD") {
-		t.Errorf("site = %q, must not carry the earlier, unflagged assignment", got[0].Site)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "env.sh", tc.line+"\n")
+			// The match starts at tc.match: one past its first byte, per
+			// gitleaks' own StartColumn convention.
+			col := strings.Index(tc.line, tc.match) + 2
+			got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: "env.sh", StartLine: 1, StartColumn: col}})
+			if len(unplaced) != 0 || len(got) != 1 {
+				t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+			}
+			if strings.Contains(got[0].Site, tc.secret) {
+				t.Errorf("site = %q, must not carry the earlier, unflagged secret %q", got[0].Site, tc.secret)
+			}
+		})
 	}
 }
 
