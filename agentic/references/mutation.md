@@ -89,6 +89,14 @@ statically-linked `CGO_ENABLED=0` binary for four platforms — which every C-ba
 binding rules out. `github.com/odvcencio/gotreesitter` is a pure-Go tree-sitter runtime, so the
 grammar tables are the only input.
 
+**The shipped build is a `grammar_subset`.** `gotreesitter` embeds all 206 of its grammars
+unless the `grammar_subset` build tag turns the wildcard embed off, and each
+`grammar_subset_<lang>` tag turns one blob back on — 15MB against 33MB for the same binary. A
+build without them is correct and larger; a build with `grammar_subset` and a language's own
+tag missing panics at that language's first parse, which is why `ci-test` runs the suite under
+the exact tag list `go build` uses (see the root [`AGENTS.md`](../../AGENTS.md) Commands
+section).
+
 **The node types are the whole of what lydite knows per language**, held in one `grammar` table
 each: the infix node whose `operator` field the three operator rewrites replace, the return node,
 the statement node, which inner expressions a statement deletion applies to, the literal node types

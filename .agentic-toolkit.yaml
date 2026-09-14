@@ -1,9 +1,13 @@
-extends:
+platforms: [claude, codex]
+memory:
+  root: .memory
+  agent: claudecode
+stacks:
   - github.com/pedromvgomes/agentic-toolkit.git/stacks/default.yaml
   - github.com/pedromvgomes/agentic-toolkit.git/stacks/plannotator.yaml
   - github.com/pedromvgomes/agentic-toolkit.git/stacks/serena.yaml
   - github.com/pedromvgomes/agentic-toolkit.git/stacks/rtk.yaml
-skills:
-  - ./.agents/skills/bump-version
-memory:
-  agent: claudecode
+
+# Repo definitions (we use default ./agentic root, so all definitions there
+# are picked automatically)
+context: ./agentic/lydite-repo.md

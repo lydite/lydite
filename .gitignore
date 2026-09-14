@@ -34,6 +34,9 @@ node_modules/
 /.claude/
 /CLAUDE.md
 /.mcp.json
+/.codex/
+/AGENTS.md
+/.agents/
 
 # Python bytecode from the CI assertion scripts.
 __pycache__/

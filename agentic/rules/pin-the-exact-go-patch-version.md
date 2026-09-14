@@ -6,5 +6,5 @@ module's `toolchain` directive — which is how a govulncheck built by an older 
 locally and failed in CI. When `go.mod`'s `toolchain` line moves, every `go-version-file:`
 reference and every literal `go-version:` moves in the same change.
 
-Reasoning: [`.agents/references/ci.md`](../references/ci.md) and
-[`.agents/references/toolchains.md`](../references/toolchains.md).
+Reasoning: [`agentic/references/ci.md`](../references/ci.md) and
+[`agentic/references/toolchains.md`](../references/toolchains.md).

@@ -105,6 +105,10 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
   answering that the App is not installed, posts as `github-actions[bot]`. A consumer who
   installed nothing still gets the surface. That is why "not installed" is an *answer* and not
   an error.
+- **The relay is written and tested, and not yet deployed.** Until `vars.LYDITE_RELAY_URL` is
+  set, every comment and every thread goes through the `github-token` fallback above — a
+  supported path, not a temporary one. No finding appears in both surfaces regardless of which
+  path is live.
 
 ## The threads
 
