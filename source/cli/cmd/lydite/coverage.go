@@ -206,7 +206,14 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 		return unmeasuredComponent(c, err.Error())
 	}
 	if !rep.Lines.Measured() {
-		return unmeasuredComponent(c, "the coverage report lists no coverable line")
+		// rep.Unused travels even here: a component whose exclusions
+		// happen to leave zero net coverable lines can still carry a
+		// declaration that covers no function, and nameUnusedDeclarations
+		// reads it off the measurement — a report discarded past this
+		// point is a warning nobody sees.
+		m := unmeasuredComponent(c, "the coverage report lists no coverable line")
+		m.Unused = rep.Unused
+		return m
 	}
 	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
 		Lines: rep.Lines, Hits: rep.Hits, Unused: rep.Unused, Producer: producerOf(root, c, tc)}

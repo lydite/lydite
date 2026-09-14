@@ -194,6 +194,25 @@ func TestADeclarationThatReachesNoFunctionIsNamed(t *testing.T) {
 			src:  "export function f(): number {\n  return 1;\n}\n" + declare + "\n",
 			line: 4,
 		},
+		{
+			// A blank line between a declaration and the function it once
+			// named must not let it reattach to whatever follows once that
+			// function is edited away — the same bound Go's own doc-comment
+			// attachment already carries.
+			name: "a blank line separates it from what follows",
+			lang: runner.Rust, path: "lib.rs",
+			src:  declare + "\n\nfn f() -> i64 {\n    1\n}\n",
+			line: 1,
+		},
+		{
+			// A comment immediately below the declaration that is not part
+			// of its own wrapped reason must stop the walk rather than
+			// being skipped like a reason's own continuation line would be.
+			name: "an unrelated adjacent comment separates it from what follows",
+			lang: runner.Rust, path: "lib.rs",
+			src:  declare + "\n// an unrelated comment\nfn f() -> i64 {\n    1\n}\n",
+			line: 1,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			declared, err := DeclaredExclusions(c.lang, c.path, []byte(c.src), annotation.Coverage)

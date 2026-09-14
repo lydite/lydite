@@ -82,7 +82,9 @@ reading the token in a diff would have to know the file's language to know what 
 `internal/mutation` already parses Rust, TypeScript and TSX, its `grammar` table already names each
 language's comment node, and `tsGen.comments` already feeds `annotation.Declarations` — so the
 declaration side exists for these languages and only the scope side is new: a set of function-like
-node types per grammar, and a walk to the innermost one containing a line.
+node types per grammar, and a walk from a declaration's own comment lines to the function
+immediately following them, bound to the same no-blank-line limit Go's own doc-comment attachment
+already carries.
 
 That walk cannot simply be called from `internal/coverage`, because **`internal/mutation` imports
 `internal/coverage`** — one edge, `coverage.IsGeneratedGoSource`. Coverage is the package CRAP and

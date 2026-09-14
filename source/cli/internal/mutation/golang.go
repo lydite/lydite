@@ -86,7 +86,7 @@ func GenerateGo(path string, src []byte, lines map[int]bool) ([]Mutant, []Unmatc
 		return nil, nil, err
 	}
 
-	g := &goGen{sites: sites{path: path, src: src, lines: lines, reasons: reasons}, fset: fset}
+	g := &goGen{sites: sites{path: path, src: src, lines: lines, reasons: annotation.Reasons(reasons)}, fset: fset}
 	ast.Inspect(file, g.visit)
 	return g.out, g.resolve(), nil
 }

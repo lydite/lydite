@@ -517,6 +517,45 @@ func TestMeasureCarriesTheReportsUnmatchedDeclarations(t *testing.T) {
 	}
 }
 
+// A component whose only function is itself excluded measures zero net
+// coverable lines and takes the unmeasured path — and a misplaced declaration
+// elsewhere in that same component still has to be named. Dropping it there
+// would be the one shape that reads as though nobody had to fix anything: the
+// row says "unmeasured" and the warning that would tell an author their
+// declaration did nothing never reaches them.
+func TestAnUnmeasuredComponentStillCarriesUnusedDeclarations(t *testing.T) {
+	root := t.TempDir()
+	for rel, content := range map[string]string{
+		"api/go.mod": "module example.com/api\n\ngo 1.26\n",
+		"api/main.go": "package api\n\n" +
+			"// [lydite:exclude_from_coverage][the whole function is measured elsewhere]\n" +
+			"func F() int {\n" +
+			"\t// [lydite:exclude_from_coverage][written inside the body, where it does nothing]\n" +
+			"\treturn 1\n}\n",
+		"api/.lydite-reports/coverage/coverage.out": "mode: set\nexample.com/api/main.go:4.16,7.2 1 1\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}
+	inv, err := invocation(c, runner.Instrumented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := measure(context.Background(), root, c, inv, nil, true)
+	if m.Measured() {
+		t.Fatalf("Measured() = true, want the excluded function to leave zero net coverable lines")
+	}
+	if len(m.Unused) != 1 || m.Unused[0] != "api/main.go:5" {
+		t.Errorf("Unused = %v, want [api/main.go:5]", m.Unused)
+	}
+}
+
 // The instrumented variant is what a run measures from, so the report path the
 // gate reads has to be the one the invocation actually writes. A test asserting
 // the two separately passes while they disagree.

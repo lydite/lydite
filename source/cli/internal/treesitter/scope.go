@@ -103,15 +103,18 @@ func (d Declared) Lines() map[int]bool {
 // A declaration covers the function written immediately below it, and nothing
 // else. That is the same rule go/ast applies in Go, where a doc comment is
 // attached to the declaration it precedes — tree-sitter attaches nothing, so
-// the attachment is read off the tree's own sibling order here: the next node
-// that is neither a comment nor a decoration is what the comment is about, and
-// it is a function when it introduces one on its own first line.
+// the attachment is read off the tree's own sibling order here: past the
+// declaration's own already-known reason lines and any decoration, bounded to
+// lines with nothing blank between them, the next node is what the comment is
+// about, and it is a function when it introduces one on its own first line.
 //
 // Taking that whole node rather than the function inside it is what makes
 // `export function f()` and `@log m()` one span apiece. A declaration whose
 // next sibling introduces no function — one written inside a function body,
 // which reads perfectly and does nothing, or one above a struct — covers
-// nothing and is reported in Unused.
+// nothing and is reported in Unused. So does one a blank line, or a comment
+// that is not its own reason's continuation, separates from what follows: see
+// Grammar.scope.
 func DeclaredExclusions(lang runner.Lang, path string, src []byte, gate annotation.Gate) (Declared, error) {
 	g, ok := GrammarFor(lang, path)
 	if !ok {
@@ -127,28 +130,49 @@ func DeclaredExclusions(lang runner.Lang, path string, src []byte, gate annotati
 		return Declared{}, fmt.Errorf("reading %s: %w", path, err)
 	}
 	out := Declared{Funcs: map[Span]string{}}
-	for line, reason := range reasons {
-		span, ok := g.scope(comments[line], language)
+	for line, decl := range reasons {
+		span, ok := g.scope(comments, line, decl.Lines, language)
 		if !ok {
 			out.Unused = append(out.Unused, line)
 			continue
 		}
-		out.Funcs[span] = reason
+		out.Funcs[span] = decl.Reason
 	}
 	sort.Ints(out.Unused)
 	return out, nil
 }
 
-// scope is the span a declaration written in comment covers.
-func (g Grammar) scope(comment *gotreesitter.Node, language *gotreesitter.Language) (Span, bool) {
-	if comment == nil {
+// scope is the span a declaration covers, found from comments (every comment
+// in the file, keyed by line) and the declaration's own line and how many
+// further lines its reason consumed — both already known from annotation.
+// Declarations, and not re-derived by a second reading of the same comments.
+//
+// The walk starts at the reason's own last line rather than at its first, and
+// from there skips only a decoration, and only when it starts on the very
+// next line. Anything else encountered there — a blank line, or a comment
+// that is not this declaration's own continuation — ends the walk without a
+// match. A version that skipped every comment indiscriminately once let a
+// declaration reattach to whatever function happened to follow it after the
+// one it was written for was edited away, with no line holding the token
+// changed to trigger a referral. Bounding to adjacent lines is the same limit
+// Go's own doc-comment attachment already carries — gofmt separates
+// declarations with a blank line — asked of a tree instead of of go/parser.
+func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, language *gotreesitter.Language) (Span, bool) {
+	last := comments[line+lines]
+	if last == nil {
 		return Span{}, false
 	}
-	anchor := comment.NextSibling()
-	for anchor != nil && (anchor.IsExtra() || decorations[g.tables()][anchor.Type(language)]) {
+	anchor := last.NextSibling()
+	prevEnd := last.EndPoint().Row
+	for anchor != nil && decorations[g.tables()][anchor.Type(language)] {
+		if anchor.StartPoint().Row != prevEnd+1 {
+			return Span{}, false
+		}
+		prevEnd = anchor.EndPoint().Row
 		anchor = anchor.NextSibling()
 	}
-	if anchor == nil || !g.introducesFunction(anchor, language, anchor.StartPoint().Row) {
+	if anchor == nil || anchor.IsExtra() || anchor.StartPoint().Row != prevEnd+1 ||
+		!g.introducesFunction(anchor, language, anchor.StartPoint().Row) {
 		return Span{}, false
 	}
 	return Span{First: int(anchor.StartPoint().Row) + 1, Last: int(anchor.EndPoint().Row) + 1}, true

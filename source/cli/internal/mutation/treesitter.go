@@ -278,7 +278,7 @@ func GenerateTreeSitter(lang runner.Lang, path string, src []byte, lines map[int
 	if err != nil {
 		return nil, nil, err
 	}
-	t.reasons = reasons
+	t.reasons = annotation.Reasons(reasons)
 	t.visit(root)
 	return t.out, t.resolve(), nil
 }

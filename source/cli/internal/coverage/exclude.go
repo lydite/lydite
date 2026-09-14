@@ -84,8 +84,8 @@ func DeclaredExclusions(fset *token.FileSet, file *ast.File, path string, gate a
 		}
 		for _, c := range fn.Doc.List {
 			line := fset.Position(c.Pos()).Line
-			if reason, ok := reasons[line]; ok {
-				out.Funcs[fn] = reason
+			if decl, ok := reasons[line]; ok {
+				out.Funcs[fn] = decl.Reason
 				claimed[line] = true
 			}
 		}
