@@ -129,6 +129,15 @@ that, and is a separate open question.
 runs once over the scan root whatever the declaration says. Its findings therefore carry no
 component, which is what `Finding.Component` being empty already means.
 
+**gitleaks is the second root-scoped gate**, for the same reason Semgrep is one: a secret scanner
+reads bytes, not a build graph, and the files most likely to carry a credential —
+`.github/workflows/`, a `docker-compose.yml`, an `.env` — belong to no component at all. It runs
+once over the scan root's working tree, never over history, and its findings carry no component,
+so `findingCounts` puts the count in `root_findings` beside Semgrep's. It is not diff-scoped: the
+row fails on every secret in the tree, as gosec's does, and the anchor is what decides which claims
+reach the diff and which land in the standing comment as pre-existing debt. See
+[ADR 0035](../../docs/adr/0035-secret-scanning-is-root-scoped-over-the-working-tree.md).
+
 **`scan` has no `--component` or `--affected`.** Selection is `lydite test`'s surface today; a scan
 that narrowed itself would need the same widening-on-ignorance argument made again, and nothing
 asks for it yet.

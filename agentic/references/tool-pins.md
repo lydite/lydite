@@ -17,6 +17,7 @@ Dependabot watches, colocated with the package that uses it:
 | cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
 | gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |
+| gitleaks | `internal/secrets/gitleaks-pin/go.mod` | **still a Go constant** — see below |
 
 The npm toolchains install with `npm ci` from a committed lockfile into a cache directory keyed
 by a **hash of that lockfile**. The old key was a hand-maintained string of concatenated version
@@ -31,6 +32,15 @@ because a pin is colocated with the package that uses it — and because the two
 under different rules: `go-pin`'s tools analyse source, so they are keyed by the Go toolchain
 that will build them, and a wrapper that reads another command's output is not.
 
+gitleaks follows gotestsum's pattern rather than `go-pin`'s: its version is a constant in
+`internal/secrets/pins.go`, and `internal/secrets/gitleaks-pin/go.mod` is a module of its own
+rather than an entry in `go-pin`, because gitleaks analyses no Go source and is keyed by its own
+version alone. It carries one caveat `go-pin`'s tools do not: a `go install`ed gitleaks is built
+without the release ldflags, so `gitleaks version` reports `version is set by build process`
+rather than the pinned version — there is no "is the pinned version already installed" probe to
+run, unlike `internal/semgrep`'s pipx pattern, and the version-keyed install directory is the
+whole of the guarantee.
+
 **Go is the one exception, deliberately.** `gosecPkg`/`govulncheckPkg` are const expressions that
 concatenate the version at compile time, and `go:embed` cannot read files inside a nested module,
 so the versions can't be read from `go-pin/go.mod` at runtime. The constants stay, and
@@ -41,11 +51,11 @@ go.sum 17→114 — which would then generate a stream of irrelevant Dependabot 
 
 ## A version stated twice: `internal/pins` and `go run ./tools/pinsync`
 
-Two pins are stated a second time somewhere Dependabot cannot reach: `golang.go`'s constants,
-for the reason above, and `biome.json`'s `$schema` URL, which Biome never fetches and an editor
-validates that file against — a stale one has every local edit checked against the wrong schema.
-Dependabot edits a manifest and nothing else, so a bump arrives with the mirror still stating the
-old version.
+Three pins are stated a second time somewhere Dependabot cannot reach: `golang.go`'s constants
+and `internal/secrets/pins.go`'s `gitleaksVersion`, both for the reason above, and `biome.json`'s
+`$schema` URL, which Biome never fetches and an editor validates that file against — a stale one
+has every local edit checked against the wrong schema. Dependabot edits a manifest and nothing
+else, so a bump arrives with the mirror still stating the old version.
 
 `internal/pins` is the whole of that rule: which manifests hold a version, which files restate
 it, and how to read and write both. `Check` reports drift and `Write` resolves it, and
