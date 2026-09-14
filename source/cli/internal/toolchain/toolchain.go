@@ -392,6 +392,10 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 			env = []string{"RUSTUP_TOOLCHAIN=" + req.Raw}
 		}
 		r.ambient, good, r.lack = rustReady(ctx, componentDir(root, req), env)
+		// The ambient line names r.bin as what answered — rustup, not cargo,
+		// now that r.ambient is the toolchain name rustup reports rather than
+		// a cargo version.
+		r.bin = "rustup"
 	}
 
 	if good {
