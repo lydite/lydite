@@ -486,7 +486,11 @@ func confirm(ctx context.Context, root string, req Requirement, st *step) (strin
 		// to report.
 		active, _, lack := rustReady(ctx, dir, Compose(st.pathDirs, nil, st.vars))
 		if active == "" {
-			return "", errors.New(lack)
+			// The caller discards this string on a non-nil error and
+			// substitutes its own fallback, so what matters here is the
+			// error, not the value — returning active rather than a literal
+			// keeps that true by construction instead of by convention.
+			return active, errors.New(lack)
 		}
 		return display(active), nil
 	}
