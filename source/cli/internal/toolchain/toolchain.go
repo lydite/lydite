@@ -43,6 +43,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -254,9 +255,17 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	shared := map[string]*resolution{}
 	for _, req := range reqs {
 		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
+		// Rust's answer is per directory, not per channel. rustup resolves a
+		// toolchain by walking up from the directory cargo runs in, so two
+		// components declaring the same thing — or declaring nothing — can
+		// still select different toolchains, and sharing one answer between
+		// them would hand the second component the first one's directory.
+		if req.Lang == runner.Rust {
+			key += "\x00" + req.Unit.Dir
+		}
 		got, seen := shared[key]
 		if !seen {
-			resolved, err := resolveOne(ctx, req, ov)
+			resolved, err := resolveOne(ctx, root, req, ov)
 			if err != nil {
 				return nil, err
 			}
@@ -290,6 +299,11 @@ type resolution struct {
 	// it was there at all.
 	bin, ambient string
 	present      bool
+	// lack names the shortfall when the language has a more specific answer
+	// than a version comparison. Rust does: a channel can be installed and
+	// still be missing the clippy or rustfmt component every check runs, which
+	// neither "is older than" nor "is not installed" describes.
+	lack string
 	// note is the provisioning step's own sentence, which is about the
 	// machine rather than about any component, so it is shared verbatim.
 	note string
@@ -328,10 +342,10 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 		return logf(w, "%s\n", r.note)
 	case resolutionDisabled:
 		return logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, r.ambient, r.present))
+			req.Lang, r.lacking(req))
 	case resolutionFailed:
 		return logf(w, "warning: could not provision the %s toolchain (%s): %s — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, r.ambient, r.present), r.note)
+			req.Lang, r.lacking(req), r.note)
 	case resolutionProvisioned:
 		// The install happened once, so it is reported once.
 		if r.note == "" || r.noted {
@@ -347,7 +361,7 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 // is present does not satisfy it. It executes and returns what happened; the
 // caller writes the line, because the line names a component and this is
 // shared between every component that wants the same toolchain.
-func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution, error) {
+func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides) (resolution, error) {
 	p, ok := probes[req.Lang]
 	if !ok {
 		return resolution{}, nil
@@ -355,7 +369,36 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 	ambient, present := installed(ctx, p)
 	r := resolution{kind: resolutionAmbient, bin: p.bin, ambient: ambient, present: present}
 
-	if satisfied(req, ambient, present) {
+	good := satisfied(req, ambient, present)
+	if req.Lang == runner.Rust {
+		// Rust's verdict comes from rustup, asked in the component's own
+		// directory — the only place the channel a cargo invocation there
+		// selects can be established, and the only authority on a named
+		// channel, which has no version to compare. See rustReady.
+		//
+		// The toolchain rustup names replaces the probed cargo version as what
+		// this resolved to, because that version is the machine's default
+		// channel and not necessarily the one this component runs under.
+		//
+		// An override selects a channel rustup's own file-based resolution
+		// does not know about — it lives only in .lydite/config.yml — so the
+		// question has to be asked with RUSTUP_TOOLCHAIN set, the same way
+		// provisioning selects it below. Asking without it checks the
+		// channel the directory would resolve to on its own, which can
+		// already be ready and read the override as satisfied without ever
+		// applying it.
+		var env []string
+		if req.Overridden {
+			env = []string{"RUSTUP_TOOLCHAIN=" + req.Raw}
+		}
+		r.ambient, good, r.lack = rustReady(ctx, componentDir(root, req), env)
+		// The ambient line names r.bin as what answered — rustup, not cargo,
+		// now that r.ambient is the toolchain name rustup reports rather than
+		// a cargo version.
+		r.bin = "rustup"
+	}
+
+	if good {
 		// Satisfied is not the same as nothing to do. Go still needs its
 		// toolchain pinned so that installing an external tool cannot
 		// silently switch away from the version just verified — see
@@ -368,7 +411,7 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 				// contributes no directory and only GOTOOLCHAIN=local, which
 				// names every ambient Go there has ever been — so a caller
 				// caching a tool built under it has nothing else to key on.
-				r.env = &Env{Vars: st.vars, Resolved: display(ambient)}
+				r.env = &Env{Vars: st.vars, Resolved: display(r.ambient)}
 				// The pin is about the machine, not about any one component,
 				// so it is said once alongside the per-component line.
 				r.note = st.note
@@ -383,8 +426,18 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 		// with no version at all, so a machine that already has the right
 		// toolchain records a different producer from one that provisioned
 		// it, and the two never compare.
-		if ambient != "" {
-			r.env = &Env{Resolved: display(ambient)}
+		if r.ambient != "" {
+			r.env = &Env{Resolved: display(r.ambient)}
+			// Being ready is not the same as being selected. An override
+			// channel that is already installed still needs RUSTUP_TOOLCHAIN
+			// carried into the environment a later cargo invocation uses —
+			// without it, "the override channel has clippy and rustfmt" and
+			// "the component actually runs under it" are two different
+			// claims, and only rustReady's own verdict, just above, checked
+			// the first.
+			if req.Lang == runner.Rust && req.Overridden {
+				r.env.Vars = []string{"RUSTUP_TOOLCHAIN=" + req.Raw}
+			}
 		}
 		return r, nil
 	}
@@ -393,7 +446,7 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 		return r, nil
 	}
 
-	st, err := provision(ctx, req, ambient, present)
+	st, err := provision(ctx, req, r.ambient, r.present)
 	if err != nil {
 		r.kind, r.note = resolutionFailed, err.Error()
 		return r, nil
@@ -406,8 +459,62 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 		ensureExecutable(dir)
 	}
 	r.kind, r.note = resolutionProvisioned, st.note
-	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}
+	// What was installed, not what was asked for. The declaration is a channel
+	// or a floor — "stable", "1.26" — and recording it would describe every
+	// release that ever satisfied it, so the same toolchain would carry one
+	// identity on a runner that already had it and another on a runner that
+	// installed it. Env.Resolved is a baseline's producer and half of a tool
+	// cache's key, and both compare it verbatim.
+	resolved, err := confirm(ctx, root, req, st)
+	if err != nil {
+		// The install succeeded, so the environment is real and keeping it is
+		// not in question; only the identity went unestablished. The
+		// declaration stands in for it, and the line says so rather than
+		// letting an unconfirmed version read as a measured one.
+		resolved = displayRaw(req)
+		r.note += fmt.Sprintf("; warning: could not confirm %s's installed version (%v) — recording %q",
+			req.Lang, err, resolved)
+	}
+	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: resolved}
 	return r, nil
+}
+
+// confirm asks the toolchain a provisioning step has just installed what
+// version it is, under the environment that step produced.
+func confirm(ctx context.Context, root string, req Requirement, st *step) (string, error) {
+	dir := componentDir(root, req)
+	if req.Lang == runner.Rust {
+		// rustup's answer, for the same reason the satisfied check takes it:
+		// the channel a cargo invocation in this directory selects is the one
+		// that will do the work, and a named channel has no version of its own
+		// to report.
+		active, _, lack := rustReady(ctx, dir, Compose(st.pathDirs, nil, st.vars))
+		if active == "" {
+			// The caller discards this string on a non-nil error and
+			// substitutes its own fallback, so what matters here is the
+			// error, not the value — returning active rather than a literal
+			// keeps that true by construction instead of by convention.
+			return active, errors.New(lack)
+		}
+		return display(active), nil
+	}
+	p, ok := probes[req.Lang]
+	if !ok {
+		return "", fmt.Errorf("lydite has no %s probe", req.Lang)
+	}
+	version, err := probeUnder(ctx, p, st, dir)
+	if err != nil {
+		return "", err
+	}
+	// Rendered the way the ambient path renders its own answer, because the
+	// two are compared as strings by everything that reads them.
+	return display(version), nil
+}
+
+// componentDir is the component's directory on disk, which is where a
+// toolchain question about it has to be asked.
+func componentDir(root string, req Requirement) string {
+	return filepath.Join(root, filepath.FromSlash(req.Unit.Dir))
 }
 
 // provision dispatches to the per-language provisioner. Each one differs in
@@ -418,7 +525,11 @@ func provision(ctx context.Context, req Requirement, ambient string, present boo
 	case runner.Go:
 		return provisionGo(ctx, req, ambient, present)
 	case runner.Rust:
-		return provisionRust(ctx, req, ambient, present)
+		// ambient is rustReady's active channel for Rust — resolveOne set
+		// r.ambient to it before deciding provisioning was needed — the
+		// channel this directory already resolves to, which an unpinned
+		// component falls back to installing.
+		return provisionRust(ctx, req, ambient)
 	case runner.TypeScript:
 		return provisionNode(ctx, req, ambient, present)
 	default:
@@ -461,6 +572,16 @@ func declaredBy(req Requirement) string {
 		return "no version declared by this repo"
 	}
 	return fmt.Sprintf("satisfies %s from %s", displayRaw(req), req.Source)
+}
+
+// lacking renders why the ambient toolchain was not good enough, preferring
+// the language's own answer over the generic version comparison when it has
+// one.
+func (r *resolution) lacking(req Requirement) string {
+	if r.lack != "" {
+		return r.lack
+	}
+	return shortfall(req, r.ambient, r.present)
 }
 
 // shortfall renders why the ambient toolchain was not good enough.

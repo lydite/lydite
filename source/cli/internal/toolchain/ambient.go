@@ -2,8 +2,10 @@ package toolchain
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"lydite/lydite/internal/runner"
@@ -44,8 +46,9 @@ var probes = map[runner.Lang]probe{
 	},
 	runner.Rust: {
 		// cargo, not rustc: every Rust check and the coverage path invoke
-		// cargo, and a rustup install can in principle have one without the
-		// other. Asking the binary lydite actually runs is the honest probe.
+		// cargo. This names the binary lydite runs, for the diagnostic line;
+		// whether a Rust component is satisfied is rustReady's answer, not
+		// this version's.
 		bin:         "cargo",
 		versionArgs: []string{"--version"},
 		// "cargo 1.96.0 (abcdef123 2025-01-01)"
@@ -82,6 +85,178 @@ func installed(ctx context.Context, p probe) (version string, present bool) {
 		return "", true
 	}
 	return p.parse(string(out)), true
+}
+
+// probeUnder asks the toolchain a provisioning step has just made available
+// what version it is, under the environment that step produced: its
+// directories in front of PATH, its variables applied, and the component's own
+// directory as the working directory.
+//
+// Probing any other way answers about a different toolchain. A downloaded Go
+// or Node lives only in a directory the step contributes, and Go's version
+// depends on the GOTOOLCHAIN the step sets — so installed's answer, taken
+// before any of that existed, is the ambient toolchain the step was run to
+// replace.
+//
+// The step's variables go after the probe's own, because a flat environment
+// resolves the last occurrence of a key: GOTOOLCHAIN=local identifies what is
+// installed *now*, and the step's pin is what the environment will actually
+// select.
+func probeUnder(ctx context.Context, p probe, st *step, dir string) (string, error) {
+	env := Compose(st.pathDirs, nil, p.env, st.vars)
+	bin, err := lookPathIn(env, p.bin)
+	if err != nil {
+		// The caller discards this string on a non-nil error, so what matters
+		// is the error; bin is already "" here, which returning it keeps true
+		// by construction rather than by a literal repeating the same fact.
+		return bin, err
+	}
+	cmd := exec.CommandContext(ctx, bin, p.versionArgs...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- versionArgs come from this file's own static probes table, and bin is that table's name resolved against a PATH this package built
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	version := p.parse(string(out))
+	if version == "" {
+		// Same reasoning as above: version is already "" here, and the
+		// caller never reads it once err is non-nil.
+		return version, fmt.Errorf("%s does not name a version", p.bin)
+	}
+	return version, nil
+}
+
+// lookPathIn resolves a command against the PATH a composed environment
+// carries, rather than against this process's own.
+//
+// exec.LookPath cannot do it: a child's PATH decides nothing about how its
+// argv[0] is resolved, which happens in the parent. So a toolchain lydite has
+// just unpacked — reachable only through a directory the step contributes — is
+// invisible to a lookup that consults the ambient PATH, and the probe would
+// silently run the ambient toolchain instead of the provisioned one.
+func lookPathIn(env []string, bin string) (path string, err error) {
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	for _, kv := range env {
+		// The last PATH wins, the same way it does in the child.
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			dirs = filepath.SplitList(v)
+		}
+	}
+	for _, d := range dirs {
+		candidate := filepath.Join(d, bin)
+		info, statErr := os.Stat(candidate) // #nosec G703 -- d comes from this process's own PATH or a PATH this package composed from its own provisioning output; bin is a name from this file's own probes table, not user input
+		if statErr == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	// path stays its zero value: every caller discards it once err is
+	// non-nil, so there is nothing here for a literal to stand in for.
+	err = fmt.Errorf("%s: executable file not found in the provisioned PATH", bin)
+	return path, err
+}
+
+// rustChecksNeed are the rustup components lydite's Rust checks run: clippy
+// for the lint gate, rustfmt for the formatting one. A channel installed
+// without them is not a channel a scan can use.
+var rustChecksNeed = []string{"clippy", "rustfmt"}
+
+// rustReady asks rustup, from the component's own directory, whether a cargo
+// invocation there already has what every Rust check needs: the channel that
+// directory resolves to, installed, carrying clippy and rustfmt. It returns
+// the toolchain's name, that verdict, and — when the verdict is no — what it
+// is short of, phrased to complete "the rust toolchain ...".
+//
+// A version comparison against `cargo --version` cannot answer this. rustup
+// selects a toolchain per invocation by walking up from the working directory
+// for a rust-toolchain.toml, and lydite's own directory has none, so that
+// probe reports the machine's rustup *default* channel rather than the
+// crate's. A component pinning an older channel than the default then reads as
+// satisfied and is never provisioned; rustup fetches it lazily in the middle
+// of `cargo clippy`, without clippy, and the gap surfaces as a failed check
+// instead of a setup step. Named channels ("stable", "nightly") carry no
+// version to compare at all, so rustup resolving the file itself is the only
+// answer there is.
+//
+// No rustup means nothing can be resolved and nothing can be provisioned, and
+// that is reported as not ready rather than as satisfied: the caller takes the
+// provisioning path, which fails and warns, instead of reporting a pass it
+// never established.
+// env is added to rustup's own environment, because the selection is part of
+// the question: a channel chosen by RUSTUP_TOOLCHAIN is one rustup names only
+// when it is asked with that variable set, and asking without it reports the
+// channel the directory would have resolved to instead.
+func rustReady(ctx context.Context, dir string, env []string) (active string, ready bool, lack string) {
+	if _, err := exec.LookPath("rustup"); err != nil {
+		return "", false, "needs rustup, which is not installed"
+	}
+	out, err := rustupIn(ctx, dir, env, "show", "active-toolchain")
+	if err != nil {
+		return "", false, "is one rustup resolves no channel for in this component"
+	}
+	// "1.85.0-aarch64-apple-darwin (overridden by '/repo/rust-toolchain.toml')"
+	// — the name is the first field, kept verbatim rather than canonicalised,
+	// because a channel is not a version and the host triple is what tells two
+	// installs of one channel apart.
+	active = firstField(out)
+	if active == "" {
+		return "", false, "is one rustup resolves no channel for in this component"
+	}
+	out, err = rustupIn(ctx, dir, env, "component", "list", "--installed", "--toolchain", active)
+	if err != nil {
+		return active, false, "resolves to " + active + ", which is not installed"
+	}
+	var missing []string
+	for _, want := range rustChecksNeed {
+		if !hasComponent(out, want) {
+			missing = append(missing, want)
+		}
+	}
+	if len(missing) > 0 {
+		return active, false, "resolves to " + active + ", which is installed without " + strings.Join(missing, " and ")
+	}
+	// lack is a named return nothing above this line has assigned, so it is
+	// already "" — returning it keeps that true by construction, since
+	// neither caller reads a lack message once ready is true.
+	return active, true, lack
+}
+
+// rustupIn runs rustup with its working directory set to the component's,
+// which is the whole point: rustup picks a toolchain per invocation by walking
+// up from that directory, so an answer taken anywhere else is an answer about
+// a different toolchain.
+//
+// Deliberately not executil.Run, for the same reason installed is not: this is
+// a probe, and rustup chatter ahead of every scan is noise.
+func rustupIn(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "rustup", args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- args are this file's own literals plus a toolchain name rustup itself just printed
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// hasComponent reports whether `rustup component list --installed` named one.
+// Components are listed target-qualified ("clippy-aarch64-apple-darwin") on a
+// toolchain carrying a host triple and bare ("clippy") on one that does not,
+// and both spellings mean installed.
+func hasComponent(list, name string) bool {
+	for line := range strings.SplitSeq(list, "\n") {
+		line = strings.TrimSpace(line)
+		if line == name || strings.HasPrefix(line, name+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// firstField returns the first whitespace-separated field, verbatim.
+func firstField(out string) string {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // fieldAfter returns the whitespace-separated field following the first
