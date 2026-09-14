@@ -145,6 +145,11 @@ which toolchains and components are installed rather than asking cargo its
 version, which is a different question from the one this decision is about. Tracked as
 [#55](https://github.com/lydite/lydite/issues/55).
 
+> Closed by asking rustup: the probe asks `rustup show active-toolchain` and
+> `rustup component list --installed`, run from the component's own directory,
+> and requires clippy and rustfmt on the resolved channel. See
+> [`toolchains.md`](../../agentic/references/toolchains.md).
+
 Components resolving to the same requirement are probed and provisioned once and
 share the result, so the common case costs one diagnostic line rather than one
 per component.

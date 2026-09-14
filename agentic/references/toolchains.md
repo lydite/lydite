@@ -64,6 +64,20 @@ channel, an `lts/*` .nvmrc, no declaration at all) is satisfied by anything pres
 named no floor to be below. A toolchain that won't identify itself is treated as too old, because
 it cannot be *shown* to satisfy a pin.
 
+**`Env.Resolved` always names the toolchain actually installed, never the declaration that
+asked for it.** A baseline's producer string and a tool cache's key both compare it verbatim,
+so it has to identify one concrete release rather than a floor or a channel that could name
+several. The ambient path already probes the toolchain in place, so its answer is exact. The
+provisioned path re-probes under the environment provisioning just produced — its `PATH`
+directories in front, its variables applied, the component's directory as the working
+directory for Rust — after installation succeeds, rather than recording the manifest's raw
+`"stable"` or `"1.26"`, which would describe every release that ever satisfied it and give
+the same toolchain a different identity on every runner that installed it versus every
+runner that already had it. If that re-probe itself fails, the environment provisioning
+produced is still applied — the install worked, only confirming its version didn't —
+`Resolved` falls back to the raw declaration, and the provisioning note carries a `warning:`
+clause naming the failure once, so the fallback is visible rather than read as a measurement.
+
 Each language provisions differently, and only one of the three downloads anything:
 
 - **Go** delegates to `GOTOOLCHAIN`. Any Go 1.21+ can fetch another toolchain itself, through the
@@ -95,14 +109,18 @@ Each language provisions differently, and only one of the three downloads anythi
   rustup would otherwise install it lazily in the middle of `cargo clippy`, where a missing
   component reads as a check failure rather than a setup step. With no rustup at all, lydite says
   so and continues rather than installing rustup behind the user's back.
-  **The probe does not ask rustup what is installed**, and that is a real limit
-  rather than an oversight: it asks the ambient `cargo` its version, from lydite's own
-  working directory. A component pinning a channel older than the machine's default
-  therefore reads as satisfied and is never materialised, and rustup fetches it lazily
-  during `cargo clippy` — without the components, which is the failure this provisioning
-  exists to prevent. Per-component resolution narrows it rather than causing it: taking
-  the highest channel across every crate left the same hole. Closing it means asking
-  `rustup` which toolchains and components are present ([#55](https://github.com/lydite/lydite/issues/55)).
+  **The probe asks rustup, not cargo, and asks it from the component's own directory.**
+  `rustup show active-toolchain`, run with the component's directory as the working
+  directory, names the channel rustup would select there — the same selection a `cargo`
+  invocation in that directory would trigger, since both read `rust-toolchain.toml` off
+  the current directory. `rustup component list --installed --toolchain <name>` then
+  confirms that channel carries both `clippy` and `rustfmt`; a channel present without
+  either reads as not ready, since a missing component would otherwise surface mid-check
+  as a failure rather than at the setup step meant to prevent it. A named channel
+  (`stable`, `nightly`) has no version of its own to compare, so it is satisfied once
+  rustup resolves and reports it as installed. With no rustup on PATH the component reads
+  as not ready, falling through to provisioning, which then fails cleanly with a warning
+  rather than reading as satisfied.
 
   Installing is not selecting, and the two come apart in exactly one case. rustup picks a toolchain
   by reading `rust-toolchain.toml` from the directory cargo runs in, which covers the normal case
