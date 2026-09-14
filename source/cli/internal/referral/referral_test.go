@@ -616,3 +616,22 @@ func TestExemptionsPathIsRecognisedUnderAScanRoot(t *testing.T) {
 		t.Errorf("bundled = %v, want the non-exemption path", d.Bundled)
 	}
 }
+
+// gitleaks' inline allow is a suppression like every other tool's.
+//
+// lydite does not pass --ignore-gitleaks-allow, so the comment clears the
+// secret finding outright — and what it asserts is that a credential-shaped
+// string is not a credential, which nobody but its author can check. The
+// opt-out this gate attracts most must not be the one that merges unattended.
+func TestGitleaksAllowIsASuppression(t *testing.T) {
+	d := Disqualifications(Change{
+		Paths: []string{"src/config.go"},
+		Added: []DiffLine{{Path: "src/config.go", Text: "\tkey := example // gitleaks:allow"}},
+	}, Disqualifiers{})
+	if len(d) != 1 || d[0].Kind != "suppression added" {
+		t.Fatalf("got %+v, want one suppression added", d)
+	}
+	if !strings.Contains(d[0].Evidence, "gitleaks:allow") {
+		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
+	}
+}

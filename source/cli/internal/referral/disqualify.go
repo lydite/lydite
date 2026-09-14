@@ -50,6 +50,12 @@ var suppressionTokens = []string{
 	// suppression means a change merges unread.
 	annotation.Prefix,
 	"#nosec",
+	// gitleaks' own inline allow. lydite deliberately does not pass
+	// --ignore-gitleaks-allow, so this comment clears a secret finding
+	// outright — and what it clears is an author asserting that a
+	// credential-shaped string is not a credential, which is checkable by
+	// nobody else.
+	"gitleaks:allow",
 	"//nolint",
 	"#[allow(",
 	"#![allow(",
