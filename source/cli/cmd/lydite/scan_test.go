@@ -21,6 +21,7 @@ import (
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
@@ -281,7 +282,7 @@ func TestScanRejectsARetiredExcludeKey(t *testing.T) {
 // switched off, which is a decision rather than an incapacity.
 func TestScanReportsAComponentWithNoDerivableLanguage(t *testing.T) {
 	dir := t.TempDir()
-	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 	writeLydite(t, dir, component.FileName,
 		"components:\n  - name: legacy\n    dir: .\n    command: [\"make\", \"check\"]\n")
 
@@ -567,14 +568,15 @@ func TestATestdataModuleIsNotAModuleBoundary(t *testing.T) {
 
 // Every opt-out taken together is a different fact from any one of them. A
 // language switched off produces no row, deliberately — but a run where that
-// is true of every declared component and of Semgrep produced no rows at all,
+// is true of every declared component and of every root-scoped gate produced
+// no rows at all,
 // and an empty document renders as `verdict: pass`: the green of a scan that
 // never happened, which is what the status exists to prevent.
 func TestAScanThatRanNothingSaysSo(t *testing.T) {
 	dir := t.TempDir()
 	writeLydite(t, dir, component.FileName,
 		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsemgrep:\n  enabled: false\n")
+	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsemgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
 
 	var out bytes.Buffer
@@ -678,7 +680,7 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 		"components:\n"+
 			"  - name: api\n    dir: .\n    runner: go-test\n"+
 			"  - name: api-integration\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
 	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
 
@@ -761,7 +763,7 @@ func TestTwoComponentsOverOneDirectoryWithDifferentEnvironmentsBothRun(t *testin
 		"components:\n"+
 			"  - name: api\n    dir: .\n    runner: go-test\n"+
 			"  - name: api-cgo\n    dir: .\n    runner: go-test\n    env:\n      CGO_ENABLED: \"1\"\n")
-	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
 	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
 
@@ -845,7 +847,7 @@ func TestLyditesOwnDeclarationLeavesNothingUnscanned(t *testing.T) {
 // Counting rows is not the test for "did anything run". A raw-command
 // component and a deduplicated one each add an unmeasured row, and unmeasured
 // does not vote — so a repository whose every component declares a raw
-// command, with Semgrep off, would otherwise produce a document full of amber
+// command, with every root-scoped gate off, would otherwise produce a document full of amber
 // rows and `verdict: pass` having executed nothing at all.
 func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
 	dir := t.TempDir()
@@ -853,7 +855,7 @@ func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
 		"components:\n"+
 			"  - name: legacy\n    dir: .\n    command: [\"make\", \"check\"]\n"+
 			"  - name: tools\n    dir: .\n    command: [\"make\", \"tools\"]\n")
-	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 
 	var out bytes.Buffer
 	cmd := newScanCmd()
@@ -999,5 +1001,121 @@ func TestEachLanguageNamesTheGatesThatReportItsFindings(t *testing.T) {
 	// all, which is the honest answer rather than a nought.
 	if got := scannerGates(runner.Lang("cobol")); got != nil {
 		t.Errorf("an unchecked language names %v, want nothing", got)
+	}
+}
+
+// The secret gate runs once over the scan root, its claims name no component,
+// and one key in .lydite/config.yml switches the whole of it off.
+//
+// Root-scoped is the load-bearing half. A claim attributed to whichever
+// component happens to contain its path is the ownership question ADR 0033
+// refuses to answer, and it is what decides whether the count lands in
+// root_findings or inside a component.
+//
+// The credential is assembled here rather than written, so this file is not
+// itself a finding under the repository's own gate.
+func TestTheSecretGateIsRootScopedAndSwitchesOffWithOneKey(t *testing.T) {
+	// Invented, and assembled from halves: generic-api-key wants a
+	// high-entropy value beside a keyword, which is a shape this file must not
+	// itself carry.
+	invented := "8a7b6c5d4e3f2a1b0c9d" + "8e7f6a5b4c3d2e1f0a9b"
+	leaky := "aws_key: \"" + invented + "\"\n"
+
+	scan := func(t *testing.T, cfgYAML string) []byte {
+		t.Helper()
+		dir := t.TempDir()
+		// A raw-command component, so the only thing that can run is the
+		// root-scoped gate under test: a language component would pull gosec
+		// and govulncheck into a test about neither.
+		writeLydite(t, dir, component.FileName,
+			"components:\n  - name: legacy\n    dir: .\n    command: [\"make\", \"check\"]\n")
+		writeLydite(t, dir, config.FileName, cfgYAML)
+		writeLydite(t, dir, "config.yml", leaky)
+
+		var out bytes.Buffer
+		cmd := newScanCmd()
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--dir", dir, "--json"})
+		_ = cmd.ExecuteContext(context.Background())
+		return out.Bytes()
+	}
+
+	var doc struct {
+		Rows     []struct{ Status, Label string } `json:"rows"`
+		Findings []finding.Finding                `json:"findings"`
+	}
+	if err := json.Unmarshal(scan(t, "semgrep:\n  enabled: false\n"), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	var row string
+	for _, r := range doc.Rows {
+		if r.Label == secrets.Gate {
+			row = r.Status
+		}
+	}
+	if row != string(ui.StatusFail) {
+		t.Fatalf("rows = %+v, want a failing %s row over a tree holding a credential", doc.Rows, secrets.Gate)
+	}
+	var claims int
+	for _, f := range doc.Findings {
+		if f.Gate != secrets.Gate {
+			continue
+		}
+		claims++
+		if f.Component != "" {
+			t.Errorf("claim names component %q; a root-scoped gate attributes nothing", f.Component)
+		}
+		if f.Row != secrets.Gate {
+			t.Errorf("claim names row %q, want the row that made it", f.Row)
+		}
+		if strings.Contains(f.Site, invented) {
+			t.Errorf("the site carries the credential: %q", f.Site)
+		}
+	}
+	if claims == 0 {
+		t.Errorf("findings = %+v, want the leak as a located claim", doc.Findings)
+	}
+
+	// And switched off it runs nothing and reports nothing — the same tree,
+	// one key different.
+	doc.Rows, doc.Findings = nil, nil
+	if err := json.Unmarshal(scan(t, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n"), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	for _, r := range doc.Rows {
+		if r.Label == secrets.Gate {
+			t.Errorf("rows = %+v, want no %s row with the gate switched off", doc.Rows, secrets.Gate)
+		}
+	}
+	for _, f := range doc.Findings {
+		if f.Gate == secrets.Gate {
+			t.Errorf("a gate switched off reported %+v", f)
+		}
+	}
+}
+
+// A root-scoped gate's claims are counted over the repository rather than
+// inside a component, which is where ledger.Record.RootFindings holds them.
+//
+// Semgrep is not the only such gate any more, and a count that landed inside
+// whichever component happened to contain the path would answer an ownership
+// question the declaration does not.
+func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "cli", Dir: "cli", Runner: "go-test"},
+	}}
+
+	perComponent, root := findingCounts(decl, config.Default(), []finding.Finding{{
+		Gate: secrets.Gate, Path: "cli/config.yml", Line: 3,
+		Message: "Detected a Generic API Key. " + "Rotate this credential",
+		Site:    "generic-api-key\x1faws_key: ",
+	}}, true)
+
+	if got := root[secrets.Gate]; got != 1 {
+		t.Errorf("root[%s] = %d, want the claim counted over the repository", secrets.Gate, got)
+	}
+	if got, ok := perComponent["cli"][secrets.Gate]; ok {
+		t.Errorf("perComponent[cli][%s] = %d, want no key: the claim names no component", secrets.Gate, got)
 	}
 }

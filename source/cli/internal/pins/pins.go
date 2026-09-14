@@ -76,6 +76,9 @@ func Mirrors() []Mirror {
 		goPin("gotestsum", "gotest.tools/gotestsum", "gotestsumVersion",
 			filepath.Join("internal", "runner", "gotestsum-pin", "go.mod"),
 			filepath.Join("internal", "runner", "pins.go")),
+		goPin("gitleaks", "github.com/zricethezav/gitleaks/v8", "gitleaksVersion",
+			filepath.Join("internal", "secrets", "gitleaks-pin", "go.mod"),
+			filepath.Join("internal", "secrets", "pins.go")),
 		{
 			Name:   "biome",
 			Pin:    filepath.Join("internal", "typescript", "biome-pin", "package.json"),

@@ -69,6 +69,56 @@ func TestLoadSemgrepConfigOverride(t *testing.T) {
 	}
 }
 
+// Secret scanning is on by default and takes exactly one key.
+//
+// A repository that says nothing gets the gate, because a gate nobody opted
+// into is the only kind that finds the credential nobody meant to commit. The
+// opt-out is the whole gate: there is no per-finding key here, and a false
+// positive is answered in the scan root's own .gitleaks.toml.
+func TestLoadSecretsEnabled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		yml  string
+		want bool
+	}{
+		"absent":            {"", true},
+		"explicitly on":     {"secrets:\n  enabled: true\n", true},
+		"explicitly off":    {"secrets:\n  enabled: false\n", false},
+		"another key alone": {"semgrep:\n  enabled: false\n", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.yml != "" {
+				write(t, dir, tc.yml)
+			}
+			got, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got.Secrets.Enabled != tc.want {
+				t.Errorf("Secrets.Enabled = %v, want %v for %q", got.Secrets.Enabled, tc.want, tc.yml)
+			}
+		})
+	}
+}
+
+// Switching secret scanning off switches nothing else off. The key names one
+// gate, and a repository that declines it still gets every language check and
+// Semgrep.
+func TestLoadSecretsOptOutLeavesEveryOtherGate(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "secrets:\n  enabled: false\n")
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := Default()
+	want.Secrets.Enabled = false
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Load = %+v, want %+v", got, want)
+	}
+}
+
 // Zero-config users get a small noise-absorbing tolerance on the coverage
 // gates, so a sub-rounding-error dip (86.1% vs baseline 86.1%) doesn't fail
 // unrelated PRs. The aggregate and patch knobs default independently.

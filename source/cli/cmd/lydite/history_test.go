@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
@@ -819,6 +820,7 @@ func TestAComponentWithNoApplicableGateRecordsNoCount(t *testing.T) {
 	cfg := config.Default()
 	cfg.Go.Enabled = false
 	cfg.Semgrep.Enabled = false
+	cfg.Secrets.Enabled = false
 
 	perComponent, root := findingCounts(decl, cfg, nil, true)
 
@@ -826,7 +828,40 @@ func TestAComponentWithNoApplicableGateRecordsNoCount(t *testing.T) {
 		t.Errorf("findingCounts = %v, want no component recorded: one declares its own command and the other's language is off", perComponent)
 	}
 	if len(root) != 0 {
-		t.Errorf("root = %v, want nothing for a scan whose only root-scoped gate is off", root)
+		t.Errorf("root = %v, want nothing for a scan whose root-scoped gates are all off", root)
+	}
+}
+
+// Each root-scoped gate seeds its own nought, and only its own.
+//
+// Semgrep and gitleaks are switched on separately, so a nought recorded for one
+// because the other is enabled would say a scanner ran over the tree that the
+// configuration never asked to run — the absent-is-not-zero rule, in the pair of
+// gates most likely to be configured apart.
+func TestEachRootScopedGateSeedsItsOwnNought(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		semgrep bool
+		wants   string
+		absent  string
+	}{
+		{name: "secrets alone", semgrep: false, wants: secrets.Gate, absent: semgrep.Gate},
+		{name: "semgrep alone", semgrep: true, wants: semgrep.Gate, absent: secrets.Gate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Semgrep.Enabled = tc.semgrep
+			cfg.Secrets.Enabled = !tc.semgrep
+
+			_, root := findingCounts(component.File{}, cfg, nil, true)
+
+			if got, ok := root[tc.wants]; !ok || got != 0 {
+				t.Errorf("%s = %d (present %v), want a recorded nought for a clean scan", tc.wants, got, ok)
+			}
+			if _, ok := root[tc.absent]; ok {
+				t.Errorf("%s recorded a count with the gate switched off: %v", tc.absent, root)
+			}
+		})
 	}
 }
 
