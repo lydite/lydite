@@ -65,6 +65,41 @@ func fakeRustup(t *testing.T, bin, active string, components []string) string {
 	return marker
 }
 
+// fakeRustupInstalling puts a rustup on PATH whose answers change once it has
+// been asked to install something: before that the channel resolves but is
+// missing clippy, after it the channel is complete. A fake with fixed answers
+// cannot reach the state the provisioning path leaves behind, which is the
+// state the version recorded in Env.Resolved is read from.
+//
+// Like the real one it honours RUSTUP_TOOLCHAIN over the directory, and names
+// the channel it selects target-qualified.
+//
+// showFailsAfterInstall makes `show active-toolchain` start failing once the
+// install has run — the transient error the confirming probe has to survive
+// without discarding an environment that was genuinely provisioned.
+func fakeRustupInstalling(t *testing.T, bin, active string, showFailsAfterInstall bool) string {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "installs")
+	guard := ""
+	if showFailsAfterInstall {
+		guard = "[ -f " + quote(marker) + " ] && exit 1; "
+	}
+	writeScript(t, filepath.Join(bin, "rustup"), strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1 $2" in`,
+		`"show active-toolchain") ` + guard +
+			`case "${RUSTUP_TOOLCHAIN}" in "") echo ` + quote(active) +
+			`;; *) echo "${RUSTUP_TOOLCHAIN}-x86_64-unknown-linux-gnu" ;; esac ;;`,
+		`"component list")`,
+		`  if [ -f ` + quote(marker) + ` ]; then printf '%s\n' clippy rustfmt; else printf '%s\n' rustfmt; fi ;;`,
+		`"toolchain install") echo "$*" >> ` + quote(marker) + " ;;",
+		"*) exit 1 ;;",
+		"esac",
+		"",
+	}, "\n"))
+	return marker
+}
+
 // installs is what the fake rustup was asked to install, empty when it was
 // never asked.
 func installs(t *testing.T, marker string) string {
@@ -237,12 +272,12 @@ func TestRustReadyReportsWhatRustupIsShortOf(t *testing.T) {
 	bin := fakeToolchainBin(t)
 	dir := t.TempDir()
 
-	if _, ready, lack := rustReady(context.Background(), dir); ready || lack == "" {
+	if _, ready, lack := rustReady(context.Background(), dir, nil); ready || lack == "" {
 		t.Fatalf("rustReady with no rustup = ready %v, lack %q; want not ready, with a reason", ready, lack)
 	}
 
 	fakeRustup(t, bin, "", nil)
-	active, ready, lack := rustReady(context.Background(), dir)
+	active, ready, lack := rustReady(context.Background(), dir, nil)
 	if active != "" || ready || lack == "" {
 		t.Fatalf("rustReady with an unresolvable channel = (%q, %v, %q); want ready false with a reason", active, ready, lack)
 	}

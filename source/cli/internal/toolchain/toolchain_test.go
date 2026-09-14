@@ -378,3 +378,170 @@ func TestKeyDistinguishesAmbientToolchainVersions(t *testing.T) {
 		t.Fatalf("two ambient toolchains share the key %q, so a tool built by the older one is reused", env.Key())
 	}
 }
+
+// What a provisioned toolchain records is what got installed, not what the
+// manifest asked for. A channel names a moving target: recording "stable"
+// describes every Rust release there has ever been, so a baseline's producer
+// and a tool cache's key both stop distinguishing the toolchains they exist to
+// distinguish.
+func TestProvisionedToolchainRecordsTheVersionItInstalled(t *testing.T) {
+	dir := rustCrate(t, "stable")
+	bin := fakeToolchainBin(t)
+	fakeCargo(t, bin, "1.90.0")
+	marker := fakeRustupInstalling(t, bin, "1.91.0-x86_64-unknown-linux-gnu", false)
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.Rust, Overrides{}, &log)
+
+	if got := installs(t, marker); !strings.Contains(got, "stable") {
+		t.Fatalf("the declared channel must be installed, rustup was asked %q; log was %q", got, log.String())
+	}
+	if got := env.Version(); got != "1.91.0-x86_64-unknown-linux-gnu" {
+		t.Fatalf("Version = %q, want the toolchain rustup installed rather than the channel the manifest names", got)
+	}
+}
+
+// The bug-fix property itself. Two runners resolving one declaration to one
+// toolchain — one that already had it, one that had to install it — describe it
+// identically, so the baseline written by either compares against the other and
+// a tool cached by either is reused by the other.
+func TestAmbientAndProvisionedAgreeOnTheToolchainTheyResolvedTo(t *testing.T) {
+	const active = "1.91.0-x86_64-unknown-linux-gnu"
+
+	resolved := func(t *testing.T, components []string) *Env {
+		t.Helper()
+		dir := rustCrate(t, "stable")
+		bin := fakeToolchainBin(t)
+		fakeCargo(t, bin, "1.90.0")
+		if components == nil {
+			fakeRustupInstalling(t, bin, active, false)
+		} else {
+			fakeRustup(t, bin, active, components)
+		}
+		return ensureOne(t, dir, runner.Rust, Overrides{}, &bytes.Buffer{})
+	}
+
+	ambient := resolved(t, []string{"clippy", "rustfmt"})
+	provisioned := resolved(t, nil)
+
+	if ambient.Version() != provisioned.Version() {
+		t.Fatalf("the same toolchain is recorded as %q when it was already there and %q when it was installed",
+			ambient.Version(), provisioned.Version())
+	}
+	if ambient.Key() != provisioned.Key() {
+		t.Fatalf("the same toolchain keys as %q ambient and %q provisioned, so nothing cached under one is reused under the other",
+			ambient.Key(), provisioned.Key())
+	}
+}
+
+// A confirming probe that fails after a successful install leaves a toolchain
+// that is genuinely there. Discarding the environment over it would undo the
+// install; recording a version nothing confirmed would be a claim. So the
+// environment stands, the declaration is recorded as the stand-in it is, and
+// the line says the identity is unconfirmed.
+func TestAnUnconfirmedInstalledVersionKeepsTheEnvironmentAndWarns(t *testing.T) {
+	dir := rustCrate(t, "1.85")
+	bin := fakeToolchainBin(t)
+	fakeCargo(t, bin, "1.90.0")
+	fakeRustupInstalling(t, bin, "1.91.0-x86_64-unknown-linux-gnu", true)
+
+	var log bytes.Buffer
+	// Overridden, so provisioning contributes a variable there is something to
+	// lose: RUSTUP_TOOLCHAIN is what selects the channel just installed.
+	env := ensureOne(t, dir, runner.Rust, Overrides{Rust: "stable"}, &log)
+
+	if !slices.Contains(env.Environ(), "RUSTUP_TOOLCHAIN=stable") {
+		t.Fatalf("Environ = %q, want the selection the successful install made", env.Environ())
+	}
+	if got := env.Version(); got != "stable" {
+		t.Errorf("Version = %q, want the declaration as the stand-in for a version nothing confirmed", got)
+	}
+	out := log.String()
+	if !strings.Contains(out, "installed toolchain stable") {
+		t.Errorf("log should still report the install that succeeded, got %q", out)
+	}
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, `recording "stable"`) {
+		t.Errorf("log should warn that the installed version went unconfirmed and say what it recorded, got %q", out)
+	}
+}
+
+// Installing is not selecting, and the confirming probe has to ask about the
+// toolchain that was selected. An override lives only in .lydite/config.yml, so
+// RUSTUP_TOOLCHAIN is the whole of the selection — asking rustup without it
+// answers about the channel the directory would have resolved to instead.
+func TestTheInstalledVersionIsConfirmedUnderTheSelectionProvisioningMade(t *testing.T) {
+	dir := rustCrate(t, "1.85")
+	bin := fakeToolchainBin(t)
+	fakeCargo(t, bin, "1.90.0")
+	fakeRustupInstalling(t, bin, "1.90.0-x86_64-unknown-linux-gnu", false)
+
+	env := ensureOne(t, dir, runner.Rust, Overrides{Rust: "stable"}, &bytes.Buffer{})
+
+	if got := env.Version(); got != "stable-x86_64-unknown-linux-gnu" {
+		t.Fatalf("Version = %q, want the toolchain RUSTUP_TOOLCHAIN selects", got)
+	}
+}
+
+// Go's identity comes from the toolchain GOTOOLCHAIN selects, not from the one
+// that was ambient a moment ago — so the confirming probe runs under the
+// variables provisioning set, and those win over the probe's own.
+func TestProvisionedGoRecordsTheToolchainItSelected(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	bin := fakeToolchainBin(t)
+	// A go old enough to need the declared toolchain and new enough to fetch
+	// it itself, reporting whichever toolchain GOTOOLCHAIN names — which is
+	// what the real go command does.
+	writeScript(t, filepath.Join(bin, "go"), strings.Join([]string{
+		"#!/bin/sh",
+		`case "${GOTOOLCHAIN}" in local|"") v=go1.21.5 ;; *) v="${GOTOOLCHAIN}" ;; esac`,
+		`echo "go version $v linux/amd64"`,
+		"",
+	}, "\n"))
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.Go, Overrides{}, &log)
+
+	if !slices.Contains(env.Environ(), "GOTOOLCHAIN=go1.26.0") {
+		t.Fatalf("Environ = %q, want the declared toolchain pinned; log was %q", env.Environ(), log.String())
+	}
+	if got := env.Version(); got != "1.26.0" {
+		t.Fatalf("Version = %q, want the toolchain GOTOOLCHAIN selected rather than the %q go.mod declares", got, "1.26")
+	}
+}
+
+// The confirming probe runs the toolchain provisioning installed, which is
+// reachable only through the directories provisioning put in front of PATH —
+// Node is downloaded and unpacked into one of those and exists nowhere else.
+func TestProbeUnderRunsTheToolchainOnlyTheProvisionedPathHas(t *testing.T) {
+	fakeToolchainBin(t)
+	unpacked := t.TempDir()
+	writeScript(t, filepath.Join(unpacked, "node"), "#!/bin/sh\necho v22.21.1\n")
+	p := probes[runner.TypeScript]
+
+	got, err := probeUnder(context.Background(), p, &step{pathDirs: []string{unpacked}}, t.TempDir())
+	if err != nil || got != "v22.21.1" {
+		t.Fatalf("probeUnder = (%q, %v), want the version the unpacked toolchain reports", got, err)
+	}
+
+	// Without those directories there is nothing to run, and that is an error
+	// rather than an empty version quietly recorded as one.
+	if got, err := probeUnder(context.Background(), p, &step{}, t.TempDir()); err == nil {
+		t.Fatalf("probeUnder off the provisioned PATH = %q, want an error", got)
+	}
+}
+
+// A toolchain that runs but will not say what it is confirms nothing, and an
+// empty version recorded as the answer is indistinguishable from one nothing
+// probed for.
+func TestProbeUnderRejectsAToolchainThatWillNotIdentifyItself(t *testing.T) {
+	fakeToolchainBin(t)
+	unpacked := t.TempDir()
+	writeScript(t, filepath.Join(unpacked, "node"), "#!/bin/sh\necho ''\n")
+
+	got, err := probeUnder(context.Background(), probes[runner.TypeScript],
+		&step{pathDirs: []string{unpacked}}, t.TempDir())
+	if err == nil {
+		t.Fatalf("probeUnder = %q, want an error from a toolchain that names no version", got)
+	}
+}

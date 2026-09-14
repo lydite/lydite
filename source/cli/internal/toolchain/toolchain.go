@@ -43,6 +43,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -378,7 +379,7 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 		// The toolchain rustup names replaces the probed cargo version as what
 		// this resolved to, because that version is the machine's default
 		// channel and not necessarily the one this component runs under.
-		r.ambient, good, r.lack = rustReady(ctx, filepath.Join(root, filepath.FromSlash(req.Unit.Dir)))
+		r.ambient, good, r.lack = rustReady(ctx, componentDir(root, req), nil)
 	}
 
 	if good {
@@ -432,8 +433,58 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 		ensureExecutable(dir)
 	}
 	r.kind, r.note = resolutionProvisioned, st.note
-	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: displayRaw(req)}
+	// What was installed, not what was asked for. The declaration is a channel
+	// or a floor — "stable", "1.26" — and recording it would describe every
+	// release that ever satisfied it, so the same toolchain would carry one
+	// identity on a runner that already had it and another on a runner that
+	// installed it. Env.Resolved is a baseline's producer and half of a tool
+	// cache's key, and both compare it verbatim.
+	resolved, err := confirm(ctx, root, req, st)
+	if err != nil {
+		// The install succeeded, so the environment is real and keeping it is
+		// not in question; only the identity went unestablished. The
+		// declaration stands in for it, and the line says so rather than
+		// letting an unconfirmed version read as a measured one.
+		resolved = displayRaw(req)
+		r.note += fmt.Sprintf("; warning: could not confirm %s's installed version (%v) — recording %q",
+			req.Lang, err, resolved)
+	}
+	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: resolved}
 	return r, nil
+}
+
+// confirm asks the toolchain a provisioning step has just installed what
+// version it is, under the environment that step produced.
+func confirm(ctx context.Context, root string, req Requirement, st *step) (string, error) {
+	dir := componentDir(root, req)
+	if req.Lang == runner.Rust {
+		// rustup's answer, for the same reason the satisfied check takes it:
+		// the channel a cargo invocation in this directory selects is the one
+		// that will do the work, and a named channel has no version of its own
+		// to report.
+		active, _, lack := rustReady(ctx, dir, Compose(st.pathDirs, nil, st.vars))
+		if active == "" {
+			return "", errors.New(lack)
+		}
+		return display(active), nil
+	}
+	p, ok := probes[req.Lang]
+	if !ok {
+		return "", fmt.Errorf("lydite has no %s probe", req.Lang)
+	}
+	version, err := probeUnder(ctx, p, st, dir)
+	if err != nil {
+		return "", err
+	}
+	// Rendered the way the ambient path renders its own answer, because the
+	// two are compared as strings by everything that reads them.
+	return display(version), nil
+}
+
+// componentDir is the component's directory on disk, which is where a
+// toolchain question about it has to be asked.
+func componentDir(root string, req Requirement) string {
+	return filepath.Join(root, filepath.FromSlash(req.Unit.Dir))
 }
 
 // provision dispatches to the per-language provisioner. Each one differs in
