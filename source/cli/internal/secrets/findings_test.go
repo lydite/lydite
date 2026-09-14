@@ -461,6 +461,8 @@ func TestASiteDropsAnEarlierAssignmentEvenWhenGitleaksDidNotFlagIt(t *testing.T)
 		{"a quoted password full of punctuation", `export DB_PASSWORD='P@ssw0rd!' API_TOKEN=abcdef1234567890`, "P@ssw0rd!", "API_TOKEN"},
 		{"a password shorter than eight characters", "export DB_PASSWORD=abc API_TOKEN=abcdef1234567890", "abc", "API_TOKEN"},
 		{"a DSN password ahead of a flagged token", "postgres://app:changeme@db/app?api_key=abcdef1234567890", "changeme", "api_key"},
+		{"a command-line password flag ahead of a flagged token", "mysql -u root -phunter2 --api-key=abcdef1234567890", "hunter2", "api-key"},
+		{"a command-line password flag using its own switch", "redis-cli -a hunter2secret --token=abcdef1234567890", "hunter2secret", "token"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -486,9 +488,12 @@ func TestAPrefixIsBoundedAndNormalised(t *testing.T) {
 	write(t, dir, "bundle.min.js", "  spaced \t out  key\n"+long+"\n")
 	src := newTree(dir)
 
-	// Reindenting a line must not re-identify the claim on it.
-	if got := src.prefix("bundle.min.js", 1, 999); got != "spaced out key" {
-		t.Errorf("prefix = %q, want the line's fields joined by single spaces", got)
+	// A multi-word prefix is exactly the shape a command-line flag or a
+	// second assignment takes — "mysql -u root -phunter2 " is letters,
+	// digits and spaces too — so safePrefix admits only a single identifier
+	// and blanks anything with more than one word in it.
+	if got := src.prefix("bundle.min.js", 1, 999); got != "" {
+		t.Errorf("prefix = %q, want empty — more than one word is not a safe prefix", got)
 	}
 	// A minified bundle is one line of megabytes, and a site is uploaded in the
 	// report document.

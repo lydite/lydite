@@ -172,14 +172,16 @@ posted afresh. That is the fingerprint behaving as specified on a claim whose on
 distinguishing content may not be published.
 
 Cutting at the match's own start column protects a claim from its own secret and from a second
-flagged match sharing the line, but not from an assignment gitleaks' own rules never fired on —
+flagged match sharing the line, but not from a credential gitleaks' own rules never fired on —
 `export DB_PASSWORD=hunter2 API_TOKEN=<token>`, a JSON `{"password": "hunter2!", "api_key": …}`,
-a DSN's password ahead of an `api_key` parameter. No length or character-class threshold on what
-such a value looks like is trusted to bound it — a password can be three characters or thirty,
-plain or quoted and full of punctuation — so the prefix is blanked outright whenever it contains
-a colon, an equals sign, or a quote character, checked after clipping so a clipped-away tail
-cannot cause an already-safe head to be discarded too. What survives is prose with none of
-those three characters in it — otherwise the site is the rule alone.
+a DSN's password ahead of an `api_key` parameter, `mysql -u root -phunter2 --api-key=<token>`.
+None of those needs a colon, an equals sign or a quote — a command-line flag is letters, digits
+and a leading dash — so a blocklist of dangerous characters keeps discovering a new shape it
+forgot to name. The prefix is instead an allowlist of one shape: it survives only when it is,
+in full, a single identifier optionally followed by one opening bracket — `connect(`, `clé` —
+checked after clipping so a clipped-away tail cannot cause an already-safe head to be discarded
+too. Anything with a second word, a digit-and-punctuation flag, a colon or a quote in it is not
+provably safe, so it is not published; the site is the rule alone instead.
 
 **Rejected: gitleaks' own `Fingerprint`.** It is `file:rule:startline`, a line-keyed identity —
 the one thing `internal/finding` exists to not be.

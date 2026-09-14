@@ -254,26 +254,30 @@ func (t *tree) prefix(path string, n, col int) string {
 	}
 	line := lines[n-1]
 	cut := clip(finding.Normalise(line[:prefixEnd(line, col)]))
-	if assignmentLike.MatchString(cut) {
+	if !safePrefix.MatchString(cut) {
 		return ""
 	}
 	return cut
 }
 
-// assignmentLike matches a colon, an equals sign, or a quote character.
+// safePrefix matches a prefix holding nothing but one identifier-shaped
+// token, optionally followed by a single opening bracket — the only shape
+// of "assignment context" this package is willing to publish. It anchors
+// both ends, so it accepts the whole cut or none of it.
 //
 // Cutting at the earliest match gitleaks flagged on a line only protects
-// flagged matches from each other. A line can also carry an assignment no
+// flagged matches from each other. A line can also carry a credential no
 // rule flagged — export DB_PASSWORD=hunter2 API_TOKEN=<token>, a JSON
-// {"password": "hunter2!", "api_key": …}, a DSN's own password ahead of an
-// api_key parameter — and that value is exactly as much a secret as the one
-// gitleaks found. No length or character-class threshold on what such a
-// value looks like can be trusted — a password can be short, and it can be
-// quoted and full of punctuation — so any of these three characters ahead of
-// a match is reason enough to publish no prefix at all rather than guess
-// which part of it is safe. Checked after clipping, so a prefix's clipped-away
-// tail cannot cause the kept, and already safe, head to be discarded too.
-var assignmentLike = regexp.MustCompile(`[:='"` + "`" + `]`)
+// {"password": "hunter2!", "api_key": …}, a DSN's password ahead of an
+// api_key parameter, mysql -u root -phunter2 --api-key=<token> — and each
+// is exactly as much a secret as the one gitleaks found. A blocklist of
+// dangerous characters keeps discovering a new command shape it forgot: a
+// flag needs no `=`, no quote, no colon. So this is a denylist of nothing
+// and an allowlist of one shape instead — refusing every prefix that is
+// not provably just an identifier, rather than guessing which punctuation
+// is safe. Checked after clipping, so a clipped-away tail cannot cause an
+// already-safe head to be discarded too.
+var safePrefix = regexp.MustCompile(`^(\p{L}[\p{L}0-9_.]*)?[(\[]?$`)
 
 func (t *tree) read(path string) []string {
 	if t.root == nil {
