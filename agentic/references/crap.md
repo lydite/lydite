@@ -80,13 +80,17 @@ its mutants by lines coverage reports as executed, so reading `Hits` there would
 declaration silence a second gate — and a function whose coverage is taken in another process has
 not thereby become unmutable. A language with no declaration form has one map under both names.
 
-**A declaration follows Go's own attachment, and that is a stated limit.** A function written
-directly beneath an existing declaration — no blank line, no doc comment of its own — takes that
-declaration, because `go/parser` attaches the group to the nearer declaration; the new function is
-excluded and the old one returns to being counted, and nothing refers the change because the diff
-adds no line holding the token. What bounds it is that gofmt separates declarations with a blank
-line and the shape is unusual. Closing it properly means naming the function inside the token,
-which is a grammar change rather than a rule this one can make.
+**Go's own attachment carries a stated limit the other two languages don't share.** A function
+written directly beneath an existing declaration — no blank line, no doc comment of its own —
+takes that declaration, because `go/parser` attaches the group to the nearer declaration; the new
+function is excluded and the old one returns to being counted, and nothing refers the change
+because the diff adds no line holding the token. What bounds it is that gofmt separates
+declarations with a blank line and the shape is unusual. Closing it properly means naming the
+function inside the token, which is a grammar change rather than a rule this one can make. In
+Rust, TypeScript and TSX the declaration is a `//` line comment written inside the function it
+covers rather than a doc comment above it, so tree-sitter resolves the comment's own line to the
+innermost function-like node containing it — there is no adjacent declaration for it to leak into,
+because it was never outside one.
 
 **The reason is required and delimited.** Required for the cause the exemption set requires one:
 the declaration is the entire risk record for a finding nobody can clear, and a bare token is not
@@ -97,15 +101,24 @@ godoc: `//lydite:…` with no space is a *directive*, and godoc strips a directi
 continuations, so a wrapped reason lost its first line and leaked the rest into the rendered
 documentation.
 
-**A declaration covers the function whose doc comment holds it, and nothing else.** That is where a
-claim about a function belongs, it is the one comment group a language's own parser already
-attaches to a declaration, and it is the only placement that cannot silently widen — a rule that
-also read a trailing comment on the `func` line would let a declaration written for one function
-acknowledge the next after an edit moved a blank line. `coverage.DeclaredExclusions` is the one
-implementation, in `internal/coverage` because `internal/crap` already imports it and the reverse
-would be a cycle; `internal/annotation` stays a leaf that answers what a comment *says* rather than
-what a language's syntax attaches it to, so `internal/referral` links the token and neither a
-parser nor `coverage.DeclaredExclusions`.
+**A declaration covers the function whose scope holds it, and nothing else.** That is where a
+claim about a function belongs, and it is the only placement that cannot silently widen — a rule
+that also read a trailing comment on the `func` line would let a declaration written for one
+function acknowledge the next after an edit moved a blank line. In Go that scope is the doc
+comment `go/parser` attaches to a declaration, read off the source; in Rust, TypeScript and TSX
+it is the innermost function-like node tree-sitter finds enclosing the declaration's line, also
+read off the source — a parser is needed at all because the coverage report itself never carries
+enough to answer this, and an lcov `FN` record in particular is a start line with no end — see
+[ADR 0034](../../docs/adr/0034-an-exclusion-declaration-is-scoped-by-a-parser-in-every-language.md).
+`coverage.DeclaredExclusions` is the Go implementation, in `internal/coverage` because
+`internal/crap` already imports it and the reverse would be a cycle. The other three run through
+`treesitter.DeclaredExclusions`, in `internal/treesitter` rather than in `internal/coverage`
+itself: `internal/mutation` already imports `internal/coverage`, so the walk could not live there
+without inverting that edge and making the mutation engine a dependency of every coverage figure —
+it lives in a package neither `internal/coverage` nor `internal/mutation` imports the other
+through. `internal/annotation` stays a leaf that answers what a comment *says* rather than what a
+language's syntax attaches it to, so `internal/referral` links the token and neither a parser nor
+either `DeclaredExclusions`.
 
 **Two numbers keep it honest.** Every `crap` row carries how many functions were excluded, because
 a repository can annotate its way to nothing above the threshold and that count is what makes it
