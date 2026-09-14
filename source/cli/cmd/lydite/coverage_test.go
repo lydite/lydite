@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
@@ -478,6 +479,41 @@ func TestMeasureReadsTheReportTheInvocationNamed(t *testing.T) {
 	}
 	if _, ok := m.Hits["api/main.go"]; !ok {
 		t.Errorf("hits = %v, want a scan-root-relative key", m.Hits)
+	}
+}
+
+// The report's unmatched declarations reach the measurement, which is what the
+// run that renders rows names them off. Read from the report and never taken
+// again here, so a base tree measured through this same path carries its own
+// and is discarded with them.
+func TestMeasureCarriesTheReportsUnmatchedDeclarations(t *testing.T) {
+	root := t.TempDir()
+	for rel, content := range map[string]string{
+		"api/go.mod": "module example.com/api\n\ngo 1.26\n",
+		"api/main.go": "package api\n\nfunc F() int {\n" +
+			"\t// [lydite:exclude_from_coverage][written inside the body, where it does nothing]\n" +
+			"\treturn 1\n}\n",
+		"api/.lydite-reports/coverage/coverage.out": "mode: set\nexample.com/api/main.go:3.16,6.2 1 1\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}
+	inv, err := invocation(c, runner.Instrumented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := measure(context.Background(), root, c, inv, nil, true)
+	if !m.Measured() {
+		t.Fatalf("unmeasured: %s", m.Why)
+	}
+	if len(m.Unused) != 1 || m.Unused[0] != "api/main.go:4" {
+		t.Errorf("Unused = %v, want [api/main.go:4]", m.Unused)
 	}
 }
 
@@ -1749,5 +1785,46 @@ func TestABaseTreesUnmeasurableComponentIsNotAFailedMeasurement(t *testing.T) {
 	// that is the only account of it outliving the worktree.
 	if got := warnings.String(); !strings.Contains(got, "web") || !strings.Contains(got, "docker: not found") {
 		t.Errorf("warnings = %q, want the failed component and its tail", got)
+	}
+}
+
+// A coverage declaration that covers no function is named on the command's
+// stderr, in every language.
+//
+// internal/crap reads its own gate's unmatched declarations and deliberately
+// leaves the coverage ones alone, so without this an author who wrote one
+// inside a body has taken the referral a suppression brings, got none of its
+// effect, and has nothing to see. The token in the message is the coverage one:
+// a warning naming the wrong gate sends its reader to the wrong declaration.
+func TestACoverageDeclarationCoveringNoFunctionIsNamedInEveryLanguage(t *testing.T) {
+	t.Parallel()
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
+	}}
+	api := measured("api", runner.Go, 9, 10)
+	api.Unused = []string{"api/lib.go:12"}
+	web := measured("web", runner.TypeScript, 9, 10)
+	web.Unused = []string{"web/src/index.ts:4"}
+
+	cmd := newTestCmd()
+	var errOut strings.Builder
+	cmd.SetErr(&errOut)
+	addCoverageRows(context.Background(), cmd, ui.NewReport("test"), t.TempDir(), decl, decl.Components,
+		[]measurement{api, web}, config.Default(), coverageOptions{Instrument: true})
+
+	got := errOut.String()
+	for _, where := range []string{"api/lib.go:12", "web/src/index.ts:4"} {
+		if !strings.Contains(got, where) {
+			t.Errorf("stderr = %q, want %s located", got, where)
+		}
+	}
+	if !strings.Contains(got, annotation.Marker(annotation.Coverage)) {
+		t.Errorf("stderr = %q, want it to name the token an author has to fix", got)
+	}
+	// And never the CRAP one. The two loops share every other word, so the
+	// token is the only thing that tells a reader which declaration to open.
+	if strings.Contains(got, annotation.Marker(annotation.CRAP)) {
+		t.Errorf("stderr = %q, want a coverage declaration reported against the coverage gate", got)
 	}
 }

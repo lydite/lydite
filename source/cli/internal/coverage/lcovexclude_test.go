@@ -179,6 +179,88 @@ func TestTheDeductionIsPerRecordAndNotPerLine(t *testing.T) {
 	}
 }
 
+// A declaration whose next sibling introduces no function reaches the report as
+// unused, in both lcov languages, keyed exactly as the hits beside it are.
+//
+// The same key, because a warning naming a path no gate mentions is one a reader
+// cannot open: the component's own directory is on the hits after prefixHits,
+// so it is on this too.
+func TestAnUnmatchedDeclarationReachesTheLCOVReport(t *testing.T) {
+	for _, c := range []struct {
+		lang   runner.Lang
+		file   string
+		source string
+	}{
+		{runner.Rust, "src/lib.rs", "// [lydite:exclude_from_coverage][measured elsewhere]\n" +
+			"pub struct Counter;\n\npub fn f() -> i64 {\n    1\n}\n"},
+		{runner.TypeScript, "src/scope.ts", "// [lydite:exclude_from_coverage][measured elsewhere]\n" +
+			"export const value = 1;\n\nexport function f(): number {\n  return 1;\n}\n"},
+	} {
+		t.Run(string(c.lang), func(t *testing.T) {
+			root := t.TempDir()
+			write(t, root, "pkg/"+c.file, c.source)
+			write(t, root, "pkg/lcov.info", "SF:"+c.file+"\nDA:4,1\nDA:5,1\nLF:2\nLH:2\nend_of_record\n")
+
+			got, err := Measure(context.Background(), root, "pkg", "lcov.info", c.lang, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "pkg/" + c.file + ":1"
+			if len(got.Unused) != 1 || got.Unused[0] != want {
+				t.Errorf("Unused = %v, want [%s]", got.Unused, want)
+			}
+			if _, ok := got.Hits["pkg/"+c.file]; !ok {
+				t.Errorf("Hits is keyed %v, which the warning above does not name", got.Hits)
+			}
+			// It excluded nothing, which is what makes it worth naming: the
+			// tool's own counts stand.
+			if got.Lines != (LineCount{Covered: 2, Total: 2}) {
+				t.Errorf("Lines = %+v, want {2 2} — nothing was deducted", got.Lines)
+			}
+		})
+	}
+}
+
+// One source named twice is one declaration warned about once. A trace holding
+// two records for a file — which cargo-llvm-cov emits for a source compiled
+// into two targets — would otherwise report one misplaced declaration twice,
+// and a reader who fixed it once would still see it.
+func TestASourceNamedTwiceNamesItsDeclarationOnce(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "src/lib.rs", "// [lydite:exclude_from_coverage][measured elsewhere]\n"+
+		"pub struct Counter;\n\npub fn f() -> i64 {\n    1\n}\n")
+	write(t, root, "lcov.info",
+		"SF:src/lib.rs\nDA:4,1\nLF:1\nLH:1\nend_of_record\n"+
+			"SF:src/lib.rs\nDA:5,1\nLF:1\nLH:1\nend_of_record\n")
+
+	got, err := Measure(context.Background(), root, ".", "lcov.info", runner.Rust, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Unused) != 1 {
+		t.Errorf("Unused = %v, want one entry for the one declaration", got.Unused)
+	}
+}
+
+// A declaration that found its function is not named, in either lcov language.
+// A warning on every working declaration is one readers learn to skim past.
+func TestAMatchedLCOVDeclarationIsNotNamed(t *testing.T) {
+	for _, probe := range []struct {
+		dir, report string
+		lang        runner.Lang
+	}{
+		{"rustlcovprobe", "rust-lcov.info", runner.Rust},
+		{"tslcovprobe", "ts-lcov-v8.info", runner.TypeScript},
+	} {
+		t.Run(probe.dir, func(t *testing.T) {
+			got := measureProbe(t, probe.dir, probe.report, probe.lang, nil)
+			if len(got.Unused) != 0 {
+				t.Errorf("Unused = %v, want none: every declaration in the probe covers a function", got.Unused)
+			}
+		})
+	}
+}
+
 // A source file the report names but the grammar cannot read is no exclusion,
 // never a failed measurement. The tree compiled to produce the report being
 // read, so failing a coverage figure over a parse would turn it into a syntax

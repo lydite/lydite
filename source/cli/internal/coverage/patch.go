@@ -166,11 +166,11 @@ func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
 //
 // A nil callback excludes nothing, which is what a caller asking only about the
 // report itself wants.
-func lcovReport(data []byte, baseDir string, exclude func(file string) (map[int]bool, error)) (Report, error) {
+func lcovReport(data []byte, baseDir string, exclude func(file string) (exclusions, error)) (Report, error) {
 	out := Report{Hits: LineHits{}, Executed: LineHits{}}
 	var deduct LineCount
 	var file string
-	var excluded map[int]bool
+	var excluded exclusions
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -178,15 +178,23 @@ func lcovReport(data []byte, baseDir string, exclude func(file string) (map[int]
 		switch {
 		case strings.HasPrefix(line, "SF:"):
 			file = normalizeRelPath(baseDir, strings.TrimPrefix(line, "SF:"))
-			if _, ok := out.Hits[file]; !ok {
+			_, seen := out.Hits[file]
+			if !seen {
 				out.Hits[file] = map[int]int{}
 				out.Executed[file] = map[int]int{}
 			}
-			excluded = nil
+			excluded = exclusions{}
 			if exclude != nil {
 				var err error
 				if excluded, err = exclude(file); err != nil {
 					return Report{}, err
+				}
+				// Once per file and not once per record. A trace naming one
+				// source twice — which cargo-llvm-cov emits for a file compiled
+				// into two targets — would otherwise warn twice about one
+				// declaration, and a reader fixing it once would still see it.
+				if !seen {
+					out.Unused = append(out.Unused, excluded.Unused...)
 				}
 			}
 		case strings.HasPrefix(line, "DA:"):
@@ -218,7 +226,7 @@ func lcovReport(data []byte, baseDir string, exclude func(file string) (map[int]
 			// lines as uncovered would report the author's own statement back
 			// as a hole they have to fill — the reading that makes an exclusion
 			// worth nothing.
-			if excluded[lineNo] {
+			if excluded.Lines[lineNo] {
 				deduct.Total++
 				if hitCount > 0 {
 					deduct.Covered++
@@ -238,7 +246,7 @@ func lcovReport(data []byte, baseDir string, exclude func(file string) (map[int]
 			}
 		case line == "end_of_record":
 			file = ""
-			excluded = nil
+			excluded = exclusions{}
 		}
 	}
 	out.Lines.Total -= deduct.Total
@@ -308,10 +316,11 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 		// The lines this file's author declared the suite does not measure.
 		// Read once for the whole file, because the aggregate, the per-line
 		// hits and the executed set all answer to it.
-		excluded, err := excludedGoLines(abs, annotation.Coverage)
+		excluded, err := excludedGoLines(abs, rel, annotation.Coverage)
 		if err != nil {
 			return Report{}, err
 		}
+		out.Unused = append(out.Unused, excluded.Unused...)
 		hits, executed := map[int]int{}, map[int]int{}
 		for _, b := range p.Blocks {
 			// Out of the denominator as well as the numerator. A declaration
@@ -319,7 +328,7 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 			// statements as uncovered would report the author's own statement
 			// back as a hole they have to fill — the reading that makes an
 			// exclusion worth nothing.
-			if !excluded[b.StartLine] {
+			if !excluded.Lines[b.StartLine] {
 				out.Lines.Total += b.NumStmt
 				if b.Count > 0 {
 					out.Lines.Covered += b.NumStmt
@@ -343,7 +352,7 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 				// seen: a hit count is never negative, so the two are the
 				// same rule and this one has no boundary to get wrong.
 				executed[line] = max(executed[line], b.Count)
-				if excluded[line] {
+				if excluded.Lines[line] {
 					continue
 				}
 				hits[line] = max(hits[line], b.Count)

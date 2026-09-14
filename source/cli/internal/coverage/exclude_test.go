@@ -297,6 +297,70 @@ func original() int { return 2 }
 	}
 }
 
+// A coverage declaration that documents no function reaches the report, so the
+// run that renders rows can name it.
+//
+// internal/crap reads its own gate's unused declarations and deliberately drops
+// the coverage ones, leaving this the only path that can tell a Go author their
+// declaration did nothing — and they have already taken the referral writing it
+// brought.
+func TestAnUnmatchedCoverageDeclarationReachesTheGoReport(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module m\n\ngo 1.26\n")
+	writeFile(t, root, "a.go", `package m
+
+func Kept(n int) int {
+	// [lydite:exclude_from_coverage][written inside the body, where it does nothing]
+	if n > 0 {
+		return 1
+	}
+	return 0
+}
+`)
+	writeFile(t, root, "cover.out", `mode: set
+m/a.go:3.24,5.11 1 1
+m/a.go:5.11,7.3 1 0
+m/a.go:8.2,8.10 1 0
+`)
+	rep, err := goProfile(GoModuleProfile{Profile: filepath.Join(root, "cover.out"), ModuleName: "m"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unused) != 1 || rep.Unused[0] != "a.go:4" {
+		t.Errorf("Unused = %v, want [a.go:4] — the line the declaration was written on", rep.Unused)
+	}
+	// And it excluded nothing, which is the whole of what makes it worth
+	// naming: the figure is the function's three statements, unreduced.
+	if rep.Lines.Total != 3 {
+		t.Errorf("lines = %+v, want the function still counted", rep.Lines)
+	}
+}
+
+// A declaration that found its function is not named. A warning on every
+// working declaration is one readers learn to skim past, which costs the
+// warning that matters its audience.
+func TestAMatchedCoverageDeclarationIsNotNamed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module m\n\ngo 1.26\n")
+	writeFile(t, root, "a.go", `package m
+
+// [lydite:exclude_from_coverage][the proving ground exercises this end to end]
+func Skipped(n int) int {
+	return n
+}
+`)
+	writeFile(t, root, "cover.out", "mode: set\nm/a.go:4.25,6.2 1 0\n")
+	rep, err := goProfile(GoModuleProfile{Profile: filepath.Join(root, "cover.out"), ModuleName: "m"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unused) != 0 {
+		t.Errorf("Unused = %v, want none: the declaration covered a function", rep.Unused)
+	}
+}
+
 // A line covered by more than one block reads as hit when any of them ran.
 // Taking the last record instead would have the patch gate score it uncovered
 // while the aggregate scored it covered — two figures disagreeing about one

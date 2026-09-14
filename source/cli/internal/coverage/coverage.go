@@ -90,6 +90,20 @@ type Report struct {
 	// mutation gate as well — a function whose coverage is taken in another
 	// process has not thereby become unmutable.
 	Executed LineHits
+	// Unused names each `[lydite:exclude_from_coverage]` declaration that
+	// covers no function, as "file:line".
+	//
+	// Named rather than dropped, for the reason a mutation declaration covering
+	// no mutant is named: its author believes they have excluded something, has
+	// taken the referral writing a suppression brings, and nothing they can see
+	// says the declaration did nothing. The commonest cause is one written
+	// inside a function body rather than above it, where it reads perfectly.
+	//
+	// It rides on the report rather than being warned about where it is read,
+	// because a base tree is measured through this same path and its report is
+	// discarded — a declaration in a tree nobody is looking at must not be
+	// reported as this run's.
+	Unused []string
 }
 
 // Measure reads the report an instrumented run wrote for one component.
@@ -162,15 +176,18 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 // The language is carried in for that alone — the report is read the same way
 // whichever of the two wrote it.
 func measureLCOV(data []byte, unitDir, dir string, lang runner.Lang) (Report, error) {
-	rep, err := lcovReport(data, unitDir, func(file string) (map[int]bool, error) {
+	rep, err := lcovReport(data, unitDir, func(file string) (exclusions, error) {
 		// A path prefixHits is about to drop is not this component's file — a
 		// dependency compiled from a registry checkout is the usual one — and
 		// joining the component's directory onto it names somewhere else
 		// entirely.
 		if path.IsAbs(file) || strings.HasPrefix(file, "../") {
-			return nil, nil
+			return exclusions{}, nil
 		}
-		return excludedLCOVLines(filepath.Join(unitDir, filepath.FromSlash(file)), lang, annotation.Coverage)
+		// Named with the component's directory already on it, because the hits
+		// beside it are prefixed below and an unused declaration a reader
+		// cannot open is one they cannot act on.
+		return excludedLCOVLines(filepath.Join(unitDir, filepath.FromSlash(file)), path.Join(relDir(dir), file), lang, annotation.Coverage)
 	})
 	if err != nil {
 		return Report{}, err
