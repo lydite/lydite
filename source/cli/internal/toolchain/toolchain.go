@@ -254,9 +254,17 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	shared := map[string]*resolution{}
 	for _, req := range reqs {
 		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
+		// Rust's answer is per directory, not per channel. rustup resolves a
+		// toolchain by walking up from the directory cargo runs in, so two
+		// components declaring the same thing — or declaring nothing — can
+		// still select different toolchains, and sharing one answer between
+		// them would hand the second component the first one's directory.
+		if req.Lang == runner.Rust {
+			key += "\x00" + req.Unit.Dir
+		}
 		got, seen := shared[key]
 		if !seen {
-			resolved, err := resolveOne(ctx, req, ov)
+			resolved, err := resolveOne(ctx, root, req, ov)
 			if err != nil {
 				return nil, err
 			}
@@ -290,6 +298,11 @@ type resolution struct {
 	// it was there at all.
 	bin, ambient string
 	present      bool
+	// lack names the shortfall when the language has a more specific answer
+	// than a version comparison. Rust does: a channel can be installed and
+	// still be missing the clippy or rustfmt component every check runs, which
+	// neither "is older than" nor "is not installed" describes.
+	lack string
 	// note is the provisioning step's own sentence, which is about the
 	// machine rather than about any component, so it is shared verbatim.
 	note string
@@ -328,10 +341,10 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 		return logf(w, "%s\n", r.note)
 	case resolutionDisabled:
 		return logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, r.ambient, r.present))
+			req.Lang, r.lacking(req))
 	case resolutionFailed:
 		return logf(w, "warning: could not provision the %s toolchain (%s): %s — continuing with what is on PATH\n",
-			req.Lang, shortfall(req, r.ambient, r.present), r.note)
+			req.Lang, r.lacking(req), r.note)
 	case resolutionProvisioned:
 		// The install happened once, so it is reported once.
 		if r.note == "" || r.noted {
@@ -347,7 +360,7 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 // is present does not satisfy it. It executes and returns what happened; the
 // caller writes the line, because the line names a component and this is
 // shared between every component that wants the same toolchain.
-func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution, error) {
+func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides) (resolution, error) {
 	p, ok := probes[req.Lang]
 	if !ok {
 		return resolution{}, nil
@@ -355,7 +368,20 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 	ambient, present := installed(ctx, p)
 	r := resolution{kind: resolutionAmbient, bin: p.bin, ambient: ambient, present: present}
 
-	if satisfied(req, ambient, present) {
+	good := satisfied(req, ambient, present)
+	if req.Lang == runner.Rust {
+		// Rust's verdict comes from rustup, asked in the component's own
+		// directory — the only place the channel a cargo invocation there
+		// selects can be established, and the only authority on a named
+		// channel, which has no version to compare. See rustReady.
+		//
+		// The toolchain rustup names replaces the probed cargo version as what
+		// this resolved to, because that version is the machine's default
+		// channel and not necessarily the one this component runs under.
+		r.ambient, good, r.lack = rustReady(ctx, filepath.Join(root, filepath.FromSlash(req.Unit.Dir)))
+	}
+
+	if good {
 		// Satisfied is not the same as nothing to do. Go still needs its
 		// toolchain pinned so that installing an external tool cannot
 		// silently switch away from the version just verified — see
@@ -368,7 +394,7 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 				// contributes no directory and only GOTOOLCHAIN=local, which
 				// names every ambient Go there has ever been — so a caller
 				// caching a tool built under it has nothing else to key on.
-				r.env = &Env{Vars: st.vars, Resolved: display(ambient)}
+				r.env = &Env{Vars: st.vars, Resolved: display(r.ambient)}
 				// The pin is about the machine, not about any one component,
 				// so it is said once alongside the per-component line.
 				r.note = st.note
@@ -383,8 +409,8 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 		// with no version at all, so a machine that already has the right
 		// toolchain records a different producer from one that provisioned
 		// it, and the two never compare.
-		if ambient != "" {
-			r.env = &Env{Resolved: display(ambient)}
+		if r.ambient != "" {
+			r.env = &Env{Resolved: display(r.ambient)}
 		}
 		return r, nil
 	}
@@ -393,7 +419,7 @@ func resolveOne(ctx context.Context, req Requirement, ov Overrides) (resolution,
 		return r, nil
 	}
 
-	st, err := provision(ctx, req, ambient, present)
+	st, err := provision(ctx, req, r.ambient, r.present)
 	if err != nil {
 		r.kind, r.note = resolutionFailed, err.Error()
 		return r, nil
@@ -418,7 +444,7 @@ func provision(ctx context.Context, req Requirement, ambient string, present boo
 	case runner.Go:
 		return provisionGo(ctx, req, ambient, present)
 	case runner.Rust:
-		return provisionRust(ctx, req, ambient, present)
+		return provisionRust(ctx, req)
 	case runner.TypeScript:
 		return provisionNode(ctx, req, ambient, present)
 	default:
@@ -461,6 +487,16 @@ func declaredBy(req Requirement) string {
 		return "no version declared by this repo"
 	}
 	return fmt.Sprintf("satisfies %s from %s", displayRaw(req), req.Source)
+}
+
+// lacking renders why the ambient toolchain was not good enough, preferring
+// the language's own answer over the generic version comparison when it has
+// one.
+func (r *resolution) lacking(req Requirement) string {
+	if r.lack != "" {
+		return r.lack
+	}
+	return shortfall(req, r.ambient, r.present)
 }
 
 // shortfall renders why the ambient toolchain was not good enough.

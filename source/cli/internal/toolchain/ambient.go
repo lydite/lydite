@@ -44,8 +44,9 @@ var probes = map[runner.Lang]probe{
 	},
 	runner.Rust: {
 		// cargo, not rustc: every Rust check and the coverage path invoke
-		// cargo, and a rustup install can in principle have one without the
-		// other. Asking the binary lydite actually runs is the honest probe.
+		// cargo. This names the binary lydite runs, for the diagnostic line;
+		// whether a Rust component is satisfied is rustReady's answer, not
+		// this version's.
 		bin:         "cargo",
 		versionArgs: []string{"--version"},
 		// "cargo 1.96.0 (abcdef123 2025-01-01)"
@@ -82,6 +83,101 @@ func installed(ctx context.Context, p probe) (version string, present bool) {
 		return "", true
 	}
 	return p.parse(string(out)), true
+}
+
+// rustChecksNeed are the rustup components lydite's Rust checks run: clippy
+// for the lint gate, rustfmt for the formatting one. A channel installed
+// without them is not a channel a scan can use.
+var rustChecksNeed = []string{"clippy", "rustfmt"}
+
+// rustReady asks rustup, from the component's own directory, whether a cargo
+// invocation there already has what every Rust check needs: the channel that
+// directory resolves to, installed, carrying clippy and rustfmt. It returns
+// the toolchain's name, that verdict, and — when the verdict is no — what it
+// is short of, phrased to complete "the rust toolchain ...".
+//
+// A version comparison against `cargo --version` cannot answer this. rustup
+// selects a toolchain per invocation by walking up from the working directory
+// for a rust-toolchain.toml, and lydite's own directory has none, so that
+// probe reports the machine's rustup *default* channel rather than the
+// crate's. A component pinning an older channel than the default then reads as
+// satisfied and is never provisioned; rustup fetches it lazily in the middle
+// of `cargo clippy`, without clippy, and the gap surfaces as a failed check
+// instead of a setup step. Named channels ("stable", "nightly") carry no
+// version to compare at all, so rustup resolving the file itself is the only
+// answer there is.
+//
+// No rustup means nothing can be resolved and nothing can be provisioned, and
+// that is reported as not ready rather than as satisfied: the caller takes the
+// provisioning path, which fails and warns, instead of reporting a pass it
+// never established.
+func rustReady(ctx context.Context, dir string) (active string, ready bool, lack string) {
+	if _, err := exec.LookPath("rustup"); err != nil {
+		return "", false, "needs rustup, which is not installed"
+	}
+	out, err := rustupIn(ctx, dir, "show", "active-toolchain")
+	if err != nil {
+		return "", false, "is one rustup resolves no channel for in this component"
+	}
+	// "1.85.0-aarch64-apple-darwin (overridden by '/repo/rust-toolchain.toml')"
+	// — the name is the first field, kept verbatim rather than canonicalised,
+	// because a channel is not a version and the host triple is what tells two
+	// installs of one channel apart.
+	active = firstField(out)
+	if active == "" {
+		return "", false, "is one rustup resolves no channel for in this component"
+	}
+	out, err = rustupIn(ctx, dir, "component", "list", "--installed", "--toolchain", active)
+	if err != nil {
+		return active, false, "resolves to " + active + ", which is not installed"
+	}
+	var missing []string
+	for _, want := range rustChecksNeed {
+		if !hasComponent(out, want) {
+			missing = append(missing, want)
+		}
+	}
+	if len(missing) > 0 {
+		return active, false, "resolves to " + active + ", which is installed without " + strings.Join(missing, " and ")
+	}
+	return active, true, ""
+}
+
+// rustupIn runs rustup with its working directory set to the component's,
+// which is the whole point: rustup picks a toolchain per invocation by walking
+// up from that directory, so an answer taken anywhere else is an answer about
+// a different toolchain.
+//
+// Deliberately not executil.Run, for the same reason installed is not: this is
+// a probe, and rustup chatter ahead of every scan is noise.
+func rustupIn(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "rustup", args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- args are this file's own literals plus a toolchain name rustup itself just printed
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// hasComponent reports whether `rustup component list --installed` named one.
+// Components are listed target-qualified ("clippy-aarch64-apple-darwin") on a
+// toolchain carrying a host triple and bare ("clippy") on one that does not,
+// and both spellings mean installed.
+func hasComponent(list, name string) bool {
+	for line := range strings.SplitSeq(list, "\n") {
+		line = strings.TrimSpace(line)
+		if line == name || strings.HasPrefix(line, name+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// firstField returns the first whitespace-separated field, verbatim.
+func firstField(out string) string {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // fieldAfter returns the whitespace-separated field following the first
