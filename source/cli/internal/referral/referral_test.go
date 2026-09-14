@@ -126,6 +126,16 @@ exemptions:
 			Change{Paths: []string{".github/workflows/ci.yml"}},
 			"CI workflow edited",
 		},
+		{
+			"an edit to gitleaks' own allowlist",
+			Change{Paths: []string{".gitleaks.toml"}},
+			"secret-scan config edited",
+		},
+		{
+			"an edit to gitleaks' own fingerprint ignore list",
+			Change{Paths: []string{".gitleaksignore"}},
+			"secret-scan config edited",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

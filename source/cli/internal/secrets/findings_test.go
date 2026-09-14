@@ -156,6 +156,36 @@ func TestSiteIsTheLinePrefixAndNeverTheSecret(t *testing.T) {
 	}
 }
 
+func TestASiteNeverIncludesAnotherMatchOnTheSameLine(t *testing.T) {
+	// A line can hold more than one match — a chained assignment, a DSN
+	// followed by a token, two -e flags on one docker run line — and gitleaks
+	// reports each as its own leak. Cutting a claim at its own StartColumn
+	// alone would let an earlier match's secret ride along in a later
+	// claim's site, published in scan.json and into a comment on a public
+	// pull request.
+	dir, _ := captured(t, "gitleaks")
+	rep := report{
+		// A rule matching right at the start of the line.
+		{RuleID: "rule-a", File: "config.yml", StartLine: 3, StartColumn: 2},
+		// A second rule matching deep inside the same line — with only its
+		// own column applied, its site would carry "aws_key" and part of the
+		// hex string that is rule-a's match.
+		{RuleID: "rule-b", File: "config.yml", StartLine: 3, StartColumn: 40},
+	}
+	got, unplaced := findings(dir, rep)
+	if len(unplaced) != 0 {
+		t.Fatalf("unplaced = %v, want none", unplaced)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d claims, want 2", len(got))
+	}
+	for _, f := range got {
+		if f.Site != site(f.Rule, "") {
+			t.Errorf("site for %s = %q, want %q — cut at the earliest match on the line", f.Rule, f.Site, site(f.Rule, ""))
+		}
+	}
+}
+
 func TestOrdinalSeparatesTwoClaimsSharingASite(t *testing.T) {
 	// Two secrets under one rule with no distinguishing prefix in one file are
 	// ordinals 0 and 1 — the cost ADR 0035 names and accepts. Without the

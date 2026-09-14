@@ -74,6 +74,7 @@ const (
 // discarded thing is a credential somebody committed.
 func findings(dir string, rep report) (out []finding.Finding, unplaced []string) {
 	src := newTree(dir)
+	cols := earliestColumnPerLine(rep)
 	for _, l := range inSourceOrder(rep) {
 		path := filepath.ToSlash(strings.TrimPrefix(l.File, "./"))
 		if path == "" || l.StartLine < 1 {
@@ -87,6 +88,11 @@ func findings(dir string, rep report) (out []finding.Finding, unplaced []string)
 		if l.EndLine > l.StartLine {
 			end = l.EndLine
 		}
+		// The cut is the earliest match on this line, not this claim's own:
+		// gitleaks reports one leak per match, and a line with two matches
+		// would otherwise put the first one's secret into the second one's
+		// site, published in scan.json for text no rule flagged as its own.
+		col := cols[lineKey{path, l.StartLine}]
 		out = append(out, finding.Finding{
 			Gate: Gate,
 			// No Component. This gate is root-scoped, and an empty component is
@@ -100,11 +106,43 @@ func findings(dir string, rep report) (out []finding.Finding, unplaced []string)
 			Message: message(l),
 			// No Detail. Everything gitleaks would put there is either already a
 			// field — the rule, the description — or is the secret.
-			Site: site(l.RuleID, src.prefix(path, l.StartLine, l.StartColumn)),
+			Site: site(l.RuleID, src.prefix(path, l.StartLine, col)),
 		})
 	}
 	finding.Number(out)
 	return out, unplaced
+}
+
+// lineKey names one line of one file, for grouping leaks that share it.
+type lineKey struct {
+	path string
+	line int
+}
+
+// earliestColumnPerLine is, for every file and line a leak names, the
+// smallest StartColumn reported for it.
+//
+// A line can carry more than one match — a chained .env export, a
+// docker run with two -e flags, a DSN followed by a token — and gitleaks
+// reports each as its own leak. Every claim on that line has to cut its site
+// before the first of them, not just before itself, or the claim for the
+// second match publishes the first match's secret as its own identity.
+func earliestColumnPerLine(rep report) map[lineKey]int {
+	cols := make(map[lineKey]int, len(rep))
+	for _, l := range rep {
+		if l.StartLine < 1 {
+			continue
+		}
+		path := filepath.ToSlash(strings.TrimPrefix(l.File, "./"))
+		if path == "" {
+			continue
+		}
+		k := lineKey{path, l.StartLine}
+		if cur, ok := cols[k]; !ok || l.StartColumn < cur {
+			cols[k] = l.StartColumn
+		}
+	}
+	return cols
 }
 
 // inSourceOrder is the report's leaks by file and then by position.
