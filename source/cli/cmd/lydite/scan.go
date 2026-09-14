@@ -22,6 +22,7 @@ import (
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
@@ -187,6 +188,20 @@ func newScanCmd() *cobra.Command {
 			var results []executil.Result
 			if cfg.Semgrep.Enabled {
 				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, semgrepBase(baseSHA)))
+			}
+			// Root-scoped, like Semgrep and unlike every language check: a
+			// secret scanner reads bytes rather than a build graph, and the
+			// files most likely to carry a credential — a workflow, a
+			// compose file, an .env somebody added — belong to no component
+			// at all. So it runs once over the scan root and its claims name
+			// no component.
+			//
+			// Given no diff base. gitleaks has no --baseline-commit, so the
+			// row fails on every secret in the tree as gosec's does, and the
+			// anchor is what decides which claims become threads on the
+			// change and which are the pre-existing debt.
+			if cfg.Secrets.Enabled {
+				results = append(results, secrets.Check(ctx, dir))
 			}
 
 			// A run in which no check ran says so, in a row of its own.

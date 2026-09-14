@@ -62,6 +62,21 @@ var suppressionTokens = []string{
 	"@ts-nocheck",
 }
 
+// substringSuppressionTokens are suppression markers whose own tool reads
+// them by plain substring, so a word boundary here would open exactly the
+// gap this package exists to close.
+//
+// gitleaks reads `gitleaks:allow` with an unanchored match: `# xgitleaks:allow`
+// clears a secret finding for gitleaks exactly as `# gitleaks:allow` does,
+// because gitleaks does not require the token to start a word. Checking it
+// with containsAny's word-boundary rule would let a change spell the marker
+// with a leading identifier character and merge unattended — the marker is
+// suppressing gitleaks's own reading of the line, not lydite's, so it is
+// lydite that has to match gitleaks's rule and not its own.
+var substringSuppressionTokens = []string{
+	"gitleaks:allow",
+}
+
 // skipTokens stop a test from running or from being counted.
 //
 // The `.only` forms belong here even though they read as a focusing tool
@@ -97,6 +112,18 @@ const workflowDir = ".github/workflows"
 // changing the evidence this package reads about itself. `--text` stops the
 // rendering trick; this veto covers the rest of what the file can do.
 const gitAttributes = ".gitattributes"
+
+// gitleaksConfig and gitleaksIgnore are gitleaks' own suppression surfaces.
+// lydite passes no --config, so gitleaks discovers both at whatever
+// directory it is told to scan — matched by base name rather than a
+// repository-root path, the same way gitAttributes is, since the scan root
+// referral runs over is not always the repository root. An allowlist broad
+// enough to match every path, or a fingerprint an author has decided is not
+// a secret, switches the gate off exactly as removing a #nosec would — and
+// neither is a token any one line can be checked against, so the file
+// itself is the veto.
+const gitleaksConfig = ".gitleaks.toml"
+const gitleaksIgnore = ".gitleaksignore"
 
 // testDeclarations open a test. Removing one is how a check stops failing
 // without anything being fixed, which is the same "made a verdict go away"
@@ -142,6 +169,8 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 	for _, line := range ch.Added {
 		if tok, ok := containsAny(line.Text, suppressionTokens); ok {
 			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
+		} else if tok, ok := containsSubstring(line.Text, substringSuppressionTokens); ok {
+			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
 		}
 		if tok, ok := containsAny(line.Text, skipTokens); ok {
 			add("test disabled", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
@@ -175,6 +204,8 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("lydite config edited", p, p)
 		case path.Base(p) == gitAttributes:
 			add("diff rendering edited", p, p)
+		case path.Base(p) == gitleaksConfig || path.Base(p) == gitleaksIgnore:
+			add("secret-scan config edited", p, p)
 		case p == workflowDir || strings.HasPrefix(p, workflowDir+"/"):
 			add("CI workflow edited", p, p)
 		}
@@ -209,6 +240,26 @@ func containsAny(text string, tokens []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// containsSubstring finds the first token present in text anywhere, with no
+// word-boundary check.
+//
+// For a marker whose own tool reads it the same unanchored way — gitleaks'
+// `gitleaks:allow` — a word-boundary requirement here would accept a
+// spelling the tool itself still honours, which is the gap containsAny's
+// stricter check exists to close for tokens that are Go, Rust or TypeScript
+// syntax.
+func containsSubstring(text string, tokens []string) (string, bool) {
+	for _, t := range tokens {
+		if strings.Contains(text, t) {
+			return t, true
+		}
+	}
+	return "", false // [lydite:exclude_from_mutation][the token beside a false
+	// second value is read by nobody: every caller checks the bool and never
+	// looks at the string when it is false, so no caller can be shown a
+	// different one]
 }
 
 // atWordStart reports whether the match at i begins a token rather than

@@ -1,0 +1,32 @@
+# lydite's own answer to gitleaks, in gitleaks' own configuration.
+#
+# `lydite scan` passes no --config, so gitleaks discovers this file at the scan
+# root — which is where a repository's allowlist belongs, beside the rest of its
+# scanning policy. See docs/adr/0035.
+#
+# Every entry names a rule and a path and says why. A blanket exclude of
+# testdata/ is deliberately not here: a fixture is committed code, and a
+# credential in one is a credential in the repository.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "captured govulncheck report: googlesource commit hashes read as access tokens"
+targetRules = ["sourcegraph-access-token"]
+paths = ['''source/cli/internal/golang/testdata/govulncheck\.json''']
+
+[[allowlists]]
+description = "a list of Biome rule categories, one of which is named noSecrets"
+targetRules = ["generic-api-key"]
+paths = ['''source/cli/internal/typescript/biome_test\.go''']
+
+[[allowlists]]
+description = "gitleaks' own fixtures: credential-shaped placeholders committed to be found, which is what pins the report shape internal/secrets parses"
+targetRules = ["generic-api-key"]
+paths = ['''source/cli/internal/secrets/testdata/''']
+
+[[allowlists]]
+description = "inline test literals for the site's own leaked-value guard: invented credential-shaped strings a test proves are never published, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''source/cli/internal/secrets/findings_test\.go''']

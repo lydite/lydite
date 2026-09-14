@@ -16,6 +16,7 @@ import (
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/ui"
 )
@@ -679,9 +680,22 @@ func findingCounts(decl component.File, cfg config.Config, found []finding.Findi
 		}
 		perComponent[c.Name] = counts
 	}
+	// Each root-scoped gate seeds its own nought, independently of the others:
+	// a gate switched off records no key, and a gate that is on records 0 even
+	// when its neighbour is off. One seed shared between them would let a clean
+	// gitleaks run read as a gate nobody asked for.
 	var root map[string]int
+	seed := func(gate string) {
+		if root == nil {
+			root = map[string]int{}
+		}
+		root[gate] = 0
+	}
 	if cfg.Semgrep.Enabled {
-		root = map[string]int{semgrep.Gate: 0}
+		seed(semgrep.Gate)
+	}
+	if cfg.Secrets.Enabled {
+		seed(secrets.Gate)
 	}
 	for _, f := range found {
 		// A root-scoped claim names no component, and nothing here invents

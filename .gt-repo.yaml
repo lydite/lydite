@@ -114,6 +114,22 @@ dependabot:
     note: |
       PyYAML, installed by the proving-ground coverage gate's one-component
       leg when the runner's own interpreter lacks it.
+  - ecosystem: gomod
+    directory: /source/cli/internal/secrets/gitleaks-pin
+    note: |
+      gitleaks (internal/secrets). A bump here must be mirrored into
+      pins.go's gitleaksVersion constant, which go:embed cannot reach because
+      gitleaks-pin is a nested module. internal/pins holds that rule: its
+      TestNoDrift fails a bump that did not carry its mirror, and
+      `go run ./tools/pinsync` writes it.
+
+      The allow rule is load-bearing for the same reason go-pin's is: this
+      module has no .go files, so `go mod tidy` marks gitleaks itself
+      `// indirect`, and Dependabot's default allow rule is direct
+      dependencies only.
+    allow:
+      - dependency_name: github.com/zricethezav/gitleaks/v8
+        dependency_type: all
   - ecosystem: npm
     directory: /source/cloud-services
     note: |

@@ -246,6 +246,37 @@ updates:
       default-days: 7
     open-pull-requests-limit: 25
 
+  # gitleaks (internal/secrets). A bump here must be mirrored into
+  # pins.go's gitleaksVersion constant, which go:embed cannot reach because
+  # gitleaks-pin is a nested module. internal/pins holds that rule: its
+  # TestNoDrift fails a bump that did not carry its mirror, and
+  # `go run ./tools/pinsync` writes it.
+  #
+  # The allow rule is load-bearing for the same reason go-pin's is: this
+  # module has no .go files, so `go mod tidy` marks gitleaks itself
+  # `// indirect`, and Dependabot's default allow rule is direct
+  # dependencies only.
+  - package-ecosystem: "gomod"
+    directory: "/source/cli/internal/secrets/gitleaks-pin"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+    # Dependabot's default is direct dependencies only, so anything held
+    # indirectly is never bumped. An allow rule is what stops a pin freezing
+    # silently — nothing reports a dependency that simply stops being updated.
+    allow:
+      - dependency-name: "github.com/zricethezav/gitleaks/v8"
+        dependency-type: all
+
   # The Workers lydite operates (source/cloud-services), as one npm
   # workspace and therefore one component.
   #
