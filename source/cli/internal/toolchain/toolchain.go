@@ -495,7 +495,11 @@ func provision(ctx context.Context, req Requirement, ambient string, present boo
 	case runner.Go:
 		return provisionGo(ctx, req, ambient, present)
 	case runner.Rust:
-		return provisionRust(ctx, req)
+		// ambient is rustReady's active channel for Rust — resolveOne set
+		// r.ambient to it before deciding provisioning was needed — the
+		// channel this directory already resolves to, which an unpinned
+		// component falls back to installing.
+		return provisionRust(ctx, req, ambient)
 	case runner.TypeScript:
 		return provisionNode(ctx, req, ambient, present)
 	default:

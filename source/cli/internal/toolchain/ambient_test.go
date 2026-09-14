@@ -130,6 +130,43 @@ func rustCrate(t *testing.T, channel string) string {
 	return dir
 }
 
+// unpinnedRustCrate is a component directory with no rust-toolchain.toml, no
+// rust-toolchain file, and no config override — the case where rustup itself
+// picks the channel, from its own default rather than from anything lydite
+// declared.
+func unpinnedRustCrate(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	write(t, dir, "Cargo.toml", "[package]\nname = \"x\"\n")
+	return dir
+}
+
+// An unpinned component has no rust-toolchain.toml for rustup to read, so
+// installing a channel does nothing to select it: only RUSTUP_TOOLCHAIN or the
+// file rustup already resolves to changes what a later cargo invocation picks.
+// Provisioning the wrong channel — a hardcoded "stable" rather than the one
+// rustup's own default already names — installs clippy and rustfmt onto a
+// toolchain nothing will ever run under, and the component keeps failing under
+// its original, incomplete default.
+func TestRustProvisionsTheActiveChannelWhenNoneIsDeclared(t *testing.T) {
+	dir := unpinnedRustCrate(t)
+	bin := fakeToolchainBin(t)
+	fakeCargo(t, bin, "1.90.0")
+	marker := fakeRustup(t, bin, "nightly-x86_64-unknown-linux-gnu",
+		[]string{"rustfmt-x86_64-unknown-linux-gnu"})
+
+	var log bytes.Buffer
+	ensureOne(t, dir, runner.Rust, Overrides{}, &log)
+
+	got := installs(t, marker)
+	if !strings.Contains(got, "nightly-x86_64-unknown-linux-gnu") {
+		t.Fatalf("rustup should be asked to install the channel it already resolves this directory to, got %q; log was %q", got, log.String())
+	}
+	if strings.Contains(got, "install stable") {
+		t.Fatalf("rustup must not be asked to install a hardcoded stable when the component declared nothing, got %q", got)
+	}
+}
+
 // The headline case. A crate pinning a channel *older* than the machine's
 // rustup default is exactly what a version comparison gets wrong: `cargo
 // --version`, run from lydite's own directory, reports the default, and 1.90
