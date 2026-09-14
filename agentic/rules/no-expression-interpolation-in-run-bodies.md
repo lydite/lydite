@@ -7,4 +7,4 @@ script-injection vector whatever the value looks like; `if:` conditions and `wit
 a `uses:` step are fine. Semgrep's `yaml.github-actions.security.run-shell-injection` has
 caught this in a lydite action already.
 
-Reasoning: [`.agents/references/actions.md`](../references/actions.md).
+Reasoning: [`agentic/references/actions.md`](../references/actions.md).

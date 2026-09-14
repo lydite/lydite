@@ -393,3 +393,11 @@ actually fixes a stacked pull request is a caller passing the branch it targets,
 `lydite/actions` does: every job it runs takes `--base-branch` from `github.base_ref`, on
 `pull_request` events and never on a push.
 
+## `lydite coverage` is removed
+
+So are `coverage.source`, `coverage.{go,rust}.report`, `coverage.rust.lcov`, `--source`,
+`--tests`, `--go-report`, `--rust-report` and `--rust-lcov-report`. Each is rejected by name
+rather than ignored — including the command itself, which answers with what replaced it
+rather than cobra's unknown-command message. See
+[ADR 0019](../../docs/adr/0019-coverage-per-component-gated-by-lydite-test.md).
+

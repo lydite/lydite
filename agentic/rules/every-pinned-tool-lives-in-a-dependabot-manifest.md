@@ -7,4 +7,4 @@ needs its own manifest colocated with the package that uses it, an entry in
 updater then stops bumping that pin in a job log nobody reads. A version restated outside its
 manifest is a mirror `internal/pins` must know about.
 
-Reasoning: [`.agents/references/tool-pins.md`](../references/tool-pins.md).
+Reasoning: [`agentic/references/tool-pins.md`](../references/tool-pins.md).

@@ -6,5 +6,5 @@ green of one that ran it — the failure wardnet/wardnet#957 shipped. The same r
 surface: a section that quietly disappears is indistinguishable from a concern that passed, so
 a missing input renders as a section saying so.
 
-Reasoning: [`.agents/references/output-grammar.md`](../references/output-grammar.md) and
-[`.agents/references/surface.md`](../references/surface.md).
+Reasoning: [`agentic/references/output-grammar.md`](../references/output-grammar.md) and
+[`agentic/references/surface.md`](../references/surface.md).

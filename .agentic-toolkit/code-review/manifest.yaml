@@ -1,0 +1,140 @@
+# The review a repo gets when it declares none of its own.
+#
+# A consumer that writes its own manifest replaces this one whole: prompt
+# bodies stay shareable through `builtin:` references rather than through a
+# merge algorithm, so there is one roster per repo and never half of two.
+#
+# Two rosters, one per provider, and the same panels and rules for each. The
+# local pass is Claude and the pull request is codex, so a change is read by two
+# models trained differently before anyone else sees it. Every model is named:
+# a reviewer left on the CLI's default is a model nobody chose.
+#
+# Every panel names its twin on the other provider as its fallback, so a
+# provider that blocks a run — a spent quota, a rejected token — is retried
+# once on the other roster rather than left unavailable.
+version: 1
+
+reviewers:
+  unified:     {provider: claudecode, model: sonnet, prompt: builtin:unified}
+  correctness: {provider: claudecode, model: sonnet, prompt: builtin:correctness}
+  security:    {provider: claudecode, model: opus,   prompt: builtin:security}
+  performance: {provider: claudecode, model: sonnet, prompt: builtin:performance}
+
+  unified-codex:     {provider: codex, model: sol,   prompt: builtin:unified}
+  correctness-codex: {provider: codex, model: sol,   prompt: builtin:correctness}
+  security-codex:    {provider: codex, model: astra, prompt: builtin:security}
+  performance-codex: {provider: codex, model: sol,   prompt: builtin:performance}
+
+judge:     {provider: claudecode, model: opus,   prompt: builtin:judge}
+validator: {provider: claudecode, model: sonnet, prompt: builtin:validator}
+
+# The codex panels judge and validate on codex, so a pull request is read and
+# reconciled without the model that already reviewed it locally.
+panels:
+  quick:
+    description: One Claude reviewer over all three axes. The pre-push pass, where being fast is what it is worth.
+    reviewers: [unified]
+    fallback: quick-codex
+  standard:
+    description: Correctness and security on Claude, each with its own scope.
+    reviewers: [correctness, security]
+    fallback: standard-codex
+  deep:
+    description: Every axis on Claude, run twice, so agreement between independent instances is the confidence signal.
+    reviewers: [correctness, security, performance]
+    quorum: 2
+    fallback: deep-codex
+
+  quick-codex:
+    description: One codex reviewer over all three axes.
+    reviewers: [unified-codex]
+    judge:     {provider: codex, model: astra, prompt: builtin:judge}
+    validator: {provider: codex, model: sol,   prompt: builtin:validator}
+    fallback: quick
+  standard-codex:
+    description: Correctness and security on codex, each with its own scope. The second model's first look at the change.
+    reviewers: [correctness-codex, security-codex]
+    judge:     {provider: codex, model: astra, prompt: builtin:judge}
+    validator: {provider: codex, model: sol,   prompt: builtin:validator}
+    fallback: standard
+  deep-codex:
+    description: Every axis on codex, run twice, so agreement between independent instances is the confidence signal.
+    reviewers: [correctness-codex, security-codex, performance-codex]
+    quorum: 2
+    judge:     {provider: codex, model: astra, prompt: builtin:judge}
+    validator: {provider: codex, model: sol,   prompt: builtin:validator}
+    fallback: deep
+
+defaults:
+  worktree: quick
+  pr:       standard-codex
+
+# `standard` is the ceiling a rule can reach on a pull request. The branch has
+# normally been through the local loop by the time it is opened, so a second
+# every-axis-twice reading buys a re-read of code that was read deeply an hour
+# ago. `deep-codex` stays a panel and stays `deep`'s fallback; reaching it on a
+# pull request is `--panel deep-codex`, which is a person deciding this change
+# is the exception.
+#
+# Nothing verifies that the local loop ran. It posts nothing, so the pull
+# request carries no record of it, and approval reads only what is posted here
+# — while the author, whose machine that loop runs on, is the party a review
+# exists not to trust. An author who skips it gets the shallower reading on a
+# change that would have raised to `deep` locally, and no one is told. That is
+# the price of not paying for the deepest panel twice on every branch, and it
+# is a trade rather than an oversight: raise it back by naming `deep-codex` in
+# a pull-request rule, or reach it per change with `--panel`.
+#
+# So the worktree rules and the pull-request rules are not symmetric, and
+# `context` is what keeps each on its own side. A rule carries one combinator,
+# so the context guard makes each rule an `all:` — which is why one criterion
+# gets one rule rather than several being grouped.
+#
+# The rules raising to `standard-codex` cannot raise the panel while that is
+# also the pull-request default. They still fire, and `explain` lists them. They
+# are kept so lowering the default does not silently drop a criterion.
+escalate:
+  # Mistakes here are exploitable, or land on somebody who is not in the room,
+  # or are indistinguishable from correct until production. Worktree only: this
+  # is the reading that happens before anyone else sees the change, which is the
+  # point at which looking harder is still cheaper than being wrong.
+  - to: deep
+    all:
+      - signals: {in: [auth, crypto, concurrency, sensitive-data, fix-revert]}
+      - context: {in: [worktree]}
+
+  # Widely used code: the count separates a one-line change nobody depends on
+  # from a one-line change everybody does. Worktree only, for the reason above.
+  - to: deep
+    all:
+      - referencing_files: {gte: 20}
+      - context: {in: [worktree]}
+
+  # Irreversible or wide, but the risk is not in the diff: a migration's cost is
+  # the table it locks, and a pipeline's is what it can reach. The security
+  # reviewer is the one with something to say, so this buys that rather than
+  # every axis twice.
+  #
+  # `bugfix-lines` belongs here rather than beside `fix-revert`: touching a line
+  # a routine repair last edited is a reason to read more of the change, not a
+  # reason to read every axis of it twice.
+  - to: standard
+    all:
+      - signals: {in: [migrations, ci-cd, iac, bugfix-lines]}
+      - context: {in: [worktree]}
+  - to: standard-codex
+    all:
+      - signals: {in: [migrations, ci-cd, iac, bugfix-lines]}
+      - context: {in: [pr]}
+
+  # Size alone. It raises to standard rather than deep, because bulk is a
+  # reason to look at more of a change, not a reason to look harder at each
+  # part of it.
+  - to: standard
+    all:
+      - changed_files: {gte: 50}
+      - context: {in: [worktree]}
+  - to: standard-codex
+    all:
+      - changed_files: {gte: 50}
+      - context: {in: [pr]}
