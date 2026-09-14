@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,6 +187,54 @@ func TestRustProvisionsAChannelOlderThanTheMachineDefault(t *testing.T) {
 	got := installs(t, marker)
 	if !strings.Contains(got, "1.85") || !strings.Contains(got, "clippy") {
 		t.Fatalf("the declared channel must be installed with clippy, rustup was asked %q; log was %q", got, log.String())
+	}
+}
+
+// fakeRustupOverrideAware puts a rustup on PATH that resolves to the
+// directory's own default channel unless RUSTUP_TOOLCHAIN names another,
+// exactly as the real rustup does — and reports both as fully installed, so a
+// test using it isolates the selection question from the readiness one.
+func fakeRustupOverrideAware(t *testing.T, bin, def string) {
+	t.Helper()
+	writeScript(t, filepath.Join(bin, "rustup"), strings.Join([]string{
+		"#!/bin/sh",
+		`case "$1 $2" in`,
+		`"show active-toolchain")`,
+		`  case "${RUSTUP_TOOLCHAIN}" in`,
+		`  "") echo ` + quote(def) + " ;;",
+		`  *) echo "${RUSTUP_TOOLCHAIN}-x86_64-unknown-linux-gnu" ;;`,
+		`  esac ;;`,
+		`"component list") printf '%s\n' clippy-x86_64-unknown-linux-gnu rustfmt-x86_64-unknown-linux-gnu ;;`,
+		`"toolchain install") exit 0 ;;`,
+		"*) exit 1 ;;",
+		"esac",
+		"",
+	}, "\n"))
+}
+
+// A config override selects a toolchain rustup's own directory-based
+// resolution knows nothing about — it lives only in .lydite/config.yml — so
+// asking readiness without RUSTUP_TOOLCHAIN set checks the directory's own
+// default instead of the channel the override actually names. Both are fully
+// installed here, so the bug this guards is not "provisioning never runs" —
+// it is the override being silently ignored: a check would still run under
+// the directory's default, and Env.Resolved would record that default as the
+// baseline's producer instead of the channel a human asked for in config.
+func TestRustOverrideSelectsEvenWhenBothChannelsAreReady(t *testing.T) {
+	dir := unpinnedRustCrate(t)
+	bin := fakeToolchainBin(t)
+	fakeRustupOverrideAware(t, bin, "stable-x86_64-unknown-linux-gnu")
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.Rust, Overrides{Rust: "nightly"}, &log)
+	if env == nil {
+		t.Fatalf("Ensure returned no environment for an overridden Rust component; log was %q", log.String())
+	}
+	if !strings.Contains(env.Resolved, "nightly") {
+		t.Fatalf("Resolved = %q, want the overridden channel, not the directory's own default; log was %q", env.Resolved, log.String())
+	}
+	if !slices.Contains(env.Vars, "RUSTUP_TOOLCHAIN=nightly") {
+		t.Fatalf("Vars = %v, want RUSTUP_TOOLCHAIN=nightly carried into the environment so a later cargo invocation actually selects it", env.Vars)
 	}
 }
 

@@ -379,7 +379,19 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 		// The toolchain rustup names replaces the probed cargo version as what
 		// this resolved to, because that version is the machine's default
 		// channel and not necessarily the one this component runs under.
-		r.ambient, good, r.lack = rustReady(ctx, componentDir(root, req), nil)
+		//
+		// An override selects a channel rustup's own file-based resolution
+		// does not know about — it lives only in .lydite/config.yml — so the
+		// question has to be asked with RUSTUP_TOOLCHAIN set, the same way
+		// provisioning selects it below. Asking without it checks the
+		// channel the directory would resolve to on its own, which can
+		// already be ready and read the override as satisfied without ever
+		// applying it.
+		var env []string
+		if req.Overridden {
+			env = []string{"RUSTUP_TOOLCHAIN=" + req.Raw}
+		}
+		r.ambient, good, r.lack = rustReady(ctx, componentDir(root, req), env)
 	}
 
 	if good {
@@ -412,6 +424,16 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 		// it, and the two never compare.
 		if r.ambient != "" {
 			r.env = &Env{Resolved: display(r.ambient)}
+			// Being ready is not the same as being selected. An override
+			// channel that is already installed still needs RUSTUP_TOOLCHAIN
+			// carried into the environment a later cargo invocation uses —
+			// without it, "the override channel has clippy and rustfmt" and
+			// "the component actually runs under it" are two different
+			// claims, and only rustReady's own verdict, just above, checked
+			// the first.
+			if req.Lang == runner.Rust && req.Overridden {
+				r.env.Vars = []string{"RUSTUP_TOOLCHAIN=" + req.Raw}
+			}
 		}
 		return r, nil
 	}
