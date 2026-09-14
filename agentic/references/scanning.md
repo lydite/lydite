@@ -83,20 +83,25 @@ because `cargo install` reads `CARGO_HOME`, `CARGO_REGISTRIES_*`, `CARGO_NET_*` 
 
 **Every check reports its findings as data, through a side channel.** The tool keeps printing
 exactly what it printed before and lydite reads a structured copy purely to populate
-`Result.Findings` — so `Result.Detail` stays empty for every tool that prints its own findings,
-and what a reader needs beyond the one-line claim travels per finding in `Finding.Detail`.
-Biome is the exception it already was: its report goes to a file so its own chatter cannot
-corrupt the JSON, so nothing streams and `Detail` is the only place its findings exist. See
+`Result.Findings` — so `Result.Detail` stays empty for gosec's, Semgrep's, gitleaks's and
+govulncheck's own findings, and what a reader needs beyond the one-line claim travels per finding
+in `Finding.Detail`. Biome, clippy, cargo-audit and cargo-deny are exceptions, for two different
+reasons: Biome's report goes to a file so its own chatter cannot corrupt the JSON, so nothing
+streams and `Detail` is the only place its findings exist; clippy, cargo-audit and cargo-deny run
+once, in JSON mode, with no second, richer terminal rendering left to duplicate, so `Detail`
+renders the claim line and each finding's own `Finding.Detail` instead of sitting empty. See
 [ADR 0032](../../docs/adr/0032-every-scanner-reports-its-findings-as-data.md).
 
-**Three checks run their tool twice**, because it cannot write a report and print for a human in
-one invocation. For `cargo clippy`, `cargo-audit` and `cargo-deny` the second pass buys back the
-terminal output, and it is cheap — clippy's is 0.24s against a first pass of 1.76s, because cargo
-replays cached diagnostics rather than recompiling. For `govulncheck` it buys back the **verdict**:
-under `-format json` it exits 0 whether or not it found anything, while the text run exits 3, so a
-single JSON run would report every advisory and pass the check. `gosec` and Semgrep need one pass
-each — `-fmt json -out <file> -stdout -verbose text` and `--json-output=<file>` both write a copy
-rather than a replacement.
+**Only `govulncheck` still runs its tool twice**, because it has no output-file flag and needs a
+second invocation to buy back the **verdict**: under `-format json` it exits 0 whether or not it
+found anything, while the text run exits 3, so a single JSON run would report every advisory and
+pass the check. `cargo clippy`, `cargo-audit` and `cargo-deny` run once, under `--message-format
+json`, `--json` and `--format json`, and render `Result.Detail` from their own `Findings` instead
+of buying back a second terminal rendering — clippy's diagnostic already carries `rendered`,
+cargo's exact text, and audit's and deny's `Finding.Detail` was already the text beyond the
+one-line claim, so there was nothing left to lose. `gosec` and Semgrep need one pass each —
+`-fmt json -out <file> -stdout -verbose text` and `--json-output=<file>` both write a copy rather
+than a replacement.
 
 **The tool's own exit status decides the row**, with two exceptions where it under-reports: gosec
 states a package that did not compile in the report rather than in its status, and Semgrep exits

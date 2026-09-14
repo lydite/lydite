@@ -44,16 +44,19 @@ type Result struct {
 	// streams it live as well, so for most tools it has already reached the
 	// terminal by the time anyone reads this field.
 	Output string
-	// Detail is findings a scanner package derived itself, for a tool whose
-	// real report never reaches the terminal at all. Biome is the case that
-	// needs it: lydite sends its report to a file with --reporter-file so
-	// that Biome's own chatter cannot corrupt the JSON, which means nothing
-	// streams and Output holds no findings. A caller that only prints a
-	// pass/fail line then shows the developer a failure with no reason
-	// attached, in the terminal and in the PR comment alike.
+	// Detail is findings a scanner package derived itself, rendered when a
+	// caller needs more than a pass/fail line to explain a failing row. Two
+	// things put text here: a tool whose real report never reaches the
+	// terminal at all — Biome sends its report to a file with
+	// --reporter-file so its own chatter cannot corrupt the JSON, which
+	// means nothing streams and Output holds no findings — and clippy,
+	// cargo-audit and cargo-deny, which run once in JSON mode with no
+	// second, richer terminal rendering to lose, so Detail is rendered from
+	// Findings instead of left empty.
 	//
-	// Empty for every tool that prints its own findings — reprinting those
-	// would duplicate what already streamed.
+	// Empty for a tool whose own findings already reach a reader on the
+	// terminal with nothing more needed: gosec's, Semgrep's, gitleaks's and
+	// govulncheck's.
 	Detail string
 	// Findings are the located claims this check made, as data. A check that
 	// parses a structured report sets them and renders Detail from them, so

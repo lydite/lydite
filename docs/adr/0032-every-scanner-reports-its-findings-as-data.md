@@ -16,9 +16,13 @@ nothing on any line, which reads as lydite having found nothing where it found
 plenty.
 
 **Every scanner now reports its findings as data, and `scan` anchors them
-against the change. Each tool keeps rendering to the terminal exactly as it
+against the change. Most tools keep rendering to the terminal exactly as they
 did; lydite reads a structured copy purely to populate `Result.Findings`, and a
-check whose tool cannot do both at once runs twice. A dependency advisory is
+check whose tool cannot do both at once runs twice to buy the terminal output
+back. clippy, cargo-audit and cargo-deny take the trade the other way: each
+runs once, in JSON mode, and lydite renders `Result.Detail` from `Findings`
+instead, because for these three the JSON already carries everything a
+developer would otherwise read on the terminal. A dependency advisory is
 located at the manifest or lockfile line naming the package, and identified by
 the advisory's own id rather than by the text of that line.**
 
@@ -37,48 +41,65 @@ being judged against the original every time a developer has seen the real thing
 in another context. It also means the terminal output changes in the same commit
 as the data channel, so a regression in either is attributed to both.
 
-So `Result.Detail` stays **empty** for these tools, which is what its own
-documentation already says — *"empty for every tool that prints its own
-findings"*. What a reader needs beyond the one-line claim travels per finding, in
-`Finding.Detail`: gosec's source excerpt, clippy's rendered diagnostic,
-govulncheck's call path, cargo-deny's dependency graph. That is the text a
-surface can show beside a claim without reprinting a stream that already reached
-the terminal.
+So `Result.Detail` stays **empty** for gosec, Semgrep, gitleaks and
+govulncheck's own findings — each still prints a human rendering that no JSON
+pass replaces, so putting the same text in `Detail` would duplicate a stream
+that already reached the terminal. What a reader needs beyond the one-line
+claim travels per finding, in `Finding.Detail`: gosec's source excerpt,
+Semgrep's matched snippet, govulncheck's call path. That is the text a surface
+can show beside a claim without reprinting a stream that already reached the
+terminal.
 
-Biome remains the exception it already was. Its report goes to a file so its own
-chatter cannot corrupt the JSON, which means nothing streams and `Detail` is the
-only place its findings exist.
+clippy, cargo-audit and cargo-deny sit outside that reasoning, because for
+these three there was never a second, richer terminal rendering to lose.
+clippy's JSON diagnostic carries a `rendered` field that already *is* cargo's
+exact text, so quoting it into `Result.Detail` joins a stream rather than
+reimplementing one; cargo-audit's and cargo-deny's `Finding.Detail` — the
+advisory URL, the dependency path — was already the text beyond the one-line
+claim, since neither tool's human output said more than its JSON does. So
+`Result.Detail` for these three is the claim line plus each finding's own
+indented `Finding.Detail`: the row's prose and the finding's data are one
+derivation, not two free to disagree.
 
-## Three tools run twice, for two different reasons
+Biome is a third kind of exception, and an older one. Its report goes to a
+file so its own chatter cannot corrupt the JSON, which means nothing streams
+at all and `Detail` is the only place its findings exist.
 
-Only Semgrep and gosec can write a machine-readable report *and* print for a
-human in one invocation — `--json-output=<file>` and `-fmt json -out <file>
--stdout -verbose text` respectively. clippy needs no second format at all: every
-diagnostic carries `rendered`, the exact text cargo prints.
+## Only govulncheck still runs its tool twice
 
-The other three run twice, and the two reasons are worth separating.
+Semgrep and gosec can write a machine-readable report *and* print for a human
+in one invocation — `--json-output=<file>` and `-fmt json -out <file>
+-stdout -verbose text` respectively. clippy, cargo-audit and cargo-deny need
+no second format either, for a different reason: each runs once, under
+`--message-format json`, `--json` and `--format json`, and that single JSON
+run is both the terminal output and the source `Result.Detail` and `Findings`
+render from. clippy's diagnostic carries `rendered`, the exact text cargo
+prints, so the JSON pass loses nothing a text pass would have shown;
+cargo-audit's and cargo-deny's human text never said more than their JSON's
+`Finding.Detail` already captures.
 
-For clippy, cargo-audit and cargo-deny the second pass buys back the **terminal
-output**: `--message-format json`, `--json` and `--format json` each replace the
-human stream rather than copying it. The cost is small and measured — clippy's
-second pass is 0.24s against a first pass of 1.76s, because cargo replays cached
-diagnostics rather than recompiling; cargo-audit's is 1.8s against 3.1s.
+govulncheck alone still runs twice, and the reason is the **verdict**, not
+the terminal output. It has no output-file flag, and under `-format json` it
+exits 0 whether or not it found anything while the text run exits 3. A
+single JSON run would report every advisory and pass the check that exists
+to block on them. So the text pass decides the row and the JSON pass only
+populates `Findings`. The second pass costs 4.6s on top of 6.2s, the
+package-load work being already done.
 
-For govulncheck the second pass buys back the **verdict**, which is a stronger
-requirement. It has no output-file flag, and under `-format json` it exits 0
-whether or not it found anything while the text run exits 3. A single JSON run
-would report every advisory and pass the check that exists to block on them. So
-the text pass decides the row and the JSON pass only populates `Findings`. The
-second pass costs 4.6s on top of 6.2s, the package-load work being already done.
-
-**The text pass is always the one that decides the row.** lydite adds no verdict
-of its own from a parsed report, with two exceptions where the tool's own status
-under-reports: gosec states a package that did not compile in the report rather
-than in its exit status, and Semgrep exits zero for a run whose rules would not
-load. Both are the failure `reportableBiome`'s `parse` and `internalError/io`
-categories exist to catch — a scan that read nothing must not render as a clean
-pass — and both carry their reason in `Result.Detail`, because that is the only
-place a verdict lydite invented can explain itself.
+**The tool's own exit status always decides the row, never a count of parsed
+findings.** For gosec, Semgrep and govulncheck that status is the text pass's;
+for clippy, cargo-audit and cargo-deny, which run only once, it is that same
+run's. lydite adds no verdict of its own from a parsed report, with two
+exceptions where the tool's own status under-reports: gosec states a package
+that did not compile in the report rather than in its exit status, and
+Semgrep exits zero for a run whose rules would not load. Both are the failure
+`reportableBiome`'s `parse` and `internalError/io` categories exist to catch —
+a scan that read nothing must not render as a clean pass — and both carry
+their reason in `Result.Detail`, because that is the only place a verdict
+lydite invented can explain itself. A failing clippy, cargo-audit or
+cargo-deny row carries a reason too, for a different cause: not a status that
+under-reports, but zero findings in a run that still failed, where
+`Result.Detail` names why rather than sitting empty beside a bare `✗`.
 
 ## A dependency advisory is located at the manifest line
 
@@ -182,8 +203,9 @@ than an omission: it reaches no change at all. That is the shape
 
 - Five more gates can reach a line, and a scan can reach one at all, so the
   review surface carries what a security scan found rather than nothing.
-- Three checks run their tool twice. The added wall-clock is measured and small,
-  and it is paid per component rather than per finding.
+- One check — govulncheck — still runs its tool twice, to buy back the
+  verdict rather than the terminal output. The added wall-clock is measured
+  and small, and it is paid per component rather than per finding.
 - Six report shapes are now lydite's to track. Each is parsed from a captured
   real report rather than a hand-written one, and each parser keeps
   `reportableBiome`'s stance: an unrecognised category, level or code is

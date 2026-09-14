@@ -291,8 +291,10 @@ const detailCap = 5
 // tail of its log when it carries none.
 //
 // Detail first, because it is the reason the row's author chose to put next to
-// the verdict — Biome's findings reach a reader no other way. The log is the
-// fallback for every check that streamed its findings instead, where the row
+// the verdict — Biome's findings reach a reader no other way, and clippy,
+// cargo-audit and cargo-deny render the same claim-plus-Finding.Detail prose so
+// their row never has to quote the raw JSON their one run now produces. The log
+// is the fallback for every check that only streams its findings, where the row
 // holds a status and the output holds the reason.
 func failureLines(dir string, row ui.Row) []string {
 	if len(row.Detail) > 0 {
