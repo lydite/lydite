@@ -1,24 +1,25 @@
 package mutation
 
 import (
-	"fmt"
 	"path"
 	"strconv"
 	"strings"
 
 	"github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/grammars"
 
 	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/treesitter"
 )
 
 // Rust and TypeScript are parsed with tree-sitter, through a pure-Go runtime.
 //
-// Go is parsed with go/ast because the language ships its own parser and
-// nothing could be more faithful. The other two have no parser in the standard
-// library and lydite must stay a single statically-linked CGO_ENABLED=0 binary
-// for four platforms, which every C-backed tree-sitter binding rules out.
+// Which parse tables read a file, and how a tree that will not parse is
+// reported, are internal/treesitter's — the coverage gates ask the same two
+// questions of the same three languages, and .ts and .tsx being one language
+// to lydite and two grammars to tree-sitter is a rule that must not be written
+// down twice. What stays here is the operator catalogue: the node types each
+// of the five operators rewrites.
 //
 // The grammar tables are the reason the operator catalogue survives three
 // languages: each operator is a rewrite of a syntax node, and the node types
@@ -74,10 +75,8 @@ const (
 // same five and only the node names differ. A language that needed its own
 // traversal would be evidence the catalogue had stopped being one taxonomy.
 type grammar struct {
-	// language loads the parse tables. Called once per file rather than held,
-	// because the loader caches and a package-level value would be a global
-	// this package cannot reset between tests.
-	language func() *gotreesitter.Language
+	// tables names the parse tables this catalogue's node names belong to.
+	tables treesitter.Grammar
 	// comment is the node type of a line comment. Only the line form can
 	// carry a declaration; a block comment's text does not begin with the
 	// marker, so it is refused by the text rather than by a second rule.
@@ -123,7 +122,7 @@ type grammar struct {
 // rustGrammar and tsGrammar are the two tables, verified against the grammars
 // themselves rather than read off documentation.
 var rustGrammar = grammar{
-	language:  grammars.RustLanguage,
+	tables:    treesitter.Rust,
 	comment:   "line_comment",
 	binary:    "binary_expression",
 	returns:   []string{"return_expression"},
@@ -146,7 +145,7 @@ var rustGrammar = grammar{
 }
 
 var tsGrammar = grammar{
-	language:  grammars.TypescriptLanguage,
+	tables:    treesitter.TypeScript,
 	comment:   "comment",
 	binary:    "binary_expression",
 	returns:   []string{"return_statement"},
@@ -168,12 +167,11 @@ var tsGrammar = grammar{
 	testFile: typeScriptTestFile,
 }
 
-// tsxGrammar parses .tsx, which the TypeScript grammar cannot: `<T>(x) => x`
-// is a type assertion in one and an opening JSX tag in the other, so the two
-// are separate parse tables upstream and a .tsx file read by the TypeScript
-// tables produces a tree full of errors.
+// tsxGrammar is the same catalogue read under the TSX tables: every node type
+// named here is spelled identically in both grammars, and only the tables
+// differ.
 var tsxGrammar = grammar{
-	language:  grammars.TsxLanguage,
+	tables:    treesitter.TSX,
 	comment:   tsGrammar.comment,
 	binary:    tsGrammar.binary,
 	returns:   tsGrammar.returns,
@@ -183,24 +181,28 @@ var tsxGrammar = grammar{
 	testFile:  tsGrammar.testFile,
 }
 
-// grammarFor picks the tables for one file.
+// grammarFor picks the operator catalogue for one file, off the same tables
+// answer every other reader of a tree-sitter tree resolves.
 //
-// By extension and not by the component's language, because .ts and .tsx are
-// one language to lydite and two grammars to tree-sitter. A file extension
-// lydite has no tables for yields no mutants rather than an error: the
-// TypeScript family includes plain JavaScript, which the orphan gate counts as
-// source, and refusing a whole component over one .mjs would be a gate firing
-// on ordinary work.
+// A language lydite has no tables for yields no mutants rather than an error:
+// the TypeScript family includes plain JavaScript, which the orphan gate counts
+// as source, and refusing a whole component over one .mjs would be a gate
+// firing on ordinary work.
 func grammarFor(lang runner.Lang, file string) (grammar, bool) {
-	switch lang {
-	case runner.Rust:
+	tables, ok := treesitter.GrammarFor(lang, file)
+	if !ok {
+		return grammar{}, false
+	}
+	switch tables {
+	case treesitter.Rust:
 		return rustGrammar, true
-	case runner.TypeScript:
-		if strings.EqualFold(path.Ext(file), ".tsx") {
-			return tsxGrammar, true
-		}
+	case treesitter.TypeScript:
 		return tsGrammar, true
+	case treesitter.TSX:
+		return tsxGrammar, true
 	default:
+		// Tables with no catalogue beside them. A grammar added below and not
+		// here must yield no mutants rather than the last catalogue written.
 		return grammar{}, false
 	}
 }
@@ -239,14 +241,11 @@ func typeScriptTestFile(p string) bool {
 // nothing could be asked about, and an unparsed file is source lydite examined
 // nothing of. Reported, it is a component that says so; swallowed, it is a
 // component whose suite appears to have killed everything.
-type ErrUnparsed struct {
-	Path   string
-	Reason string
-}
-
-func (e ErrUnparsed) Error() string {
-	return fmt.Sprintf("%s: the grammar could not parse this file: %s", e.Path, e.Reason)
-}
+//
+// One type and not a mutation-shaped copy of one, so that a caller holding
+// both a mutation run and a coverage figure matches a file neither of them
+// could read exactly once.
+type ErrUnparsed = treesitter.ErrUnparsed
 
 // GenerateTreeSitter produces every mutant for one Rust or TypeScript file,
 // restricted to the given 1-indexed lines.
@@ -266,26 +265,12 @@ func GenerateTreeSitter(lang runner.Lang, path string, src []byte, lines map[int
 	if g.testFile(path) {
 		return nil, nil, nil
 	}
-	language := g.language()
-	if language == nil {
-		return nil, nil, ErrUnparsed{Path: path, Reason: "the grammar tables did not load"}
-	}
-	tree, err := gotreesitter.NewParser(language).Parse(src)
+	// A file the tables refuse is not mutated at all. Mutating the parts the
+	// grammar did understand would report a mutant at a byte range derived
+	// from a misreading, and an author cannot tell that from a real survivor.
+	root, language, err := g.tables.Parse(path, src)
 	if err != nil {
-		return nil, nil, ErrUnparsed{Path: path, Reason: err.Error()}
-	}
-	root := tree.RootNode()
-	if root == nil {
-		return nil, nil, ErrUnparsed{Path: path, Reason: "the parse produced no tree"}
-	}
-	// A tree carrying an error node is a file the grammar did not
-	// understand — a syntax lydite's tables predate, or a file that does not
-	// compile. Mutating the parts it did understand would report a mutant at
-	// a byte range derived from a misreading, and an author cannot tell that
-	// from a real survivor.
-	if root.HasErrorOrMissing() {
-		return nil, nil, ErrUnparsed{Path: path,
-			Reason: "the tree carries a syntax error, so the byte ranges a mutant would replace cannot be trusted"}
+		return nil, nil, err
 	}
 
 	t := &tsGen{sites: sites{path: path, src: src, lines: lines}, g: g, lang: language}

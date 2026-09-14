@@ -1,6 +1,7 @@
 package coverage
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -9,6 +10,8 @@ import (
 	"sort"
 
 	"lydite/lydite/internal/annotation"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/treesitter"
 )
 
 // Excluded is what one Go file declares about a gate: the functions whose
@@ -138,4 +141,34 @@ func excludedGoLines(path string, gate annotation.Gate) (map[int]bool, error) {
 		return nil, err
 	}
 	return excluded.Lines(fset), nil
+}
+
+// excludedLCOVLines is the lines of one Rust or TypeScript source file that a
+// declaration for gate covers.
+//
+// The same question excludedGoLines answers, asked of a language whose report
+// is lcov. It is a parser that answers it in both, because the alternative is a
+// declaration meaning one thing in Go and another here — see ADR 0034. lcov
+// carries a start line per function and no end, so the report itself cannot say
+// how far a declaration reaches.
+//
+// A file that cannot be read or will not parse is no exclusion rather than an
+// error, the stance excludedGoLines takes and for the same reason: the tree
+// compiled to produce the report being read, so failing a coverage figure over
+// a parse would turn it into a syntax check. A declaration that is present and
+// malformed is still an error naming the line.
+func excludedLCOVLines(path string, lang runner.Lang, gate annotation.Gate) (map[int]bool, error) {
+	src, err := os.ReadFile(path) // #nosec G304 -- the path comes from lydite's own coverage report, under the scan root
+	if err != nil {
+		return nil, nil
+	}
+	declared, err := treesitter.DeclaredExclusions(lang, path, src, gate)
+	if err != nil {
+		var unparsed treesitter.ErrUnparsed
+		if errors.As(err, &unparsed) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return declared.Lines(), nil
 }

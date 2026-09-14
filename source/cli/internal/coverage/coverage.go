@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/runner"
 )
@@ -87,8 +88,7 @@ type Report struct {
 	// other. Mutation bounds its mutants by lines coverage reports as executed,
 	// and reading Hits for that would let a coverage declaration silence the
 	// mutation gate as well — a function whose coverage is taken in another
-	// process has not thereby become unmutable. A language with no declaration
-	// form has one map under both names.
+	// process has not thereby become unmutable.
 	Executed LineHits
 }
 
@@ -116,7 +116,7 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang, en
 	case runner.Go:
 		return measureGo(ctx, root, unitDir, dir, reportPath, env)
 	case runner.Rust, runner.TypeScript:
-		return measureLCOV(data, unitDir, dir)
+		return measureLCOV(data, unitDir, dir, lang)
 	default:
 		return Report{}, fmt.Errorf("no coverage report format for %q", lang)
 	}
@@ -155,12 +155,29 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 // own JSON export exactly, while the DA lines number 55. A line carrying more
 // than one record is one line to LF and two to a DA tally, so counting DA
 // silently reports a smaller denominator than the tool does.
-func measureLCOV(data []byte, unitDir, dir string) (Report, error) {
-	lines, hits := ParseLCOV(data, unitDir)
-	prefixed := prefixHits(hits, relDir(dir))
-	// One map under both names: lcov carries no declaration lydite reads, so
-	// nothing was removed from it and there is nothing to put back.
-	return Report{Lines: lines, Hits: prefixed, Executed: prefixed}, nil
+//
+// The source each "SF:" record names is parsed, because that is the only thing
+// that can say how far a `[lydite:exclude_from_coverage]` declaration reaches:
+// every function record lcov's two producers emit is a start line with no end.
+// The language is carried in for that alone — the report is read the same way
+// whichever of the two wrote it.
+func measureLCOV(data []byte, unitDir, dir string, lang runner.Lang) (Report, error) {
+	rep, err := lcovReport(data, unitDir, func(file string) (map[int]bool, error) {
+		// A path prefixHits is about to drop is not this component's file — a
+		// dependency compiled from a registry checkout is the usual one — and
+		// joining the component's directory onto it names somewhere else
+		// entirely.
+		if path.IsAbs(file) || strings.HasPrefix(file, "../") {
+			return nil, nil
+		}
+		return excludedLCOVLines(filepath.Join(unitDir, filepath.FromSlash(file)), lang, annotation.Coverage)
+	})
+	if err != nil {
+		return Report{}, err
+	}
+	rep.Hits = prefixHits(rep.Hits, relDir(dir))
+	rep.Executed = prefixHits(rep.Executed, relDir(dir))
+	return rep, nil
 }
 
 // prefixHits puts the component's own directory back on each path, so every
