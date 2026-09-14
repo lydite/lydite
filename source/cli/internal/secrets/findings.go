@@ -138,7 +138,9 @@ func earliestColumnPerLine(rep report) map[lineKey]int {
 			continue
 		}
 		k := lineKey{path, l.StartLine}
-		if cur, ok := cols[k]; !ok || l.StartColumn < cur {
+		if cur, ok := cols[k]; !ok || l.StartColumn < cur { // [lydite:exclude_from_mutation][< vs <=
+			// differ only when l.StartColumn == cur, and writing the same value back
+			// changes nothing a caller can observe]
 			cols[k] = l.StartColumn
 		}
 	}

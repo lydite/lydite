@@ -252,6 +252,20 @@ func TestSourceOrderIsIndependentOfTheReportsOrder(t *testing.T) {
 	}
 }
 
+func TestInSourceOrderBreaksATieOnColumn(t *testing.T) {
+	// Two leaks sharing a file and a line are only ordered by column. Given
+	// them in descending column order, source order — ascending — is the one
+	// thing that distinguishes "sorted" from "left as given".
+	rep := report{
+		{RuleID: "b", File: "a.py", StartLine: 1, StartColumn: 40},
+		{RuleID: "a", File: "a.py", StartLine: 1, StartColumn: 10},
+	}
+	got := inSourceOrder(rep)
+	if got[0].RuleID != "a" || got[1].RuleID != "b" {
+		t.Errorf("order = %s, %s, want a, b (ascending column)", got[0].RuleID, got[1].RuleID)
+	}
+}
+
 func TestALeakThatNamesNoLineIsReportedRatherThanDropped(t *testing.T) {
 	// A parser that silently discards input is how a gate quietly stops working,
 	// and the discarded thing here is a credential somebody committed.
@@ -285,6 +299,22 @@ func TestAClaimOnTheFirstLineIsKept(t *testing.T) {
 	got, unplaced := findings(dir, report{{RuleID: "r", File: "config.yml", StartLine: 1, StartColumn: 2}})
 	if len(got) != 1 || len(unplaced) != 0 {
 		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+	}
+}
+
+func TestEarliestColumnPerLineKeepsTheFirstLine(t *testing.T) {
+	// A boundary excluding line 1 would drop the earliest-column entry for
+	// every match on a file's first line, leaving its site cut at column 0
+	// (the map's zero value) rather than the column gitleaks reported.
+	cols := earliestColumnPerLine(report{{File: "a.py", StartLine: 1, StartColumn: 10}})
+	if got, ok := cols[lineKey{"a.py", 1}]; !ok || got != 10 {
+		t.Errorf("cols[a.py:1] = %d, %v, want 10, true", got, ok)
+	}
+	for _, l := range []int{0, -1} {
+		cols := earliestColumnPerLine(report{{File: "a.py", StartLine: l, StartColumn: 10}})
+		if _, ok := cols[lineKey{"a.py", l}]; ok {
+			t.Errorf("a leak naming line %d entered the map, which has no line to be a key for", l)
+		}
 	}
 }
 
@@ -397,6 +427,18 @@ func TestAPrefixIsEmptyForALineItCannotRead(t *testing.T) {
 	// failing the run.
 	if got := newTree(filepath.Join(dir, "not-a-directory")).prefix("config.yml", 4, 6); got != "" {
 		t.Errorf("prefix = %q, want empty from a tree that could not be opened", got)
+	}
+}
+
+func TestAPrefixReadsTheLastLineOfAFileWithNoTrailingNewline(t *testing.T) {
+	// A file with no trailing newline splits into exactly as many elements as
+	// it has lines, so its last line is at n == len(lines) — the one value a
+	// boundary of ">=" instead of ">" would refuse to read, even though it
+	// names a real line the file has.
+	dir := t.TempDir()
+	write(t, dir, "a.py", "first\nsecond")
+	if got := newTree(dir).prefix("a.py", 2, 4); got != "se" {
+		t.Errorf("prefix = %q, want %q — the last line, present with no trailing newline", got, "se")
 	}
 }
 

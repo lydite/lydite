@@ -256,7 +256,10 @@ func containsSubstring(text string, tokens []string) (string, bool) {
 			return t, true
 		}
 	}
-	return "", false
+	return "", false // [lydite:exclude_from_mutation][the token beside a false
+	// second value is read by nobody: every caller checks the bool and never
+	// looks at the string when it is false, so no caller can be shown a
+	// different one]
 }
 
 // atWordStart reports whether the match at i begins a token rather than
