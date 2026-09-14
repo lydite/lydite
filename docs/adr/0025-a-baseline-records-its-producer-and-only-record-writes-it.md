@@ -100,6 +100,12 @@ change per runner, in the direction that reports `new` rather than a false
 regression; closing it means probing again after provisioning
 ([#89](https://github.com/lydite/lydite/issues/89)).
 
+> Closed by re-probing: `Env.Resolved` records the toolchain a re-probe finds
+> under the environment provisioning just produced, never the manifest's raw
+> declaration, so a channel pin and a version pin compare the same way whether
+> the toolchain was ambient or provisioned. See
+> [`toolchains.md`](../../agentic/references/toolchains.md).
+
 ## `lydite test` writes nothing to the `lydite` branch
 
 Recording the baseline is a push. Measuring runs each component's suite and any

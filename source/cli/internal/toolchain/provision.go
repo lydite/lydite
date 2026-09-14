@@ -189,19 +189,36 @@ func downloadGo(ctx context.Context, version, staging string) error {
 // install it on first use, in the middle of `cargo clippy`, and a missing
 // clippy component surfaces as a confusing check failure rather than as a
 // setup step.
-func provisionRust(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
-	if present && !olderThan(ambient, req.Version) {
-		return nil, nil
-	}
+//
+// There is no "already good enough" short-circuit here, and there must not be
+// one: rustReady has already established that the channel this component
+// resolves to is missing or incomplete. A version comparison at this point
+// would compare the machine's default channel against the declared one and
+// return a no-op for exactly the case the caller sent it here to fix.
+//
+// active is the channel rustReady found this component's directory already
+// resolving to, before any install. It is what an unpinned component falls
+// back to, and it must be: with no rust-toolchain.toml and no override,
+// installing a channel selects nothing — only the file rustup already reads,
+// or RUSTUP_TOOLCHAIN, changes what a later cargo invocation picks. A
+// hardcoded "stable" would install clippy and rustfmt onto a toolchain
+// nothing runs under, leaving the component to keep failing on its original,
+// incomplete default.
+func provisionRust(ctx context.Context, req Requirement, active string) (*step, error) {
 	if !executil.Available("rustup") {
 		return nil, fmt.Errorf(
-			"no cargo on PATH and rustup is not installed either; install rustup (https://rustup.rs) so lydite can provision the %s toolchain",
+			"rustup is not installed; install it (https://rustup.rs) so lydite can provision the %s toolchain. A cargo on PATH is not enough: rustup is what resolves a component's channel and what installs clippy and rustfmt for it",
 			displayRaw(req))
 	}
 	// rustup needs a concrete channel. The repo's own word for it is the
 	// right one to pass — "stable" and "1.96" are both valid channels, and
-	// rustup understands them where lydite's version comparison cannot.
+	// rustup understands them where lydite's version comparison cannot. An
+	// unpinned component has no such word: the channel it needs is the one
+	// rustup already resolves this directory to, not an assumed default.
 	channel := req.Raw
+	if channel == "" {
+		channel = active
+	}
 	if channel == "" {
 		channel = "stable"
 	}
@@ -213,10 +230,15 @@ func provisionRust(ctx context.Context, req Requirement, ambient string, present
 		return nil, fmt.Errorf("rustup toolchain install %s: %w", channel, r.Err)
 	}
 
-	st := &step{
-		note: fmt.Sprintf("rust: installed toolchain %s via rustup (declared in %s; %s)",
-			channel, req.Source, absentOrOld(ambient, present)),
+	note := fmt.Sprintf("rust: installed toolchain %s with clippy and rustfmt via rustup", channel)
+	// Named only when a manifest actually named it. A component declaring no
+	// channel is installed at "stable", and "declared in " with nothing after
+	// it reads as a manifest lydite failed to name rather than as one that was
+	// never written.
+	if req.Source != "" {
+		note += " (declared in " + req.Source + ")"
 	}
+	st := &step{note: note}
 	// Installing is not selecting. rustup picks a toolchain by reading
 	// rust-toolchain.toml from the directory cargo runs in, which covers the
 	// normal case for free — internal/rust and internal/coverage both run
