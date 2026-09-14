@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/ui"
 )
@@ -514,4 +516,87 @@ func TestClipClaimAtExactlyTheCap(t *testing.T) {
 	if over := clipClaim(strings.Repeat("x", claimRunes+1)); !strings.HasSuffix(over, "…") {
 		t.Error("a message one rune over the cap was not clipped")
 	}
+}
+
+// clippy, cargo-audit and cargo-deny each run once, in JSON mode, so the output
+// scan writes to the row's log is the machine report and nothing a reader can
+// use. A failing row of theirs carries its own Detail — the claims it parsed, or
+// the reason a report that named none still failed — and that Detail is what the
+// comment quotes. A row that arrived here with none would fall back to the log
+// and paste the report into a public pull-request comment.
+func TestAFailingCargoToolRowNeverQuotesItsRawJSONLog(t *testing.T) {
+	cases := []struct {
+		name   string
+		result executil.Result
+		want   string
+	}{
+		{
+			name: "clippy claims",
+			result: executil.Result{
+				Name:   "cargo clippy(engine)",
+				Output: `{"reason":"compiler-message","message":{"code":{"code":"clippy::needless_borrow"},"level":"warning","spans":[{"file_name":"src/lib.rs","line_start":12,"is_primary":true}],"rendered":"warning: this expression creates a reference which is immediately dereferenced"}}` + "\n",
+				Detail: "src/lib.rs:12  clippy::needless_borrow  this expression creates a reference which is immediately dereferenced\n" +
+					"  warning: this expression creates a reference which is immediately dereferenced\n",
+				Err: errors.New("exit status 101"),
+			},
+			want: "clippy::needless_borrow",
+		},
+		{
+			name: "an audit report naming no claim",
+			result: executil.Result{
+				Name:   "cargo audit(engine)",
+				Output: `{"database":{"advisory-count":712},"vulnerabilities":{"found":false,"count":0,"list":[]}}` + "\n",
+				Detail: unreadableShape("cargo audit", "exit status 1"),
+				Err:    errors.New("exit status 1"),
+			},
+			want: "names no finding",
+		},
+		{
+			name: "deny claims",
+			result: executil.Result{
+				Name:   "cargo deny(engine)",
+				Output: `{"type":"diagnostic","fields":{"code":"banned","severity":"error","message":"crate is explicitly banned","graphs":[{"name":"openssl","version":"0.10.55"}]}}` + "\n",
+				Detail: "Cargo.toml:1  banned  crate is explicitly banned\n  openssl 0.10.55\n",
+				Err:    errors.New("exit status 2"),
+			},
+			want: "explicitly banned",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			rows := resultRows(root, []executil.Result{tc.result})
+			if len(rows) != 1 {
+				t.Fatalf("resultRows returned %d rows, want 1", len(rows))
+			}
+			row := rows[0]
+			if row.Log == "" {
+				t.Fatal("no log was written, so the fallback this test guards cannot fire")
+			}
+
+			lines := failureLines(reportsDir(root), row)
+			joined := strings.Join(lines, "\n")
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("the row's own detail did not reach the comment:\n%s", joined)
+			}
+			if strings.Contains(joined, `{"`) {
+				t.Errorf("the JSON report was quoted:\n%s", joined)
+			}
+
+			// The same row with no detail does quote the log, which is what
+			// makes the assertion above about this log and not an empty one.
+			row.Detail = nil
+			if fallback := strings.Join(failureLines(reportsDir(root), row), "\n"); !strings.Contains(fallback, `{"`) {
+				t.Errorf("the log holds no JSON, so nothing was proved:\n%s", fallback)
+			}
+		})
+	}
+}
+
+// unreadableShape is the message internal/rust renders for a failing run whose
+// report names no claim, restated here as the text this layer has to carry
+// through untouched.
+func unreadableShape(gate, status string) string {
+	return fmt.Sprintf("%s failed (%s) and its JSON report names no finding; the check's log holds the report.", gate, status)
 }
