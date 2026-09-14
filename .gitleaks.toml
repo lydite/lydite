@@ -24,3 +24,8 @@ paths = ['''source/cli/internal/typescript/biome_test\.go''']
 [[allowlists]]
 description = "gitleaks' own fixtures: credential-shaped placeholders committed to be found, which is what pins the report shape internal/secrets parses"
 paths = ['''source/cli/internal/secrets/testdata/''']
+
+[[allowlists]]
+description = "inline test literals for the site's own leaked-value guard: invented credential-shaped strings a test proves are never published, not secrets"
+targetRules = ["generic-api-key"]
+paths = ['''source/cli/internal/secrets/findings_test\.go''']
