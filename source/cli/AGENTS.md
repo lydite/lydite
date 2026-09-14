@@ -28,7 +28,7 @@ governs what you are about to change, before you change it.
 | [`mutation.md`](../../.agents/references/mutation.md) | `internal/mutation` |
 | [`findings.md`](../../.agents/references/findings.md) | `internal/finding` |
 | [`quality-history.md`](../../.agents/references/quality-history.md) | `internal/ledger`, `internal/junit` |
-| [`scanning.md`](../../.agents/references/scanning.md) | which units each language's checks run over |
+| [`scanning.md`](../../.agents/references/scanning.md) | which units each language's checks run over, and `internal/secrets`, the root-scoped secret scan |
 | [`linters.md`](../../.agents/references/linters.md) | `internal/typescript` |
 | [`semgrep.md`](../../.agents/references/semgrep.md) | `internal/semgrep` |
 | [`toolchains.md`](../../.agents/references/toolchains.md) | `internal/toolchain`, `internal/download` |
