@@ -32,3 +32,15 @@ General rule for any test relying on Go's map iteration to be "obviously unsorte
 fix": count entries in the tens, not single digits, and verify the reverse-defect proof across
 several process invocations, not one — a single local run share the same one-process hash seed
 sampling risk CI's single mutant-run does.
+
+A follow-on branch (`feat/flaky-new-tests`, ADR 0039) measured the same mechanism more precisely
+while designing `lydite test --gate-flaky`'s rerun: `source/cli/internal/flaky/testdata/map-iteration-order.txt`
+runs a six-entry map across 26 fresh processes and finds the *cycle* itself stays fixed across
+every process while only the *rotation* is resampled — so what varies process to process is
+narrower than "a new random order," and `-test.count=2` inside one process drew the identical
+order twice in 3 of 6 processes measured. The general lesson this sharpens: `-count=N` cannot
+resample anything a process fixes once (a map hash seed, a `sync.Once`, an `init`-seeded
+generator, a port, a temp-dir name) — only a genuinely separate process invocation can. This is
+also why `--gate-flaky`'s own rerun is a second `go test` process and never a `-count=2` folded
+into the first (see `docs/adr/0039-a-new-test-is-rerun-once-in-its-own-process.md`, "Two runs,
+and they are two processes").

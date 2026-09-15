@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="6" failures="0" errors="0" time="1.770524">
+	<testsuite tests="6" failures="0" time="1.771000" name="flakyprobe" timestamp="2026-09-15T08:34:57+01:00">
+		<properties>
+			<property name="go.version" value="go1.26.5 darwin/arm64"></property>
+		</properties>
+		<testcase classname="flakyprobe" name="TestPreExistingStable" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestDeterministicNew" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestFlakyNew" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests/one" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests/two" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests" time="0.000000"></testcase>
+	</testsuite>
+</testsuites>

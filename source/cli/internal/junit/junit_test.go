@@ -1,6 +1,9 @@
 package junit
 
 import (
+	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -159,6 +162,185 @@ func TestAReportWithNoTestIsEmpty(t *testing.T) {
 func TestAReportThatIsNotXMLIsAnError(t *testing.T) {
 	if _, err := Read(strings.NewReader("this is not xml <<<")); err == nil {
 		t.Error("Read accepted a document that is not XML")
+	}
+}
+
+// Every producer's report reads back per test as well as in aggregate, and the
+// two readers agree about how many tests the document holds — a name-keyed map
+// that lost a case would let the flaky gate call a test unexamined that the
+// ledger counted.
+func TestEveryProducersReportReadsBackPerTest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   map[string]Outcome
+	}{
+		{"cargo-nextest", nextestReport, map[string]Outcome{"tests::ok": Pass, "tests::bad": Fail}},
+		{"gotestsum", gotestsumReport, map[string]Outcome{"TestOK": Pass, "TestFail": Fail, "TestSkip": Skip}},
+		{"vitest", vitestReport, map[string]Outcome{"passes": Pass, "fails": Fail, "todo": Skip}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReadOutcomes(strings.NewReader(tc.report))
+			if err != nil {
+				t.Fatalf("ReadOutcomes: %v", err)
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("ReadOutcomes = %v, want %v", got, tc.want)
+			}
+			counts, err := Read(strings.NewReader(tc.report))
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if len(got) != counts.Total {
+				t.Errorf("ReadOutcomes holds %d tests and Read counted %d", len(got), counts.Total)
+			}
+		})
+	}
+}
+
+// A subtest is a testcase of its own, and its parent's record already
+// aggregates it. Both are in the map, so a caller keyed on the top-level name
+// reads the aggregate and never has to roll one up.
+func TestASubtestAndItsParentAreBothRecorded(t *testing.T) {
+	got, err := ReadOutcomes(strings.NewReader(`<testsuites>
+		<testsuite>
+			<testcase classname="probe" name="TestParent/one"></testcase>
+			<testcase classname="probe" name="TestParent/two">
+				<failure message="assertion"></failure>
+			</testcase>
+			<testcase classname="probe" name="TestParent">
+				<failure message="assertion"></failure>
+			</testcase>
+		</testsuite>
+	</testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomes: %v", err)
+	}
+	want := map[string]Outcome{"TestParent/one": Pass, "TestParent/two": Fail, "TestParent": Fail}
+	if !maps.Equal(got, want) {
+		t.Errorf("ReadOutcomes = %v, want %v", got, want)
+	}
+}
+
+// One name recorded twice keeps the worse outcome. Two packages may each
+// declare a TestSum, and resolving the ambiguity towards the outcome that
+// reports leaves a caller with noise rather than a silence it cannot see.
+func TestOneNameRecordedTwiceKeepsTheWorseOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   Outcome
+	}{
+		{"pass then fail", `<testcase name="X"></testcase><testcase name="X"><failure/></testcase>`, Fail},
+		{"fail then pass", `<testcase name="X"><failure/></testcase><testcase name="X"></testcase>`, Fail},
+		{"skip then pass", `<testcase name="X"><skipped/></testcase><testcase name="X"></testcase>`, Skip},
+		{"skip then fail", `<testcase name="X"><skipped/></testcase><testcase name="X"><failure/></testcase>`, Fail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReadOutcomes(strings.NewReader("<testsuites><testsuite>" + tc.report + "</testsuite></testsuites>"))
+			if err != nil {
+				t.Fatalf("ReadOutcomes: %v", err)
+			}
+			if got["X"] != tc.want {
+				t.Errorf("ReadOutcomes[X] = %v, want %v", got["X"], tc.want)
+			}
+		})
+	}
+}
+
+// An outcome element outside a testcase belongs to something else, and the
+// bound Read keeps is the one this reader keeps: a failure in a producer's own
+// properties block is nobody's outcome.
+func TestAnOutcomeOutsideATestcaseIsNobodysOutcome(t *testing.T) {
+	got, err := ReadOutcomes(strings.NewReader(`<testsuites>
+		<testsuite>
+			<properties><error message="not a test"></error></properties>
+			<testcase name="ok"></testcase>
+		</testsuite>
+	</testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomes: %v", err)
+	}
+	if !maps.Equal(got, map[string]Outcome{"ok": Pass}) {
+		t.Errorf("ReadOutcomes = %v, want the one testcase passing", got)
+	}
+}
+
+// A testcase with no name is not addressable by the caller asking about one,
+// and recording it under "" would answer for every test the report forgot to
+// name.
+func TestAnUnnamedTestcaseIsNotRecorded(t *testing.T) {
+	got, err := ReadOutcomes(strings.NewReader(
+		`<testsuites><testsuite><testcase></testcase><testcase name="ok"></testcase></testsuite></testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomes: %v", err)
+	}
+	if !maps.Equal(got, map[string]Outcome{"ok": Pass}) {
+		t.Errorf("ReadOutcomes = %v, want the named testcase alone", got)
+	}
+}
+
+// An outcome names itself the way a report's reader would say it, since it
+// reaches a finding's detail as prose.
+func TestAnOutcomeNamesItself(t *testing.T) {
+	for o, want := range map[Outcome]string{Pass: "passed", Fail: "failed", Skip: "skipped"} {
+		if got := o.String(); got != want {
+			t.Errorf("Outcome(%d).String() = %q, want %q", o, got, want)
+		}
+	}
+}
+
+func TestReadOutcomesRejectsADocumentThatIsNotXML(t *testing.T) {
+	if _, err := ReadOutcomes(strings.NewReader("this is not xml <<<")); err == nil {
+		t.Error("ReadOutcomes accepted a document that is not XML")
+	}
+}
+
+// A report that is not there is an error naming the path, for the reason
+// ReadFile's is: it is what a gate reports as the cause it could not measure.
+func TestReadOutcomesFileNamesAReportThatIsNotThere(t *testing.T) {
+	_, err := ReadOutcomesFile("/nonexistent/lydite/junit.xml")
+	if err == nil {
+		t.Fatal("ReadOutcomesFile reported success for a report that does not exist")
+	}
+	if !strings.Contains(err.Error(), "junit.xml") {
+		t.Errorf("error = %q, want it to name the report", err)
+	}
+}
+
+// A testcase's own name stays current until its own end tag, not until the
+// first nested element that closes before it — a producer routinely nests
+// <system-out> ahead of the outcome element, and the name has to survive that
+// close to be there when the outcome element opens.
+func TestANameSurvivesANestedElementClosingBeforeTheOutcome(t *testing.T) {
+	got, err := ReadOutcomes(strings.NewReader(`<testsuites><testsuite>
+		<testcase name="noisy">
+			<system-out>a line the runner captured</system-out>
+			<failure message="assertion"></failure>
+		</testcase>
+	</testsuite></testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomes: %v", err)
+	}
+	if got["noisy"] != Fail {
+		t.Errorf(`ReadOutcomes["noisy"] = %v, want %v`, got["noisy"], Fail)
+	}
+}
+
+// A report that is there but does not parse is an error naming the path, the
+// same as one that is not there at all — ReadOutcomesFile wraps ReadOutcomes's
+// own rejection rather than swallowing it.
+func TestReadOutcomesFileNamesAReportThatDoesNotParse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "junit.xml")
+	if err := os.WriteFile(path, []byte("<testsuites><testcase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadOutcomesFile(path)
+	if err == nil {
+		t.Fatal("ReadOutcomesFile reported success for a report that does not parse")
+	}
+	if !strings.Contains(err.Error(), "junit.xml") {
+		t.Errorf("error = %q, want it to name the report", err)
 	}
 }
 

@@ -39,6 +39,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
@@ -332,6 +333,155 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	default:
 		return Invocation{}, false
 	}
+}
+
+// rerunJUnitReport is where the flaky gate's second run writes its report,
+// beside run 1's and never over it.
+//
+// Its own path because the ledger records run 1's counts: a rerun of five
+// tests overwriting them would put "5 tests" in the quality history of a
+// component that ran six hundred. One path for every package a component
+// reruns, since the reruns are sequential and the caller reads each report
+// before the next one starts — and the caller clears the path first, so a
+// package whose rerun wrote nothing cannot be measured from the last one that
+// did.
+var rerunJUnitReport = report("flaky-rerun.xml")
+
+// GoJUnitPlain is the plain Go suite run through the pinned wrapper, so it
+// writes a JUnit report without being instrumented.
+//
+// The flaky gate reads a test's first outcome out of the report run 1 already
+// wrote, and under --no-coverage the plain variant is `go test`, which writes
+// none. Asking for the gate therefore has to make the run write one whichever
+// variant it ran (ADR 0039).
+//
+// A function of its own and not a fourth Variant, because the wrapper must
+// stay off the Plain variant itself: mutation runs Plain once per mutant, and
+// a JUnit report written and discarded thousands of times is a process in the
+// way of the thing being timed (ADR 0027). A variant is what every runner
+// answers for; this is one language's plain invocation with one report added,
+// asked for by the one caller that needs it.
+func GoJUnitPlain(args []string) (Invocation, bool) {
+	return Invocation{
+		Name:        gotestsumName,
+		Args:        append([]string{"--format", "pkgname", "--junitfile", junitReport, "--"}, goTestArgs(args)...),
+		JUnitReport: junitReport,
+		PathDirs:    []string{gotestsumBinDir()},
+	}, true
+}
+
+// GoRerun is the flaky gate's second run: one package's named tests, filtered
+// by an anchored -run pattern, in a process of their own.
+//
+// args is the component's declared `go test` arguments, which the rerun copies
+// so the two runs differ in as little as possible — `-race` included, since a
+// race detector present in one run and absent in the other makes two outcomes
+// disagree for a reason that is not the test's. The coverage flags are dropped
+// and the declared package patterns are replaced by pkg: a second profile
+// written to the component's coverage.out would overwrite the measurement the
+// coverage gate is about to read, and a rerun of the whole tree is not a rerun
+// of the new tests.
+//
+// -run and -count=1 are appended after the declared flags so they win a
+// duplicate, and -count=1 is the whole point of the invocation: run 2's argv
+// is by construction a cacheable subset of a run that just happened, so
+// without it Go serves run 1's own result and the gate reports determinism
+// having executed nothing. That is the exact mirror of ADR 0027's rule that
+// mutation must never pass -count=1, and neither is a mistake in the other's
+// direction.
+//
+// It answers false for an empty name set. A rerun of no tests would be a
+// `go test` with a pattern matching nothing, which prints `ok` and reports a
+// pass for a filter that ran nothing at all.
+func GoRerun(args []string, pkg string, names []string) (Invocation, bool) {
+	if len(names) == 0 || pkg == "" {
+		return Invocation{}, false
+	}
+	test := append(goTestFlags(args), "-run", RunPattern(names), "-count=1", pkg)
+	return Invocation{
+		Name:        gotestsumName,
+		Args:        append([]string{"--format", "pkgname", "--junitfile", rerunJUnitReport, "--"}, test...),
+		JUnitReport: rerunJUnitReport,
+		PathDirs:    []string{gotestsumBinDir()},
+	}, true
+}
+
+// RunPattern is the anchored alternation `go test -run` takes for an exact set
+// of top-level test names.
+//
+// Anchored at both ends, so `-run TestFoo` cannot also select `TestFooBar`:
+// the set the gate reruns has to be the set it decided was new, and a rerun
+// that quietly widens it reports outcomes for tests nobody wrote. The names
+// are spliced in unescaped, which is safe because they are Go identifiers —
+// the only characters a compiler accepts in one are letters, digits and
+// underscore, none of which mean anything to a regexp.
+func RunPattern(names []string) string {
+	return "^(" + strings.Join(names, "|") + ")$"
+}
+
+// goTestFlags is the declared arguments with the coverage flags and the
+// package patterns removed, leaving what run 2 copies from run 1.
+//
+// A package pattern is an argument that is not a flag — the split cmd/go makes
+// itself, where every `go test` flag begins with a dash and every package
+// argument does not. Patterns are dropped wherever they sit rather than at the
+// first one, since `go test ./... -v` is as ordinary a spelling as
+// `go test -v ./...`.
+//
+// A flag may spell its value in the next argument as readily as after an
+// equals sign, so goTestValueFlags says which ones do: dropping `-coverprofile`
+// and leaving its path behind hands `go test` a path where it expects a
+// package, and dropping `5m` out of `-timeout 5m` leaves a flag with no value.
+// A flag that table does not name is taken to carry its value inline, which is
+// the spelling that is unambiguous for every flag there is.
+func goTestFlags(args []string) []string {
+	out := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, inline := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		value, separate := "", false
+		if !inline && goTestValueFlags[name] && i+1 < len(args) {
+			value, separate = args[i+1], true
+			i++
+		}
+		if coverageFlags[name] {
+			continue
+		}
+		out = append(out, a)
+		if separate {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// coverageFlags is what run 2 must not carry. The profile is the measurement
+// the coverage gate is about to read, and -coverpkg and -covermode without it
+// are instrumentation the rerun pays for and nothing reads.
+var coverageFlags = map[string]bool{
+	"cover":        true,
+	"coverprofile": true,
+	"coverpkg":     true,
+	"covermode":    true,
+}
+
+// goTestValueFlags is the `go test` and build flags whose value may be the
+// argument after them. It is what keeps a flag and its value together when the
+// rerun copies run 1's argv, and a boolean flag left out of it is right: only
+// a flag that takes a value can swallow the argument behind it.
+var goTestValueFlags = map[string]bool{
+	"asmflags": true, "bench": true, "benchtime": true, "blockprofile": true,
+	"blockprofilerate": true, "buildmode": true, "buildvcs": true, "count": true,
+	"covermode": true, "coverpkg": true, "coverprofile": true, "cpu": true,
+	"cpuprofile": true, "exec": true, "fuzz": true, "fuzzminimizetime": true,
+	"fuzztime": true, "gcflags": true, "gocoverdir": true, "ldflags": true,
+	"memprofile": true, "memprofilerate": true, "mod": true, "modfile": true,
+	"mutexprofile": true, "mutexprofilefraction": true, "outputdir": true,
+	"overlay": true, "p": true, "parallel": true, "run": true, "shuffle": true,
+	"skip": true, "tags": true, "timeout": true, "toolexec": true, "trace": true,
 }
 
 // nextestJUnit is where cargo-nextest writes JUnit under the default profile.

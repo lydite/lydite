@@ -2,6 +2,7 @@ package runner
 
 import (
 	"path"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -451,5 +452,186 @@ func TestNoExtensionBelongsToTwoLanguages(t *testing.T) {
 			}
 			owner[e] = lang
 		}
+	}
+}
+
+// The flaky gate reads run 1's outcomes out of the report the suite wrote, so
+// asking for the gate has to make the plain variant write one too — through
+// the same pinned wrapper and to the same path the instrumented variant uses,
+// since the ledger reads that path whichever variant ran.
+func TestGoJUnitPlainIsThePlainRunThroughTheWrapper(t *testing.T) {
+	inv, ok := GoJUnitPlain([]string{"-race", "./..."})
+	if !ok {
+		t.Fatal("GoJUnitPlain supplied no invocation")
+	}
+	want := "gotestsum --format pkgname --junitfile .lydite-reports/junit.xml -- -race ./..."
+	if got := line(inv); got != want {
+		t.Errorf("GoJUnitPlain = %q, want %q", got, want)
+	}
+	if inv.JUnitReport != junitReport {
+		t.Errorf("GoJUnitPlain writes %q, want %q", inv.JUnitReport, junitReport)
+	}
+	if inv.CoverageReport != "" {
+		t.Errorf("GoJUnitPlain reports coverage at %q, and a plain run measures none", inv.CoverageReport)
+	}
+	if empty, _ := GoJUnitPlain(nil); !slices.Contains(empty.Args, "./...") {
+		t.Errorf("GoJUnitPlain with no args = %v, want the whole package tree", empty.Args)
+	}
+}
+
+// Plain stays bare `go test`. Mutation runs it once per mutant, so a JUnit
+// report written and discarded thousands of times is a process in the way of
+// the thing being timed — which is why the gate's variant is a function of its
+// own rather than a change to this one.
+func TestThePlainVariantStaysBareGoTest(t *testing.T) {
+	if got := line(argv(t, GoTest, Plain, "-race", "./...")); got != "go test -race ./..." {
+		t.Errorf("the plain variant = %q, want bare go test", got)
+	}
+}
+
+// The wrapper is installed for whatever actually runs it, and both of the
+// gate's invocations do.
+func TestTheGatesInvocationsRunTheWrapper(t *testing.T) {
+	junitPlain, _ := GoJUnitPlain(nil)
+	rerun, _ := GoRerun(nil, ".", []string{"TestOne"})
+	for name, inv := range map[string]Invocation{"GoJUnitPlain": junitPlain, "GoRerun": rerun} {
+		if inv.Name != gotestsumName {
+			t.Errorf("%s runs %q, not the wrapper", name, inv.Name)
+		}
+		if !slices.Contains(inv.PathDirs, gotestsumBinDir()) {
+			t.Errorf("%s PathDirs = %v, want the pinned wrapper's bin dir", name, inv.PathDirs)
+		}
+	}
+}
+
+// Run 2 copies run 1's argv, drops the coverage flags and replaces the package
+// patterns with the one package it reruns — and ends with -run and -count=1,
+// which are appended last so a declared duplicate cannot win.
+func TestGoRerunCopiesTheArgvAndFiltersIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"nothing declared", nil, "-run ^(TestA|TestB)$ -count=1 ./pkg"},
+		{"race is kept", []string{"-race", "./..."}, "-race -run ^(TestA|TestB)$ -count=1 ./pkg"},
+		{
+			"coverage flags are dropped",
+			[]string{"-coverprofile=x.out", "-coverpkg=./...", "-covermode=atomic", "-cover", "-race", "./..."},
+			"-race -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			"a coverage flag's separate value goes with it",
+			[]string{"-coverprofile", "x.out", "-race", "./..."},
+			"-race -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			"another flag's separate value stays with it",
+			[]string{"-timeout", "5m", "./..."},
+			"-timeout 5m -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			"a flag after the packages is still a flag",
+			[]string{"./...", "-race"},
+			"-race -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			"a declared -run and -count lose to the gate's",
+			[]string{"-run", "TestOther", "-count=5", "./..."},
+			"-run TestOther -count=5 -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			// A value flag with nothing after it to carry: the bound on
+			// looking one argument ahead has to refuse reading past the end
+			// of the slice rather than reading its value out of bounds.
+			"a value flag with no following argument is not consumed",
+			[]string{"-timeout"},
+			"-timeout -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			// -ldflags's value routinely starts with "-" itself, as -X does
+			// here. The value has to be skipped by the loop rather than
+			// reprocessed as a flag of its own, or it appears twice.
+			"a value that looks like a flag is not reprocessed",
+			[]string{"-ldflags", "-X main.version=1.0"},
+			"-ldflags -X main.version=1.0 -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, ok := GoRerun(tc.args, "./pkg", []string{"TestA", "TestB"})
+			if !ok {
+				t.Fatal("GoRerun supplied no invocation")
+			}
+			want := "gotestsum --format pkgname --junitfile " + rerunJUnitReport + " -- " + tc.want
+			if got := line(inv); got != want {
+				t.Errorf("GoRerun = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// -count=1 is mandatory, and its absence is the failure that cannot be seen:
+// run 2's argv is a cacheable subset of a run that just happened, so without
+// it Go answers from run 1's own result and the gate reports determinism
+// having executed nothing. It is the exact mirror of ADR 0027's rule that
+// mutation must never pass it.
+func TestTheRerunAlwaysCarriesCountOne(t *testing.T) {
+	for _, args := range [][]string{nil, {"-race", "./..."}, {"-count=3", "./..."}} {
+		inv, ok := GoRerun(args, ".", []string{"TestA"})
+		if !ok {
+			t.Fatalf("GoRerun over %v supplied no invocation", args)
+		}
+		if i := slices.Index(inv.Args, "-count=1"); i < 0 {
+			t.Errorf("GoRerun over %v = %v, want -count=1", args, inv.Args)
+		} else if j := slices.Index(inv.Args, "-count=3"); j > i {
+			t.Errorf("GoRerun over %v puts -count=3 after -count=1, so the declared count wins", args)
+		}
+	}
+}
+
+// Run 2's report is its own file. The ledger records run 1's counts, and a
+// rerun of five tests overwriting them would put "5 tests" in the quality
+// history of a component that ran six hundred.
+func TestTheRerunWritesItsOwnReport(t *testing.T) {
+	inv, _ := GoRerun(nil, ".", []string{"TestA"})
+	if inv.JUnitReport == junitReport {
+		t.Errorf("the rerun writes %q, which is run 1's own report", inv.JUnitReport)
+	}
+	if inv.JUnitReport == "" {
+		t.Error("the rerun writes no report, so nothing can read its outcomes")
+	}
+	if path.Dir(inv.JUnitReport) != ReportDir {
+		t.Errorf("the rerun writes %q, want it under %q", inv.JUnitReport, ReportDir)
+	}
+}
+
+// A rerun of no tests is refused. `go test -run` matching nothing prints `ok`,
+// so an invocation built for an empty set reports a pass for a filter that ran
+// nothing at all.
+func TestARerunOfNoTestsIsRefused(t *testing.T) {
+	if _, ok := GoRerun([]string{"-race"}, "./pkg", nil); ok {
+		t.Error("GoRerun built an invocation for no tests")
+	}
+	if _, ok := GoRerun([]string{"-race"}, "", []string{"TestA"}); ok {
+		t.Error("GoRerun built an invocation for no package")
+	}
+}
+
+// The pattern is anchored at both ends, so a rerun of TestFoo cannot also
+// select TestFooBar — the set the gate reruns has to be the set it decided was
+// new.
+func TestTheRunPatternIsAnchored(t *testing.T) {
+	if got := RunPattern([]string{"TestFoo", "TestBar"}); got != "^(TestFoo|TestBar)$" {
+		t.Errorf("RunPattern = %q", got)
+	}
+	re, err := regexp.Compile(RunPattern([]string{"TestFoo"}))
+	if err != nil {
+		t.Fatalf("RunPattern is not a regexp: %v", err)
+	}
+	if re.MatchString("TestFooBar") {
+		t.Error("the pattern for TestFoo also matches TestFooBar")
+	}
+	if !re.MatchString("TestFoo") {
+		t.Error("the pattern for TestFoo does not match TestFoo")
 	}
 }

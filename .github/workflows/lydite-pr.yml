@@ -298,7 +298,7 @@ jobs:
       - name: lydite test
         env:
           COMPONENTS: ${{ matrix.shard.components }}
-        run: lydite test --dir . --affected --component "$COMPONENTS" --gate-coverage
+        run: lydite test --dir . --affected --component "$COMPONENTS" --gate-coverage --gate-flaky
 
       # Under its own prefix, so `publish` never reads a shard's document as a
       # `test` section of its own: there would be one per shard, each answering
