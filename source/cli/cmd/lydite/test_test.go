@@ -1391,6 +1391,26 @@ func reportRowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
 	return ui.Row{}
 }
 
+// A run that selected nothing still renders a flaky row per component it is
+// responsible for, the same way it renders one per suite: a section that
+// quietly disappeared would be indistinguishable from one that examined
+// everything and found no new test.
+func TestGateFlakyReportsEvenWhenNothingWasSelected(t *testing.T) {
+	root := affectedRepo(t)
+	commitChange(t, root, "", "")
+
+	out, err := runTestCmd(t, root, "--affected", "--gate-flaky", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	for _, name := range []string{"a", "b"} {
+		row := jsonRowByLabel(t, out, flakyLabel(name))
+		if row.Status != string(ui.StatusUnmeasured) {
+			t.Errorf("flaky(%s) = %+v, want unmeasured: the component's suite never ran", name, row)
+		}
+	}
+}
+
 // outcomeOf names an outcome a report may not have recorded at all: a nil
 // pointer is what compare leaves behind for exactly that case, and it is
 // named plainly rather than dereferenced.

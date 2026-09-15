@@ -1437,7 +1437,10 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 		case flaky.Agreed:
 		}
 	}
-	finding.Number(found)
+	// No finding.Number pass: Site is the package and the test's name, which
+	// the compiler already guarantees unique within a package, so two
+	// disagreements from one component can never share a (Path, Site) pair
+	// for an ordinal to disambiguate. Ordinal stays its zero value.
 	unmeasured := unexamined + skipped
 	row := ui.Row{Label: label, Detail: detail}
 	switch {

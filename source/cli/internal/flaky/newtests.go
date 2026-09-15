@@ -151,7 +151,7 @@ func NewTests(ctx context.Context, dir, base string, changed []string) ([]Test, 
 		if out[i].Package != out[j].Package {
 			return out[i].Package < out[j].Package
 		}
-		return out[i].Name < out[j].Name
+		return out[i].Name < out[j].Name // [lydite:exclude_from_mutation][reached only when out[i].Package == out[j].Package, and the compiler already forbids two tests sharing a name within one package — the two names being compared are always distinct, so <= behaves exactly like < here]
 	})
 	return out, nil
 }

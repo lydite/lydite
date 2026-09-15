@@ -540,6 +540,22 @@ func TestGoRerunCopiesTheArgvAndFiltersIt(t *testing.T) {
 			[]string{"-run", "TestOther", "-count=5", "./..."},
 			"-run TestOther -count=5 -run ^(TestA|TestB)$ -count=1 ./pkg",
 		},
+		{
+			// A value flag with nothing after it to carry: the bound on
+			// looking one argument ahead has to refuse reading past the end
+			// of the slice rather than reading its value out of bounds.
+			"a value flag with no following argument is not consumed",
+			[]string{"-timeout"},
+			"-timeout -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
+		{
+			// -ldflags's value routinely starts with "-" itself, as -X does
+			// here. The value has to be skipped by the loop rather than
+			// reprocessed as a flag of its own, or it appears twice.
+			"a value that looks like a flag is not reprocessed",
+			[]string{"-ldflags", "-X main.version=1.0"},
+			"-ldflags -X main.version=1.0 -run ^(TestA|TestB)$ -count=1 ./pkg",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv, ok := GoRerun(tc.args, "./pkg", []string{"TestA", "TestB"})

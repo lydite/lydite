@@ -308,6 +308,25 @@ func TestReadOutcomesFileNamesAReportThatIsNotThere(t *testing.T) {
 	}
 }
 
+// A testcase's own name stays current until its own end tag, not until the
+// first nested element that closes before it — a producer routinely nests
+// <system-out> ahead of the outcome element, and the name has to survive that
+// close to be there when the outcome element opens.
+func TestANameSurvivesANestedElementClosingBeforeTheOutcome(t *testing.T) {
+	got, err := ReadOutcomes(strings.NewReader(`<testsuites><testsuite>
+		<testcase name="noisy">
+			<system-out>a line the runner captured</system-out>
+			<failure message="assertion"></failure>
+		</testcase>
+	</testsuite></testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomes: %v", err)
+	}
+	if got["noisy"] != Fail {
+		t.Errorf(`ReadOutcomes["noisy"] = %v, want %v`, got["noisy"], Fail)
+	}
+}
+
 // A report that is there but does not parse is an error naming the path, the
 // same as one that is not there at all — ReadOutcomesFile wraps ReadOutcomes's
 // own rejection rather than swallowing it.

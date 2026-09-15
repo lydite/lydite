@@ -1,6 +1,7 @@
 package flaky
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -295,6 +296,129 @@ func TestAFileThatDoesNotParseFailsRatherThanDeclaringNothing(t *testing.T) {
 	_, err := NewTests(t.Context(), r.dir, base, []string{"pkg/a_test.go"})
 	if err == nil || !strings.Contains(err.Error(), "parsing pkg/a_test.go") {
 		t.Errorf("NewTests over an unparseable file = %v, want a parse failure naming the file", err)
+	}
+}
+
+// The result is sorted by package first and by name only within one package,
+// so a change touching two packages does not read as sorted by name alone.
+func TestNewTestsAreSortedByPackageThenName(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{"a/keep.txt": "x\n"})
+	base := r.commit("base")
+	r.write(map[string]string{
+		"b/x_test.go": source("TestB"),
+		"a/x_test.go": source("TestA2", "TestA1"),
+	})
+	r.commit("head")
+
+	got := mustNewTests(t, r.dir, base, "b/x_test.go", "a/x_test.go")
+	want := []Test{
+		{Package: "a", Name: "TestA1", Path: "a/x_test.go", Line: 8},
+		{Package: "a", Name: "TestA2", Path: "a/x_test.go", Line: 5},
+		{Package: "b", Name: "TestB", Path: "b/x_test.go", Line: 5},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v", got, want)
+	}
+}
+
+// goTestFiles both dedupes and sorts, the way its doc comment promises: a
+// caller iterating the result gets one entry per path, in a stable order,
+// whatever order the diff listed them in.
+func TestGoTestFilesDedupesAndSorts(t *testing.T) {
+	got := goTestFiles([]string{"b/x_test.go", "a/x_test.go", "b/x_test.go", "a/lib.go"})
+	want := []string{"a/x_test.go", "b/x_test.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("goTestFiles = %v, want %v", got, want)
+	}
+}
+
+// A file exactly at the size bound is read whole, byte for byte — the bound
+// is on what is larger than maxFileBytes, not on what reaches it, and the
+// limit reader is given one byte more than the bound so a file this size is
+// never mistaken for one that has to be rejected.
+func TestAFileExactlyAtTheSizeLimitIsReadWhole(t *testing.T) {
+	root := t.TempDir()
+	content := bytes.Repeat([]byte("a"), maxFileBytes)
+	if err := os.WriteFile(filepath.Join(root, "big_test.go"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	got, err := readWorkTree(r, "big_test.go")
+	if err != nil {
+		t.Fatalf("readWorkTree: %v", err)
+	}
+	if len(got) != maxFileBytes {
+		t.Fatalf("read %d byte(s), want the whole %d-byte file, not a truncated copy", len(got), maxFileBytes)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("the bytes read do not match the file's own content")
+	}
+}
+
+// A file one byte over the limit is refused by name rather than silently
+// truncated to the limit and read as if it were smaller.
+func TestAFileOverTheSizeLimitIsRefused(t *testing.T) {
+	root := t.TempDir()
+	content := bytes.Repeat([]byte("a"), maxFileBytes+1)
+	if err := os.WriteFile(filepath.Join(root, "big_test.go"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	_, err = readWorkTree(r, "big_test.go")
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("readWorkTree over an oversized file = %v, want a refusal naming the bound", err)
+	}
+}
+
+// isTestName is the compiler's own rule: only a name prefixed "Test" whose
+// next rune is not lower-case counts, and a name that does not start with it
+// at all is never mistaken for one that does.
+func TestIsTestNameRefusesANameWithNoTestPrefix(t *testing.T) {
+	for _, name := range []string{"Helper", "BenchmarkFoo", "setup", ""} {
+		if isTestName(name) {
+			t.Errorf("isTestName(%q) = true, want false: no Test prefix", name)
+		}
+	}
+}
+
+// A file that imports no "testing" package can declare no test — even one
+// whose function parameter is spelled `*lydite.T` through an unrelated
+// import aliased "lydite", which is what distinguishes testingName's ""
+// sentinel from a package name that could ever legitimately match one.
+func TestATestShapedFunctionWithNoTestingImportDeclaresNothing(t *testing.T) {
+	src := "package pkg\n\n" +
+		"import lydite \"example.com/notreal\"\n\n" +
+		"func TestDecoy(t *lydite.T) {}\n"
+	got, err := declaredTests("pkg", "pkg/a_test.go", []byte(src))
+	if err != nil {
+		t.Fatalf("declaredTests: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("declaredTests = %+v, want none: the file never imports testing", got)
+	}
+}
+
+// A test function may spell an explicit empty result list, `func TestX(t
+// *testing.T) ()`, which go/ast records as a non-nil, zero-length Results —
+// distinct from the nil Results an ordinary declaration gets. Both are zero
+// results, and both are a test.
+func TestATestWithAnExplicitEmptyResultListIsStillATest(t *testing.T) {
+	src := "package pkg\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) () {}\n"
+	got, err := declaredTests("pkg", "pkg/a_test.go", []byte(src))
+	if err != nil {
+		t.Fatalf("declaredTests: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "TestX" {
+		t.Errorf("declaredTests = %+v, want TestX alone", got)
 	}
 }
 

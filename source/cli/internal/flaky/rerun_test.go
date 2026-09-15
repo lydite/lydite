@@ -418,8 +418,12 @@ func TestATestNeitherReportRecordsIsUnmeasured(t *testing.T) {
 // component's own relative directory, and filepath.Rel says so rather than
 // producing a pattern go test would misread.
 func TestRelPackageNamesAPathItCannotRelate(t *testing.T) {
-	if _, err := relPackage(".", "/etc/passwd"); err == nil {
+	pattern, err := relPackage(".", "/etc/passwd")
+	if err == nil {
 		t.Fatal("relPackage accepted a package an absolute path could not be made relative to a relative directory")
+	}
+	if pattern != "" {
+		t.Errorf("pattern = %q, want none: an error carries no pattern to be misread as one", pattern)
 	}
 }
 

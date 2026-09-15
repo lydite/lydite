@@ -186,7 +186,9 @@ func record(out map[string]Outcome, name string, o Outcome) {
 }
 
 // worse orders the outcomes for record: Fail over Skip over Pass.
-func worse(a, b Outcome) bool { return rank(a) >= rank(b) }
+func worse(a, b Outcome) bool {
+	return rank(a) >= rank(b) // [lydite:exclude_from_mutation][rank is injective over the three outcomes, so a tie only occurs when a == b — record then overwrites out[name] with the value it already holds, which no observation can tell from skipping the write]
+}
 
 func rank(o Outcome) int {
 	switch o {
