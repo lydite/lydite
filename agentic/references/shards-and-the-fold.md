@@ -13,12 +13,17 @@ shards' documents back into one. See
 
 **A run reports exactly the components it is responsible for, and nothing about any other.** The
 responsibility set is the `--component` list, or the whole declaration when there is none: one suite
-row and one coverage row per component in it, a patch row for each whose files the diff touched, and
-no row at all about a component outside it. Under one process, padding a `coverage(<name>)` row for
-every *declared* component is informative; under a matrix it means every shard publishes rows about
-components other shards are running, so the merged document holds N answers per component and a
-consumer keying rows by label
+row, one `flaky` row and one coverage row per component in it, a patch row for each whose files the
+diff touched, and no row at all about a component outside it. Under one process, padding a
+`coverage(<name>)` row for every *declared* component is informative; under a matrix it means every
+shard publishes rows about components other shards are running, so the merged document holds N
+answers per component and a consumer keying rows by label
 picks one of them.
+
+**`flaky(<name>)` folds through the same `componentRows` call `test(<name>)` does**, whether or not
+the shard that ran the component was asked for `--gate-flaky` — the row exists either way, `context`
+when the flag was not passed, so it takes exactly one component's worth of fold logic rather than a
+second, gate-conditional one.
 
 The rule buys the property everything else rests on: **every declared component appears exactly once
 across the shards.** So "did a shard die" is a question about the declaration and the documents, and

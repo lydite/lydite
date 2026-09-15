@@ -172,6 +172,15 @@ without lydite implementing any. Measured over five distinct mutants of one leaf
 repository, 1.67s each against 79s with the cache disabled — `-count=1` would multiply the cost of
 mutation by roughly fifty.
 
+**`lydite test --gate-flaky`'s rerun mandates `-count=1`, and that is not a contradiction of this
+rule but its mirror image.** Mutation wants the cache because an overlay invalidates exactly the
+mutated package and its dependents, and nothing else changed. The flaky gate wants to defeat the
+cache because its second run is, by construction, a cacheable repeat of a suite that just ran —
+without `-count=1` Go would serve the first run's own result and the gate would report determinism
+having executed nothing. See
+[ADR 0039](../../docs/adr/0039-a-new-test-is-rerun-once-in-its-own-process.md) for the detail;
+the two rules are stated once each so that neither gate gets "corrected" to match the other.
+
 **A mutant runs against its own package first, and against the closure only if it survives there.**
 A mutant its own package's tests kill is killed, and nothing wider could change that; a mutant that
 survives them has to be held against every test that could kill it, because a mutant in a library
