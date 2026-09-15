@@ -137,6 +137,12 @@ where a looser match would silently stop mutating code that ships. `tests/` and 
 recognised by path as well, being whole files. TypeScript needs none of this and has the conventions
 every runner lydite ships supports: a `.test.` or `.spec.` infix, and a `__tests__` directory.
 
+**The classification lives in `internal/treesitter`, not here.** `Grammar.TestFile` and
+`Grammar.TestModule` are the one answer both this gate and `internal/crap` ask: mutating an
+assertion and scoring one are both "is this the suite", and a second, gate-local copy would agree
+with this one only until somebody edited it for one gate's own reason. See
+[`crap.md`](crap.md) for the other caller.
+
 **The golden fixtures are what hold the grammars.** `internal/mutation/testdata/` carries a Rust, a
 TypeScript and a TSX fixture beside the exact mutant set each produces — offsets, operators and
 replaced text, because a count alone passes on tables that have started reading a different node. A

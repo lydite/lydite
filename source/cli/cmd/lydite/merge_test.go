@@ -708,3 +708,50 @@ func TestMergeSumsTheScoresNoShardCanAnswerFor(t *testing.T) {
 		t.Errorf("crap = %q, want the worst across the repository", got.Value)
 	}
 }
+
+// The fold's denominator is a property of the declaration, counted before any
+// document is folded — so a Rust or TypeScript component counts toward it the
+// same way a Go one does, even when no shard's measurements hold it at all.
+// An unsharded run over the same declaration would count it too; a fold that
+// disagreed would swing lower every time a language other than Go went
+// unmeasured, which is not a property of sharding.
+func TestMergeCountsARustComponentTowardTheDenominatorEvenUnmeasured(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: svc\n    dir: svc\n    runner: go-test\n"+
+			"  - name: web\n    dir: web\n    runner: cargo-nextest\n")
+	write(t, root, "svc/.keep", "")
+	write(t, root, "web/.keep", "")
+
+	shard := shardDir(t,
+		[]ui.Row{
+			{Status: ui.StatusPass, Label: "orphans", Value: "none in 2 source file(s)"},
+			{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
+			{Status: ui.StatusPass, Label: "schedule", Value: "2 component(s), max 1 concurrent"},
+			{Status: ui.StatusPass, Label: "test(svc)", Value: "passed"},
+			{Status: ui.StatusPass, Label: "coverage(svc)", Value: "measured"},
+			{Status: ui.StatusPass, Label: "crap(svc)", Value: "3 function(s) above 30, worst 41.5, baseline 3"},
+			{Status: ui.StatusPass, Label: "test(web)", Value: "passed"},
+			{Status: ui.StatusUnmeasured, Label: "coverage(web)", Value: "not measured — no shard's measurements hold this component"},
+			{Status: ui.StatusUnmeasured, Label: "crap(web)", Value: "not measured — no shard's measurements hold this component"},
+		},
+		// web is declared but absent from every document's Components map — the
+		// case the fold's declaration-based count exists for.
+		&measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{
+			"svc": {
+				Entry: gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go"},
+				Base:  &gitstate.Entry{LineCount: coverage.LineCount{Covered: 1, Total: 2}, Producer: "go"},
+				CRAP:  &gitstate.CRAPEntry{Above: 3, Worst: 41.5, Producer: "go"},
+			},
+		}})
+
+	out, err := runMergeCmd(t, root, shard)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	got := jsonRowByLabel(t, out, "crap")
+	if !strings.Contains(got.Value, "1 of 2 component(s)") {
+		t.Errorf("crap = %q, want the Rust component counted toward the denominator alongside the Go one", got.Value)
+	}
+}

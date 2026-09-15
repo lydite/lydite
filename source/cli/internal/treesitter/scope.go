@@ -175,7 +175,7 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 		!g.introducesFunction(anchor, language, anchor.StartPoint().Row) {
 		return Span{}, false
 	}
-	return Span{First: int(anchor.StartPoint().Row) + 1, Last: int(anchor.EndPoint().Row) + 1}, true
+	return span(anchor), true
 }
 
 // introducesFunction reports whether n opens a function on row.

@@ -208,30 +208,30 @@ func TestOnlyACfgTestModuleIsSkipped(t *testing.T) {
 	}
 }
 
-// A test file's own code is not the code under test.
+// A test file's own code is not the code under test. Which paths are the suite
+// is internal/treesitter's rule and is asserted there; what this holds is that
+// the generator asks it.
 func TestTheSuiteIsNotMutated(t *testing.T) {
 	for _, c := range []struct {
 		lang runner.Lang
 		path string
+		src  string
 		test bool
 	}{
-		{runner.Rust, "tests/integration.rs", true},
-		{runner.Rust, "benches/throughput.rs", true},
-		{runner.Rust, "src/lib.rs", false},
-		{runner.TypeScript, "src/grade.test.ts", true},
-		{runner.TypeScript, "src/grade.spec.ts", true},
-		{runner.TypeScript, "src/__tests__/grade.ts", true},
-		{runner.TypeScript, "src/grade.ts", false},
-		// A file merely mentioning the word is not the suite.
-		{runner.TypeScript, "src/testing.ts", false},
-		{runner.TypeScript, "src/latest.ts", false},
+		{runner.Rust, "tests/integration.rs", "fn f(x: i32) -> bool { x < 1 }\n", true},
+		{runner.Rust, "benches/throughput.rs", "fn f(x: i32) -> bool { x < 1 }\n", true},
+		{runner.Rust, "src/lib.rs", "fn f(x: i32) -> bool { x < 1 }\n", false},
+		{runner.TypeScript, "src/grade.test.ts", "function f(x: number) { return x < 1; }\n", true},
+		{runner.TypeScript, "src/__tests__/grade.ts", "function f(x: number) { return x < 1; }\n", true},
+		{runner.TypeScript, "src/grade.ts", "function f(x: number) { return x < 1; }\n", false},
 	} {
-		g, ok := grammarFor(c.lang, c.path)
-		if !ok {
-			t.Fatalf("no grammar for %s", c.lang)
+		src := []byte(c.src)
+		mutants, _, err := GenerateTreeSitter(c.lang, c.path, src, everyLine(src))
+		if err != nil {
+			t.Fatalf("%s: %v", c.path, err)
 		}
-		if got := g.testFile(c.path); got != c.test {
-			t.Errorf("testFile(%q) = %v, want %v", c.path, got, c.test)
+		if (len(mutants) == 0) != c.test {
+			t.Errorf("%s: %d mutant(s), want the suite skipped = %v", c.path, len(mutants), c.test)
 		}
 	}
 }

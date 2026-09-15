@@ -1,0 +1,12 @@
+/**
+ * A whole file with a `.spec.` infix, skipped by the same rule as `.test.`.
+ */
+
+import { Gate } from "./probe";
+
+test("an admin is always allowed", () => {
+  const gate = new Gate();
+  if (!gate.allow(null, true)) {
+    throw new Error("admin refused");
+  }
+});

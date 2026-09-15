@@ -1,0 +1,14 @@
+/**
+ * A whole file under a `__tests__` directory, skipped by its path even though
+ * its name carries neither infix.
+ */
+
+export function sample(seed: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < seed; i += 1) {
+    if (i % 3 === 0) {
+      out.push(i);
+    }
+  }
+  return out;
+}
