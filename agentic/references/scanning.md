@@ -205,8 +205,13 @@ chose the delta everywhere else.
 **The base set is recomputed at the merge-base, not read from a stored baseline.** The same
 throwaway-worktree shape `measureBaseTree` uses for CRAP: check the merge-base out, run the same
 licence read there, remove the worktree — cheap here because a licence set costs one manifest read
-and one tool invocation, no suite, no compose service, no instrumented build. A worktree that will
-not check out, a module download that will not resolve, or a cargo-deny that will not run reports
+and one tool invocation, no suite, no compose service, no instrumented build. Unlike
+`measureBaseTree`, the checkout is **one worktree for the whole scan**, not one per component:
+`newLicenceBaseTree` in `cmd/lydite/scan.go` opens it lazily, the first time any component's
+licence gate asks for a set, and every Go and Rust component's base read shares it — a repository
+with N components pays one checkout of the merge-base commit, not N of the identical commit. A
+worktree that will not check out, a module download that will not resolve, or a cargo-deny that
+will not run reports
 `licence.Unmeasured` on the row, naming what failed; it is never folded into a passing verdict with
 an empty base set — a gate that could not run must never render as one that ran and found nothing.
 A run with no diff base at all — `lydite scan` on `main` — is `context`, reporting the full
