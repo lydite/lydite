@@ -8,7 +8,10 @@ package semgrep
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"lydite/lydite/internal/executil"
@@ -30,6 +33,68 @@ const AppTokenEnv = "SEMGREP_APP_TOKEN" // #nosec G101 -- this is an env var NAM
 // the repository rather than to any one of them.
 const Gate = "semgrep"
 
+// semgrepignoreFile is the filename Semgrep itself looks for at the root of a
+// scan. Its presence — whatever it contains — replaces the built-in default
+// ignore list below rather than extending it.
+const semgrepignoreFile = ".semgrepignore"
+
+// defaultIgnorePatterns is Semgrep's own default `.semgrepignore` template for
+// the version pinned in requirements.txt: the paths Semgrep skips when the scan
+// root carries no `.semgrepignore` of its own.
+//
+// Semgrep exposes no command that prints it. The list is the block following
+// the marker string "default semgrepignore patterns" in the `semgrep-core`
+// binary inside the pinned pip package, read with `strings`; a version bump
+// must re-verify it the same way, because a pattern that has silently left
+// Semgrep's template is one this warning names as dropped when it is not.
+var defaultIgnorePatterns = []string{
+	".git",
+	".svn",
+	".hg",
+	"_darcs",
+	"CVS",
+	"build/",
+	"vendor/",
+	"dist/",
+	"*.min.js",
+	".env/",
+	".tox/",
+	"node_modules/",
+	".npm/",
+	".yarn/",
+	".venv/",
+	"_opam/",
+	"_build/",
+	"_cargo/",
+	"test/",
+	"tests/",
+	"testsuite/",
+	"*_test.go",
+}
+
+// warnSemgrepignore names what a `.semgrepignore` at the scan root costs.
+//
+// Semgrep treats the file as a replacement for its built-in defaults, not an
+// addition to them, so a repository that writes one line to skip a directory
+// also starts scanning every path in defaultIgnorePatterns — vendored code,
+// build output, and the test trees `tests/` and `*_test.go` name. The findings
+// count moves with no rule change and nothing in the report says why.
+//
+// A warning and not a row: the file is the repository's own configuration of
+// its own scan, which ADR 0020 records as legitimate influence. Naming what is
+// lost is the whole of what lydite owes here — it never rewrites the file, and
+// the scope a consumer chose deliberately is not a failure.
+func warnSemgrepignore(w io.Writer, dir string) {
+	// Presence and not content: an empty file opts out of the whole template
+	// just as a full one does, so stat answers the question and reading the
+	// file would answer a different one.
+	if _, err := os.Stat(filepath.Join(dir, semgrepignoreFile)); err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "warning: %s at the scan root replaces Semgrep's built-in default ignore list rather than extending it, so Semgrep now scans %s — re-add the ones you want kept\n",
+		semgrepignoreFile, strings.Join(defaultIgnorePatterns, ", "))
+}
+
 // Check runs Semgrep against dir using the given ruleset config (e.g. "auto",
 // or a custom registry ref/path from .lydite/config.yml), failing on any finding.
 //
@@ -44,7 +109,12 @@ const Gate = "semgrep"
 // baseSHA, when non-empty, makes that fallback diff-aware too: Semgrep only
 // reports findings absent at that commit. Empty means scan everything, which
 // is what a local `lydite scan` wants.
-func Check(ctx context.Context, dir, rulesetConfig, baseSHA string) executil.Result {
+//
+// w carries the warnings about the environment the scan ran in — what a
+// `.semgrepignore` at the scan root drops — and never the findings, which are
+// the returned Result's.
+func Check(ctx context.Context, dir, rulesetConfig, baseSHA string, w io.Writer) executil.Result {
+	warnSemgrepignore(w, dir)
 	if r := ensure(ctx); !r.Ok() {
 		return r
 	}

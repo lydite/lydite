@@ -227,6 +227,13 @@ repositories. Editing `.lydite/components.yml` is already a built-in
 disqualifier, so adding such a variable is a change that cannot merge
 unattended.
 
+> The `.semgrepignore` half is closed by naming what the file drops: `lydite scan`
+> warns on stderr, before Semgrep runs, with every default ignore pattern a
+> `.semgrepignore` at the scan root stops Semgrep applying. The warning never gates
+> the scan, and the file stays the repository's own. A nested `biome.json` narrowing
+> Biome is the same shape and is not addressed. See
+> [`semgrep.md`](../../agentic/references/semgrep.md).
+
 ## Consequences
 
 - A consumer upgrading must declare its components before `lydite scan` will run,

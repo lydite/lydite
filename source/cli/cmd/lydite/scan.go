@@ -187,7 +187,7 @@ func newScanCmd() *cobra.Command {
 
 			var results []executil.Result
 			if cfg.Semgrep.Enabled {
-				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, semgrepBase(baseSHA)))
+				results = append(results, semgrep.Check(ctx, dir, cfg.Semgrep.Config, semgrepBase(baseSHA), cmd.ErrOrStderr()))
 			}
 			// Root-scoped, like Semgrep and unlike every language check: a
 			// secret scanner reads bytes rather than a build graph, and the
