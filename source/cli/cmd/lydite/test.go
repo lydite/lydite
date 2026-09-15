@@ -25,6 +25,8 @@ import (
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/flaky"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
@@ -38,7 +40,7 @@ import (
 func newTestCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected, noCoverage, gateCoverage bool
+	var asJSON, noColor, stream, onlyAffected, noCoverage, gateCoverage, gateFlaky bool
 	var concurrency, baseBranch string
 	cmd := &cobra.Command{
 		Use:           "test",
@@ -200,6 +202,11 @@ the component's to declare.`,
 				}
 				ordered = own
 			}
+			// Resolved once for the run rather than once per component: the
+			// merge-base and the paths the change touched are facts about the
+			// change, and asking git for them per component pays the same walk
+			// again for every one of them.
+			gate := newFlakyGate(ctx, dir, baseBranch, gateFlaky)
 			cov := coverageOptions{
 				Instrument:  !noCoverage,
 				Gate:        gateCoverage,
@@ -216,6 +223,11 @@ the component's to declare.`,
 						rep.Add(r)
 					}
 				}
+				// A row per component whether or not anything ran, for the
+				// reason the coverage rows below take one: a component whose
+				// suite never ran examined none of its new tests, and a
+				// section that disappears reads as a concern that passed.
+				gate.report(rep, own)
 				// The gate still reports, because a caller that asked for it
 				// has to be able to tell this from a run where the flag was
 				// dropped. On the default branch this is also the run that
@@ -243,7 +255,8 @@ the component's to declare.`,
 				return renderReport(cmd, rep, dir, asJSON, noColor)
 			}
 
-			ms := runComponents(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep)
+			ms := runComponentsGated(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep, gate)
+			gate.report(rep, own)
 			addCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
@@ -289,6 +302,13 @@ the component's to declare.`,
 	// already refused for selection, for the same reason.
 	cmd.Flags().BoolVar(&gateCoverage, "gate-coverage", false,
 		"compare each component's coverage against the baseline for the merge-base, and record this tree's")
+	// Explicit, the sibling of --gate-coverage, for the reason ADR 0018 gave
+	// for selection: a gate inferred from "am I in CI" guesses, and the caller
+	// already knows the event. Asking for it makes a Go component's suite write
+	// a JUnit report whichever variant it ran, since the first of the two
+	// outcomes is read from the report the run already wrote.
+	cmd.Flags().BoolVar(&gateFlaky, "gate-flaky", false,
+		"rerun each Go component's new tests once, in a process of their own, and fail on a test whose two outcomes disagree")
 	// Every run captures; this only adds the terminal. A suite that hangs
 	// prints nothing until it is killed, and its log is written but not yet
 	// interesting — watching it is the case a captured file cannot serve.
@@ -383,6 +403,13 @@ type componentPlan struct {
 // comment renders green. `ui.Report.ExitCode` stays the single place the
 // mapping lives.
 func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report) []measurement {
+	return runComponentsGated(ctx, root, selected, ordered, skipped, cfg, envs, limit, stream, instrument, rep, nil)
+}
+
+// runComponentsGated is that run with the flaky gate a caller asked for, which
+// each component's own run carries out before its services are torn down. A
+// nil gate is a run nobody asked one of.
+func runComponentsGated(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report, gate *flakyGate) []measurement {
 	plans := planComponents(ctx, root, selected, "test", stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -416,7 +443,7 @@ func runComponents(ctx context.Context, root string, selected, ordered []compone
 
 	outcome := scheduler.Run(ctx, items, limit, func(ctx context.Context, k int) {
 		i := index[k]
-		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, envs.For(plans[i].c.Name), instrument)
+		rows[i], measured[i] = runComponent(ctx, root, plans[i], cfg, envs.For(plans[i].c.Name), instrument, gate)
 	})
 
 	// A cancelled run kills every suite it had started, so each one exits
@@ -650,7 +677,7 @@ func scheduleRow(ctx context.Context, outcome scheduler.Outcome, components, lim
 // reports failures naming the tests instead of the missing service, and a
 // green run is worse still — it would mean the declaration was ignored and
 // nobody was told.
-func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, tc *toolchain.Env, instrument bool) (row ui.Row, m measurement) {
+func runComponent(ctx context.Context, root string, p componentPlan, cfg config.Config, tc *toolchain.Env, instrument bool, gate *flakyGate) (row ui.Row, m measurement) {
 	c, log := p.c, p.log
 	label := testLabel(c.Name)
 	m = unmeasuredComponent(c, "the component did not run")
@@ -659,7 +686,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 	if instrument {
 		variant = runner.Instrumented
 	}
-	inv, err := invocation(c, variant)
+	inv, err := invocationFor(c, variant, gate)
 	if err != nil {
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable", Detail: []string{err.Error()}}, m
 	}
@@ -704,7 +731,15 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		return failed, m
 	}
 
-	if res := executil.RunOutput(ctx, dir, childEnv(tc, c, inv), log.out, inv.Name, inv.Args...); !res.Ok() {
+	res := executil.RunOutput(ctx, dir, childEnv(tc, c, inv), log.out, inv.Name, inv.Args...)
+	// Here, and not in a later pass over the report: the stack this component
+	// declared is still up, and a service-dependent test rerun after teardown
+	// fails because nothing is listening — which would report the most
+	// reliable test in the repository as flaky, with evidence its author
+	// cannot reproduce. Whether the suite passed or failed, because it is when
+	// the suite failed that a disagreement is most likely and most valuable.
+	gate.run(ctx, root, dir, c, inv, tc, log)
+	if !res.Ok() {
 		// No measurement from a suite that failed. A report written by a run
 		// that did not finish describes the tests that got as far as running,
 		// and gating on it would let a broken suite record a baseline nothing
@@ -1169,6 +1204,316 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 		return runner.Invocation{}, fmt.Errorf("runner %q supplies no %s variant", c.Runner, variant)
 	}
 	return inv, nil
+}
+
+// invocationFor is the invocation this run executes, which is the plain or
+// instrumented variant unless the flaky gate needs a report the variant does
+// not write.
+//
+// invocation itself is left alone, because mutation and the baseline
+// measurement read it and neither asked for the gate: the plain variant is the
+// bare `go test` mutation runs once per mutant, and a JUnit report written and
+// discarded thousands of times is a process in the way of the thing being
+// timed (ADR 0027).
+func invocationFor(c component.Component, variant runner.Variant, gate *flakyGate) (runner.Invocation, error) {
+	if gate.gates(c) && variant == runner.Plain {
+		// The gate reads run 1's outcomes out of the report the suite wrote,
+		// and under --no-coverage the plain Go variant writes none. Asking for
+		// the gate therefore makes the run write one whichever variant it ran
+		// (ADR 0039).
+		if inv, ok := runner.GoJUnitPlain(c.Args); ok {
+			return inv, nil
+		}
+	}
+	return invocation(c, variant)
+}
+
+// flakyLabel is how every row about one component's new tests is named.
+//
+// Labelled the way testLabel is, and for the same reason: a component called
+// `flaky` must not be able to take this gate's row, and a consumer keying rows
+// by label would silently lose one of the two.
+func flakyLabel(name string) string { return "flaky(" + name + ")" }
+
+// flakyGate is the `--gate-flaky` run: what makes a test new, and what each
+// component's two runs established about the tests it introduced.
+//
+// The merge-base and the paths the change touched are resolved once for the
+// run, because they are facts about the change rather than about any
+// component. Each component's verdict is filled in from the goroutine running
+// that component — the rerun has to happen inside the component's own run,
+// before its services come down — and every row is rendered afterwards, in
+// declaration order.
+type flakyGate struct {
+	// requested is the flag. A gate nobody asked for still takes a row per
+	// component, as context: a section that quietly disappears is
+	// indistinguishable from a concern that passed.
+	requested bool
+	// base is the revision a test is new against, and changed the paths this
+	// change touched, relative to the scan root. An empty pair is a tree with
+	// no change against its base, where nothing is new.
+	base    string
+	changed []string
+	// why names what stopped the gate before any component ran. It is one
+	// unmeasured row per component rather than an error, the way --affected's
+	// unresolvable merge-base is not: this gate narrows nothing and skips no
+	// suite, so a run that cannot examine it still ran everything it was asked
+	// to.
+	why string
+
+	mu    sync.Mutex
+	rows  map[string]ui.Row
+	found []finding.Finding
+}
+
+// newFlakyGate resolves what the gate needs before any component starts.
+func newFlakyGate(ctx context.Context, dir, baseBranch string, requested bool) *flakyGate {
+	g := &flakyGate{requested: requested, rows: map[string]ui.Row{}}
+	if !requested {
+		return g
+	}
+	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+	if err != nil {
+		g.why = "the merge-base could not be resolved, so no test can be called new: " + err.Error()
+		return g
+	}
+	head, err := gitstate.HeadSHA(ctx, dir)
+	if err != nil {
+		g.why = "HEAD could not be resolved: " + err.Error()
+		return g
+	}
+	// A tree that is its own merge-base has no change to introduce a test, so
+	// every component reports no new tests. It is left holding no paths, which
+	// says exactly that and asks git for no diff at all.
+	if head == base {
+		return g
+	}
+	touched, err := gitdiff.Changed(ctx, dir, base)
+	if err != nil {
+		g.why = "the change against " + shortSHA(base) + " could not be read: " + err.Error()
+		return g
+	}
+	prefix, err := gitdiff.Prefix(ctx, dir)
+	if err != nil {
+		g.why = "the scan root could not be located inside the repository: " + err.Error()
+		return g
+	}
+	g.base = base
+	for _, p := range touched.All {
+		// The diff is repository-relative and a new test is decided over paths
+		// relative to the scan root. A path outside that root declares no test
+		// this run could rerun.
+		if rel, inside := gitdiff.Rel(prefix, p); inside {
+			g.changed = append(g.changed, rel)
+		}
+	}
+	return g
+}
+
+// gates reports whether this component's suite has to write a JUnit report for
+// the gate to read its first outcomes from.
+func (g *flakyGate) gates(c component.Component) bool {
+	return g != nil && g.requested && len(c.Command) == 0 && c.Runner == runner.GoTest
+}
+
+// run reruns one component's new tests and records what the two runs
+// established, from the goroutine running that component.
+func (g *flakyGate) run(ctx context.Context, root, dir string, c component.Component, inv runner.Invocation, tc *toolchain.Env, log *componentLog) {
+	if g == nil || !g.requested {
+		return
+	}
+	row, found := g.examine(ctx, root, dir, c, inv, tc, log)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rows[c.Name] = row
+	g.found = append(g.found, found...)
+}
+
+// examine is one component's verdict: which of its tests the change
+// introduced, what a second run of them says, and the finding each
+// disagreement makes.
+func (g *flakyGate) examine(ctx context.Context, root, dir string, c component.Component, inv runner.Invocation, tc *toolchain.Env, log *componentLog) (ui.Row, []finding.Finding) {
+	label := flakyLabel(c.Name)
+	// What the component is comes before what the run could resolve: a Rust
+	// component is outside this slice whatever the checkout looks like, and a
+	// row blaming the merge-base would send its author after the wrong thing.
+	switch {
+	case len(c.Command) > 0:
+		// A raw command opts out of the derived variants, so there is no
+		// invocation to filter down to a set of test names and no report to
+		// read a first outcome from.
+		return unexaminedRow(label, "the component declares a raw command, which opts out of the derived variants"), nil
+	case c.Runner != runner.GoTest:
+		// Named rather than skipped: a repository that asked for the gate and
+		// got silence in two of its three languages must be able to see that
+		// it did.
+		return unexaminedRow(label, flakyLanguage(c)), nil
+	case g.why != "":
+		return unexaminedRow(label, g.why), nil
+	}
+	tests, err := flaky.NewTests(ctx, root, g.base, componentPaths(c.Dir, g.changed))
+	switch {
+	case errors.Is(err, flaky.ErrNoMergeBase):
+		return unexaminedRow(label, err.Error()), nil
+	case err != nil:
+		return unexaminedRow(label, "the tests this change introduces could not be read: "+err.Error()), nil
+	case len(tests) == 0:
+		return ui.Row{Status: ui.StatusPass, Label: label, Value: "no new tests"}, nil
+	case inv.JUnitReport == "":
+		return unexaminedRow(label, "the suite wrote no test report, so no first outcome could be read"), nil
+	}
+	run1, err := junit.ReadOutcomesFile(filepath.Join(dir, filepath.FromSlash(inv.JUnitReport)))
+	if err != nil {
+		return unexaminedRow(label, "the suite's own report could not be read: "+err.Error()), nil
+	}
+	results, err := flaky.Rerun(ctx, tests, flaky.Options{
+		Root: root,
+		Dir:  c.Dir,
+		Args: c.Args,
+		// The rerun goes through the same pinned wrapper run 1 did, so the
+		// environment that found it is the environment that finds it again.
+		Env:  childEnv(tc, c, inv),
+		Run1: run1,
+		Log:  log.out,
+	})
+	if err != nil {
+		return unexaminedRow(label, "the rerun did not finish: "+err.Error()), nil
+	}
+	return flakyRow(label, c, results)
+}
+
+// report adds one row per component this run was responsible for, in
+// declaration order, and every finding the disagreements made.
+//
+// A component whose suite never ran still takes a row. Its new tests were not
+// examined, and a gate that could not run never renders as one that passed.
+func (g *flakyGate) report(rep *ui.Report, own []component.Component) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range own {
+		switch row, ok := g.rows[c.Name]; {
+		case ok:
+			rep.Add(row)
+		case !g.requested:
+			rep.Add(ui.Row{Status: ui.StatusContext, Label: flakyLabel(c.Name),
+				Value: "not gated — --gate-flaky reruns the tests a change introduces"})
+		default:
+			rep.Add(unexaminedRow(flakyLabel(c.Name), "the component's suite did not run, so there was nothing to rerun"))
+		}
+	}
+	rep.AddFindings(g.found...)
+}
+
+// flakyRow is what one component's results establish, and the finding each
+// disagreement makes.
+//
+// The strongest verdict owns the row and the weaker one is still said: a run
+// holding both a disagreement and a test nothing could examine fails, with the
+// unexamined count in the detail.
+func flakyRow(label string, c component.Component, results []flaky.Result) (ui.Row, []finding.Finding) {
+	var disagreed, unexamined int
+	var detail []string
+	var found []finding.Finding
+	for _, r := range results {
+		switch r.Verdict {
+		case flaky.Disagreed:
+			disagreed++
+			detail = append(detail,
+				fmt.Sprintf("%s: run 1 %s, run 2 %s", r.Test.Name, outcomeOf(r.Run1), outcomeOf(r.Run2)),
+				"rerun in "+c.Dir+": "+r.Command)
+			found = append(found, flakyFinding(label, c, r))
+		case flaky.Unmeasured:
+			unexamined++
+			detail = append(detail, r.Test.Name+" was not examined: "+r.Why)
+		case flaky.Skipped:
+			// Both runs skipped it, which agrees and examined nothing. It is
+			// counted among the agreements the value reports and named here,
+			// because a test skipped in every run is one the gate has said
+			// nothing about.
+			detail = append(detail, r.Test.Name+" was skipped in both runs")
+		case flaky.Agreed:
+		}
+	}
+	finding.Number(found)
+	row := ui.Row{Label: label, Detail: detail}
+	switch {
+	case disagreed > 0:
+		row.Status = ui.StatusFail
+		row.Value = fmt.Sprintf("%d of %d new test(s) disagreed between two runs", disagreed, len(results))
+	case unexamined == len(results):
+		row.Status = ui.StatusUnmeasured
+		row.Value = fmt.Sprintf("not examined — none of the %d new test(s) could be measured", len(results))
+	default:
+		row.Status = ui.StatusPass
+		row.Value = fmt.Sprintf("%d new test(s), 2 runs each", len(results))
+	}
+	return row, found
+}
+
+// flakyFinding is the claim one disagreement makes, on the line the test is
+// declared at.
+//
+// The site is the package directory and the test's name — the identity ADR
+// 0039 gives a test — so reformatting the file above the declaration does not
+// re-identify the claim. The ordinal is zero because a name is unique within a
+// package by the compiler's own rule.
+func flakyFinding(label string, c component.Component, r flaky.Result) finding.Finding {
+	return finding.Finding{
+		Gate:      "flaky",
+		Component: c.Name,
+		Row:       label,
+		Path:      r.Test.Path,
+		Line:      r.Test.Line,
+		Message:   r.Test.Name + " disagreed between two runs",
+		Detail: []string{
+			"run 1: " + outcomeOf(r.Run1) + ", run 2: " + outcomeOf(r.Run2),
+			"The rerun ran it alone, in " + c.Dir + ": " + r.Command,
+			"Two runs disagreed. That is not a claim the test is random — a test that only passes because another test ran first disagrees here too, and is non-deterministic in the sense that matters.",
+		},
+		Site: r.Test.Package + " " + r.Test.Name,
+	}
+}
+
+// outcomeOf names an outcome a report may not have recorded at all.
+func outcomeOf(o *junit.Outcome) string {
+	if o == nil {
+		return "absent"
+	}
+	return o.String()
+}
+
+// flakyLanguage says which language a component's suite is written in, for a
+// component this slice does not gate.
+func flakyLanguage(c component.Component) string {
+	if lang := langOf(c); lang != "" {
+		return "the flaky gate is Go only, and this component's suite is " + string(lang)
+	}
+	return "the flaky gate is Go only, and this component declares no runner lydite knows"
+}
+
+// componentPaths is the changed paths that lie inside one component, which is
+// the whole of what its own gate may look at.
+//
+// A component's row is about the tests it introduced, and flaky.NewTests reads
+// whatever paths it is given: handed the whole diff, every component would
+// rerun every other component's new tests and report them under its own name.
+func componentPaths(dir string, changed []string) []string {
+	dir = path.Clean(dir)
+	if dir == "." {
+		return changed
+	}
+	var out []string
+	for _, p := range changed {
+		if strings.HasPrefix(p, dir+"/") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// unexaminedRow is a gate that examined nothing, with the cause beside it.
+func unexaminedRow(label, why string) ui.Row {
+	return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "not examined — " + why}
 }
 
 // childEnv is the environment one of a component's commands runs with: the

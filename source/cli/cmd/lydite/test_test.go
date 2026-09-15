@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,9 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/fixture"
+	"lydite/lydite/internal/flaky"
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
@@ -355,7 +359,7 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	cfg.TypeScript.Install = "exit 3"
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg, nil, false)
+	}), cfg, nil, false, nil)
 	if row.Status != ui.StatusFail {
 		t.Fatalf("status = %q, want a failure", row.Status)
 	}
@@ -403,7 +407,7 @@ func TestTeardownRunsWhenSetupFails(t *testing.T) {
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Setup:    []string{"exit 7"},
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Status != ui.StatusFail || row.Value != "setup failed" {
 		t.Fatalf("row = %+v, want the setup named as the failure", row)
 	}
@@ -420,7 +424,7 @@ func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"touch " + marker},
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Status != ui.StatusFail || row.Value != "failed" {
 		t.Fatalf("row = %+v, want the suite named as the failure", row)
 	}
@@ -436,7 +440,7 @@ func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
 		t.Fatalf("row = %+v, want the teardown named", row)
 	}
@@ -450,7 +454,7 @@ func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
 		Teardown: []string{"exit 4"},
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Value != "failed" {
 		t.Errorf("value = %q, want the suite failure to survive", row.Value)
 	}
@@ -465,7 +469,7 @@ func TestSetupRunsBeforeTheSuite(t *testing.T) {
 		// ordering holds.
 		Setup: []string{"echo 1 > setup-ran"},
 		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -502,7 +506,7 @@ func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
 	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v", row)
@@ -532,7 +536,7 @@ func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
 	root := fixtureRepo(t, "components: []\n")
 	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
 		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), nil, false)
+	}), config.Default(), nil, false, nil)
 	if row.Status != ui.StatusPass {
 		t.Fatalf("row = %+v", row)
 	}
@@ -1122,6 +1126,303 @@ func TestAComponentCannotCancelTheResolvedToolchain(t *testing.T) {
 	if last != "local" {
 		t.Fatalf("GOTOOLCHAIN = %q, want lydite's resolved value to win", last)
 	}
+}
+
+// The gate end to end over the probe ADR 0039 decides on: the suite runs, the
+// tests the change introduced are rerun in a process of their own, and the one
+// whose two outcomes disagree fails the gate and lands on its own declaration.
+//
+// TestFlakyNew passes in the process that finds no marker and fails in the one
+// that does, so run 1 and run 2 disagree about it deterministically — a probe
+// that flaked at random would make the test proving this gate the gate's own
+// first false positive.
+func TestTheFlakyGateFailsANewTestThatDisagreesWithItself(t *testing.T) {
+	root := flakyProbeRepo(t)
+	out, err := runTestCmd(t, root, "--json", "--no-coverage", "--gate-flaky")
+	if err == nil {
+		t.Fatalf("a new test that answered twice and differently passed the run:\n%s", out)
+	}
+	// The suite itself passed: run 1 is the process that leaves the marker, so
+	// the only red row is the gate's.
+	if got := jsonRowByLabel(t, out, "test(probe)"); got.Status != string(ui.StatusPass) {
+		t.Fatalf("test(probe) = %+v, want a passing suite: the disagreement is the gate's finding, not the suite's", got)
+	}
+	row := jsonRowByLabel(t, out, "flaky(probe)")
+	if row.Status != string(ui.StatusFail) {
+		t.Fatalf("flaky(probe) = %+v, want a failure", row)
+	}
+	if !strings.Contains(row.Value, "1 of 3 new test(s)") {
+		t.Errorf("flaky(probe) = %q, want one of the three new tests named as the disagreement", row.Value)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "TestFlakyNew: run 1 passed, run 2 failed") {
+		t.Errorf("detail = %q, want both outcomes of the test that disagreed", detail)
+	}
+	// The tests that agreed take no line of their own: the row says what it
+	// established, and two runs that agreed established nothing to act on.
+	// They are in the rerun's argv, which is one invocation for the package.
+	for _, name := range []string{"TestDeterministicNew", "TestNewSubtests"} {
+		if strings.Contains(detail, name+":") || strings.Contains(detail, name+" was") {
+			t.Errorf("detail = %q, want nothing claimed about %s", detail, name)
+		}
+	}
+	// The test the change did not introduce is never rerun and never named:
+	// the gate's budget is the new tests alone.
+	if strings.Contains(out, "TestPreExistingStable") {
+		t.Errorf("the report mentions a test the change did not introduce:\n%s", out)
+	}
+
+	found := jsonFindings(t, out)
+	if len(found) != 1 {
+		t.Fatalf("findings = %+v, want one per disagreement", found)
+	}
+	f := found[0]
+	// The declaration's own line, so ADR 0031 puts the claim on the line the
+	// author just wrote rather than in a comment about the file.
+	if f.Gate != "flaky" || f.Path != "probe/probe_test.go" || f.Line != 32 {
+		t.Errorf("finding = %+v, want it on the func TestFlakyNew line", f)
+	}
+	if f.Site != "probe TestFlakyNew" {
+		t.Errorf("site = %q, want the package directory and the test's name", f.Site)
+	}
+	if !strings.Contains(f.Message, "TestFlakyNew") || !strings.Contains(f.Message, "disagreed") {
+		t.Errorf("message = %q, want the test named and the claim stated", f.Message)
+	}
+	// The rerun's argv, so the author reproduces it with one command rather
+	// than being told their test is haunted.
+	if d := strings.Join(f.Detail, "\n"); !strings.Contains(d, "-count=1") || !strings.Contains(d, "TestFlakyNew") {
+		t.Errorf("finding detail = %q, want the rerun that reproduces it", d)
+	}
+}
+
+// A change that introduces no test pays nothing and says so, which is the
+// common case and must not read like a gate that could not run.
+//
+// A tree that is its own merge-base is that case at its widest: there is no
+// change at all, which is what the default branch runs on every push.
+func TestTheFlakyGateSaysWhenAChangeIntroducesNoTest(t *testing.T) {
+	root := flakyProbeRepo(t)
+	gitIn(t, root, "push", "--quiet", "origin", "HEAD:refs/heads/tip")
+
+	row := examineComponent(t, root, "tip", component.Component{
+		Name: "probe", Dir: "probe", Runner: runner.GoTest,
+	})
+	if row.Status != ui.StatusPass || row.Value != "no new tests" {
+		t.Errorf("flaky(probe) = %+v, want a pass saying the change introduced none", row)
+	}
+}
+
+// A component's gate is about the tests it introduced. Handed the whole diff,
+// every component would rerun every other component's new tests and report
+// them under its own name.
+func TestAComponentsGateSeesOnlyItsOwnChangedPaths(t *testing.T) {
+	changed := []string{"moda/x_test.go", "modb/x_test.go", "modb/deep/y_test.go", "README.md"}
+	got := componentPaths("modb", changed)
+	want := []string{"modb/x_test.go", "modb/deep/y_test.go"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("componentPaths(modb) = %v, want %v", got, want)
+	}
+	// A component rooted at the scan root owns every path in the change, and a
+	// prefix match would drop them all.
+	if got := componentPaths(".", changed); len(got) != len(changed) {
+		t.Errorf("componentPaths(.) = %v, want the whole change", got)
+	}
+	// Names are not prefixes: `modb-tools` is another component.
+	if got := componentPaths("modb", []string{"modb-tools/x_test.go"}); len(got) != 0 {
+		t.Errorf("componentPaths(modb) = %v, want nothing from a component whose name starts alike", got)
+	}
+}
+
+// The flag is never inferred, and a run that was not asked to gate says so
+// rather than leaving the row out: a section that quietly disappears is
+// indistinguishable from a concern that passed.
+func TestWithoutTheFlagEveryComponentTakesAContextRow(t *testing.T) {
+	root := fixtureRepo(t, `components:
+  - name: fixture
+    dir: mod
+    runner: go-test
+`)
+	out, err := runTestCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("test failed: %v\n%s", err, out)
+	}
+	row := jsonRowByLabel(t, out, "flaky(fixture)")
+	if row.Status != string(ui.StatusContext) {
+		t.Errorf("flaky(fixture) = %+v, want a context row: nothing was gated", row)
+	}
+	if !strings.Contains(row.Value, "--gate-flaky") {
+		t.Errorf("value = %q, want the flag that would gate it named", row.Value)
+	}
+	if len(jsonFindings(t, out)) != 0 {
+		t.Errorf("a run that gated nothing published findings:\n%s", out)
+	}
+}
+
+// Rust and TypeScript are a later slice, and a repository that asked for the
+// gate and got silence in two of its three languages must be able to see that
+// it did. A raw `command:` opts out of the derived variants the same way.
+func TestTheFlakyGateNamesWhatItCannotExamine(t *testing.T) {
+	root := gitRepo(t, map[string]string{"web/package.json": `{"name":"web"}`})
+	for _, tc := range []struct {
+		name string
+		c    component.Component
+		want string
+	}{
+		{
+			name: "a TypeScript component",
+			c:    component.Component{Name: "web", Dir: "web", Runner: runner.Vitest},
+			want: "typescript",
+		},
+		{
+			name: "a raw command",
+			c:    component.Component{Name: "web", Dir: "web", Command: []string{"make", "test"}},
+			want: "raw command",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := examineComponent(t, root, "HEAD", tc.c)
+			if row.Status != ui.StatusUnmeasured {
+				t.Fatalf("row = %+v, want unmeasured: a gate that could not run is not one that passed", row)
+			}
+			if !strings.Contains(row.Value, tc.want) {
+				t.Errorf("value = %q, want it to name %q", row.Value, tc.want)
+			}
+		})
+	}
+}
+
+// There is no "new" without a merge-base, so the whole row is unmeasured and
+// names the cause — never a pass over a shallow checkout.
+func TestAnUnresolvableMergeBaseLeavesTheFlakyRowUnmeasured(t *testing.T) {
+	root := flakyProbeRepo(t)
+	row := examineComponent(t, root, "0000000000000000000000000000000000000000", component.Component{
+		Name: "probe", Dir: "probe", Runner: runner.GoTest,
+	})
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured", row)
+	}
+	if !strings.Contains(row.Value, "merge-base") {
+		t.Errorf("value = %q, want the unresolvable revision named as the cause", row.Value)
+	}
+}
+
+// The strongest verdict owns the row and the weaker one is still said: a run
+// holding both a disagreement and a test nothing could examine fails, with the
+// unexamined count in the detail.
+func TestTheFlakyRowReportsTheStrongestVerdictAndSaysTheRest(t *testing.T) {
+	pass, fail := junit.Pass, junit.Fail
+	c := component.Component{Name: "svc", Dir: "svc"}
+	results := []flaky.Result{
+		{Test: flaky.Test{Package: "svc", Name: "TestAgrees", Path: "svc/x_test.go", Line: 3},
+			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
+		{Test: flaky.Test{Package: "svc", Name: "TestDisagrees", Path: "svc/x_test.go", Line: 9},
+			Verdict: flaky.Disagreed, Run1: &pass, Run2: &fail, Command: "gotestsum -- -run '^(TestDisagrees)$' -count=1 ."},
+		{Test: flaky.Test{Package: "svc", Name: "TestUnrun", Path: "svc/x_test.go", Line: 15},
+			Verdict: flaky.Unmeasured, Why: "run 1's report does not record it"},
+	}
+
+	row, found := flakyRow(flakyLabel(c.Name), c, results)
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want the disagreement to own the row", row)
+	}
+	if !strings.Contains(row.Value, "1 of 3") {
+		t.Errorf("value = %q, want the disagreement counted against every new test", row.Value)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "TestUnrun was not examined: run 1's report does not record it") {
+		t.Errorf("detail = %q, want the unexamined test still said", detail)
+	}
+	if len(found) != 1 || found[0].Line != 9 || found[0].Ordinal != 0 {
+		t.Fatalf("findings = %+v, want one on the disagreement's declaration", found)
+	}
+
+	// Nothing measurable at all is unmeasured rather than a pass over tests
+	// nobody looked at.
+	row, found = flakyRow(flakyLabel(c.Name), c, results[2:])
+	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
+		t.Errorf("row = %+v, findings = %+v; want an unmeasured row and no claim", row, found)
+	}
+}
+
+// flakyProbeRepo is a repository whose one component holds the flakyprobe
+// fixture: the merge-base's tree at origin/main, and HEAD's — which declares
+// three tests the base does not — on the branch.
+func flakyProbeRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := t.TempDir()
+	write(t, root, component.FileName,
+		"components:\n  - name: probe\n    dir: probe\n    runner: go-test\n    args: [\"./...\"]\n")
+	copyTree(t, filepath.Join("..", "..", "internal", "flaky", "testdata", "flakyprobe", "base"), root, "probe")
+	gitIn(t, origin, "init", "--quiet", "--bare", "-b", "main")
+	gitIn(t, root, "init", "--quiet", "-b", "main")
+	gitIn(t, root, "config", "user.email", "t@example.com")
+	gitIn(t, root, "config", "user.name", "t")
+	gitIn(t, root, "remote", "add", "origin", origin)
+	gitIn(t, root, "add", "-A")
+	gitIn(t, root, "commit", "--quiet", "-m", "base")
+	gitIn(t, root, "push", "--quiet", "origin", "main")
+	copyTree(t, filepath.Join("..", "..", "internal", "flaky", "testdata", "flakyprobe", "head"), root, "probe")
+	commitChange(t, root, "", "")
+
+	// The pinned wrapper is what makes a plain Go suite write the report the
+	// gate reads its first outcomes from, and fetching it is the one thing
+	// here that needs a network on a cold cache.
+	inv, _ := runner.GoJUnitPlain(nil)
+	r, ok := runner.Lookup(runner.GoTest)
+	if !ok {
+		t.Fatal("no go-test runner")
+	}
+	if err := r.Prepare(context.Background(), inv, filepath.Join(root, "probe"), "", executil.Env{}, io.Discard); err != nil {
+		t.Skipf("the pinned test wrapper is not installed and could not be fetched: %v", err)
+	}
+	return root
+}
+
+// copyTree materialises a committed fixture tree under root/dir.
+func copyTree(t *testing.T, src, root, dir string) {
+	t.Helper()
+	tree := fixture.Tree(t, src)
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(tree, e.Name())) // #nosec G304 -- a fixture tree this test materialised
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, root, path.Join(dir, e.Name()), string(data))
+	}
+}
+
+// examineComponent is one component's verdict, without the suite run that
+// would precede it: the row is decided before anything is rerun for every case
+// that cannot be examined at all.
+func examineComponent(t *testing.T, root, base string, c component.Component) ui.Row {
+	t.Helper()
+	g := newFlakyGate(t.Context(), root, base, true)
+	log := openLog(root, c.Name, "test.log", false, len(c.Name))
+	t.Cleanup(log.Close)
+	row, found := g.examine(t.Context(), root, filepath.Join(root, filepath.FromSlash(c.Dir)), c,
+		runner.Invocation{JUnitReport: "absent.xml"}, nil, log)
+	if len(found) != 0 {
+		t.Fatalf("findings = %+v, want none: nothing was rerun", found)
+	}
+	return row
+}
+
+// jsonFindings is the located claims the document carries, which is the
+// channel a review thread is opened from.
+func jsonFindings(t *testing.T, out string) []finding.Finding {
+	t.Helper()
+	var doc struct {
+		Findings []finding.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not a JSON document: %v\n%s", err, out)
+	}
+	return doc.Findings
 }
 
 // A report that was asked for and did not arrive says why. A component
