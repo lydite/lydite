@@ -208,21 +208,21 @@ func TestAScoreWithNothingComparableIsNewAndNotAFailure(t *testing.T) {
 // be noticed on it is what teaches a reader to skim past it — and it is still a
 // row, because a component silently absent reads as one that scored clean.
 //
-// A Go component whose score could not be taken is the opposite: that is a gate
+// A component whose score could not be taken is the opposite: that is a gate
 // that did not run, and it is amber.
-func TestALanguageWithNoComplexitySourceIsContextAndAFailedScoreIsAmber(t *testing.T) {
+func TestAComponentWithNoLanguageIsContextAndAFailedScoreIsAmber(t *testing.T) {
 	t.Parallel()
-	// A TypeScript component whose suite failed as well: the row must say the
+	// A raw-command component whose suite failed as well: the row must say the
 	// metric has no source for it, not that the suite failed — "not scored —
 	// the suite failed" reads as though fixing the suite would produce a
 	// score.
-	web := unmeasuredComponent(component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}, "the suite failed")
-	row, _ := crapRow(web, nil, true)
+	docs := unmeasuredComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}}, "the suite failed")
+	row, _ := crapRow(docs, nil, true)
 	if row.Status != ui.StatusContext {
-		t.Errorf("crap(web) = %+v, want context — the metric has no source for it", row)
+		t.Errorf("crap(docs) = %+v, want context — the metric has no source for it", row)
 	}
-	if !strings.Contains(row.Value, "typescript") || strings.Contains(row.Value, "the suite failed") {
-		t.Errorf("crap(web) = %q, want it to name the language rather than the suite", row.Value)
+	if !strings.Contains(row.Value, "unstated") || strings.Contains(row.Value, "the suite failed") {
+		t.Errorf("crap(docs) = %q, want it to say the language is unstated rather than name the suite", row.Value)
 	}
 
 	broken := measured("api", runner.Go, 9, 10)
@@ -243,13 +243,13 @@ func TestALanguageWithNoComplexitySourceIsContextAndAFailedScoreIsAmber(t *testi
 }
 
 // The figure over the repository counts the components CRAP could apply to, so
-// a repository whose TypeScript components cannot be scored is not reported as
+// a repository whose raw-command components cannot be scored is not reported as
 // two thirds ungated. It is the same rule a composed coverage figure follows.
 func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 	t.Parallel()
-	web := measured("web", runner.TypeScript, 1, 2)
-	web.CRAPWhy = "lydite scores Go alone, and web is typescript"
-	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), web}, nil, nil)
+	docs := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
+		"the component declares a raw command, which has no instrumented variant")
+	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), docs}, nil, nil)
 	if !ok {
 		t.Fatal("no summary row over a repository with two scored components")
 	}
@@ -273,7 +273,7 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 
 	// A repository lydite can score nothing of gets no row at all: that is a
 	// property of the metric, not a gap this run left.
-	if _, ok := crapSummaryOf([]measurement{web}, nil, nil); ok {
+	if _, ok := crapSummaryOf([]measurement{docs}, nil, nil); ok {
 		t.Error("a repository with no component CRAP applies to got a summary row")
 	}
 	// One it could score and did not is amber, for the reason a floor that
@@ -566,6 +566,169 @@ func goProducer(t *testing.T, root string) string {
 		t.Fatal("no go-test runner")
 	}
 	return r.Producer(filepath.Join(root, "svc"), "")
+}
+
+// untested is a hit map covering the whole of a file and executing none of it,
+// which is the half of a score a walk cannot supply: a tangled function nobody
+// ran is what puts one over the threshold.
+func untested(file string, through int) coverage.LineHits {
+	hits := map[int]int{}
+	for line := 1; line <= through; line++ {
+		hits[line] = 0
+	}
+	return coverage.LineHits{file: hits}
+}
+
+// tangledRust and tangledTypeScript are one untested function each, branchy
+// enough to sit above the threshold: six decision points is complexity seven,
+// and at no coverage that is 56.
+const tangledRust = `// tangled is untested and full of branches, which is the pair CRAP scores.
+pub fn tangled(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    let mut n = 0;
+    if a > 0 { n += 1; }
+    if b > 0 { n += 1; }
+    if c > 0 { n += 1; }
+    if d > 0 { n += 1; }
+    if e > 0 { n += 1; }
+    if f > 0 { n += 1; }
+    n
+}
+`
+
+const tangledTypeScript = `// tangled is untested and full of branches, which is the pair CRAP scores.
+export function tangled(a: number, b: number, c: number, d: number, e: number, f: number): number {
+  let n = 0;
+  if (a > 0) { n += 1; }
+  if (b > 0) { n += 1; }
+  if (c > 0) { n += 1; }
+  if (d > 0) { n += 1; }
+  if (e > 0) { n += 1; }
+  if (f > 0) { n += 1; }
+  return n;
+}
+`
+
+// Rust and TypeScript reach the rows the same way Go does: the walk produces a
+// score from the hit map the instrumented run wrote, and the row gates it
+// against the baseline. Driven through `score` rather than by assigning the
+// report, because the wiring from the language to the row is the whole subject.
+func TestRustAndTypeScriptComponentsAreScoredAndGated(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		lang runner.Lang
+		file string
+		src  string
+	}{
+		{"rust", runner.Rust, "svc/src/lib.rs", tangledRust},
+		{"typescript", runner.TypeScript, "web/src/a.ts", tangledTypeScript},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			write(t, root, c.file, c.src)
+			m := measured(c.name, c.lang, 0, 12)
+			m.Hits = untested(c.file, 12)
+			m.CRAP, m.CRAPWhy = score(root, m)
+			if !m.Scored() {
+				t.Fatalf("score(%s) = (%+v, %q), want a report", c.file, m.CRAP, m.CRAPWhy)
+			}
+
+			// With nothing to compare against, the component is new and gates
+			// nothing — the state every repository is in the first time it runs
+			// a lydite that scores this language.
+			fresh, findings := crapRow(m, nil, true)
+			if fresh.Status != ui.StatusNew || !strings.Contains(fresh.Value, "no baseline yet") {
+				t.Errorf("crap(%s) with no baseline = %+v, want new", c.name, fresh)
+			}
+			if !strings.Contains(fresh.Value, "1 function(s) above 30") {
+				t.Errorf("crap(%s) = %q, want the tangled function counted", c.name, fresh.Value)
+			}
+			if len(findings) != 0 {
+				t.Errorf("crap(%s) claimed %v on a row that gates nothing", c.name, findings)
+			}
+
+			// And above its baseline count it fails, naming the function to act
+			// on — the same claim a Go component makes.
+			row, findings := crapRow(m, gitstate.CRAPBaseline{c.name: {Above: 0}}, true)
+			if row.Status != ui.StatusFail || !strings.Contains(row.Value, "1 more") {
+				t.Fatalf("crap(%s) = %+v, want a failure over the delta", c.name, row)
+			}
+			if len(findings) != 1 || findings[0].Site != "tangled" || findings[0].Path != c.file {
+				t.Errorf("findings = %+v, want the tangled function located", findings)
+			}
+		})
+	}
+}
+
+// A component whose every scorable function is declared is not clean; it is a
+// component nothing was scored in, and it reads the way a Go component in that
+// state does — amber, and never the green of a repository with no debt.
+func TestAnAllExcludedRustComponentIsNotAPass(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "svc/src/lib.rs", `// tangled is untested and full of branches.
+// [lydite:exclude_from_crap][the proving ground exercises this end to end]
+pub fn tangled(a: i64, b: i64) -> i64 {
+    let mut n = 0;
+    if a > 0 { n += 1; }
+    if b > 0 { n += 1; }
+    n
+}
+`)
+	m := measured("svc", runner.Rust, 0, 8)
+	m.Hits = untested("svc/src/lib.rs", 8)
+	m.CRAP, m.CRAPWhy = score(root, m)
+	if m.Scored() {
+		t.Fatalf("score = %+v, want nothing scored — every function is declared", m.CRAP)
+	}
+	if m.CRAP.Excluded != 1 || !strings.Contains(m.CRAPWhy, "every function") {
+		t.Errorf("score = (%+v, %q), want the declared function counted and named", m.CRAP, m.CRAPWhy)
+	}
+	row, _ := crapRow(m, nil, true)
+	if row.Status != ui.StatusUnmeasured {
+		t.Errorf("crap(svc) = %+v, want amber — a gate that scored nothing must not read as one that passed", row)
+	}
+}
+
+// A component whose coverage report describes no function is amber too, in
+// every language: a gate with nothing to measure is not a gate that passed.
+func TestATypeScriptComponentWithNoFunctionToScoreIsNotAPass(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "web/src/a.ts", "export const answer = 42;\n")
+	m := measured("web", runner.TypeScript, 0, 1)
+	m.Hits = untested("web/src/a.ts", 1)
+	m.CRAP, m.CRAPWhy = score(root, m)
+	if m.Scored() || !strings.Contains(m.CRAPWhy, "no function to score") {
+		t.Fatalf("score = (%+v, %q), want the report to say it describes no function", m.CRAP, m.CRAPWhy)
+	}
+	if row, _ := crapRow(m, nil, true); row.Status != ui.StatusUnmeasured {
+		t.Errorf("crap(web) = %+v, want amber rather than a silent pass", row)
+	}
+}
+
+// The denominator is every component CRAP applies to, across all three
+// languages. A repository reporting its Rust and TypeScript components as
+// outside the metric would understate how much of itself the figure covers.
+func TestTheSummaryDenominatorSpansEveryScoredLanguage(t *testing.T) {
+	t.Parallel()
+	rust := scored("svc", 1, 56.0)
+	rust.Lang = runner.Rust
+	web := scored("web", 2, 90.0)
+	web.Lang = runner.TypeScript
+	docs := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
+		"the component declares a raw command, which has no instrumented variant")
+
+	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), rust, web, docs}, nil, nil)
+	if !ok {
+		t.Fatal("no summary row over a repository with three scored components")
+	}
+	for _, want := range []string{"6 function(s) above 30", "3 of 3 component(s)", "worst 90.0"} {
+		if !strings.Contains(row.Value, want) {
+			t.Errorf("crap = %q, want it to say %q", row.Value, want)
+		}
+	}
 }
 
 // A declaration that documents no function reaches a reader. Its author

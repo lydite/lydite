@@ -69,14 +69,14 @@ type measurement struct {
 	//
 	// It rides on the coverage measurement because it is computed from it —
 	// the instrumented run wrote one report, and asking a second question of
-	// it costs no second run. Go alone; every other language carries the zero
-	// value and the reason below.
+	// it costs no second run. Every language lydite walks; a component whose
+	// language is unstated carries the zero value and the reason below.
 	CRAP crap.Report
 	// CRAPWhy says why there is no score, and is empty exactly when there is
-	// one. It is separate from Why because the two come apart in both
-	// directions: a measured Go component whose source will not parse has a
-	// coverage figure and no score, and a TypeScript component has a coverage
-	// figure and never a score.
+	// one. It is separate from Why because the two come apart: a measured
+	// component whose source will not parse has a coverage figure and no
+	// score, and one whose coverage report describes no function has a figure
+	// and nothing to score.
 	CRAPWhy string
 	// Why says why there is no measurement, and is empty exactly when there
 	// is one. It is carried rather than inferred, because "this component was
@@ -139,11 +139,24 @@ func (m measurement) crapEntry() gitstate.CRAPEntry {
 	return gitstate.CRAPEntry{Above: m.CRAP.Above(), Worst: m.CRAP.Worst, Producer: m.Producer}
 }
 
-// scorable reports whether CRAP could ever apply to this component. Go alone,
-// which is a property of the language rather than of the run: lydite walks
-// go/ast in-process, and no other language it gates has a complexity source in
-// hand.
-func (m measurement) scorable() bool { return m.Lang == runner.Go }
+// scorable reports whether CRAP could ever apply to this component, which is a
+// property of the language rather than of the run: lydite walks go/ast for Go
+// and internal/treesitter's tables for Rust and TypeScript, all in-process. A
+// component declaring a raw command states no language at all, so there is
+// nothing to walk.
+//
+// The three are enumerated rather than written as "any language lydite gates",
+// so a fourth added without a walk behind it does not become scorable by
+// default — it would score zero functions, which reads exactly like a component
+// that scored clean.
+func (m measurement) scorable() bool {
+	switch m.Lang {
+	case runner.Go, runner.Rust, runner.TypeScript:
+		return true
+	default:
+		return false
+	}
+}
 
 // entry is what this measurement records as a baseline: the counts, and what
 // produced them. One conversion, so no caller can write counts and forget the
@@ -226,10 +239,9 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 //
 // No second run and no second artefact, which is the same rule the patch gate
 // follows: the instrumented variant wrote one report, and complexity is a walk
-// over source lydite can read. A component in a language lydite has no
-// complexity source for is not scored and says so, rather than being silently
-// absent — a component nobody scored and one that scored clean read identically
-// in a count of zero.
+// over source lydite can read. A component with no language to walk is not
+// scored and says so, rather than being silently absent — a component nobody
+// scored and one that scored clean read identically in a count of zero.
 //
 // It names nothing on stderr. A base tree is measured through this same path
 // and its report is discarded, so a declaration warned about here would belong
@@ -258,17 +270,15 @@ func score(root string, m measurement) (crap.Report, string) {
 }
 
 // noComplexitySource says why a component is not scored, for the one reason
-// that is a property of the metric rather than of the run.
+// that is a property of the metric rather than of the run: every language
+// lydite gates is walked, so the only component left with no complexity source
+// is one whose language is never stated.
 //
-// Built here rather than read off the measurement, because a component in a
-// language lydite scores none of also carries whatever stopped its coverage
-// being measured — and "not scored — the suite failed" reads as though fixing
-// the suite would produce a score.
+// Built here rather than read off the measurement, because such a component
+// also carries whatever stopped its coverage being measured — and "not scored
+// — the suite failed" reads as though fixing the suite would produce a score.
 func noComplexitySource(m measurement) string {
-	if m.Lang == "" {
-		return "lydite scores Go alone, and " + m.Name + " declares a raw command, so its language is unstated"
-	}
-	return "lydite scores Go alone, and " + m.Name + " is " + string(m.Lang)
+	return m.Name + " declares a raw command, so its language is unstated and there is no source to walk"
 }
 
 // producerOf names what wrote this component's report.
@@ -945,11 +955,11 @@ func baseTreeBaseline(w io.Writer, base string, ms []measurement, tails map[stri
 // reads a baseline is indistinguishable from one whose every component is new.
 func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row, []finding.Finding) {
 	label := "crap(" + m.Name + ")"
-	// A language lydite has no complexity source for is context and never
-	// amber: nothing about this repository could make the row green, so
-	// spending the tag that exists to be noticed on it is what teaches a
-	// reader to skim past it. It is still a row, because a component silently
-	// absent reads as one that scored clean.
+	// A component whose language is unstated — a raw `command:`, which names
+	// no source to walk — is context and never amber: nothing about this
+	// repository could make the row green, so spending the tag that exists to
+	// be noticed on it is what teaches a reader to skim past it. It is still a
+	// row, because a component silently absent reads as one that scored clean.
 	if !m.scorable() {
 		return ui.Row{Status: ui.StatusContext, Label: label, Value: "not scored — " + noComplexitySource(m)}, nil
 	}
@@ -1077,13 +1087,13 @@ func worstFunctions(findings []finding.Finding, over int) []string {
 // quality ledger records and a reader asks for, which no per-component row is.
 //
 // The denominator counts the components CRAP could apply to, so a repository
-// whose TypeScript components cannot be scored is not reported as two thirds
+// whose raw-command components cannot be scored is not reported as two thirds
 // ungated. It is the same rule `gateable` applies to a composed coverage
 // figure.
 func crapSummaryRow(scorable int, scored, carried []gitstate.CRAPEntry) (ui.Row, bool) {
 	// Nothing lydite could score, so there is no figure and no gap. A row here
-	// would report a repository with no Go as ungated, which is a property of
-	// the metric rather than of the run.
+	// would report a repository that declares no language as ungated, which is
+	// a property of the metric rather than of the run.
 	if scorable == 0 {
 		return ui.Row{}, false
 	}
