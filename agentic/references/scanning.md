@@ -147,3 +147,68 @@ reach the diff and which land in the standing comment as pre-existing debt. See
 that narrowed itself would need the same widening-on-ignorance argument made again, and nothing
 asks for it yet.
 
+## The licence gate compares a non-conforming set against the merge-base
+
+`internal/licence` is the language-neutral core — `licence.Dependency`, `licence.Set`,
+`licence.Policy`, `licence.Compare` — and it runs no tool and reads no manifest itself. What
+checks a dependency's licence against `licence.policy.allow` (see
+[Configuration](configuration.md)) is each language's own scanner, and the gate is the set of
+`(package, licence)` pairs the current tree carries that fail the policy and the merge-base did
+not: a pair present at the merge-base is grandfathered, and only an introduced one fails the row.
+See [ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-introduces.md) for
+why a count, a version-keyed pair, and a stored `test record` baseline were all rejected in favour
+of this shape.
+
+**Go and Rust run it; TypeScript never gates and never enumerates dependencies.**
+`recordGoLicence` and `recordRustLicence` in `cmd/lydite/scan.go` add a `licence(<component>)`
+row per Go and Rust component, gating pass or fail against the merge-base. The `case
+runner.TypeScript` in the same switch calls `recordNoLicenceSource`, which adds the same
+`licence(<component>)` row rendered `context` and naming that lydite reads no licence source for
+TypeScript — a row present and never green, the same way `crapRow` renders `context` for a
+language it has no complexity source for
+([ADR 0028](../../docs/adr/0028-crap-gates-the-delta-above-the-threshold.md)). A TypeScript
+component's row disappearing entirely would read as a gate that ran and found nothing; the
+`context` row is what keeps that distinguishable.
+
+**A claim is located at the manifest line naming the package** — `go.mod`'s require line, read by
+`readGoMod`, or the `Cargo.lock` stanza, read by `readCargoLock` — and identified by the package
+and licence rather than by that line's text, `Pair.Site()`'s `licence␟<package> <licence>`. The
+version takes no part in the key: a bump whose licence is unchanged is the pair that was already
+there, and a bump that changes it is a pair nothing grandfathered. This is the same departure ADR
+0032 makes for a dependency advisory, and for the same reason — see [Findings](findings.md).
+
+**Go classifies in-process, over `go list -deps -json ./...`.** `internal/golang/licence.go`'s
+`classifyModule` reads each dependency module's `LICENSE*`/`LICENCE*`/`COPYING*` files at its root
+through `github.com/google/licensecheck`, and `Expression` folds several classified files into one
+SPDX `OR` expression — `gopkg.in/yaml.v2` carries Apache-2.0 in `LICENSE` and MIT in
+`LICENSE.libyaml`, and either allowed conforms. `-deps` rather than `-m all` scopes it to modules
+the build actually compiles; a `replace` is followed to its right side, and a vendored module is
+read through the package's own `Dir` rather than `Module.Dir`, which `go list` leaves empty under
+`vendor/`. Nothing classified is `licence.Unknown` — a pair like any other, which grandfathers the
+same way a known licence does, so adopting the gate never fails a repository over a dependency
+whose licence nobody could already read.
+
+**Rust reads cargo-deny's own rejections, under one of three policy sources.**
+`internal/rust/deny.go`'s `PolicyFor` decides which document gates a component: `PolicyFromLydite`
+generates cargo-deny's `[licenses]` table from `licence.policy.allow` into a temporary file and
+runs `cargo deny check licenses --config <generated>` as its own invocation, split out of the
+`check bans` row `denyArgv` still runs under the consumer's own config; `PolicyFromConsumer` is a
+component's own `deny.toml` when lydite states no policy, and it gates **absolutely** rather than
+by delta — cargo-deny already evaluates that file whole on every run, and grandfathering it would
+weaken a check a consumer opted into deliberately; `PolicyFromNone` is neither, and the row is
+`context` naming that nothing ran, because cargo-deny's unconfigured default rejects every licence
+and inventing an implicit gate out of that default is the failure this design exists not to repeat.
+**Only `PolicyFromLydite` is delta-gated** — a policy this repository states and applies absolutely
+would fail every adopting repository on the licences it already ships, the same argument that
+chose the delta everywhere else.
+
+**The base set is recomputed at the merge-base, not read from a stored baseline.** The same
+throwaway-worktree shape `measureBaseTree` uses for CRAP: check the merge-base out, run the same
+licence read there, remove the worktree — cheap here because a licence set costs one manifest read
+and one tool invocation, no suite, no compose service, no instrumented build. A worktree that will
+not check out, a module download that will not resolve, or a cargo-deny that will not run reports
+`licence.Unmeasured` on the row, naming what failed; it is never folded into a passing verdict with
+an empty base set — a gate that could not run must never render as one that ran and found nothing.
+A run with no diff base at all — `lydite scan` on `main` — is `context`, reporting the full
+non-conforming set and gating nothing, the shape every other diffless scan already has.
+

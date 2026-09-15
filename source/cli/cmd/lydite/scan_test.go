@@ -747,6 +747,30 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	}
 }
 
+// A TypeScript component still gets a licence row — never a section that
+// quietly disappears — but it renders context, the way a language crapRow
+// has no complexity source for does: nothing about this repository could
+// make the row green, because lydite reads no licence source for TypeScript
+// at all.
+func TestATypeScriptComponentGetsAContextLicenceRow(t *testing.T) {
+	var rep ui.Report
+	recordNoLicenceSource(&rep, component.Component{Name: "web"})
+
+	rows := rep.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly one", rows)
+	}
+	if rows[0].Label != "licence(web)" {
+		t.Fatalf("label = %q, want licence(web)", rows[0].Label)
+	}
+	if rows[0].Status != ui.StatusContext {
+		t.Fatalf("status = %q, want %q — a gate that never ran must not render as one that passed", rows[0].Status, ui.StatusContext)
+	}
+	if !strings.Contains(rows[0].Value, "no licence source") {
+		t.Fatalf("value = %q, want it to say lydite reads no licence source for the component", rows[0].Value)
+	}
+}
+
 // A repository may say how its own code builds; it may not say where lydite's
 // scanners come from. `go install`, `cargo install` and `npm ci` read GOPROXY,
 // GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry, so a declared

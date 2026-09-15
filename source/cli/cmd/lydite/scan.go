@@ -191,8 +191,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Rust:
 					recordRustLicence(ctx, rep, dir, c, cdir, env, cfg, baseSHA, changed)
 				case runner.TypeScript:
-					// TypeScript has no licence source lydite reads, so no
-					// licence set is measured for it.
+					recordNoLicenceSource(rep, c)
 				}
 			}
 
@@ -489,6 +488,18 @@ func policySourceSays(s rust.PolicySource) string {
 		return "no " + rust.DenyConfigFile + " either, so no licence check ran"
 	}
 	return string(s)
+}
+
+// recordNoLicenceSource is the licence row for a component in a language
+// lydite reads no dependency set for: context and never amber, the same
+// reason a language crapRow has no complexity source for renders the same
+// way — nothing about this repository could make the row green, and a
+// component silently absent from the report would read as one that scored
+// clean.
+func recordNoLicenceSource(rep *ui.Report, c component.Component) {
+	label := licence.Gate + "(" + c.Name + ")"
+	rep.Add(ui.Row{Status: ui.StatusContext, Label: label,
+		Value: "not measured — lydite reads no licence source for " + c.Name + ", a " + string(runner.TypeScript) + " component"})
 }
 
 // licenceRow renders one component's comparison.
