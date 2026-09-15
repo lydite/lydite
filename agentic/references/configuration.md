@@ -12,7 +12,10 @@ same tool is an arrangement nobody can predict the shape of from either half.
 findings is not it (that's what a fix-up pass + inline `#nosec`/`nosemgrep` annotations in the
 scanned repo are for): it **opts out** of what lydite's default already does (run every check over
 every declared component), and carries the numeric gate knobs
-(`coverage.tolerance`, `coverage.patch.tolerance`, `coverage.floor`).
+(`coverage.tolerance`, `coverage.patch.tolerance`, `coverage.floor`). `licence.policy.allow` is
+the one **opt-in**: absent or empty, the licence gate reports "not configured" and gates nothing,
+because inventing a default here has already failed this repository once — see
+[ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-introduces.md).
 
 Keys that described a pipeline lydite no longer has are **rejected by name** rather than ignored:
 `coverage.source` and the `coverage.{go,rust}` report paths, which located a report some other job
@@ -20,6 +23,9 @@ produced, and `rust.exclude` / `typescript.exclude` / `go.exclude`, which narrow
 manifests. lydite writes every coverage report itself and reads its units from
 `.lydite/components.yml`, so those keys
 have nothing left to say and are **rejected by name** rather than ignored (see [coverage.md](coverage.md)).
+A top-level `license:` (the American spelling) is rejected the same way, naming `licence:` as the
+correct key: `Config` has no `License` field, so `yaml.Unmarshal` would otherwise drop it silently
+and the policy would read back empty.
 
 See `internal/config/config.go` for the full schema; shape:
 
@@ -41,6 +47,15 @@ semgrep:
 secrets:
   enabled: true           # set false to run no secret scan at all. A false positive belongs in
                           # gitleaks' own .gitleaks.toml/.gitleaksignore at the scan root, not here.
+licence:
+  policy:
+    allow: []              # SPDX identifiers this organisation may ship, e.g.
+                          # [Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0].
+                          # Absent or empty is "not configured" — there is no separate
+                          # enabled key, and the list itself carries that state (see
+                          # docs/adr/0038). Each entry is validated as a real SPDX licence
+                          # identifier at load time; "license:" (the American spelling) is
+                          # rejected by name.
 toolchain:
   enabled: true          # set false to keep the diagnostics but never download/install
                           # (air-gapped runners, or images that preprovision everything)

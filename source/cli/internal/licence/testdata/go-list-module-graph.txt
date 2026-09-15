@@ -1,0 +1,21 @@
+# go list -m -json all over lydite's own module: the module graph, not the build.
+github.com/cpuguy83/go-md2man/v2 v2.0.6	Dir=(absent)
+github.com/creack/pty v1.1.9	Dir=(absent)
+github.com/google/go-cmp v0.6.0	Dir=(absent)
+github.com/inconshreveable/mousetrap v1.1.0	Dir=$GOMODCACHE/github.com/inconshreveable/mousetrap@v1.1.0
+github.com/kr/pretty v0.1.0	Dir=(absent)
+github.com/kr/text v0.2.0	Dir=$GOMODCACHE/github.com/kr/text@v0.2.0
+github.com/odvcencio/gotreesitter v0.52.0	Dir=$GOMODCACHE/github.com/odvcencio/gotreesitter@v0.52.0
+github.com/russross/blackfriday/v2 v2.1.0	Dir=(absent)
+github.com/spf13/cobra v1.10.2	Dir=$GOMODCACHE/github.com/spf13/cobra@v1.10.2
+github.com/spf13/pflag v1.0.9	Dir=$GOMODCACHE/github.com/spf13/pflag@v1.0.9
+github.com/yuin/goldmark v1.4.13	Dir=(absent)
+go.yaml.in/yaml/v3 v3.0.4	Dir=(absent)
+golang.org/x/mod v0.41.0	Dir=$GOMODCACHE/golang.org/x/mod@v0.41.0
+golang.org/x/net v0.58.0	Dir=(absent)
+golang.org/x/sync v0.22.0	Dir=(absent)
+golang.org/x/sys v0.47.0	Dir=(absent)
+golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5	Dir=(absent)
+golang.org/x/tools v0.49.0	Dir=$GOMODCACHE/golang.org/x/tools@v0.49.0
+gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127	Dir=(absent)
+gopkg.in/yaml.v3 v3.0.1	Dir=$GOMODCACHE/gopkg.in/yaml.v3@v3.0.1

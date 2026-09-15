@@ -1,0 +1,16 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/hashicorp/go-version"
+	"github.com/juju/errors"
+	"gopkg.in/yaml.v2"
+)
+
+func main() {
+	_ = yaml.Unmarshal
+	_ = errors.New
+	_, _ = version.NewVersion("1.0.0")
+	fmt.Println("probe")
+}
