@@ -326,3 +326,29 @@ func TestRunOutputWithoutABoundIsUnbounded(t *testing.T) {
 		t.Errorf("both streams should be captured, got %q", r.Output)
 	}
 }
+
+// The peak against the limit is the whole discriminator, so its boundary is
+// part of the meaning: a run whose peak reaches the fraction has hit the
+// bound, and one a byte under it has not.
+func TestHitMemoryLimitReadsThePeakAgainstTheLimit(t *testing.T) {
+	const limit = 3 << 30
+	for _, tc := range []struct {
+		name string
+		r    Result
+		want bool
+	}{
+		{"at the threshold", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit / 3}, true},
+		{"a byte under it", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit/3 - 1}, false},
+		{"well over it", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit - 1}, true},
+		{"a failure that never approached the bound", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: 12 << 20}, false},
+		{"a bound the platform could not apply", Result{Err: os.ErrClosed, MemoryLimit: limit, MaxRSS: limit}, false},
+		{"no bound asked for", Result{Err: os.ErrClosed, MaxRSS: limit}, false},
+		{"a run that succeeded", Result{MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.HitMemoryLimit(); got != tc.want {
+				t.Errorf("HitMemoryLimit = %v, want %v (peak %d, limit %d)", got, tc.want, tc.r.MaxRSS, tc.r.MemoryLimit)
+			}
+		})
+	}
+}
