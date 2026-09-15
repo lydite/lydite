@@ -12,6 +12,12 @@
 // output instead would be four parsers of four formats that are each the
 // runner's to change without notice.
 //
+// The same elements answer a second question, for a second reader: what became
+// of one named test. The flaky gate asks whether a test the change introduced
+// agrees with itself across two runs, which is a comparison of two reports test
+// by test rather than of two totals — so ReadOutcomes keeps the names Read has
+// no use for, off the same document and by the same rule.
+//
 // Counts come from the <testcase> elements and never from the summary
 // attributes on <testsuites>. Producers disagree about those: nextest omits
 // ignored tests from its `tests` attribute while gotestsum includes them, and
@@ -63,6 +69,144 @@ func ReadFile(path string) (Counts, error) {
 		return Counts{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
+}
+
+// Outcome is what a report records became of one test.
+//
+// Three values and not four: a pass is the absence of a child element saying
+// otherwise, which is the one part of the format every producer spells the
+// same way, and a test the report does not hold at all is absence from the map
+// rather than a value in it. A gate that reads "did this test agree with
+// itself" has to tell "it passed" from "nothing ran it", and an Outcome that
+// could mean either is what would let it report the second as the first.
+type Outcome int
+
+const (
+	// Pass is a testcase the producer recorded nothing against.
+	Pass Outcome = iota
+	// Fail is a failure or an error, which are one outcome here for the
+	// reason Counts.Failed folds them: both are a test that did not pass.
+	Fail
+	// Skip is a test reported without being run.
+	Skip
+)
+
+// String names the outcome as a report's reader would say it.
+func (o Outcome) String() string {
+	switch o {
+	case Fail:
+		return "failed"
+	case Skip:
+		return "skipped"
+	default:
+		return "passed"
+	}
+}
+
+// ReadOutcomesFile reads one JUnit report's per-test outcomes.
+func ReadOutcomesFile(path string) (map[string]Outcome, error) {
+	f, err := os.Open(path) // #nosec G304 -- the path is one a runner declared it writes to
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	out, err := ReadOutcomes(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
+}
+
+// ReadOutcomes maps each test the report holds to what became of it, by the
+// name the producer recorded.
+//
+// The name alone and not the class beside it, because the caller asking this
+// question knows a test by the name `go test -run` matches — the classname is
+// the producer's own idea of a suite, an import path for gotestsum and a binary
+// for nextest, and a caller holding a package directory cannot derive either.
+// A report recording one name twice keeps the worse outcome, Fail over Skip
+// over Pass: the two records are a real ambiguity, and resolving it towards the
+// outcome that reports rather than the one that stays quiet leaves a caller
+// with noise instead of a silence it cannot see.
+//
+// Subtests are in the map under their own full names — `TestParent/child`
+// beside `TestParent` — because they are testcases of their own and dropping
+// them would make this reader disagree with Read about what the report holds.
+// A parent's own record already aggregates its children, so a caller keyed on
+// top-level names reads the aggregate and never has to roll one up.
+func ReadOutcomes(r io.Reader) (map[string]Outcome, error) {
+	dec := xml.NewDecoder(r)
+	out := map[string]Outcome{}
+	// The name of the <testcase> currently open, empty outside one, so that an
+	// element named `failure` elsewhere in the document cannot be read as some
+	// test's outcome — the bound Read already keeps.
+	name := ""
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "testcase":
+				name = attr(t, "name")
+				if name != "" {
+					record(out, name, Pass)
+				}
+			case "failure", "error":
+				if name != "" {
+					record(out, name, Fail)
+				}
+			case "skipped":
+				if name != "" {
+					record(out, name, Skip)
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "testcase" {
+				name = ""
+			}
+		}
+	}
+	return out, nil
+}
+
+// record keeps the worse of what is already known about a name and what has
+// just been read. A testcase carrying both a failure and a skipped child, and
+// two packages recording one name, resolve the same way.
+func record(out map[string]Outcome, name string, o Outcome) {
+	if prev, ok := out[name]; ok && worse(prev, o) {
+		return
+	}
+	out[name] = o
+}
+
+// worse orders the outcomes for record: Fail over Skip over Pass.
+func worse(a, b Outcome) bool { return rank(a) >= rank(b) }
+
+func rank(o Outcome) int {
+	switch o {
+	case Fail:
+		return 2
+	case Skip:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// attr reads one attribute off an element, answering "" for an absent one.
+func attr(e xml.StartElement, name string) string {
+	for _, a := range e.Attr {
+		if a.Name.Local == name {
+			return a.Value
+		}
+	}
+	return ""
 }
 
 // Read counts the tests in a JUnit report.
