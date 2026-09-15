@@ -232,14 +232,22 @@ func TestADeclarationThatReachesNoFunctionIsNamed(t *testing.T) {
 }
 
 // Unused is sorted, because DeclaredExclusions builds it from a map keyed by
-// line and Go's own iteration order over one is randomized. Six entries make
-// an already-sorted iteration order astronomically unlikely by chance, so a
-// dropped sort fails this reliably rather than only sometimes.
+// line and Go's own iteration order over one is unspecified.
+//
+// A handful of entries is not enough to catch a dropped sort reliably: a Go
+// map small enough to fit in one bucket iterates as a random *rotation* of
+// one order its keys' hashes fix for the process, not a uniform-random
+// permutation — so a six-entry version of this test coincidentally read as
+// sorted often enough to pass CI's mutation gate with the sort removed. Forty
+// entries force the map across several buckets, where bucket order is
+// randomized too, so the only order this test accepts is one in 40! —
+// negligible rather than merely unlikely.
 func TestUnusedIsSortedNotIterationOrder(t *testing.T) {
+	const n = 40
 	var src strings.Builder
 	var want []int
 	line := 1
-	for i := range 6 {
+	for i := range n {
 		want = append(want, line)
 		src.WriteString(declare)
 		src.WriteString("\n")
@@ -251,7 +259,7 @@ func TestUnusedIsSortedNotIterationOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(declared.Unused, want) {
-		t.Errorf("Unused = %v, want %v in ascending order", declared.Unused, want)
+		t.Errorf("Unused has %d entries not in ascending order, want %v", len(declared.Unused), want)
 	}
 }
 
