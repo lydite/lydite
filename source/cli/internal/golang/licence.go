@@ -213,10 +213,8 @@ func firstLine(s string) string {
 	if s == "" {
 		return ""
 	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return ": " + s
+	line, _, _ := strings.Cut(s, "\n")
+	return ": " + line
 }
 
 // LicenceFindings is each introduced pair as a claim on the manifest line

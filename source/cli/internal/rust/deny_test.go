@@ -1,6 +1,7 @@
 package rust
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/licence"
@@ -744,6 +746,275 @@ func TestDenyBansFindingIsIdentityAndLocationUnchanged(t *testing.T) {
 // fingerprint recomputed from the same fields it is meant to pin agrees with
 // itself however they move.
 const bansFingerprint = "v1:28cf4c0066a801a5"
+
+// denyStub puts a cargo-deny in the cache the pin is keyed by, replaying a
+// captured stream on stderr and exiting with the status that capture was taken
+// with.
+//
+// ensure() finds it exactly where a real install would have left it, so what
+// runs is LicenceSet's own path — the generated policy, the argv, the stream
+// read back — without the machine needing the pinned tool. It answers the
+// directory it wrote itself into, where it records the argv it was called with
+// and the configuration it was pointed at.
+func denyStub(t *testing.T, capture string, status int) string {
+	t.Helper()
+	home := t.TempDir()
+	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
+	// $HOME/Library/Caches on macOS.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	bin, err := (cargotool.Tool{Name: "cargo-deny", Version: cargoDenyVersion}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	dir := filepath.Dir(bin)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("creating the cache directory: %v", err)
+	}
+	stream, err := os.ReadFile(filepath.Join("..", "licence", "testdata", capture))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stream"), stream, 0o600); err != nil {
+		t.Fatalf("writing the stream: %v", err)
+	}
+	script := "#!/bin/sh\n" +
+		"dir=$(dirname \"$0\")\n" +
+		"printf '%s\\n' \"$@\" > \"$dir/argv\"\n" +
+		"prev=\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"--config\" ]; then cp \"$a\" \"$dir/config.toml\"; fi\n" +
+		"  prev=$a\n" +
+		"done\n" +
+		"cat \"$dir/stream\" >&2\n" +
+		"exit " + strconv.Itoa(status) + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
+		t.Fatalf("writing the stub: %v", err)
+	}
+	return dir
+}
+
+// stubbed is what the stub recorded of one run: the argv it was called with and
+// the configuration it was pointed at.
+func stubbed(t *testing.T, dir, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("the stub recorded no %s: %v", name, err)
+	}
+	return string(data)
+}
+
+func TestLicenceSetRunsTheGeneratedPolicyAndReadsWhatCargoDenyRejected(t *testing.T) {
+	// The generated [licenses] table is what cargo-deny evaluates, so the run
+	// has to carry it as --config — and the set is what came back, never a
+	// second evaluation here of an expression cargo-deny already refused.
+	dir := denyStub(t, "deny-licenses-rejected.ndjson", 4)
+	policy := licence.NewPolicy([]string{"MIT"})
+	set, source, err := LicenceSet(context.Background(), denyProbeDir(t), executil.Env{}, policy)
+	if err != nil {
+		t.Fatalf("reading the set: %v", err)
+	}
+	if source != PolicyFromLydite {
+		t.Errorf("source = %q, want %q", source, PolicyFromLydite)
+	}
+	if set.Len() != 1 || !set.Has(licence.Pair{Package: "cbindgen", Licence: "MPL-2.0"}) {
+		t.Errorf("set = %+v, want cbindgen's MPL-2.0 alone", set.Dependencies())
+	}
+	argv := strings.Fields(stubbed(t, dir, "argv"))
+	if len(argv) != 7 || argv[0] != "deny" || argv[3] != "--config" || argv[5] != "check" || argv[6] != "licenses" {
+		t.Errorf("argv = %q, want the generated config before the subcommand", argv)
+	}
+	if got := stubbed(t, dir, "config.toml"); got != denyLicencePolicy(policy) {
+		t.Errorf("config =\n%s\nwant the generated table\n%s", got, denyLicencePolicy(policy))
+	}
+}
+
+func TestTheGeneratedPolicyIsGoneOnceTheRunIsOver(t *testing.T) {
+	// The file is cargo-deny's to read for the length of one run. Left behind,
+	// every scan of every component adds one more to the machine's temporary
+	// directory.
+	denyStub(t, "deny-licenses-rejected.ndjson", 4)
+	if _, _, err := LicenceSet(context.Background(), denyProbeDir(t), executil.Env{}, licence.NewPolicy([]string{"MIT"})); err != nil {
+		t.Fatalf("reading the set: %v", err)
+	}
+	left, err := filepath.Glob(filepath.Join(os.TempDir(), "lydite-deny-*.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("generated policies left behind: %v", left)
+	}
+}
+
+func TestLicenceSetRunsNothingWhereNoDocumentDecides(t *testing.T) {
+	// cargo-deny's own default rejects every licence, MIT included, so a run
+	// under it would report the whole dependency graph against a policy nothing
+	// in the repository chose. No stub is installed here: a run at all is the
+	// failure.
+	set, source, err := LicenceSet(context.Background(), t.TempDir(), executil.Env{}, licence.NewPolicy(nil))
+	if err != nil {
+		t.Fatalf("a component with neither document answered an error: %v", err)
+	}
+	if source != PolicyFromNone {
+		t.Errorf("source = %q, want %q", source, PolicyFromNone)
+	}
+	if set.Len() != 0 {
+		t.Errorf("set = %+v, want none from a check that never ran", set.Dependencies())
+	}
+}
+
+func TestLicenceSetAnswersTheErrorWhereTheToolCannotBeResolved(t *testing.T) {
+	// A cache directory that cannot even be named is a cargo-deny lydite cannot
+	// reach, and the row it answers is unmeasured rather than a pass over a set
+	// nothing measured.
+	dir := t.TempDir()
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	if _, _, err := LicenceSet(context.Background(), dir, executil.Env{}, licence.NewPolicy([]string{"MIT"})); err == nil {
+		t.Fatal("a cargo-deny that could not be located answered a set")
+	}
+	// And it reaches the caller as an error rather than a comparison, so the
+	// row is unmeasured rather than a verdict over a set nothing measured.
+	comparison, _, found, err := LicenceCheck(context.Background(), dir, executil.Env{},
+		licence.NewPolicy([]string{"MIT"}), licence.NoDiffBase())
+	if err == nil {
+		t.Fatalf("a check that ran nothing answered %+v", comparison)
+	}
+	if len(found) != 0 {
+		t.Errorf("claims = %+v, want none from a check that never ran", found)
+	}
+}
+
+func TestAPolicyThatCannotBeWrittenLeavesTheSetUnmeasured(t *testing.T) {
+	// cargo-deny under its own default rejects every licence, so a run whose
+	// generated policy never reached the disk must not happen at all.
+	denyStub(t, "deny-licenses-rejected.ndjson", 4)
+	probe := denyProbeDir(t)
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	if _, _, err := LicenceSet(context.Background(), probe, executil.Env{}, licence.NewPolicy([]string{"MIT"})); err == nil {
+		t.Fatal("a run whose policy was written nowhere answered a set")
+	}
+}
+
+func TestLicenceCheckFailsOnTheCrateTheChangeIntroduced(t *testing.T) {
+	// The whole gate end to end under this repository's own policy: cargo-deny
+	// rejects the crate, the merge-base did not carry it, and the claim lands on
+	// the lockfile stanza naming it.
+	denyStub(t, "deny-licenses-rejected.ndjson", 4)
+	comparison, source, found, err := LicenceCheck(context.Background(), denyProbeDir(t), executil.Env{},
+		licence.NewPolicy([]string{"MIT"}), licence.MeasuredBase(licence.Set{}))
+	if err != nil {
+		t.Fatalf("checking the probe: %v", err)
+	}
+	if source != PolicyFromLydite {
+		t.Errorf("source = %q, want %q", source, PolicyFromLydite)
+	}
+	if comparison.Verdict != licence.VerdictFail {
+		t.Fatalf("verdict = %q, want %q — the merge-base carried no crate at all", comparison.Verdict, licence.VerdictFail)
+	}
+	if len(found) != 1 || found[0].Path != cargoLockFile || found[0].Line != 12 {
+		t.Fatalf("claims = %+v, want the one rejected crate at its lockfile stanza", found)
+	}
+}
+
+func TestLicenceCheckPublishesNoClaimWhereTheMergeBaseHeldThePair(t *testing.T) {
+	// A grandfathered pair is nobody's to answer for: the verdict passes, and a
+	// claim under it would ask an author for a crate the gate decided nothing
+	// about.
+	denyStub(t, "deny-licenses-rejected.ndjson", 4)
+	base := licence.MeasuredBase(licence.NewSet(licence.Dependency{
+		Package: "cbindgen", Version: "0.27.0", Licence: "MPL-2.0",
+	}))
+	comparison, _, found, err := LicenceCheck(context.Background(), denyProbeDir(t), executil.Env{},
+		licence.NewPolicy([]string{"MIT"}), base)
+	if err != nil {
+		t.Fatalf("checking the probe: %v", err)
+	}
+	if comparison.Verdict != licence.VerdictPass {
+		t.Fatalf("verdict = %q, want %q", comparison.Verdict, licence.VerdictPass)
+	}
+	if len(found) != 0 {
+		t.Fatalf("claims = %+v, want none under a passing verdict", found)
+	}
+}
+
+func TestAGeneratedPolicyThatCannotBeWrittenNamesWhatFailed(t *testing.T) {
+	// A licence check that cannot run must say so. A generated policy silently
+	// missing is cargo-deny reading its own default, which rejects every licence.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	_, remove, err := writeDenyLicencePolicy(licence.NewPolicy([]string{"MIT"}))
+	if err == nil {
+		t.Fatal("a policy written nowhere reported success")
+	}
+	if !strings.Contains(err.Error(), "generated licence policy") {
+		t.Errorf("error = %v, want the step that failed named", err)
+	}
+	// Answered whatever happened, so a caller's deferred removal is safe to
+	// call on the error path too.
+	remove()
+}
+
+func TestLicenceClaimsAlikeInPathAndSiteAreSeparatedByTheirOrdinal(t *testing.T) {
+	// The same pair twice is two claims on one stanza sharing one site.
+	// Unnumbered, the second carries the first's fingerprint and the review
+	// surface drops it as a duplicate.
+	pair := licence.Dependency{Package: "cbindgen", Version: "0.27.0", Licence: "MPL-2.0"}
+	got := LicenceFindings(denyProbeDir(t), []licence.Dependency{pair, pair})
+	if len(got) != 2 {
+		t.Fatalf("got %d claims, want one per pair", len(got))
+	}
+	if got[0].Ordinal != 0 || got[1].Ordinal != 1 {
+		t.Fatalf("ordinals = %d and %d, want 0 and 1", got[0].Ordinal, got[1].Ordinal)
+	}
+	if got[0].Fingerprint() == got[1].Fingerprint() {
+		t.Error("both claims share a fingerprint, so the second is dropped as a duplicate")
+	}
+}
+
+func TestLicenceClaimNamesTheVersionWhereThereIsOne(t *testing.T) {
+	// The version is what a reader needs to find the crate the claim is about,
+	// and a crate named by no version is stated without one rather than with a
+	// dangling separator.
+	got := LicenceFindings(denyProbeDir(t), []licence.Dependency{
+		{Package: "cbindgen", Version: "0.27.0", Licence: "MPL-2.0"},
+		{Package: "cbindgen", Licence: "MPL-2.0"},
+	})
+	want := []string{
+		"cbindgen 0.27.0 is MPL-2.0, which the licence policy does not allow",
+		"cbindgen is MPL-2.0, which the licence policy does not allow",
+	}
+	for i, f := range got {
+		if f.Message != want[i] {
+			t.Errorf("message = %q, want %q", f.Message, want[i])
+		}
+	}
+}
+
+func TestFirstLineIsTheToolsOwnLeadingDiagnostic(t *testing.T) {
+	// The tool's own first line reaches the error, because an `unmeasured` row
+	// has to name what failed. Empty stays empty, so an error over a silent
+	// failure does not end in a dangling separator.
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"  \n\n ", ""},
+		{"error: failed to read config", ": error: failed to read config"},
+		{"\n error: failed to read config\nsecond line\nthird\n", ": error: failed to read config"},
+	}
+	for _, c := range cases {
+		if got := firstLine(c.in); got != c.want {
+			t.Errorf("firstLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
 
 // readFixture is a captured stream, read for its text alone.
 func readFixture(t *testing.T, name string) string {

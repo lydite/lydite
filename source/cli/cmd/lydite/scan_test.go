@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/orphan"
@@ -1169,6 +1171,306 @@ func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) 
 	}
 	if got, ok := perComponent["cli"][secrets.Gate]; ok {
 		t.Errorf("perComponent[cli][%s] = %d, want no key: the claim names no component", secrets.Gate, got)
+	}
+}
+
+// licenceConfig is a configuration stating a policy the way a repository does:
+// permissive enough to pass the probe's dually licensed module and to reject both of its
+// copyleft ones.
+func licenceConfig() config.Config {
+	cfg := config.Default()
+	cfg.Licence.Policy.Allow = []string{"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT"}
+	return cfg
+}
+
+// goProbeFiles is the captured Go probe module, as the files one commit is made
+// of, rooted at prefix. Its dependency set covers strong copyleft, weak
+// copyleft and a module carrying two licence files.
+func goProbeFiles(t *testing.T, prefix string) map[string]string {
+	t.Helper()
+	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "goprobe"))
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		t.Fatalf("reading the probe: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(tree, e.Name()))
+		if err != nil {
+			t.Fatalf("reading the probe: %v", err)
+		}
+		out[path.Join(prefix, e.Name())] = string(data)
+	}
+	return out
+}
+
+// The base a Go component is compared against is the set its own build
+// compiles at the merge-base, read in the checked-out tree rather than from a
+// stored figure: an entry written by a lydite that computed no licences reads
+// back as the empty set, and the delta on the day of the upgrade is then the
+// absolute set.
+func TestTheGoLicenceBaseReadsTheModuleAtTheMergeBase(t *testing.T) {
+	files := goProbeFiles(t, "api")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := goLicenceBase(context.Background(), tree, "api", nil, licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
+	}
+	want := []string{"github.com/hashicorp/go-version", "github.com/juju/errors"}
+	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, want) {
+		t.Fatalf("base set = %v, want %v — the probe's copyleft modules, read under the stated policy", got, want)
+	}
+}
+
+// The gate's whole shape for a Go component: a module the merge-base did not
+// carry is a set every pair of which the change introduced, the row fails, and
+// each claim is anchored to what the change touched — without which every claim
+// reaches the review surface at no anchor at all.
+func TestTheGoLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/README.md": "the component this change adds a module to\n"},
+		goProbeFiles(t, "api"))
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	c := component.Component{Name: "api", Dir: "api"}
+	// Line 7 of the probe's manifest is the require naming github.com/juju/errors.
+	changed := map[string][]int{"api/go.mod": {7}}
+	recordGoLicence(context.Background(), &rep, tree, c, filepath.Join(root, "api"), nil, licenceConfig(), changed)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
+		t.Fatalf("rows = %+v, want one failing licence row", rows)
+	}
+	if rows[0].Label != "licence(api)" || !strings.Contains(rows[0].Value, "introduced") {
+		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
+	}
+	found := rep.Findings()
+	if len(found) != 2 {
+		t.Fatalf("claims = %+v, want one per introduced pair", found)
+	}
+	var anchors []finding.Anchor
+	for _, f := range found {
+		if f.Path != "api/go.mod" {
+			t.Errorf("claim located at %q, want the component's manifest from the scan root", f.Path)
+		}
+		anchors = append(anchors, f.Anchor)
+	}
+	if !slices.Contains(anchors, finding.AnchorLine) {
+		t.Fatalf("anchors = %v, want the claim on the line the change touched anchored to it", anchors)
+	}
+	if slices.Contains(anchors, finding.AnchorNowhere) {
+		t.Fatalf("anchors = %v, want every claim in a file the change touched anchored to it at least", anchors)
+	}
+}
+
+// A component whose own dependencies could not be enumerated has had nothing
+// decided about it, and a red row would ask its author to answer for a claim
+// the gate never made.
+func TestTheGoLicenceRowIsUnmeasuredWhereTheDependenciesCouldNotBeRead(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/README.md": "no module here\n"},
+		map[string]string{"api/README.md": "no module here either\n"})
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordGoLicence(context.Background(), &rep, tree, component.Component{Name: "api", Dir: "api"},
+		filepath.Join(root, "api"), nil, licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
+	}
+	if len(rep.Findings()) != 0 {
+		t.Fatalf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
+	}
+}
+
+// A Rust component governed by neither document has had no licence check run at
+// all, and the row says which document is missing rather than rendering the
+// green of a check that ran and found nothing.
+func TestTheRustLicenceRowNamesTheDocumentThatDecidedNothing(t *testing.T) {
+	var rep ui.Report
+	dir := t.TempDir()
+	recordRustLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
+		component.Component{Name: "svc", Dir: "."}, dir, executil.Env{}, config.Default(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context licence row", rows)
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) || !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
+		t.Fatalf("value = %q, want both files an edit could go in named", rows[0].Value)
+	}
+}
+
+// cargo-deny not being reachable is a gate that could not run, which is amber
+// and names what failed — never the pass of a component whose crates nothing
+// read.
+func TestTheRustLicenceRowIsUnmeasuredWhereCargoDenyCouldNotRun(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"svc/Cargo.lock": "version = 4\n"},
+		map[string]string{"svc/Cargo.lock": "version = 4\n"})
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+	// A cache directory that cannot even be named, so nothing is installed and
+	// nothing on the machine is run.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	var rep ui.Report
+	recordRustLicence(context.Background(), &rep, tree, component.Component{Name: "svc", Dir: "svc"},
+		filepath.Join(root, "svc"), executil.Env{}, licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
+	}
+	if len(rows[0].Detail) == 0 {
+		t.Fatalf("row = %+v, want the reason the component could not be read", rows[0])
+	}
+}
+
+// Which document decided a Rust component's licences cannot be read off the
+// verdict, and a reader told only that nothing was gated has no way to find the
+// file an edit would go in.
+func TestPolicySourceNamesTheDocumentThatDecided(t *testing.T) {
+	cases := []struct {
+		source rust.PolicySource
+		want   string
+	}{
+		{rust.PolicyFromLydite, config.FileName},
+		{rust.PolicyFromConsumer, rust.DenyConfigFile},
+		{rust.PolicyFromNone, rust.DenyConfigFile},
+		// A source this does not recognise names itself rather than reading as
+		// one of the three it does.
+		{rust.PolicySource("something later"), "something later"},
+	}
+	for _, c := range cases {
+		if got := policySourceSays(c.source); !strings.Contains(got, c.want) {
+			t.Errorf("policySourceSays(%q) = %q, want %q named in it", c.source, got, c.want)
+		}
+	}
+	if policySourceSays(rust.PolicyFromConsumer) == policySourceSays(rust.PolicyFromNone) {
+		t.Error("a component's own deny.toml and no deny.toml at all read the same, and they are answered by different edits")
+	}
+}
+
+// Only a gating verdict renders green or red. A policy nobody stated, a run
+// given no diff base and a base that could not be built each gate nothing, and
+// rendering any of them as `pass` is a gate that never ran reported as one that
+// ran and found nothing.
+func TestOnlyAGatingLicenceVerdictRendersGreenOrRed(t *testing.T) {
+	pairs := []licence.Dependency{{Package: "copyleft", Version: "v1.0.0", Licence: "GPL-3.0-only"}}
+	cases := []struct {
+		comparison licence.Comparison
+		status     ui.Status
+		says       string
+	}{
+		{licence.Comparison{Verdict: licence.VerdictPass}, ui.StatusPass, "passed"},
+		{licence.Comparison{Verdict: licence.VerdictFail, Pairs: pairs}, ui.StatusFail, "introduced"},
+		{licence.Comparison{Verdict: licence.VerdictUnmeasured, Reason: "checking out deadbee"}, ui.StatusUnmeasured, "deadbee"},
+		{licence.Comparison{Verdict: licence.VerdictContext, Pairs: pairs}, ui.StatusContext, "no diff base"},
+		{licence.Comparison{Verdict: licence.VerdictNotConfigured}, ui.StatusContext, config.FileName},
+	}
+	for _, c := range cases {
+		row := licenceRow("licence(api)", c.comparison)
+		if row.Status != c.status {
+			t.Errorf("%q rendered %q, want %q", c.comparison.Verdict, row.Status, c.status)
+		}
+		if !strings.Contains(row.Value, c.says) {
+			t.Errorf("%q reads %q, want %q in it", c.comparison.Verdict, row.Value, c.says)
+		}
+	}
+}
+
+// A row a reader cannot act on names the dependency and the licence rather than
+// only a count — and a verdict about no pair at all carries no detail, rather
+// than an empty block under it.
+func TestTheLicenceDetailNamesEveryPairTheVerdictIsAbout(t *testing.T) {
+	if got := licenceDetail(nil); got != nil {
+		t.Errorf("detail = %v, want none where the verdict is about no pair", got)
+	}
+	got := licenceDetail([]licence.Dependency{
+		{Package: "copyleft", Version: "v1.0.0", Licence: "GPL-3.0-only"},
+		{Package: "unversioned", Licence: "LGPL-3.0"},
+	})
+	want := []string{"copyleft v1.0.0: GPL-3.0-only", "unversioned: LGPL-3.0"}
+	if !slices.Equal(got, want) {
+		t.Errorf("detail = %v, want %v", got, want)
+	}
+}
+
+// The reason a base could not be built reaches the caller, and the tree inside
+// it never does: a directory answered beside a reason would be read as the
+// checkout that did not happen, and every component measured against it.
+func TestABaseWorktreeThatWouldNotCheckOutAnswersNoTree(t *testing.T) {
+	root, _ := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\n"})
+	tree := newLicenceBaseTree(root, strings.Repeat("0123456789", 4))
+	defer tree.close(context.Background())
+
+	dir, reason := tree.open(context.Background())
+	if reason == "" {
+		t.Fatal("a merge-base that does not exist checked out")
+	}
+	if dir != "" {
+		t.Fatalf("dir = %q, want none beside a reason", dir)
+	}
+	// Decided once: the second component asks the same question and is answered
+	// from what the first attempt recorded.
+	if again, sameReason := tree.open(context.Background()); again != "" || sameReason != reason {
+		t.Fatalf("second open = %q/%q, want the first attempt's answer", again, sameReason)
+	}
+}
+
+// The checkout succeeding answers the scan root inside the worktree, which is
+// what every component's base is located under.
+func TestABaseWorktreeAnswersTheScanRootInsideIt(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\n"})
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	dir, reason := tree.open(context.Background())
+	if reason != "" {
+		t.Fatalf("checking out the merge-base: %s", reason)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "api", depsManifest)); err != nil {
+		t.Fatalf("the base tree holds no manifest at %s: %v", dir, err)
+	}
+}
+
+// A worktree that cannot be created is a base nothing can be measured against,
+// and it says so rather than falling through to a measured empty set that fails
+// every component over dependencies it already shipped.
+func TestABaseWorktreeThatCannotBeCreatedIsUnmeasured(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\n"})
+	// A file where the temporary directory belongs, so nothing can be created
+	// under it.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	if base.State() != licence.Unmeasured {
+		t.Fatalf("base state = %q, want unmeasured", base.State())
+	}
+	if !strings.Contains(base.Reason(), "temporary directory") {
+		t.Errorf("reason = %q, want the step that failed", base.Reason())
 	}
 }
 

@@ -420,10 +420,8 @@ func firstLine(s string) string {
 	if s == "" {
 		return ""
 	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return ": " + s
+	line, _, _ := strings.Cut(s, "\n")
+	return ": " + line
 }
 
 // LicenceSet is the component's non-conforming crates, with the document that

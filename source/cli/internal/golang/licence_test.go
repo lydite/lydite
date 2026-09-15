@@ -264,6 +264,13 @@ func TestAVendoredSubpackageResolvesToItsModuleRoot(t *testing.T) {
 			Dir:        filepath.Join(root, "internal", "scanner"),
 			Module:     &goListModule{Path: "gopkg.in/yaml.v2"},
 		}, root},
+		// A module `go list` answers no directory for at either end is one
+		// nothing can be read from, and it resolves to no directory rather
+		// than to some path derived from its import path.
+		{"no directory at all", goListPackage{
+			ImportPath: "gopkg.in/yaml.v2",
+			Module:     &goListModule{Path: "gopkg.in/yaml.v2"},
+		}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -342,6 +349,68 @@ func TestTwoLicencesAgainstOneModuleAreTwoClaims(t *testing.T) {
 	}
 	if found[0].Line != found[1].Line || found[0].Line != 7 {
 		t.Errorf("lines = %d and %d, want both on the require naming the module", found[0].Line, found[1].Line)
+	}
+}
+
+// The same pair twice is two claims on one line sharing one site, and the
+// ordinal is the only thing separating them. Unnumbered, the second carries the
+// first's fingerprint and the review surface drops it as a duplicate.
+func TestTwoIdenticalPairsAreSeparatedByTheirOrdinal(t *testing.T) {
+	pair := licence.Dependency{Package: "github.com/juju/errors", Version: "v1.0.0", Licence: "LGPL-3.0"}
+	found := LicenceFindings(probe(t), []licence.Dependency{pair, pair})
+	if len(found) != 2 {
+		t.Fatalf("findings = %d, want one per pair", len(found))
+	}
+	if found[0].Ordinal != 0 || found[1].Ordinal != 1 {
+		t.Fatalf("ordinals = %d and %d, want 0 and 1", found[0].Ordinal, found[1].Ordinal)
+	}
+	if found[0].Fingerprint() == found[1].Fingerprint() {
+		t.Error("both claims share a fingerprint, so the second is dropped as a duplicate")
+	}
+}
+
+// The version is in the claim, because it is what a reader needs to find the
+// dependency the claim is about — and a module named by no version is stated
+// without one rather than with a dangling separator.
+func TestTheClaimNamesTheVersionWhereThereIsOneAndOmitsItWhereThereIsNot(t *testing.T) {
+	found := LicenceFindings(probe(t), []licence.Dependency{
+		{Package: "github.com/juju/errors", Version: "v1.0.0", Licence: "LGPL-3.0"},
+		{Package: "example.com/unversioned", Licence: "GPL-3.0"},
+	})
+	want := []string{
+		"github.com/juju/errors v1.0.0 is LGPL-3.0, which the licence policy does not allow",
+		"example.com/unversioned is GPL-3.0, which the licence policy does not allow",
+	}
+	for i, f := range found {
+		if f.Message != want[i] {
+			t.Errorf("message = %q, want %q", f.Message, want[i])
+		}
+	}
+}
+
+// A tool's own first line reaches the error, because an `unmeasured` row has to
+// name what failed. Empty stays empty, so an error over a silent failure does
+// not end in a dangling separator.
+func TestFirstLineIsTheToolsOwnLeadingDiagnostic(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"   \n\n ", ""},
+		{"go: module lookup disabled", ": go: module lookup disabled"},
+		{"\n  go: module lookup disabled\nsecond line\nthird\n", ": go: module lookup disabled"},
+	}
+	for _, c := range cases {
+		if got := firstLine(c.in); got != c.want {
+			t.Errorf("firstLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A directory that cannot be read contributes no identifier rather than ending
+// the scan: an unclassifiable dependency is a pair the gate carries as Unknown
+// rather than one it drops.
+func TestAModuleDirectoryThatCannotBeReadContributesNoIdentifier(t *testing.T) {
+	if got := classifyModule(filepath.Join(t.TempDir(), "no-such-module")); got != nil {
+		t.Errorf("identifiers = %v, want none from a directory nothing could read", got)
 	}
 }
 
