@@ -170,16 +170,19 @@ one thing lydite's policy decides. It costs a second cargo-deny invocation per
 Rust component, against a warm crates.io index and no build.
 
 With no lydite policy but a consumer `deny.toml` present, the licence check runs
-against that file and the row states where the policy came from. With neither,
-the row is `context` naming what is missing, and cargo-deny's reject-everything
-default never decides a row again.
+against that file and the row states where the policy came from — and gates on
+it absolutely, the way cargo-deny always has: a consumer's own configuration is
+opt-in, evaluated whole on every run, and carries no adoption-shock problem for
+a delta to solve. With neither, the row is `context` naming what is missing,
+and cargo-deny's reject-everything default never decides a row again.
 
-**Rust is delta-gated on the same mechanism**, because a policy applied
+**Only lydite's own stated policy is delta-gated**, because a policy applied
 absolutely would fail every adopting repository on the licences it already ships
 — the same argument that chose a delta in the first place, and it does not stop
 being true at a language boundary. The non-conforming set is what cargo-deny
 already reports, at both ends, so the base side costs one more invocation in the
-base worktree.
+base worktree. A consumer's `deny.toml` needs no delta: it is the source Rust
+has always gated on absolutely, before this ADR and after it.
 
 ## Go is classified in-process by `licensecheck`
 
