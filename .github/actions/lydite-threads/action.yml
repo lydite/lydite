@@ -13,11 +13,36 @@
 # new is granted here; what the relay takes over is the write, which is the
 # half ADR 0022 is about.
 #
-# The fallback is required rather than a stopgap, and there are two ways into
-# it: no relay configured, and a relay that answers that the app is not
-# installed on this repository. A consumer who has installed nothing still
-# gets its threads, from `github-actions[bot]`, and the only thing they lose
-# is whose name is on them.
+# The fallback is required rather than a stopgap, but it is not the answer to
+# every status. A consumer who has installed nothing still gets its threads,
+# from `github-actions[bot]`, and the only thing they lose is whose name is on
+# them; a consumer who has configured the relay wrongly gets a red step
+# instead, because a fallback there posts the right threads under the wrong
+# byline on every run and never once says so. The relay's answer sorts into
+# three:
+#
+#   - No relay configured, or 409 — the App is not installed on this
+#     repository. Both fall back silently; the second is the ordinary state of
+#     every repository that has not opted in.
+#   - A 5xx, curl's `000` for a relay it could not reach at all, or a 403.
+#     Falls back, under a `::warning::`.
+#   - Anything else — 401 for a token the relay would not verify, 400 for an
+#     operations document whose version `/review` does not apply. Each is
+#     deterministic, so the next run answers the same. The step fails.
+#
+# A 403 sits in the second bucket here and in the third in `lydite-comment`,
+# because `/review` has a third cause for one that `/comment` has not: an
+# operation naming a review comment that is no longer on the pull request. The
+# relay re-reads those ids at apply time, so a thread deleted between the
+# delta and the apply is a live race that the recomputed delta below settles —
+# and a rejection carries no detail (ADR 0022), so nothing at this layer can
+# tell that 403 from the ref or number mismatch that deserves a red step. The
+# ambiguity is resolved toward the fallback, which costs a misconfigured
+# `/review` its loud failure and keeps a race from failing a job.
+#
+# A fork's pull request is untouched by any of this. It cannot mint an OIDC
+# token, so it fails at the mint below, under `set -e`, before a status exists
+# to sort.
 #
 # Nothing here interpolates an expression into a `run:` body. Every value
 # arrives through `env:` and is referenced as a shell variable — Semgrep's
@@ -87,8 +112,24 @@ runs:
           cat "${RUNNER_TEMP}/relay-review.json"
           exit 0
         fi
-        echo "applied=false" >> "$GITHUB_OUTPUT"
-        echo "the relay answered ${status}; falling back to this workflow's token" >&2
+        case "$status" in
+          409)
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            echo "the relay answered ${status}; falling back to this workflow's token" >&2
+            ;;
+          000|403|5??)
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::the relay answered ${status}; falling back to this workflow's token" >&2
+            ;;
+          *)
+            # No `applied` output: the step's own failure is the whole of what
+            # this branch says, and it skips the fallback step below rather
+            # than choosing for it.
+            echo "::error::the relay answered ${status}; this is a configuration problem, not an outage, so it fails the step rather than falling back" >&2
+            cat "${RUNNER_TEMP}/relay-review.json" >&2 || true
+            exit 1
+            ;;
+        esac
         cat "${RUNNER_TEMP}/relay-review.json" >&2 || true
 
     # The delta is recomputed rather than the document replayed, because the
