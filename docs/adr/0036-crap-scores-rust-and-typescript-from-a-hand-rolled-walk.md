@@ -118,6 +118,17 @@ unchanged by this ADR), but since CRAP never scores that span as its own unit, t
 reported in `Unused` — correctly telling the author to move it to the enclosing function, rather
 than doing something quietly inconsistent with what it names.
 
+**A nested named `function_declaration` (or `generator_function_declaration`) is not this case.**
+JavaScript and TypeScript both permit a genuine nested function declaration —
+`function outer() { function inner() {} ... }` — and unlike a callback arrow it has a name and an
+independent identity, the same property that puts Rust's nested `fn` on the other side of this
+line. It gets the identical treatment: scored as its own independent function, the parent's span
+excludes its lines, and the parent's complexity gets the same flat **+1** per direct nested
+declaration. A nested *anonymous* `function_expression` or `generator_function` — the
+`function(x) { ... }` form written inline as a callback, with no name — folds like an arrow, on
+the same "no independent identity" ground; only a name changes which side of this rule a nested
+`function`-shaped node falls on.
+
 ### Test code
 
 Go's rule is "whatever the profile covers" — but that is not actually a language-neutral
