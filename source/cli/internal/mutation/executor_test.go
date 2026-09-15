@@ -260,6 +260,37 @@ func TestASuiteThatAllocatesWithoutStoppingIsKilledByItsMemoryBound(t *testing.T
 	}
 }
 
+// A mutant whose compilation reached the ceiling is unviable rather than
+// killed: nothing ran, so nothing observed the change, and what the bound
+// caught there is the compiler's appetite.
+func TestABuildThatReachesTheMemoryBoundIsUnviable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RLIMIT_DATA is settable only on linux — darwin's setrlimit refuses it with EINVAL at any value — so this is proven by the linux CI job")
+	}
+	f := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: runner.Invocation{
+			Name: os.Args[0], Args: []string{"-test.run=^TestMutationAllocatingChild$"},
+		}}
+	}}
+	results, err := Execute(t.Context(), f, []Mutant{mutantAt(1)}, Options{
+		Workers: 1, MaxMemory: 1 << 30, Env: []string{allocEnv + "=1536"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Unviable {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, Unviable, results[0].Detail)
+	}
+	if !strings.Contains(results[0].Detail, "did not compile") {
+		t.Errorf("detail = %q, want the bound named as what stopped the compilation", results[0].Detail)
+	}
+	var s Summary
+	s.Add(results[0])
+	if s.Denominator() != 0 {
+		t.Error("a mutant that was never built was counted as evidence about the suite")
+	}
+}
+
 // A suite that stays under the bound is untouched by it, so a mutant nothing
 // killed still survives — a bound that failed every mutant would report a
 // component whose tests are perfect.

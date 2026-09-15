@@ -668,6 +668,8 @@ func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {
 		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}, `--concurrency`},
 		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}, "at least 1"},
 		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}, "--timeout must not be negative"},
+		{"a memory bound that is not a size", []string{"--dir", root, "--memory", "lots"}, "--memory"},
+		{"a negative memory bound", []string{"--dir", root, "--memory", "-1GiB"}, "--memory"},
 		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}, "nope"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1308,6 +1310,25 @@ func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
 	}
 	if !strings.Contains(sel.Value, "1 of 2 affected") {
 		t.Errorf("select = %q, want 1 of 2 affected", sel.Value)
+	}
+}
+
+// A ceiling the component's own baseline would not fit under gates nothing and
+// says why. Under one, every mutant dies of the bound rather than of a test,
+// and a row reporting that as a suite that killed everything is a score
+// nothing earned.
+func TestABaselineThatWouldNotFitUnderTheMemoryBoundIsUnmeasured(t *testing.T) {
+	root := goModuleRepo(t, deeper, killsItsMutants)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--memory", "1024")
+	if err != nil {
+		t.Fatalf("a bound nothing could run under failed the run rather than reporting it: %v", err)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok || row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want an unmeasured row naming the bound", row)
+	}
+	if !strings.Contains(row.Value, "leaves no room") {
+		t.Errorf("value = %q, want the baseline's own peak against the bound", row.Value)
 	}
 }
 
