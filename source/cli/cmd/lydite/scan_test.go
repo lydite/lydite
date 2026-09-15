@@ -731,8 +731,8 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 			checks = append(checks, r.Label)
 		}
 	}
-	if !slices.Equal(checks, []string{"gosec(api)", "govulncheck(api)"}) {
-		t.Fatalf("checks = %v, want gosec and govulncheck once each for the shared directory", checks)
+	if !slices.Equal(checks, []string{"gosec(api)", "govulncheck(api)", "licence(api)"}) {
+		t.Fatalf("checks = %v, want gosec, govulncheck and licence once each for the shared directory", checks)
 	}
 	// And the second component says why it has none of its own, rather than
 	// disappearing from a report that is otherwise one row per component.

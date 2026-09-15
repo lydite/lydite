@@ -1,10 +1,17 @@
 // Package golang runs gosec and govulncheck against every Go module found
-// under the scan root. Both are
+// under the scan root, and classifies the licence of every module that module
+// compiles. gosec and govulncheck are
 // installed via `go install` into a lydite-managed, version-keyed bin
 // directory (never trusting whatever gosec/govulncheck might already be on
 // PATH) — the same "pin the exact toolchain, don't reuse ambient installs"
 // principle as the TypeScript toolchain, just using Go's own install
 // mechanism instead of npx/npm.
+//
+// The licence gate is LicenceCheck rather than part of Check, because it
+// answers with a verdict a pass/fail Result cannot carry: a policy nobody
+// stated and a base that could not be built each gate nothing, and neither may
+// render as a check that ran and found nothing. Its caller holds the stated
+// policy and the merge-base, which no language package knows how to resolve.
 package golang
 
 import (
@@ -39,7 +46,7 @@ const (
 // a language implies is the only thing that makes a zero distinguishable from
 // an absence. A fresh slice per call, because a package-level one is a
 // variable every caller can edit.
-func FindingGates() []string { return []string{GateGosec, GateGovulncheck} }
+func FindingGates() []string { return []string{GateGosec, GateGovulncheck, GateLicence} }
 
 // Check runs gosec and govulncheck in dir, with env on top of the caller's
 // own environment — the component's resolved Go toolchain.

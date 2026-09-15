@@ -17,8 +17,10 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/golang"
+	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
@@ -183,6 +185,9 @@ func newScanCmd() *cobra.Command {
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
 				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
+				if lang == runner.Go {
+					recordGoLicence(ctx, rep, dir, c, cdir, env.Check, cfg, baseSHA, changed)
+				}
 			}
 
 			var results []executil.Result
@@ -386,6 +391,144 @@ func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.
 			len(g.Files), g.Lang, g.Files[0], component.FileName)
 	}
 	return gaps
+}
+
+// recordGoLicence is the licence gate for one Go component: the non-conforming
+// set its build compiles, against the same set recomputed at the merge-base.
+//
+// The base is recomputed rather than read from a stored baseline. An entry
+// written by a lydite that did not yet compute licences reads back as the empty
+// set, so the delta on the day of the upgrade is the absolute set and fails
+// every adopting repository over dependencies nobody in that change chose.
+func recordGoLicence(ctx context.Context, rep *ui.Report, root string, c component.Component, cdir string, env []string, cfg config.Config, baseSHA string, changed map[string][]int) {
+	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
+	label := licence.Gate + "(" + c.Name + ")"
+	base := licence.NoDiffBase()
+	if policy.Configured() {
+		// Built only under a stated policy, because it costs a worktree and a
+		// module download and answers a question an unconfigured repository is
+		// not asking.
+		base = goLicenceBase(ctx, root, c.Dir, baseSHA, env, policy)
+	}
+	comparison, found, err := golang.LicenceCheck(ctx, cdir, env, policy, base)
+	if err != nil {
+		// Unmeasured and never fail: a component whose own dependencies could
+		// not be enumerated has had nothing decided about it, and a red row
+		// here would ask its author to answer for a claim the gate never made.
+		rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: label,
+			Value: "the component's dependencies could not be read", Detail: []string{err.Error()}})
+		return
+	}
+	rep.Add(licenceRow(label, comparison))
+	// Through labelled and findingsOf, so a licence claim's component, its
+	// path from the scan root and its row label are derived exactly where
+	// every other scanner's are.
+	claims := findingsOf(labelled([]executil.Result{{Name: licence.Gate, Findings: found}}, c.Name, c.Dir))
+	finding.Anchored(claims, changed)
+	rep.AddFindings(claims...)
+}
+
+// licenceRow renders one component's comparison.
+//
+// Only a gating verdict renders green or red. A policy nobody stated, a run
+// given no diff base and a base that could not be built each gate nothing, and
+// rendering any of them as `pass` is a gate that never ran reported as one that
+// ran and found nothing.
+func licenceRow(label string, c licence.Comparison) ui.Row {
+	row := ui.Row{Label: label, Detail: licenceDetail(c.Pairs)}
+	switch c.Verdict {
+	case licence.VerdictPass:
+		row.Status, row.Value = ui.StatusPass, "passed"
+	case licence.VerdictFail:
+		row.Status, row.Value = ui.StatusFail,
+			fmt.Sprintf("%d non-conforming licence(s) introduced against the merge-base", len(c.Pairs))
+	case licence.VerdictUnmeasured:
+		row.Status, row.Value = ui.StatusUnmeasured, c.Reason
+	case licence.VerdictContext:
+		row.Status, row.Value = ui.StatusContext,
+			fmt.Sprintf("%d non-conforming dependencies, gating nothing — no diff base to compare against", len(c.Pairs))
+	case licence.VerdictNotConfigured:
+		row.Status, row.Value = ui.StatusContext,
+			"not configured — state licence.policy.allow in "+config.FileName
+	}
+	return row
+}
+
+// licenceDetail names each pair the verdict is about, so a row a reader cannot
+// act on names the dependency and the licence rather than only a count.
+func licenceDetail(pairs []licence.Dependency) []string {
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(pairs))
+	for _, d := range pairs {
+		entry := d.Package
+		if d.Version != "" {
+			entry += " " + d.Version
+		}
+		out = append(out, entry+": "+d.Licence)
+	}
+	return out
+}
+
+// goLicenceBase is the component's non-conforming set recomputed at the
+// merge-base.
+//
+// measureBaseTree is the precedent: the base commit is checked out into a
+// throwaway worktree, the same path is run there, and the worktree is removed.
+// What makes the recompute affordable here is what measureBaseTree cannot do —
+// a licence set needs the manifest, the module cache and one `go list`, with no
+// suite to run, no compose service to start and no instrumented build.
+//
+// Every failure answers UnmeasuredBase naming the step, never a measured empty
+// set: a base that could not be built gates nothing and says so on the row.
+func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env []string, policy licence.Policy) licence.Base {
+	if baseSHA == "" {
+		return licence.NoDiffBase()
+	}
+	tmp, err := os.MkdirTemp("", "lydite-licence-*")
+	if err != nil {
+		return licence.UnmeasuredBase("no temporary directory for the base worktree: " + err.Error())
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	// A context of its own, for the reason measureBaseTree's removal has one:
+	// the run's may already be cancelled, and an interrupt would kill the
+	// removal and then delete the directory anyway — leaving a registered
+	// worktree pointing at nothing, which every later `git worktree add` and
+	// `git worktree list` in that repository trips over until someone prunes.
+	defer func() {
+		_ = executil.RunQuiet(context.WithoutCancel(ctx), root, "git", "worktree", "remove", "--force", tmp)
+	}()
+
+	if r := executil.RunQuiet(ctx, root, "git", "worktree", "add", "--detach", tmp, baseSHA); !r.Ok() {
+		return licence.UnmeasuredBase("checking out " + shortSHA(baseSHA) + ": " + r.Err.Error())
+	}
+	// A worktree holds the whole repository and the scan root may sit below
+	// it, so the component is located through the prefix rather than from the
+	// worktree root — the shape ChangedLines and measureBaseTree already
+	// account for.
+	prefix, err := gitdiff.Prefix(ctx, root)
+	if err != nil {
+		return licence.UnmeasuredBase("locating the scan root inside the repository: " + err.Error())
+	}
+	dir := filepath.Join(tmp, filepath.FromSlash(prefix), filepath.FromSlash(componentDir))
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		// A component with no module at the base is one this change adds, and
+		// every pair it carries is one the change introduces. That is a
+		// measured empty set rather than an unmeasured base: nothing failed,
+		// there was nothing there.
+		return licence.MeasuredBase(licence.Set{})
+	}
+	// The branch's environment, which is the component's resolved toolchain
+	// and the environment its declaration asks for. A base tree declaring a Go
+	// newer than that toolchain is a `go list` that will not run, and it
+	// answers unmeasured naming what it said rather than a set read under an
+	// environment nobody chose.
+	set, err := golang.LicenceSet(ctx, dir, env, policy)
+	if err != nil {
+		return licence.UnmeasuredBase("reading the base tree's dependencies: " + err.Error())
+	}
+	return licence.MeasuredBase(set)
 }
 
 // semgrepBase is the diff base Semgrep is given, which is none when a token is
