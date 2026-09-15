@@ -107,6 +107,13 @@ func newScanCmd() *cobra.Command {
 
 			warnUnscanned(ctx, cmd.ErrOrStderr(), dir, file, cfg)
 
+			// One merge-base worktree for the whole scan, checked out the
+			// first time a component's licence gate asks for a set and removed
+			// once every component has. A checkout per component would be the
+			// same commit extracted once per declaration.
+			licenceTree := newLicenceBaseTree(dir, baseSHA)
+			defer licenceTree.close(ctx)
+
 			// A component's checks are keyed by what they actually look at:
 			// the directory they run in and the language they run for.
 			// component.validate enforces unique names and not unique
@@ -187,9 +194,9 @@ func newScanCmd() *cobra.Command {
 				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
 				switch lang {
 				case runner.Go:
-					recordGoLicence(ctx, rep, dir, c, cdir, env.Check, cfg, baseSHA, changed)
+					recordGoLicence(ctx, rep, licenceTree, c, cdir, env.Check, cfg, changed)
 				case runner.Rust:
-					recordRustLicence(ctx, rep, dir, c, cdir, env, cfg, baseSHA, changed)
+					recordRustLicence(ctx, rep, licenceTree, c, cdir, env, cfg, changed)
 				case runner.TypeScript:
 					recordNoLicenceSource(rep, c)
 				}
@@ -405,15 +412,15 @@ func warnUnscanned(ctx context.Context, w io.Writer, dir string, file component.
 // written by a lydite that did not yet compute licences reads back as the empty
 // set, so the delta on the day of the upgrade is the absolute set and fails
 // every adopting repository over dependencies nobody in that change chose.
-func recordGoLicence(ctx context.Context, rep *ui.Report, root string, c component.Component, cdir string, env []string, cfg config.Config, baseSHA string, changed map[string][]int) {
+func recordGoLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTree, c component.Component, cdir string, env []string, cfg config.Config, changed map[string][]int) {
 	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	label := licence.Gate + "(" + c.Name + ")"
 	base := licence.NoDiffBase()
 	if policy.Configured() {
-		// Built only under a stated policy, because it costs a worktree and a
-		// module download and answers a question an unconfigured repository is
+		// Asked for only under a stated policy, because it costs a worktree and
+		// a module download and answers a question an unconfigured repository is
 		// not asking.
-		base = goLicenceBase(ctx, root, c.Dir, baseSHA, env, policy)
+		base = goLicenceBase(ctx, tree, c.Dir, env, policy)
 	}
 	comparison, found, err := golang.LicenceCheck(ctx, cdir, env, policy, base)
 	if err != nil {
@@ -441,14 +448,15 @@ func recordGoLicence(ctx context.Context, rep *ui.Report, root string, c compone
 // A Rust component can be governed by lydite's policy, by its own deny.toml or
 // by neither, and those three are answered by edits to different files — or by
 // no edit at all.
-func recordRustLicence(ctx context.Context, rep *ui.Report, root string, c component.Component, cdir string, env executil.Env, cfg config.Config, baseSHA string, changed map[string][]int) {
+func recordRustLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTree, c component.Component, cdir string, env executil.Env, cfg config.Config, changed map[string][]int) {
 	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	label := licence.Gate + "(" + c.Name + ")"
 	base := licence.NoDiffBase()
 	if policy.Configured() {
-		// Built only under a stated policy, because it costs a worktree and a
-		// cargo-deny run and answers a question no other policy source gates on.
-		base = rustLicenceBase(ctx, root, c.Dir, baseSHA, env, policy)
+		// Asked for only under a stated policy, because it costs a worktree and
+		// a cargo-deny run and answers a question no other policy source gates
+		// on.
+		base = rustLicenceBase(ctx, tree, c.Dir, env, policy)
 	}
 	comparison, source, found, err := rust.LicenceCheck(ctx, cdir, env, policy, base)
 	if err != nil {
@@ -553,8 +561,8 @@ func licenceDetail(pairs []licence.Dependency) []string {
 // a Go newer than that toolchain is a `go list` that will not run, and it
 // answers unmeasured naming what it said rather than a set read under an
 // environment nobody chose.
-func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env []string, policy licence.Policy) licence.Base {
-	return licenceBase(ctx, root, componentDir, baseSHA, "go.mod", func(dir string) (licence.Set, error) {
+func goLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir string, env []string, policy licence.Policy) licence.Base {
+	return tree.set(ctx, componentDir, "go.mod", func(dir string) (licence.Set, error) {
 		return golang.LicenceSet(ctx, dir, env, policy)
 	})
 }
@@ -565,62 +573,105 @@ func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env 
 // The lockfile is what has to be there: a component with no Cargo.lock at the
 // base is one this change adds, which the generated policy decides nothing
 // about at that end.
-func rustLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env executil.Env, policy licence.Policy) licence.Base {
-	return licenceBase(ctx, root, componentDir, baseSHA, "Cargo.lock", func(dir string) (licence.Set, error) {
+func rustLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir string, env executil.Env, policy licence.Policy) licence.Base {
+	return tree.set(ctx, componentDir, "Cargo.lock", func(dir string) (licence.Set, error) {
 		set, _, err := rust.LicenceSet(ctx, dir, env, policy)
 		return set, err
 	})
 }
 
-// licenceBase is a component's non-conforming set recomputed at the merge-base,
-// with read the language's own way of measuring one.
+// licenceBaseTree is the merge-base checked out once for a whole scan, which
+// every component's licence gate reads its base set from.
 //
-// measureBaseTree is the precedent: the base commit is checked out into a
-// throwaway worktree, the same path is run there, and the worktree is removed.
-// What makes the recompute affordable here is what measureBaseTree cannot do —
-// a licence set needs the manifest, a warm dependency cache and one tool
-// invocation, with no suite to run, no compose service to start and no
-// instrumented build.
+// measureBaseTree is the precedent, including its arithmetic: one commit, one
+// checkout. The base set is per component but the tree holding it is not, so a
+// repository with N Go and Rust components pays one checkout rather than N of
+// the identical commit. What makes the recompute affordable at all is what
+// measureBaseTree cannot do — a licence set needs the manifest, a warm
+// dependency cache and one tool invocation, with no suite to run, no compose
+// service to start and no instrumented build.
+//
+// The checkout happens on first use, so a scan no component asks a base of — no
+// diff base, no stated policy, nothing but TypeScript — pays for no worktree.
+// The failure is remembered as well as the success: a checkout that would not
+// run answers every later component the same reason, decided once.
+type licenceBaseTree struct {
+	// root is the scan root, which is where git is run and which prefix
+	// locates inside the repository.
+	root string
+	// baseSHA is the merge-base, empty on a run that was given no diff base.
+	baseSHA string
+
+	opened bool
+	// tmp is the worktree's own root, empty until it has been checked out.
+	tmp string
+	// dir is the scan root inside that worktree — tmp joined with the prefix.
+	dir string
+	// reason is what stopped the checkout, empty while nothing has.
+	reason string
+}
+
+// newLicenceBaseTree is the base every component of one scan compares against.
+// Nothing is checked out here: a scan reaches this whether or not any component
+// will ask it for a set.
+func newLicenceBaseTree(root, baseSHA string) *licenceBaseTree {
+	return &licenceBaseTree{root: root, baseSHA: baseSHA}
+}
+
+// open checks the merge-base out, once, and answers the scan root inside it —
+// or the reason no component can be measured against it.
+func (t *licenceBaseTree) open(ctx context.Context) (string, string) {
+	if t.opened {
+		return t.dir, t.reason
+	}
+	t.opened = true
+	tmp, err := os.MkdirTemp("", "lydite-licence-*")
+	if err != nil {
+		t.reason = "no temporary directory for the base worktree: " + err.Error()
+		return "", t.reason
+	}
+	// Recorded before the checkout is attempted, so close removes a worktree
+	// `git worktree add` registered and then failed part-way through.
+	t.tmp = tmp
+	if r := executil.RunQuiet(ctx, t.root, "git", "worktree", "add", "--detach", tmp, t.baseSHA); !r.Ok() {
+		t.reason = "checking out " + shortSHA(t.baseSHA) + ": " + r.Err.Error()
+		return "", t.reason
+	}
+	// A worktree holds the whole repository and the scan root may sit below
+	// it, so a component is located through the prefix rather than from the
+	// worktree root — the shape ChangedLines and measureBaseTree already
+	// account for.
+	prefix, err := gitdiff.Prefix(ctx, t.root)
+	if err != nil {
+		t.reason = "locating the scan root inside the repository: " + err.Error()
+		return "", t.reason
+	}
+	t.dir = filepath.Join(tmp, filepath.FromSlash(prefix))
+	return t.dir, ""
+}
+
+// set is one component's non-conforming set at the merge-base, with read the
+// language's own way of measuring one.
 //
 // manifest is the file whose absence at the base means the component was not
 // there. Every failure answers UnmeasuredBase naming the step, never a measured
 // empty set: a base that could not be built gates nothing and says so on the
 // row.
-func licenceBase(ctx context.Context, root, componentDir, baseSHA, manifest string, read func(dir string) (licence.Set, error)) licence.Base {
-	if baseSHA == "" {
+func (t *licenceBaseTree) set(ctx context.Context, componentDir, manifest string, read func(dir string) (licence.Set, error)) licence.Base {
+	if t.baseSHA == "" {
 		return licence.NoDiffBase()
 	}
-	tmp, err := os.MkdirTemp("", "lydite-licence-*")
-	if err != nil {
-		return licence.UnmeasuredBase("no temporary directory for the base worktree: " + err.Error())
+	root, reason := t.open(ctx)
+	if reason != "" {
+		return licence.UnmeasuredBase(reason)
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	// A context of its own, for the reason measureBaseTree's removal has one:
-	// the run's may already be cancelled, and an interrupt would kill the
-	// removal and then delete the directory anyway — leaving a registered
-	// worktree pointing at nothing, which every later `git worktree add` and
-	// `git worktree list` in that repository trips over until someone prunes.
-	defer func() {
-		_ = executil.RunQuiet(context.WithoutCancel(ctx), root, "git", "worktree", "remove", "--force", tmp)
-	}()
-
-	if r := executil.RunQuiet(ctx, root, "git", "worktree", "add", "--detach", tmp, baseSHA); !r.Ok() {
-		return licence.UnmeasuredBase("checking out " + shortSHA(baseSHA) + ": " + r.Err.Error())
-	}
-	// A worktree holds the whole repository and the scan root may sit below
-	// it, so the component is located through the prefix rather than from the
-	// worktree root — the shape ChangedLines and measureBaseTree already
-	// account for.
-	prefix, err := gitdiff.Prefix(ctx, root)
-	if err != nil {
-		return licence.UnmeasuredBase("locating the scan root inside the repository: " + err.Error())
-	}
-	dir := filepath.Join(tmp, filepath.FromSlash(prefix), filepath.FromSlash(componentDir))
+	dir := filepath.Join(root, filepath.FromSlash(componentDir))
 	if _, err := os.Stat(filepath.Join(dir, manifest)); err != nil {
 		// A component with no manifest at the base is one this change adds, and
 		// every pair it carries is one the change introduces. That is a
 		// measured empty set rather than an unmeasured base: nothing failed,
-		// there was nothing there.
+		// there was nothing there. It is asked per component, because the
+		// shared worktree answers it for each of them separately.
 		return licence.MeasuredBase(licence.Set{})
 	}
 	set, err := read(dir)
@@ -628,6 +679,23 @@ func licenceBase(ctx context.Context, root, componentDir, baseSHA, manifest stri
 		return licence.UnmeasuredBase("reading the base tree's dependencies: " + err.Error())
 	}
 	return licence.MeasuredBase(set)
+}
+
+// close removes the worktree, once, after every component has read from it. It
+// is a no-op for a scan that never opened one.
+func (t *licenceBaseTree) close(ctx context.Context) {
+	if t.tmp == "" {
+		return
+	}
+	tmp := t.tmp
+	t.tmp = ""
+	// A context of its own, for the reason measureBaseTree's removal has one:
+	// the run's may already be cancelled, and an interrupt would kill the
+	// removal and then delete the directory anyway — leaving a registered
+	// worktree pointing at nothing, which every later `git worktree add` and
+	// `git worktree list` in that repository trips over until someone prunes.
+	_ = executil.RunQuiet(context.WithoutCancel(ctx), t.root, "git", "worktree", "remove", "--force", tmp)
+	_ = os.RemoveAll(tmp)
 }
 
 // semgrepBase is the diff base Semgrep is given, which is none when a token is

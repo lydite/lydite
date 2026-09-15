@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/golang"
+	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
@@ -1168,5 +1169,262 @@ func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) 
 	}
 	if got, ok := perComponent["cli"][secrets.Gate]; ok {
 		t.Errorf("perComponent[cli][%s] = %d, want no key: the claim names no component", secrets.Gate, got)
+	}
+}
+
+// licenceBaseRepo is a repository with two commits: the tree the merge-base
+// holds, then the tree the change made of it. It answers the repository root
+// and the merge-base SHA.
+func licenceBaseRepo(t *testing.T, base, head map[string]string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		r := executil.RunQuiet(context.Background(), root, "git", args...)
+		if !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
+		}
+		return strings.TrimSpace(r.Output)
+	}
+	git("init", "-b", "main", ".")
+	commit := func(files map[string]string) string {
+		for name, body := range files {
+			writeLydite(t, root, name, body)
+		}
+		git("add", "-A")
+		// --allow-empty, because a change that alters no manifest is a tree the
+		// gate has to answer for too: it is the case that must pass.
+		git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "tree")
+		return git("rev-parse", "HEAD")
+	}
+	baseSHA := commit(base)
+	commit(head)
+	return root, baseSHA
+}
+
+// readDeps stands in for a language's own reader: a manifest whose lines are
+// `<package> <licence>`, so what a tree's non-conforming set is can be stated
+// rather than measured by a toolchain. What is under test is which tree the
+// reader was pointed at, which is the same question whatever reads it.
+func readDeps(dir string) (licence.Set, error) {
+	body, err := os.ReadFile(filepath.Join(dir, depsManifest))
+	if err != nil {
+		return licence.Set{}, err
+	}
+	var set licence.Set
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		set.Add(licence.Dependency{Package: fields[0], Licence: fields[1]})
+	}
+	return set, nil
+}
+
+// depsManifest is the file readDeps reads, and the file whose absence at the
+// base means the component was not there.
+const depsManifest = "deps"
+
+// worktrees is how many working trees the repository has registered, which is
+// one — its own — until a base is checked out.
+func worktrees(t *testing.T, root string) int {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), root, "git", "worktree", "list", "--porcelain")
+	if !r.Ok() {
+		t.Fatalf("git worktree list: %v\n%s", r.Err, r.Stderr)
+	}
+	return strings.Count(r.Output, "worktree ")
+}
+
+// permissivePolicy is a stated policy, which is all Compare asks of one: the
+// language reader has already rejected what the set carries.
+func permissivePolicy() licence.Policy { return licence.NewPolicy([]string{"MIT"}) }
+
+// packagesOf names what a verdict is about, in the order the comparison put
+// them.
+func packagesOf(pairs []licence.Dependency) []string {
+	out := make([]string, 0, len(pairs))
+	for _, d := range pairs {
+		out = append(out, d.Package)
+	}
+	return out
+}
+
+// The whole of what the gate is: the set at the merge-base, not the set at the
+// head. A base pointed at the wrong tree reads as no manifest at all, which is
+// a measured empty set — and every dependency the repository already shipped
+// then reads as one this change introduced.
+func TestTheLicenceGateFailsOnThePairTheChangeIntroduced(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"})
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
+	}
+	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, []string{"golden"}) {
+		t.Fatalf("base set = %v, want the one pair the merge-base carried", got)
+	}
+
+	current, err := readDeps(filepath.Join(root, "api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := licence.Compare(permissivePolicy(), current, base)
+	if got.Verdict != licence.VerdictFail {
+		t.Fatalf("verdict = %q, want fail — the change added a pair the merge-base did not carry", got.Verdict)
+	}
+	if names := packagesOf(got.Pairs); !slices.Equal(names, []string{"copyleft"}) {
+		t.Fatalf("introduced = %v, want copyleft alone — golden was grandfathered", names)
+	}
+}
+
+// The other half of the same gate. A pair already at the merge-base is one the
+// change did not introduce, however non-conforming it is.
+func TestTheLicenceGatePassesAChangeThatIntroducesNoPair(t *testing.T) {
+	deps := map[string]string{"api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"}
+	root, baseSHA := licenceBaseRepo(t, deps, deps)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	current, err := readDeps(filepath.Join(root, "api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := licence.Compare(permissivePolicy(), current, base)
+	if got.Verdict != licence.VerdictPass {
+		t.Fatalf("verdict = %q (%s), want pass — both pairs were already at the merge-base", got.Verdict, got.Reason)
+	}
+}
+
+// A component this change adds has no manifest at the base, which is a measured
+// empty set and not an unmeasured base: nothing failed, there was nothing
+// there. Reporting `unmeasured` would take the gate off the one change that
+// brings a whole dependency set with it.
+func TestAComponentAbsentFromTheMergeBaseMeasuresAnEmptySet(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"web/app.ts": "export const x = 1;\n"},
+		map[string]string{"api/" + depsManifest: "copyleft GPL-3.0-only\n"})
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured: the component was not there", base.State(), base.Reason())
+	}
+	if got := base.Set().Len(); got != 0 {
+		t.Fatalf("base holds %d pair(s), want none", got)
+	}
+	current, err := readDeps(filepath.Join(root, "api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := licence.Compare(permissivePolicy(), current, base); got.Verdict != licence.VerdictFail {
+		t.Fatalf("verdict = %q, want fail — every pair a new component carries is one the change introduces", got.Verdict)
+	}
+}
+
+// A worktree holds the whole repository and the scan root may sit below it. A
+// base located from the worktree root instead finds no manifest, calls that an
+// empty set, and every dependency the component already had reads as new.
+func TestTheLicenceBaseLocatesAComponentThroughTheScanRootPrefix(t *testing.T) {
+	repo, baseSHA := licenceBaseRepo(t,
+		map[string]string{"source/api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"source/api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"})
+	root := filepath.Join(repo, "source")
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured under the scan root's prefix", base.State(), base.Reason())
+	}
+	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, []string{"golden"}) {
+		t.Fatalf("base set = %v, want the pair the merge-base carried below source/", got)
+	}
+}
+
+// One commit, one checkout. A worktree per component extracts the identical
+// merge-base once per declaration, and nothing in a passing report says it
+// happened.
+func TestOneWorktreeServesEveryComponentsLicenceBase(t *testing.T) {
+	deps := map[string]string{
+		"api/" + depsManifest: "golden MIT\n",
+		"web/" + depsManifest: "silver MIT\n",
+	}
+	root, baseSHA := licenceBaseRepo(t, deps, deps)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	if got := worktrees(t, root); got != 1 {
+		t.Fatalf("worktrees = %d before any component asked for a base, want the repository's own alone", got)
+	}
+	for _, dir := range []string{"api", "web"} {
+		if base := tree.set(context.Background(), dir, depsManifest, readDeps); base.State() != licence.Measured {
+			t.Fatalf("%s base state = %q (%s), want it measured", dir, base.State(), base.Reason())
+		}
+	}
+	if got := worktrees(t, root); got != 2 {
+		t.Fatalf("worktrees = %d, want one shared base beside the repository's own", got)
+	}
+
+	tree.close(context.Background())
+	if got := worktrees(t, root); got != 1 {
+		t.Fatalf("worktrees = %d after the scan, want the base removed — a registered worktree pointing at nothing trips every later `git worktree add`", got)
+	}
+}
+
+// A scan whose components ask for no base pays for no checkout: no diff base at
+// all is the shape `lydite scan` on `main` has, and it gates nothing.
+func TestARunWithNoDiffBaseChecksOutNoWorktree(t *testing.T) {
+	root, _ := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\n"})
+	tree := newLicenceBaseTree(root, "")
+	defer tree.close(context.Background())
+
+	base := tree.set(context.Background(), "api", depsManifest, readDeps)
+	if base.State() != licence.NoBase {
+		t.Fatalf("base state = %q, want no base: the run was given no diff base", base.State())
+	}
+	if got := worktrees(t, root); got != 1 {
+		t.Fatalf("worktrees = %d, want no base checked out for a run that compares against nothing", got)
+	}
+}
+
+// A base that could not be built gates nothing and says so — on every
+// component's row, with the same reason, because the checkout it names was
+// attempted once. Falling through to a measured empty set would fail each of
+// them over dependencies nobody in the change chose.
+func TestABaseThatWillNotCheckOutIsUnmeasuredForEveryComponent(t *testing.T) {
+	deps := map[string]string{
+		"api/" + depsManifest: "golden MIT\n",
+		"web/" + depsManifest: "silver MIT\n",
+	}
+	root, _ := licenceBaseRepo(t, deps, deps)
+	tree := newLicenceBaseTree(root, strings.Repeat("0123456789", 4))
+	defer tree.close(context.Background())
+
+	var reasons []string
+	for _, dir := range []string{"api", "web"} {
+		base := tree.set(context.Background(), dir, depsManifest, readDeps)
+		if base.State() != licence.Unmeasured {
+			t.Fatalf("%s base state = %q, want unmeasured: the merge-base would not check out", dir, base.State())
+		}
+		if base.Reason() == "" {
+			t.Fatalf("%s base names no reason, want the step that failed", dir)
+		}
+		reasons = append(reasons, base.Reason())
+	}
+	if reasons[0] != reasons[1] {
+		t.Fatalf("reasons = %q, want one answer decided once for the whole scan", reasons)
+	}
+	if got := worktrees(t, root); got != 1 {
+		t.Fatalf("worktrees = %d, want no registered base after a checkout that failed", got)
 	}
 }
