@@ -102,6 +102,21 @@ func (e ErrNoReason) Error() string {
 	return fmt.Sprintf("%s:%d: %s needs a reason in brackets after it", e.Path, e.Line, Marker(e.Gate))
 }
 
+// Declaration is one declared exclusion: the reason its author gave, and how
+// many further comment lines that reason wrapped onto.
+type Declaration struct {
+	// Reason is the prose between the brackets.
+	Reason string
+	// Lines is how many lines after the opening one the reason consumed — 0
+	// when it closed on its own line. A caller resolving a declaration to a
+	// span by walking a syntax tree, rather than by a language's own
+	// doc-comment attachment, needs this to know exactly which comments are
+	// this declaration's own continuation and which are something else
+	// immediately following it: gather already found that boundary once, and
+	// re-deriving it a second way is a second answer that can disagree.
+	Lines int
+}
+
 // Declarations returns the reason declared for gate on each line, keyed by the
 // line the declaration opens on.
 //
@@ -120,9 +135,9 @@ func (e ErrNoReason) Error() string {
 // A reason runs to the first `]`, across as many immediately following comment
 // lines as it takes. A `]` inside a reason ends it early, which is the cost of
 // the simple rule and is why a reason is prose rather than a citation.
-func Declarations(path string, gate Gate, comments []Comment) (map[int]string, error) {
+func Declarations(path string, gate Gate, comments []Comment) (map[int]Declaration, error) {
 	marker := Marker(gate)
-	out := map[int]string{}
+	out := map[int]Declaration{}
 	for i := 0; i < len(comments); i++ {
 		rest, ok := strings.CutPrefix(body(comments[i].Text), marker)
 		if !ok {
@@ -139,12 +154,26 @@ func Declarations(path string, gate Gate, comments []Comment) (map[int]string, e
 		if !ok {
 			return nil, ErrNoReason{Path: path, Line: comments[i].Line, Gate: gate}
 		}
-		out[comments[i].Line] = reason
+		out[comments[i].Line] = Declaration{Reason: reason, Lines: consumed}
 		// Past the lines the reason wrapped onto, so a continuation is never
 		// read as a declaration of its own.
 		i += consumed
 	}
 	return out, nil
+}
+
+// Reasons is declared, with only the reason each line names.
+//
+// For a caller whose own resolution does not need to know how far a reason's
+// text reached — internal/mutation's is a byte-range containment over mutant
+// spans, not a comment-adjacency walk, so Declaration.Lines answers a question
+// it never asks.
+func Reasons(declared map[int]Declaration) map[int]string {
+	out := make(map[int]string, len(declared))
+	for line, d := range declared {
+		out[line] = d.Reason
+	}
+	return out
 }
 
 // gather reads a reason from the text after its opening bracket, continuing

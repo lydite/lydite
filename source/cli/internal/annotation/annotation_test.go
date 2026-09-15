@@ -19,8 +19,11 @@ func TestADeclarationIsReadWithItsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Declarations: %v", err)
 	}
-	if got[4] != "the caller bounds n" {
-		t.Errorf("line 4 reason = %q", got[4])
+	if got[4].Reason != "the caller bounds n" {
+		t.Errorf("line 4 reason = %q", got[4].Reason)
+	}
+	if got[4].Lines != 0 {
+		t.Errorf("line 4 Lines = %d, want 0 — the reason closed on its own line", got[4].Lines)
 	}
 	if _, ok := got[9]; ok {
 		t.Error("an ordinary comment was read as a declaration")
@@ -34,7 +37,7 @@ func TestADeclarationAnswersOneGate(t *testing.T) {
 	t.Parallel()
 	comments := []Comment{{Line: 4, Text: open(Coverage, "the proving ground exercises it]")}}
 	got, err := Declarations("a.go", Coverage, comments)
-	if err != nil || got[4] == "" {
+	if err != nil || got[4].Reason == "" {
 		t.Fatalf("Declarations(coverage) = (%v, %v), want the reason", got, err)
 	}
 	for _, other := range []Gate{Mutation, CRAP} {
@@ -57,7 +60,7 @@ func TestADeclarationIsKeyedToTheLineItsTokenIsOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Declarations: %v", err)
 	}
-	if len(got) != 1 || got[4] == "" {
+	if len(got) != 1 || got[4].Reason == "" {
 		t.Fatalf("Declarations returned %v, want the one line the token is on", got)
 	}
 	if _, ok := got[5]; ok {
@@ -80,8 +83,11 @@ func TestAReasonWrapsAcrossCommentLines(t *testing.T) {
 	}
 	want := "the proving ground exercises this end to end; a unit test here would run " +
 		"the machine's own toolchain rather than lydite's code"
-	if got[10] != want {
-		t.Errorf("reason = %q, want %q", got[10], want)
+	if got[10].Reason != want {
+		t.Errorf("reason = %q, want %q", got[10].Reason, want)
+	}
+	if got[10].Lines != 2 {
+		t.Errorf("Lines = %d, want 2 — the reason wrapped onto lines 11 and 12", got[10].Lines)
 	}
 }
 
@@ -144,7 +150,7 @@ func TestTheIntroducerIsStrippedEitherWay(t *testing.T) {
 		"//\t" + Marker(CRAP) + "[a reason]",
 	} {
 		got, err := Declarations("a.go", CRAP, []Comment{{Line: 1, Text: text}})
-		if err != nil || got[1] != "a reason" {
+		if err != nil || got[1].Reason != "a reason" {
 			t.Errorf("Declarations(%q) = (%v, %v), want the reason", text, got, err)
 		}
 	}

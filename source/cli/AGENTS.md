@@ -14,30 +14,30 @@ names `source/`, which declares no components.
 
 ## Where the detail is
 
-The narratives live at the repository root, in `.agents/references/`. Open the one that
+The narratives live at the repository root, in `agentic/references/`. Open the one that
 governs what you are about to change, before you change it.
 
 | Read | For |
 |---|---|
-| [`components.md`](../../.agents/references/components.md) | `internal/component`, `internal/runner`, `internal/nodedeps`, `internal/cargotool` |
-| [`services-and-scheduling.md`](../../.agents/references/services-and-scheduling.md) | `internal/compose`, `internal/scheduler` |
-| [`orphan-and-affected.md`](../../.agents/references/orphan-and-affected.md) | `internal/orphan`, `internal/affected`, `internal/pathmatch`, `internal/gitdiff` |
-| [`shards-and-the-fold.md`](../../.agents/references/shards-and-the-fold.md) | `test plan`, `test merge`, the conflict predicate |
-| [`coverage.md`](../../.agents/references/coverage.md) | `internal/coverage`, `internal/gitstate`, the baseline, the floor, the patch gate |
-| [`crap.md`](../../.agents/references/crap.md) | `internal/crap`, `internal/annotation` |
-| [`mutation.md`](../../.agents/references/mutation.md) | `internal/mutation` |
-| [`findings.md`](../../.agents/references/findings.md) | `internal/finding` |
-| [`quality-history.md`](../../.agents/references/quality-history.md) | `internal/ledger`, `internal/junit` |
-| [`scanning.md`](../../.agents/references/scanning.md) | which units each language's checks run over, and `internal/secrets`, the root-scoped secret scan |
-| [`linters.md`](../../.agents/references/linters.md) | `internal/typescript` |
-| [`semgrep.md`](../../.agents/references/semgrep.md) | `internal/semgrep` |
-| [`toolchains.md`](../../.agents/references/toolchains.md) | `internal/toolchain`, `internal/download` |
-| [`tool-pins.md`](../../.agents/references/tool-pins.md) | `internal/pins`, `tools/pinsync`, every `*-pin/` manifest |
-| [`configuration.md`](../../.agents/references/configuration.md) | `internal/config` |
-| [`output-grammar.md`](../../.agents/references/output-grammar.md) | `internal/ui` |
-| [`referral-and-clearance.md`](../../.agents/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge` |
-| [`surface.md`](../../.agents/references/surface.md) | `lydite publish` and the standing comment, `lydite threads` and `internal/threads` |
+| [`components.md`](../../agentic/references/components.md) | `internal/component`, `internal/runner`, `internal/nodedeps`, `internal/cargotool` |
+| [`services-and-scheduling.md`](../../agentic/references/services-and-scheduling.md) | `internal/compose`, `internal/scheduler` |
+| [`orphan-and-affected.md`](../../agentic/references/orphan-and-affected.md) | `internal/orphan`, `internal/affected`, `internal/pathmatch`, `internal/gitdiff` |
+| [`shards-and-the-fold.md`](../../agentic/references/shards-and-the-fold.md) | `test plan`, `test merge`, the conflict predicate |
+| [`coverage.md`](../../agentic/references/coverage.md) | `internal/coverage`, `internal/gitstate`, the baseline, the floor, the patch gate |
+| [`crap.md`](../../agentic/references/crap.md) | `internal/crap`, `internal/annotation` |
+| [`mutation.md`](../../agentic/references/mutation.md) | `internal/mutation` |
+| [`findings.md`](../../agentic/references/findings.md) | `internal/finding` |
+| [`quality-history.md`](../../agentic/references/quality-history.md) | `internal/ledger`, `internal/junit` |
+| [`scanning.md`](../../agentic/references/scanning.md) | which units each language's checks run over, and `internal/secrets`, the root-scoped secret scan |
+| [`linters.md`](../../agentic/references/linters.md) | `internal/typescript` |
+| [`semgrep.md`](../../agentic/references/semgrep.md) | `internal/semgrep` |
+| [`toolchains.md`](../../agentic/references/toolchains.md) | `internal/toolchain`, `internal/download` |
+| [`tool-pins.md`](../../agentic/references/tool-pins.md) | `internal/pins`, `tools/pinsync`, every `*-pin/` manifest |
+| [`configuration.md`](../../agentic/references/configuration.md) | `internal/config` |
+| [`output-grammar.md`](../../agentic/references/output-grammar.md) | `internal/ui` |
+| [`referral-and-clearance.md`](../../agentic/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge` |
+| [`surface.md`](../../agentic/references/surface.md) | `lydite publish` and the standing comment, `lydite threads` and `internal/threads` |
 
 Conventions, boundaries and the repository layout are in the root
 [`AGENTS.md`](../../AGENTS.md); the prescriptive rules are in
-[`.agents/rules/`](../../.agents/rules/).
+[`agentic/rules/`](../../agentic/rules/).

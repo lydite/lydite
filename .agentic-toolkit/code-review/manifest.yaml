@@ -15,15 +15,17 @@
 version: 1
 
 reviewers:
-  unified:     {provider: claudecode, model: sonnet, prompt: builtin:unified}
-  correctness: {provider: claudecode, model: sonnet, prompt: builtin:correctness}
-  security:    {provider: claudecode, model: opus,   prompt: builtin:security}
-  performance: {provider: claudecode, model: sonnet, prompt: builtin:performance}
+  unified:       {provider: claudecode, model: sonnet, prompt: builtin:unified}
+  unified-extra: {provider: claudecode, model: opus,   prompt: builtin:unified}
+  correctness:   {provider: claudecode, model: sonnet, prompt: builtin:correctness}
+  security:      {provider: claudecode, model: opus,   prompt: builtin:security}
+  performance:   {provider: claudecode, model: sonnet, prompt: builtin:performance}
 
-  unified-codex:     {provider: codex, model: sol,   prompt: builtin:unified}
-  correctness-codex: {provider: codex, model: sol,   prompt: builtin:correctness}
-  security-codex:    {provider: codex, model: astra, prompt: builtin:security}
-  performance-codex: {provider: codex, model: sol,   prompt: builtin:performance}
+  unified-codex:       {provider: codex, model: sol,   prompt: builtin:unified}
+  unified-extra-codex: {provider: codex, model: astra, prompt: builtin:unified}
+  correctness-codex:   {provider: codex, model: sol,   prompt: builtin:correctness}
+  security-codex:      {provider: codex, model: astra, prompt: builtin:security}
+  performance-codex:   {provider: codex, model: sol,   prompt: builtin:performance}
 
 judge:     {provider: claudecode, model: opus,   prompt: builtin:judge}
 validator: {provider: claudecode, model: sonnet, prompt: builtin:validator}
@@ -35,6 +37,11 @@ panels:
     description: One Claude reviewer over all three axes. The pre-push pass, where being fast is what it is worth.
     reviewers: [unified]
     fallback: quick-codex
+  focused:
+    description: One strong reviewer over all three axes, run twice. A small change carrying a risky signal.
+    reviewers: [unified-extra]
+    quorum: 2
+    fallback: focused-codex
   standard:
     description: Correctness and security on Claude, each with its own scope.
     reviewers: [correctness, security]
@@ -51,6 +58,13 @@ panels:
     judge:     {provider: codex, model: astra, prompt: builtin:judge}
     validator: {provider: codex, model: sol,   prompt: builtin:validator}
     fallback: quick
+  focused-codex:
+    description: One strong codex reviewer over all three axes, run twice. The second model's read of a small change carrying a risky signal.
+    reviewers: [unified-extra-codex]
+    quorum: 2
+    judge:     {provider: codex, model: astra, prompt: builtin:judge}
+    validator: {provider: codex, model: sol,   prompt: builtin:validator}
+    fallback: focused
   standard-codex:
     description: Correctness and security on codex, each with its own scope. The second model's first look at the change.
     reviewers: [correctness-codex, security-codex]
@@ -67,57 +81,61 @@ panels:
 
 defaults:
   worktree: quick
-  pr:       standard-codex
+  pr:       quick-codex
 
-# `standard` is the ceiling a rule can reach on a pull request. The branch has
-# normally been through the local loop by the time it is opened, so a second
-# every-axis-twice reading buys a re-read of code that was read deeply an hour
-# ago. `deep-codex` stays a panel and stays `deep`'s fallback; reaching it on a
-# pull request is `--panel deep-codex`, which is a person deciding this change
-# is the exception.
-#
-# Nothing verifies that the local loop ran. It posts nothing, so the pull
-# request carries no record of it, and approval reads only what is posted here
-# — while the author, whose machine that loop runs on, is the party a review
-# exists not to trust. An author who skips it gets the shallower reading on a
-# change that would have raised to `deep` locally, and no one is told. That is
-# the price of not paying for the deepest panel twice on every branch, and it
-# is a trade rather than an oversight: raise it back by naming `deep-codex` in
-# a pull-request rule, or reach it per change with `--panel`.
-#
-# So the worktree rules and the pull-request rules are not symmetric, and
-# `context` is what keeps each on its own side. A rule carries one combinator,
-# so the context guard makes each rule an `all:` — which is why one criterion
-# gets one rule rather than several being grouped.
-#
-# The rules raising to `standard-codex` cannot raise the panel while that is
-# also the pull-request default. They still fire, and `explain` lists them. They
-# are kept so lowering the default does not silently drop a criterion.
+# Every worktree rule below has a pr twin carrying the same conditions and
+# naming the codex twin of whatever panel the worktree rule names, so a pull
+# request is decided the same way local review is and read on the roster that
+# reviews it. `context` is what tells the twins apart: a rule carries one
+# combinator, so the context guard makes each of these an `all:` — which is
+# why one criterion gets one rule per context rather than the two being
+# grouped.
 escalate:
   # Mistakes here are exploitable, or land on somebody who is not in the room,
-  # or are indistinguishable from correct until production. Worktree only: this
-  # is the reading that happens before anyone else sees the change, which is the
-  # point at which looking harder is still cheaper than being wrong.
+  # or are indistinguishable from correct until production. The signal alone
+  # guarantees a strong reviewer reads the change twice, even at its smallest;
+  # `changed_lines` decides how much further the reading goes from there.
+  - to: focused
+    all:
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {lt: 20}
+      - context: {in: [worktree]}
+  - to: focused-codex
+    all:
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {lt: 20}
+      - context: {in: [pr]}
+  - to: standard
+    all:
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {gte: 20}
+      - changed_lines: {lt: 300}
+      - context: {in: [worktree]}
+  - to: standard-codex
+    all:
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {gte: 20}
+      - changed_lines: {lt: 300}
+      - context: {in: [pr]}
   - to: deep
     all:
-      - signals: {in: [auth, crypto, concurrency, sensitive-data, fix-revert]}
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {gte: 300}
       - context: {in: [worktree]}
-
-  # Widely used code: the count separates a one-line change nobody depends on
-  # from a one-line change everybody does. Worktree only, for the reason above.
-  - to: deep
+  - to: deep-codex
     all:
-      - referencing_files: {gte: 20}
-      - context: {in: [worktree]}
+      - signals: {in: [auth, crypto, concurrency, sensitive-data]}
+      - changed_lines: {gte: 300}
+      - context: {in: [pr]}
 
   # Irreversible or wide, but the risk is not in the diff: a migration's cost is
   # the table it locks, and a pipeline's is what it can reach. The security
   # reviewer is the one with something to say, so this buys that rather than
   # every axis twice.
   #
-  # `bugfix-lines` belongs here rather than beside `fix-revert`: touching a line
-  # a routine repair last edited is a reason to read more of the change, not a
-  # reason to read every axis of it twice.
+  # `bugfix-lines` belongs here rather than beside the auth/crypto/sensitive-data
+  # group above: touching a line a routine repair last edited is a reason to
+  # read more of the change, not a reason to read every axis of it twice.
   - to: standard
     all:
       - signals: {in: [migrations, ci-cd, iac, bugfix-lines]}

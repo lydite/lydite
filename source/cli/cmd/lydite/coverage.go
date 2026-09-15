@@ -50,6 +50,11 @@ type measurement struct {
 	Lines coverage.LineCount
 	// Hits is the per-line data the patch gate reads, nil when Why is set.
 	Hits coverage.LineHits
+	// Unused names each `[lydite:exclude_from_coverage]` declaration in this
+	// component that covers no function, as "file:line". Its author has taken
+	// the referral a suppression brings and got none of its effect, which is
+	// the one state nothing they can see says anything about.
+	Unused []string
 	// Producer names what wrote the report Lines was read from, and is what
 	// stops a comparison being made across a change to it. Empty for a
 	// component lydite could not identify an instrument for, and for one that
@@ -201,10 +206,17 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 		return unmeasuredComponent(c, err.Error())
 	}
 	if !rep.Lines.Measured() {
-		return unmeasuredComponent(c, "the coverage report lists no coverable line")
+		// rep.Unused travels even here: a component whose exclusions
+		// happen to leave zero net coverable lines can still carry a
+		// declaration that covers no function, and nameUnusedDeclarations
+		// reads it off the measurement — a report discarded past this
+		// point is a warning nobody sees.
+		m := unmeasuredComponent(c, "the coverage report lists no coverable line")
+		m.Unused = rep.Unused
+		return m
 	}
 	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
-		Lines: rep.Lines, Hits: rep.Hits, Producer: producerOf(root, c, tc)}
+		Lines: rep.Lines, Hits: rep.Hits, Unused: rep.Unused, Producer: producerOf(root, c, tc)}
 	m.CRAP, m.CRAPWhy = score(root, m)
 	return m
 }
@@ -375,8 +387,19 @@ func addCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, di
 	}
 }
 
-// nameUnusedDeclarations says which `[lydite:exclude_from_crap]` declarations
-// documented no function.
+// nameUnusedDeclarations says which `[lydite:exclude_from_crap]` and
+// `[lydite:exclude_from_coverage]` declarations documented no function.
+//
+// Both gates, in one place, because both are read off the one report this run
+// produced and a reader fixing a misplaced declaration does not care which gate
+// it named. Each is warned about by the gate it belongs to and only there:
+// internal/crap holds the CRAP declarations to covering a function and leaves
+// the coverage ones alone, so one typo is reported once.
+//
+// Coverage is warned about in all three languages. The Go path resolves a
+// declaration through go/ast and the Rust and TypeScript paths through
+// tree-sitter, and both report an unmatched one the same way — a declaration
+// that means one thing in Go and nothing elsewhere is what ADR 0034 rejected.
 //
 // Named rather than dropped, for the reason a mutation declaration covering no
 // mutant is named: its author believes they have answered a finding, and
@@ -393,6 +416,10 @@ func nameUnusedDeclarations(cmd *cobra.Command, ms []measurement) {
 		for _, where := range m.CRAP.Unused {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s covers no function, so nothing is excluded by it\n",
 				where, annotation.Marker(annotation.CRAP))
+		}
+		for _, where := range m.Unused {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s covers no function, so nothing is excluded by it\n",
+				where, annotation.Marker(annotation.Coverage))
 		}
 	}
 }

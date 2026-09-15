@@ -1,6 +1,7 @@
 package coverage
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -9,6 +10,8 @@ import (
 	"sort"
 
 	"lydite/lydite/internal/annotation"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/treesitter"
 )
 
 // Excluded is what one Go file declares about a gate: the functions whose
@@ -81,8 +84,8 @@ func DeclaredExclusions(fset *token.FileSet, file *ast.File, path string, gate a
 		}
 		for _, c := range fn.Doc.List {
 			line := fset.Position(c.Pos()).Line
-			if reason, ok := reasons[line]; ok {
-				out.Funcs[fn] = reason
+			if decl, ok := reasons[line]; ok {
+				out.Funcs[fn] = decl.Reason
 				claimed[line] = true
 			}
 		}
@@ -112,8 +115,27 @@ func goComments(fset *token.FileSet, file *ast.File) []annotation.Comment {
 	return out
 }
 
+// exclusions is what one source file declares about a gate, in the form a
+// measurement reads it: the lines a declaration covers, and the declarations
+// that cover no function at all.
+//
+// Both halves travel together because both come out of one parse, and because
+// a caller that took only the lines would drop every unmatched declaration in
+// silence — which is the state its author cannot see and most needs told.
+type exclusions struct {
+	// Lines is every line of every excluded function, which is what a
+	// measurement drops from both sides of its figure.
+	Lines map[int]bool
+	// Unused names each declaration that covers no function, as "file:line"
+	// against the path the report keys that file by, so a reader can open it.
+	Unused []string
+}
+
 // excludedGoLines is the lines of path that a declaration for gate covers, for
-// a caller that has a file on disk rather than an AST in hand.
+// a caller that has a file on disk rather than an AST in hand. name is what the
+// report keys this file by, which is what an unused declaration is named
+// against — path is where it sits on this machine, and no reader is looking
+// there.
 //
 // A file that cannot be read is no exclusion rather than an error: the same
 // stance isGeneratedGoFile takes, and for the same reason — the safe direction
@@ -123,19 +145,60 @@ func goComments(fset *token.FileSet, file *ast.File) []annotation.Comment {
 // failing the aggregate over it would turn a coverage figure into a syntax
 // check. What must not be silent is a declaration that is present and
 // malformed, which is an error naming the line.
-func excludedGoLines(path string, gate annotation.Gate) (map[int]bool, error) {
+func excludedGoLines(path, name string, gate annotation.Gate) (exclusions, error) {
 	src, err := os.ReadFile(path) // #nosec G304 -- the path comes from lydite's own coverage profile, under the scan root
 	if err != nil {
-		return nil, nil
+		return exclusions{}, nil
 	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 	if err != nil {
-		return nil, nil
+		return exclusions{}, nil
 	}
 	excluded, err := DeclaredExclusions(fset, file, path, gate)
 	if err != nil {
-		return nil, err
+		return exclusions{}, err
 	}
-	return excluded.Lines(fset), nil
+	return exclusions{Lines: excluded.Lines(fset), Unused: named(name, excluded.Unused)}, nil
+}
+
+// excludedLCOVLines is the lines of one Rust or TypeScript source file that a
+// declaration for gate covers. name is what the report keys the file by, as it
+// is for Go.
+//
+// The same question excludedGoLines answers, asked of a language whose report
+// is lcov. It is a parser that answers it in both, because the alternative is a
+// declaration meaning one thing in Go and another here — see ADR 0034. lcov
+// carries a start line per function and no end, so the report itself cannot say
+// how far a declaration reaches.
+//
+// A file that cannot be read or will not parse is no exclusion rather than an
+// error, the stance excludedGoLines takes and for the same reason: the tree
+// compiled to produce the report being read, so failing a coverage figure over
+// a parse would turn it into a syntax check. A declaration that is present and
+// malformed is still an error naming the line.
+func excludedLCOVLines(path, name string, lang runner.Lang, gate annotation.Gate) (exclusions, error) {
+	src, err := os.ReadFile(path) // #nosec G304,G703 -- the only caller, measureLCOV, has already checked that this path resolves inside the component's own directory
+	if err != nil {
+		return exclusions{}, nil
+	}
+	declared, err := treesitter.DeclaredExclusions(lang, path, src, gate)
+	if err != nil {
+		var unparsed treesitter.ErrUnparsed
+		if errors.As(err, &unparsed) {
+			return exclusions{}, nil
+		}
+		return exclusions{}, err
+	}
+	return exclusions{Lines: declared.Lines(), Unused: named(name, declared.Unused)}, nil
+}
+
+// named renders a file's unused declaration lines the way every gate names a
+// site, so a coverage warning and a CRAP one read alike.
+func named(file string, lines []int) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, fmt.Sprintf("%s:%d", file, line))
+	}
+	return out
 }

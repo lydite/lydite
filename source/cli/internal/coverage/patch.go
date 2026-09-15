@@ -141,10 +141,36 @@ func parseUnifiedDiff(diff string) map[string][]int {
 // a DA tally. Counting DA would report a denominator smaller than the tool's
 // own, in a number the gate then compares against a baseline recorded by that
 // same tool.
+//
+// It answers for the report and nothing else: no
+// `[lydite:exclude_from_coverage]` declaration is honoured here, because
+// honouring one means parsing the source the report names. measureLCOV is
+// what does that.
 func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
-	var count LineCount
-	hits := LineHits{}
+	// No exclusions to resolve, so nothing here can fail: the only error
+	// lcovReport returns is one the callback raised.
+	rep, _ := lcovReport(data, baseDir, nil)
+	return rep.Lines, rep.Hits
+}
+
+// lcovReport is the one pass over an lcov trace, producing every quantity a
+// gate takes from it: the counts the aggregate and floor read, the per-line
+// hits the patch and complexity gates read, and the lines that actually ran.
+//
+// exclude is asked, once per file as its "SF:" record is reached, which of that
+// file's lines a declaration covers. Asked here rather than applied afterwards
+// because the deduction is per *record* and not per line: LF and LH count
+// records, which is why they read 64 and 48 over a probe whose DA lines number
+// 63 — a generic emits one record per monomorphisation at the same line — and a
+// deduction of one per excluded line would leave the extra behind.
+//
+// A nil callback excludes nothing, which is what a caller asking only about the
+// report itself wants.
+func lcovReport(data []byte, baseDir string, exclude func(file string) (exclusions, error)) (Report, error) {
+	out := Report{Hits: LineHits{}, Executed: LineHits{}}
+	var deduct LineCount
 	var file string
+	var excluded exclusions
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -152,8 +178,24 @@ func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
 		switch {
 		case strings.HasPrefix(line, "SF:"):
 			file = normalizeRelPath(baseDir, strings.TrimPrefix(line, "SF:"))
-			if _, ok := hits[file]; !ok {
-				hits[file] = map[int]int{}
+			_, seen := out.Hits[file]
+			if !seen {
+				out.Hits[file] = map[int]int{}
+				out.Executed[file] = map[int]int{}
+			}
+			excluded = exclusions{}
+			if exclude != nil {
+				var err error
+				if excluded, err = exclude(file); err != nil {
+					return Report{}, err
+				}
+				// Once per file and not once per record. A trace naming one
+				// source twice — which cargo-llvm-cov emits for a file compiled
+				// into two targets — would otherwise warn twice about one
+				// declaration, and a reader fixing it once would still see it.
+				if !seen {
+					out.Unused = append(out.Unused, excluded.Unused...)
+				}
 			}
 		case strings.HasPrefix(line, "DA:"):
 			if file == "" {
@@ -175,23 +217,42 @@ func ParseLCOV(data []byte, baseDir string) (LineCount, LineHits) {
 			// LH counts as hit. Taking the last would have the patch gate
 			// score it uncovered while the aggregate scored it covered, two
 			// figures disagreeing about one line. ParseGoProfile takes the
-			// max for the same reason.
-			if prev, seen := hits[file][lineNo]; !seen || hitCount > prev {
-				hits[file][lineNo] = hitCount
+			// max for the same reason, and the same call: a missing key reads
+			// as its zero value, and a hit count is never negative, so
+			// max(existing, hitCount) is `hitCount` the first time a line is
+			// seen and the greater of the two after — one expression rather
+			// than a comparison a reader has to convince themselves is
+			// equivalent to it whichever way the two entries tie.
+			out.Executed[file][lineNo] = max(out.Executed[file][lineNo], hitCount)
+			// Out of the denominator as well as the numerator. A declaration
+			// says this suite does not measure the function, so counting its
+			// lines as uncovered would report the author's own statement back
+			// as a hole they have to fill — the reading that makes an exclusion
+			// worth nothing.
+			if excluded.Lines[lineNo] {
+				deduct.Total++
+				if hitCount > 0 {
+					deduct.Covered++
+				}
+				continue
 			}
+			out.Hits[file][lineNo] = max(out.Hits[file][lineNo], hitCount)
 		case strings.HasPrefix(line, "LF:"):
 			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LF:"))); err == nil {
-				count.Total += n
+				out.Lines.Total += n
 			}
 		case strings.HasPrefix(line, "LH:"):
 			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "LH:"))); err == nil {
-				count.Covered += n
+				out.Lines.Covered += n
 			}
 		case line == "end_of_record":
 			file = ""
+			excluded = exclusions{}
 		}
 	}
-	return count, hits
+	out.Lines.Total -= deduct.Total
+	out.Lines.Covered -= deduct.Covered
+	return out, nil
 }
 
 // GoModuleProfile locates one component's Go coverage profile, together with
@@ -256,10 +317,11 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 		// The lines this file's author declared the suite does not measure.
 		// Read once for the whole file, because the aggregate, the per-line
 		// hits and the executed set all answer to it.
-		excluded, err := excludedGoLines(abs, annotation.Coverage)
+		excluded, err := excludedGoLines(abs, rel, annotation.Coverage)
 		if err != nil {
 			return Report{}, err
 		}
+		out.Unused = append(out.Unused, excluded.Unused...)
 		hits, executed := map[int]int{}, map[int]int{}
 		for _, b := range p.Blocks {
 			// Out of the denominator as well as the numerator. A declaration
@@ -267,7 +329,7 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 			// statements as uncovered would report the author's own statement
 			// back as a hole they have to fill — the reading that makes an
 			// exclusion worth nothing.
-			if !excluded[b.StartLine] {
+			if !excluded.Lines[b.StartLine] {
 				out.Lines.Total += b.NumStmt
 				if b.Count > 0 {
 					out.Lines.Covered += b.NumStmt
@@ -291,7 +353,7 @@ func goProfile(src GoModuleProfile, root string) (Report, error) {
 				// seen: a hit count is never negative, so the two are the
 				// same rule and this one has no boundary to get wrong.
 				executed[line] = max(executed[line], b.Count)
-				if excluded[line] {
+				if excluded.Lines[line] {
 					continue
 				}
 				hits[line] = max(hits[line], b.Count)
