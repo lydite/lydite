@@ -185,8 +185,14 @@ func newScanCmd() *cobra.Command {
 					results = golang.Check(ctx, cdir, env, tc.Key())
 				}
 				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
-				if lang == runner.Go {
+				switch lang {
+				case runner.Go:
 					recordGoLicence(ctx, rep, dir, c, cdir, env.Check, cfg, baseSHA, changed)
+				case runner.Rust:
+					recordRustLicence(ctx, rep, dir, c, cdir, env, cfg, baseSHA, changed)
+				case runner.TypeScript:
+					// TypeScript has no licence source lydite reads, so no
+					// licence set is measured for it.
 				}
 			}
 
@@ -428,6 +434,63 @@ func recordGoLicence(ctx context.Context, rep *ui.Report, root string, c compone
 	rep.AddFindings(claims...)
 }
 
+// recordRustLicence is the licence gate for one Rust component: the crates
+// cargo-deny rejects under the stated policy, against the same set recomputed at
+// the merge-base.
+//
+// The row names the document that decided the licences as well as the verdict.
+// A Rust component can be governed by lydite's policy, by its own deny.toml or
+// by neither, and those three are answered by edits to different files — or by
+// no edit at all.
+func recordRustLicence(ctx context.Context, rep *ui.Report, root string, c component.Component, cdir string, env executil.Env, cfg config.Config, baseSHA string, changed map[string][]int) {
+	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
+	label := licence.Gate + "(" + c.Name + ")"
+	base := licence.NoDiffBase()
+	if policy.Configured() {
+		// Built only under a stated policy, because it costs a worktree and a
+		// cargo-deny run and answers a question no other policy source gates on.
+		base = rustLicenceBase(ctx, root, c.Dir, baseSHA, env, policy)
+	}
+	comparison, source, found, err := rust.LicenceCheck(ctx, cdir, env, policy, base)
+	if err != nil {
+		// Unmeasured and never fail: a component whose own dependencies could
+		// not be enumerated has had nothing decided about it, and a red row here
+		// would ask its author to answer for a claim the gate never made.
+		rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: label,
+			Value: "the component's dependencies could not be read", Detail: []string{err.Error()}})
+		return
+	}
+	row := licenceRow(label, comparison)
+	if source == rust.PolicyFromConsumer && comparison.Verdict == licence.VerdictFail {
+		// A component's own deny.toml is evaluated whole and absolutely, with no
+		// base in it, so the count is every crate it rejected rather than what
+		// this change introduced.
+		row.Value = fmt.Sprintf("%d non-conforming licence(s)", len(comparison.Pairs))
+	}
+	row.Value += " — " + policySourceSays(source)
+	rep.Add(row)
+	claims := findingsOf(labelled([]executil.Result{{Name: licence.Gate, Findings: found}}, c.Name, c.Dir))
+	finding.Anchored(claims, changed)
+	rep.AddFindings(claims...)
+}
+
+// policySourceSays names the document that decided a Rust component's licences,
+// on its row.
+//
+// Which one it was cannot be read off the verdict, and a reader told only that
+// nothing was gated has no way to find the file an edit would go in.
+func policySourceSays(s rust.PolicySource) string {
+	switch s {
+	case rust.PolicyFromLydite:
+		return "policy from " + config.FileName
+	case rust.PolicyFromConsumer:
+		return "policy from the component's own " + rust.DenyConfigFile
+	case rust.PolicyFromNone:
+		return "no " + rust.DenyConfigFile + " either, so no licence check ran"
+	}
+	return string(s)
+}
+
 // licenceRow renders one component's comparison.
 //
 // Only a gating verdict renders green or red. A policy nobody stated, a run
@@ -471,18 +534,48 @@ func licenceDetail(pairs []licence.Dependency) []string {
 	return out
 }
 
-// goLicenceBase is the component's non-conforming set recomputed at the
+// goLicenceBase is the Go component's non-conforming set recomputed at the
 // merge-base.
+//
+// The base tree's environment is the branch's: the component's resolved
+// toolchain and the environment its declaration asks for. A base tree declaring
+// a Go newer than that toolchain is a `go list` that will not run, and it
+// answers unmeasured naming what it said rather than a set read under an
+// environment nobody chose.
+func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env []string, policy licence.Policy) licence.Base {
+	return licenceBase(ctx, root, componentDir, baseSHA, "go.mod", func(dir string) (licence.Set, error) {
+		return golang.LicenceSet(ctx, dir, env, policy)
+	})
+}
+
+// rustLicenceBase is the Rust component's non-conforming set recomputed at the
+// merge-base.
+//
+// The lockfile is what has to be there: a component with no Cargo.lock at the
+// base is one this change adds, which the generated policy decides nothing
+// about at that end.
+func rustLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env executil.Env, policy licence.Policy) licence.Base {
+	return licenceBase(ctx, root, componentDir, baseSHA, "Cargo.lock", func(dir string) (licence.Set, error) {
+		set, _, err := rust.LicenceSet(ctx, dir, env, policy)
+		return set, err
+	})
+}
+
+// licenceBase is a component's non-conforming set recomputed at the merge-base,
+// with read the language's own way of measuring one.
 //
 // measureBaseTree is the precedent: the base commit is checked out into a
 // throwaway worktree, the same path is run there, and the worktree is removed.
 // What makes the recompute affordable here is what measureBaseTree cannot do —
-// a licence set needs the manifest, the module cache and one `go list`, with no
-// suite to run, no compose service to start and no instrumented build.
+// a licence set needs the manifest, a warm dependency cache and one tool
+// invocation, with no suite to run, no compose service to start and no
+// instrumented build.
 //
-// Every failure answers UnmeasuredBase naming the step, never a measured empty
-// set: a base that could not be built gates nothing and says so on the row.
-func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env []string, policy licence.Policy) licence.Base {
+// manifest is the file whose absence at the base means the component was not
+// there. Every failure answers UnmeasuredBase naming the step, never a measured
+// empty set: a base that could not be built gates nothing and says so on the
+// row.
+func licenceBase(ctx context.Context, root, componentDir, baseSHA, manifest string, read func(dir string) (licence.Set, error)) licence.Base {
 	if baseSHA == "" {
 		return licence.NoDiffBase()
 	}
@@ -512,19 +605,14 @@ func goLicenceBase(ctx context.Context, root, componentDir, baseSHA string, env 
 		return licence.UnmeasuredBase("locating the scan root inside the repository: " + err.Error())
 	}
 	dir := filepath.Join(tmp, filepath.FromSlash(prefix), filepath.FromSlash(componentDir))
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		// A component with no module at the base is one this change adds, and
+	if _, err := os.Stat(filepath.Join(dir, manifest)); err != nil {
+		// A component with no manifest at the base is one this change adds, and
 		// every pair it carries is one the change introduces. That is a
 		// measured empty set rather than an unmeasured base: nothing failed,
 		// there was nothing there.
 		return licence.MeasuredBase(licence.Set{})
 	}
-	// The branch's environment, which is the component's resolved toolchain
-	// and the environment its declaration asks for. A base tree declaring a Go
-	// newer than that toolchain is a `go list` that will not run, and it
-	// answers unmeasured naming what it said rather than a set read under an
-	// environment nobody chose.
-	set, err := golang.LicenceSet(ctx, dir, env, policy)
+	set, err := read(dir)
 	if err != nil {
 		return licence.UnmeasuredBase("reading the base tree's dependencies: " + err.Error())
 	}
