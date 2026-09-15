@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -186,6 +188,148 @@ func TestASuiteThatHangsTimesOutAndCountsAsKilled(t *testing.T) {
 	s.Add(results[0])
 	if k, n := s.Score(); k != 1 || n != 1 {
 		t.Errorf("a timeout scored %d of %d, want 1 of 1 — a hang is a behaviour change something noticed", k, n)
+	}
+}
+
+// allocEnv carries the size, in MiB, the helper child below allocates. Its
+// presence is also what tells that child apart from an ordinary run of this
+// test binary.
+const allocEnv = "LYDITE_MUTATION_ALLOC_MIB"
+
+// TestMutationAllocatingChild is the mutant a memory bound is measured
+// against, re-executed out of this test binary so the measurement needs no
+// language toolchain to build one.
+func TestMutationAllocatingChild(t *testing.T) {
+	mib, err := strconv.Atoi(os.Getenv(allocEnv))
+	if err != nil {
+		t.Skip("not the allocating child")
+	}
+	// Every byte is written, because a page counts against the bound when it
+	// is mapped and against the reported peak only when it is touched — a
+	// child that allocates without touching dies at a peak nothing recognises
+	// as the bound. The writes go through copy so the race detector
+	// instruments a chunk rather than a byte.
+	chunk := make([]byte, 1<<20)
+	for i := range chunk {
+		chunk[i] = 1
+	}
+	held := make([][]byte, 0, mib)
+	for range mib {
+		b := make([]byte, len(chunk))
+		copy(b, chunk)
+		held = append(held, b)
+	}
+	fmt.Printf("allocated %d MiB\n", len(held))
+}
+
+// allocating stages one mutant whose suite is the child above, asking it for
+// the size the run's own environment carries.
+func allocating() *fake {
+	return &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{
+			{Name: os.Args[0], Args: []string{"-test.run=^TestMutationAllocatingChild$"}},
+		}}
+	}}
+}
+
+// A mutant that allocates without stopping is killed by the bound and counted
+// as killed: an allocation that does not stop is a behaviour change something
+// noticed, exactly as a hang is. Without the bound the machine's memory goes
+// instead, and what dies is the agent running the job rather than the job.
+func TestASuiteThatAllocatesWithoutStoppingIsKilledByItsMemoryBound(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RLIMIT_DATA is settable only on linux — darwin's setrlimit refuses it with EINVAL at any value — so this is proven by the linux CI job")
+	}
+	const limit = 1 << 30
+	results, err := Execute(t.Context(), allocating(), []Mutant{mutantAt(1)}, Options{
+		Workers: 1, MaxMemory: limit, Env: []string{allocEnv + "=1536"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != OutOfMemory {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, OutOfMemory, results[0].Detail)
+	}
+	if results[0].MemoryUnbounded {
+		t.Error("the mutant reports the bound never reached it, on a platform that set one")
+	}
+	var s Summary
+	s.Add(results[0])
+	if k, n := s.Score(); k != 1 || n != 1 {
+		t.Errorf("a mutant stopped at its memory bound scored %d of %d, want 1 of 1", k, n)
+	}
+}
+
+// A mutant whose compilation reached the ceiling is unviable rather than
+// killed: nothing ran, so nothing observed the change, and what the bound
+// caught there is the compiler's appetite.
+func TestABuildThatReachesTheMemoryBoundIsUnviable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RLIMIT_DATA is settable only on linux — darwin's setrlimit refuses it with EINVAL at any value — so this is proven by the linux CI job")
+	}
+	f := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: runner.Invocation{
+			Name: os.Args[0], Args: []string{"-test.run=^TestMutationAllocatingChild$"},
+		}}
+	}}
+	results, err := Execute(t.Context(), f, []Mutant{mutantAt(1)}, Options{
+		Workers: 1, MaxMemory: 1 << 30, Env: []string{allocEnv + "=1536"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Unviable {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, Unviable, results[0].Detail)
+	}
+	if !strings.Contains(results[0].Detail, "did not compile") {
+		t.Errorf("detail = %q, want the bound named as what stopped the compilation", results[0].Detail)
+	}
+	var s Summary
+	s.Add(results[0])
+	if s.Denominator() != 0 {
+		t.Error("a mutant that was never built was counted as evidence about the suite")
+	}
+}
+
+// A suite that stays under the bound is untouched by it, so a mutant nothing
+// killed still survives — a bound that failed every mutant would report a
+// component whose tests are perfect.
+func TestASuiteUnderItsMemoryBoundIsUntouched(t *testing.T) {
+	results, err := Execute(t.Context(), allocating(), []Mutant{mutantAt(1)}, Options{
+		Workers: 1, MaxMemory: 1 << 30, Env: []string{allocEnv + "=16"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Survived {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, Survived, results[0].Detail)
+	}
+}
+
+// Three states have to be told apart, and a ceiling asked for on a platform
+// that has none to set is the one that matters: reported as enforced it would
+// render the green of a bound that held.
+func TestAMutantSaysWhetherTheBoundReachedIt(t *testing.T) {
+	passing := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 0")}}
+	}}
+	bounded, err := Execute(t.Context(), passing, []Mutant{mutantAt(1)}, Options{Workers: 1, MaxMemory: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := runtime.GOOS != "linux"; Unbounded(bounded) != want {
+		t.Errorf("Unbounded = %v on %s, want %v", Unbounded(bounded), runtime.GOOS, want)
+	}
+
+	// A run that asked for no ceiling is not one whose ceiling went missing,
+	// and a row saying memory was not bounded on every such run is one nobody
+	// reads.
+	none, err := Execute(t.Context(), passing, []Mutant{mutantAt(1)}, Options{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Unbounded(none) {
+		t.Error("a run that asked for no memory bound reports one that went missing")
 	}
 }
 

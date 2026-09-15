@@ -51,7 +51,7 @@ func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
 	var asJSON, noColor, stream, onlyAffected bool
-	var concurrency, baseBranch string
+	var concurrency, baseBranch, memory string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
@@ -97,6 +97,10 @@ a suppression, declaring one refers the change to a human.`,
 			}
 			if timeout < 0 {
 				return fmt.Errorf("--timeout must not be negative, got %s", timeout)
+			}
+			maxMemory, err := parseBytes(memory)
+			if err != nil {
+				return fmt.Errorf("--memory: %w", err)
 			}
 			cfg, err := config.Load(dir)
 			if err != nil {
@@ -172,6 +176,7 @@ a suppression, declaring one refers the change to a human.`,
 				files:   files,
 				limit:   limit,
 				timeout: timeout,
+				memory:  maxMemory,
 				stream:  stream,
 				// A run responsible for part of the declaration emits no
 				// summary row, for the reason it emits no coverage(repo):
@@ -201,6 +206,12 @@ a suppression, declaring one refers the change to a human.`,
 	// and it is a flag rather than a key for the reason --concurrency is.
 	cmd.Flags().DurationVar(&timeout, "timeout", 0,
 		"how long one mutant's suite may run before it counts as killed; derived from the component's own baseline by default")
+	// The same escape as --timeout, for the other half of what bounds a
+	// mutant: a suite whose own peak is not representative of what its mutants
+	// need. A bound below what the component's baseline itself held leaves the
+	// component unmeasured rather than reporting every mutant as killed.
+	cmd.Flags().StringVar(&memory, "memory", "",
+		"how much memory one mutant's suite may hold before it counts as killed, e.g. 4GiB; derived from the component's own baseline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	return cmd
 }
@@ -236,6 +247,9 @@ type mutationOptions struct {
 	files   []string
 	limit   int
 	timeout time.Duration
+	// memory overrides the ceiling derived from each component's own baseline,
+	// in bytes, and zero asks for the derivation.
+	memory  int64
 	stream  bool
 	summary bool
 }
@@ -518,6 +532,18 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 			log, tail(res.Output)...), out
 	}
 	baseline := time.Since(baselineStarted)
+	// Both halves of what bounds a mutant come off the same run: the elapsed
+	// time and the peak the kernel reported for it. The baseline itself runs
+	// under no ceiling, because deriving one needs the measurement first.
+	maxMemory := memoryBudget(res.MaxRSS, opts.memory)
+	if !memoryFits(res.MaxRSS, maxMemory) {
+		// Gating nothing rather than reporting a component whose suite kills
+		// everything: under a ceiling the baseline alone already fills, every
+		// mutant dies of the bound rather than of a test.
+		return detailed(unmeasuredRow(label, fmt.Sprintf(
+			"the baseline suite held %d byte(s), which leaves no room under the %d byte memory bound its mutants would run at",
+			res.MaxRSS, maxMemory)), log), out
+	}
 
 	report, err := coverage.Measure(ctx, opts.root, c.Dir, inv.CoverageReport, lang, childEnv(tc, c, runner.Invocation{}))
 	if err != nil {
@@ -536,11 +562,12 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	}
 
 	results, err := mutation.Execute(ctx, backend, mutants, mutation.Options{
-		Env:     childEnv(tc, c, suite),
-		Timeout: budget(baseline, opts.timeout),
-		Workers: workersFor(p, opts.limit),
-		Slots:   slots,
-		Log:     log.out,
+		Env:       childEnv(tc, c, suite),
+		Timeout:   budget(baseline, opts.timeout),
+		MaxMemory: maxMemory,
+		Workers:   workersFor(p, opts.limit),
+		Slots:     slots,
+		Log:       log.out,
 	})
 	if err != nil {
 		return unmeasuredRow(label, err.Error()), out
@@ -631,6 +658,55 @@ func budget(baseline, override time.Duration) time.Duration {
 	// other arm returns is a branch nothing can be asked about.
 	return max(baseline*budgetFactor, minimumBudget)
 }
+
+// memoryBudget is how much memory one mutant's suite may hold before it counts
+// as killed.
+//
+// A multiple of the component's own measured baseline, never a share of the
+// machine's memory: a bound that moved with the machine would make a mutant
+// killed on a small runner and surviving on a large one, so the verdict would
+// stop meaning one thing. The machine is what sets the floor's value instead.
+//
+// The floor is for a suite whose own peak is small. Four times a forty-megabyte
+// baseline is a ceiling a compiler reaches on its own, and every mutant would
+// be reported as one that allocated without stopping.
+func memoryBudget(baseline, override int64) int64 {
+	if override > 0 {
+		return override
+	}
+	// The floor as a clamp, for the reason budget's is: a conditional whose
+	// boundary returns what the other arm returns is a branch nothing can be
+	// asked about.
+	return max(baseline*memoryFactor, minimumMemory)
+}
+
+// memoryFactor is how much more than the baseline's own peak a mutant may hold.
+//
+// Four rather than the timeout's three because memory is the less elastic of
+// the two: a suite is routinely slower under a mutation and is rarely four
+// times larger. The error that matters is one-sided — a bound too tight kills a
+// mutant nothing about the tests killed, and an inflated score is permanent and
+// silent where a false survivor is an author's afternoon.
+const memoryFactor = 4
+
+// minimumMemory is the floor under that multiple. Against defaultConcurrency's
+// four slots it is 8GiB of a 16GB runner, with the agent, the toolchains and
+// the page cache in the rest; --concurrency is what bounds the sum.
+const minimumMemory = 2 << 30
+
+// memoryHeadroom is how much of the derived bound the baseline itself may hold
+// and the run still mean something.
+//
+// A mutant runs the plain variant of the suite the baseline ran instrumented,
+// so a ceiling the baseline alone already fills is one every mutant reaches
+// whatever its tests do — the run would report a component whose suite kills
+// everything, from a bound nothing about the code justifies. Only an override
+// can produce it: the derivation is four times that same peak.
+const memoryHeadroom = 2
+
+// memoryFits reports whether a component's baseline leaves room under the bound
+// its mutants run at.
+func memoryFits(peak, bound int64) bool { return peak*memoryHeadroom <= bound }
 
 // budgetFactor is how much longer than the baseline a mutant may take.
 //
@@ -755,6 +831,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
 	}
+	if n := unboundedNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
 	survivors := mutation.Survivors(results)
 	if len(survivors) == 0 {
 		return row, nil
@@ -771,6 +850,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
+	}
+	if n := unboundedNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
 	}
 	row.Detail = append(row.Detail,
 		"write the assertion that fails when the code changes this way, or declare the mutant equivalent with "+
@@ -843,7 +925,58 @@ func aside(s mutation.Summary) string {
 	if s.TimedOut > 0 {
 		parts = append(parts, fmt.Sprintf("%d timed out", s.TimedOut))
 	}
+	if s.OutOfMemory > 0 {
+		parts = append(parts, fmt.Sprintf("%d ran out of memory", s.OutOfMemory))
+	}
 	return strings.Join(parts, ", ")
+}
+
+// unboundedNote says on the row that the memory bound did not reach the
+// mutants it was asked for.
+//
+// Darwin is where that happens: setrlimit refuses RLIMIT_DATA and RLIMIT_AS
+// alike with EINVAL, at any value, so a mutant there runs bounded in time and
+// unbounded in memory. Said out loud rather than left out, because a bound
+// quietly not applied renders exactly the green of one that held.
+func unboundedNote(results []mutation.Result) string {
+	if !mutation.Unbounded(results) {
+		return ""
+	}
+	return "memory was not bounded: this platform has no limit to set, so a mutant that allocates without stopping was held to nothing"
+}
+
+// parseBytes reads a byte quantity as a flag spells one: a plain number of
+// bytes, or one with a binary suffix.
+//
+// Binary rather than decimal for every suffix, including the bare K, M and G:
+// the quantity is compared against a peak the kernel reports in pages, and a
+// tool whose GB and GiB were a 7% different ceiling would be one nobody could
+// reason about from the row.
+func parseBytes(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	digits, shift := s, 0
+	for i, suffix := range []string{"K", "M", "G"} {
+		for _, spelling := range []string{suffix, suffix + "B", suffix + "iB"} {
+			if cut, ok := strings.CutSuffix(s, spelling); ok {
+				digits, shift = strings.TrimSpace(cut), 10*(i+1)
+			}
+		}
+	}
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a byte quantity — write bytes, or a size like 4GiB: %w", s, err)
+	}
+	// A negative ceiling bounds nothing and a suffix that overflowed reads as
+	// one, so both are refused where the number is read rather than where a
+	// suite would fail under it.
+	scaled := n << shift
+	if n < 0 || scaled>>shift != n {
+		return 0, fmt.Errorf("%q is not a memory bound a suite could run under", s)
+	}
+	return scaled, nil
 }
 
 // mutationSummaryRow counts the run, and gates nothing.
@@ -865,6 +998,7 @@ func mutationSummaryRow(results []componentMutation) ui.Row {
 		elapsed += r.elapsed
 		total.Killed += r.summary.Killed
 		total.TimedOut += r.summary.TimedOut
+		total.OutOfMemory += r.summary.OutOfMemory
 		total.Survived += r.summary.Survived
 		total.Unviable += r.summary.Unviable
 		total.Acknowledged += r.summary.Acknowledged

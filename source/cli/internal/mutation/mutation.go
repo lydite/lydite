@@ -192,6 +192,13 @@ const (
 	// distinction is kept because a suite full of timeouts is worth seeing
 	// even when every one of them scores correctly.
 	TimedOut Outcome = "timed-out"
+	// OutOfMemory means the run reached its memory ceiling, and counts as
+	// killed for the reason TimedOut does: an allocation that does not stop is
+	// a behaviour change something noticed. It is told from an ordinary
+	// failure by the run's own peak against the ceiling rather than by an exit
+	// code, because every language dies differently there and all of them exit
+	// non-zero.
+	OutOfMemory Outcome = "out-of-memory"
 	// Survived means every test still passed. It is the only outcome that
 	// fails the gate.
 	Survived Outcome = "survived"
@@ -215,12 +222,19 @@ type Result struct {
 	// have to reproduce to understand — the compiler error behind an
 	// Unviable, the reason behind an Acknowledged.
 	Detail string
+	// MemoryUnbounded reports that a memory ceiling was asked for and did not
+	// reach this mutant — the platform has none to set, or setting it failed.
+	// It is carried per mutant rather than settled once for the run because it
+	// is observed where the command is run, and a bound quietly not applied
+	// otherwise reports the green of one that held.
+	MemoryUnbounded bool
 }
 
 // Summary counts one component's results.
 type Summary struct {
 	Killed       int
 	TimedOut     int
+	OutOfMemory  int
 	Survived     int
 	Unviable     int
 	Acknowledged int
@@ -233,6 +247,8 @@ func (s *Summary) Add(r Result) {
 		s.Killed++
 	case TimedOut:
 		s.TimedOut++
+	case OutOfMemory:
+		s.OutOfMemory++
 	case Survived:
 		s.Survived++
 	case Unviable:
@@ -244,25 +260,44 @@ func (s *Summary) Add(r Result) {
 
 // Total is every mutant generated, whatever became of it.
 func (s Summary) Total() int {
-	return s.Killed + s.TimedOut + s.Survived + s.Unviable + s.Acknowledged
+	return s.Killed + s.TimedOut + s.OutOfMemory + s.Survived + s.Unviable + s.Acknowledged
 }
 
 // Denominator is the mutants that say something about the suite: the killed,
-// the timed out and the survived. Unviable and acknowledged mutants are
-// excluded, because neither is evidence about the tests — one could not be
-// built and the other has been declared unkillable.
-func (s Summary) Denominator() int { return s.Killed + s.TimedOut + s.Survived }
+// the timed out, the ones that reached the memory ceiling and the survived.
+// Unviable and acknowledged mutants are excluded, because neither is evidence
+// about the tests — one could not be built and the other has been declared
+// unkillable.
+func (s Summary) Denominator() int { return s.Killed + s.TimedOut + s.OutOfMemory + s.Survived }
 
 // Score is the killed fraction of the denominator, and is meaningful only
 // alongside it: 1 of 1 and 400 of 400 are the same number and not the same
 // evidence. It is reported rather than gated on — the gate is Survived == 0,
 // a boolean, which is what makes it survive differing operator sets.
-func (s Summary) Score() (killed, total int) { return s.Killed + s.TimedOut, s.Denominator() }
+func (s Summary) Score() (killed, total int) {
+	return s.Killed + s.TimedOut + s.OutOfMemory, s.Denominator()
+}
 
 // Passed reports whether this component clears the gate. An acknowledged
 // mutant does not fail it; the referral its annotation triggers is what puts a
 // human on the claim.
 func (s Summary) Passed() bool { return s.Survived == 0 }
+
+// Unbounded reports whether any of these mutants ran without the memory
+// ceiling the run asked for.
+//
+// It is what a row says out loud on a platform with no limit to set: a mutant
+// that could allocate without stopping was not held to anything, and a run
+// reporting that as the same green as one whose bound held is the failure the
+// amber tag exists for.
+func Unbounded(results []Result) bool {
+	for _, r := range results {
+		if r.MemoryUnbounded {
+			return true
+		}
+	}
+	return false
+}
 
 // Survivors returns the results that failed the gate, in file and line order,
 // so a report lists them the way an author reads their own change.

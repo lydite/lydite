@@ -54,6 +54,11 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 			s:      mutation.Summary{Killed: 2, TimedOut: 1, Unviable: 3, Acknowledged: 1},
 			killed: 3, denom: 3,
 		},
+		{
+			name:   "a mutant stopped at its memory bound counts as killed",
+			s:      mutation.Summary{Killed: 2, OutOfMemory: 2, Unviable: 1},
+			killed: 4, denom: 4,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t), c.s, c.results, nil, 42*time.Second)
@@ -107,6 +112,130 @@ func TestTheBudgetIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
 	if got := budget(long, 7*time.Second); got != 7*time.Second {
 		t.Errorf("--timeout was not honoured: %s", got)
 	}
+}
+
+// The memory bound multiplies the component's own measured peak, never the
+// machine's memory: a bound that moved with the machine would make a mutant
+// killed on a small runner and surviving on a large one.
+func TestTheMemoryBoundIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
+	const big = 4 << 30
+	if got := memoryBudget(big, 0); got != big*memoryFactor {
+		t.Errorf("memoryBudget(%d) = %d, want %d", big, got, big*memoryFactor)
+	}
+	// Four times a small peak is a ceiling a compiler reaches on its own, and
+	// every mutant would be reported as one that allocated without stopping.
+	if got := memoryBudget(40<<20, 0); got != minimumMemory {
+		t.Errorf("the bound for a 40MiB baseline = %d, want the %d floor", got, minimumMemory)
+	}
+	if got := memoryBudget(big, 7<<30); got != 7<<30 {
+		t.Errorf("--memory was not honoured: %d", got)
+	}
+}
+
+// A ceiling the baseline itself already fills is one every mutant reaches
+// whatever its tests do, so the component gates nothing rather than reporting
+// a suite that kills everything. Only an override can produce it: the
+// derivation is four times that same peak.
+func TestABaselineThatWouldNotFitUnderTheBoundGatesNothing(t *testing.T) {
+	const peak = 1 << 30
+	if !memoryFits(peak, memoryBudget(peak, 0)) {
+		t.Error("a derived bound left its own baseline no room")
+	}
+	if memoryFits(peak, memoryBudget(peak, peak)) {
+		t.Error("a bound equal to the baseline's own peak was accepted")
+	}
+	if memoryFits(peak, memoryBudget(peak, peak*memoryHeadroom-1)) {
+		t.Errorf("a bound under %d times the baseline's peak was accepted", memoryHeadroom)
+	}
+	if !memoryFits(peak, memoryBudget(peak, peak*memoryHeadroom)) {
+		t.Errorf("a bound of exactly %d times the baseline's peak was refused", memoryHeadroom)
+	}
+}
+
+// --memory is written the way a size is written. Every suffix is binary,
+// including the bare ones: the quantity is compared against a peak the kernel
+// reports in pages, and a GB and a GiB that were different ceilings would be a
+// row nobody could reason about.
+func TestTheMemoryOverrideIsReadAsASize(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int64
+	}{
+		{"", 0},
+		// Zero is no bound at all rather than an impossible one, which is what
+		// the flag's own default means.
+		{"0", 0},
+		{"1024", 1024},
+		{"4G", 4 << 30},
+		{"4GB", 4 << 30},
+		{"4GiB", 4 << 30},
+		{"512M", 512 << 20},
+		{"512MiB", 512 << 20},
+		{"8K", 8 << 10},
+		{" 2GiB ", 2 << 30},
+	} {
+		got, err := parseBytes(c.in)
+		if err != nil {
+			t.Errorf("parseBytes(%q): %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseBytes(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	// A negative ceiling bounds nothing and a suffix that overflowed reads as
+	// one, so both are refused where the number is read.
+	for _, in := range []string{"lots", "4TiB", "-1", "-4GiB", "9223372036854775807GiB", "4 GiB extra"} {
+		got, err := parseBytes(in)
+		if err == nil {
+			t.Errorf("parseBytes(%q) = %d, want an error naming the fix", in, got)
+		}
+		// Nothing beside the error, because zero is what asks for the
+		// derivation: a quantity nobody could read must not leave a ceiling
+		// nobody chose.
+		if got != 0 {
+			t.Errorf("parseBytes(%q) = %d beside its error, want no bound at all", in, got)
+		}
+	}
+}
+
+// A bound the platform had none to set is on the row, never silent: a mutant
+// that could allocate without stopping was held to nothing, and reporting that
+// as the green of a bound that held is the failure the amber tag exists for.
+func TestARowSaysWhenMemoryWasNotBounded(t *testing.T) {
+	unbounded := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		// A mutant that survived, so the note is proven on the failing row as
+		// well as on the passing one.
+		Outcome: mutation.Survived, MemoryUnbounded: true,
+	}}
+	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1, Survived: 1}, unbounded, nil, time.Second)
+	if !detailSaying(failing, "memory was not bounded") {
+		t.Errorf("a failing row from an unbounded run says %v", failing.Detail)
+	}
+
+	held := []mutation.Result{{Outcome: mutation.Killed}}
+	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, held, nil, time.Second)
+	if detailSaying(passing, "memory was not bounded") {
+		t.Errorf("a row whose bound held says it did not: %v", passing.Detail)
+	}
+	unheld := []mutation.Result{{Outcome: mutation.Killed, MemoryUnbounded: true}}
+	passing, _ = mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, unheld, nil, time.Second)
+	if !detailSaying(passing, "memory was not bounded") {
+		t.Errorf("a passing row from an unbounded run says %v", passing.Detail)
+	}
+}
+
+func detailSaying(row ui.Row, want string) bool {
+	for _, d := range row.Detail {
+		if strings.Contains(d, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // A component's dir is relative to the scan root and so is git's diff; the
@@ -546,6 +675,8 @@ func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {
 		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}, `--concurrency`},
 		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}, "at least 1"},
 		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}, "--timeout must not be negative"},
+		{"a memory bound that is not a size", []string{"--dir", root, "--memory", "lots"}, "--memory"},
+		{"a negative memory bound", []string{"--dir", root, "--memory", "-1GiB"}, "--memory"},
 		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}, "nope"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -608,14 +739,14 @@ func TestANarrowedRunEmitsNoSummaryRow(t *testing.T) {
 func TestTheSummaryCountsOnlyWhatRan(t *testing.T) {
 	results := []componentMutation{
 		{summary: mutation.Summary{Killed: 3, Survived: 1, Unviable: 2}, elapsed: 30 * time.Second, ran: true},
-		{summary: mutation.Summary{Killed: 5, TimedOut: 1, Acknowledged: 1}, elapsed: 90 * time.Second, ran: true},
+		{summary: mutation.Summary{Killed: 5, TimedOut: 1, OutOfMemory: 1, Acknowledged: 1}, elapsed: 90 * time.Second, ran: true},
 		{summary: mutation.Summary{Killed: 99}, elapsed: time.Hour, ran: false},
 	}
 	row := mutationSummaryRow(results)
 	if row.Status != ui.StatusContext {
 		t.Errorf("the summary is %q; it gates nothing", row.Status)
 	}
-	want := "9 of 10 mutant(s) killed across 2 component(s) in 2m0s"
+	want := "10 of 11 mutant(s) killed across 2 component(s) in 2m0s"
 	if row.Value != want {
 		t.Errorf("summary = %q, want %q", row.Value, want)
 	}
@@ -623,7 +754,8 @@ func TestTheSummaryCountsOnlyWhatRan(t *testing.T) {
 	// folded into the score.
 	if len(row.Detail) == 0 || !strings.Contains(row.Detail[0], "2 did not compile") ||
 		!strings.Contains(row.Detail[0], "1 declared equivalent") ||
-		!strings.Contains(row.Detail[0], "1 timed out") {
+		!strings.Contains(row.Detail[0], "1 timed out") ||
+		!strings.Contains(row.Detail[0], "1 ran out of memory") {
 		t.Errorf("the aside does not name what is outside the denominator: %v", row.Detail)
 	}
 	if got := mutationSummaryRow(nil); got.Value != "no component was mutated" {
@@ -964,8 +1096,9 @@ func TestTheAsideNamesOnlyTheMutantsThatAreThere(t *testing.T) {
 		{"unviable", mutation.Summary{Killed: 1, Unviable: 2}, "2 did not compile"},
 		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent"},
 		{"timed out", mutation.Summary{Killed: 1, TimedOut: 3}, "3 timed out"},
-		{"all three", mutation.Summary{Unviable: 1, Acknowledged: 2, TimedOut: 3},
-			"1 did not compile, 2 declared equivalent, 3 timed out"},
+		{"out of memory", mutation.Summary{Killed: 1, OutOfMemory: 2}, "2 ran out of memory"},
+		{"all four", mutation.Summary{Unviable: 1, Acknowledged: 2, TimedOut: 3, OutOfMemory: 4},
+			"1 did not compile, 2 declared equivalent, 3 timed out, 4 ran out of memory"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := aside(c.s); got != c.want {
@@ -1184,6 +1317,25 @@ func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
 	}
 	if !strings.Contains(sel.Value, "1 of 2 affected") {
 		t.Errorf("select = %q, want 1 of 2 affected", sel.Value)
+	}
+}
+
+// A ceiling the component's own baseline would not fit under gates nothing and
+// says why. Under one, every mutant dies of the bound rather than of a test,
+// and a row reporting that as a suite that killed everything is a score
+// nothing earned.
+func TestABaselineThatWouldNotFitUnderTheMemoryBoundIsUnmeasured(t *testing.T) {
+	root := goModuleRepo(t, deeper, killsItsMutants)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--memory", "1024")
+	if err != nil {
+		t.Fatalf("a bound nothing could run under failed the run rather than reporting it: %v", err)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok || row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want an unmeasured row naming the bound", row)
+	}
+	if !strings.Contains(row.Value, "leaves no room") {
+		t.Errorf("value = %q, want the baseline's own peak against the bound", row.Value)
 	}
 }
 
