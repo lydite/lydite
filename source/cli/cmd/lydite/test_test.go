@@ -1357,6 +1357,33 @@ func TestTheFlakyRowReportsTheStrongestVerdictAndSaysTheRest(t *testing.T) {
 	if len(found) != 0 {
 		t.Errorf("findings = %+v, want none: nothing disagreed", found)
 	}
+
+	skippedBoth := flaky.Result{Test: flaky.Test{Package: "svc", Name: "TestSkippedBoth", Path: "svc/x_test.go", Line: 21},
+		Verdict: flaky.Skipped}
+
+	// Every new test skipped in both runs is nothing rerun twice, not a pass:
+	// the gate examined none of the change and must say so.
+	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{skippedBoth})
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured: a test skipped in both runs was never actually rerun", row)
+	}
+	if len(found) != 0 {
+		t.Errorf("findings = %+v, want none", found)
+	}
+
+	// One test agreed and one was skipped in both runs, and neither
+	// disagreed: a pass here would count the skipped test among the ones
+	// that actually ran twice.
+	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{results[0], skippedBoth})
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured: an agreement and a skipped-both test is not a pass", row)
+	}
+	if !strings.Contains(row.Value, "1 of 2") {
+		t.Errorf("value = %q, want the skipped test counted against every new test", row.Value)
+	}
+	if len(found) != 0 {
+		t.Errorf("findings = %+v, want none: nothing disagreed", found)
+	}
 }
 
 // flakyProbeRepo is a repository whose one component holds the flakyprobe

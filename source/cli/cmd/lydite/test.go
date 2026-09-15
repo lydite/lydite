@@ -1411,7 +1411,7 @@ func (g *flakyGate) report(rep *ui.Report, own []component.Component) {
 // holding both a disagreement and a test nothing could examine fails, with the
 // unexamined count in the detail.
 func flakyRow(label string, c component.Component, results []flaky.Result) (ui.Row, []finding.Finding) {
-	var disagreed, unexamined int
+	var disagreed, unexamined, skipped int
 	var detail []string
 	var found []finding.Finding
 	for _, r := range results {
@@ -1426,31 +1426,36 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 			unexamined++
 			detail = append(detail, r.Test.Name+" was not examined: "+r.Why)
 		case flaky.Skipped:
-			// Both runs skipped it, which agrees and examined nothing. It is
-			// counted among the agreements the value reports and named here,
-			// because a test skipped in every run is one the gate has said
-			// nothing about.
+			// Both runs skipped it, which agrees and examined nothing. It
+			// counts toward "could not be measured" alongside Unmeasured,
+			// never toward a pass: a component whose new tests all call
+			// t.Skip() has run nothing twice, and rendering that as "2 runs
+			// each" is exactly the gate-that-could-not-run-as-a-pass failure
+			// this gate exists to refuse.
+			skipped++
 			detail = append(detail, r.Test.Name+" was skipped in both runs")
 		case flaky.Agreed:
 		}
 	}
 	finding.Number(found)
+	unmeasured := unexamined + skipped
 	row := ui.Row{Label: label, Detail: detail}
 	switch {
 	case disagreed > 0:
 		row.Status = ui.StatusFail
 		row.Value = fmt.Sprintf("%d of %d new test(s) disagreed between two runs", disagreed, len(results))
-	case unexamined == len(results):
+	case unmeasured == len(results):
 		row.Status = ui.StatusUnmeasured
 		row.Value = fmt.Sprintf("not examined — none of the %d new test(s) could be measured", len(results))
-	case unexamined > 0:
-		// Some agreed and none disagreed, but a test this run could not
-		// measure is not one it can call agreeing either: a pass here would
-		// count a test that never had a second run among the ones that did,
-		// and a gate that examined part of the change must not render as one
-		// that examined all of it.
+	case unmeasured > 0:
+		// Some agreed and none disagreed, but a test this run could not run
+		// twice — whether because nothing recorded it or because it skipped
+		// both times — is not one it can call agreeing either: a pass here
+		// would count a test that was never actually rerun among the ones
+		// that were, and a gate that examined part of the change must not
+		// render as one that examined all of it.
 		row.Status = ui.StatusUnmeasured
-		row.Value = fmt.Sprintf("%d of %d new test(s) could not be measured", unexamined, len(results))
+		row.Value = fmt.Sprintf("%d of %d new test(s) could not be measured", unmeasured, len(results))
 	default:
 		row.Status = ui.StatusPass
 		row.Value = fmt.Sprintf("%d new test(s), 2 runs each", len(results))
