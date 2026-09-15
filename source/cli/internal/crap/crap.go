@@ -10,11 +10,12 @@
 // term is what makes that a cliff rather than a slope — a complexity-12
 // function at 100% is 12, at 50% is 30, and at 0% is 156.
 //
-// Go alone, and that is a property of the language rather than a stage of the
-// work. lydite is Go and walks go/ast in-process, so complexity costs no tool,
-// no pin, no install and no staleness risk. Rust and TypeScript have no
-// equivalent in hand, and inventing a language-shaped abstraction from one
-// implementation would be an abstraction fitted to Go.
+// Go, Rust and TypeScript, each walked in-process: go/ast for Go, which ships
+// its own parser, and internal/treesitter's tables for the other two. No
+// language costs a tool, a pin, an install or a staleness risk, which is what
+// rules out the complexity tools neither of those two communities has kept
+// current — see ADR 0036. The counting rules are per language and the formula
+// is not: a Function and Index are the same in all three.
 //
 // Nothing here executes anything or reads a coverage report. The component's
 // instrumented run already wrote one and internal/coverage already parsed it
@@ -86,6 +87,12 @@ type Report struct {
 	// Unused names each declaration that covers no function, so an author who
 	// believes they have answered a score is told when nothing they wrote did.
 	Unused []string
+	// Skipped names each file this gate could not walk despite its language
+	// otherwise being scored — a JSX-bearing TypeScript extension today. A
+	// component whose report holds one of these is not fully scored, and this
+	// is what keeps that from reading as though it were: see skipped in
+	// treesitter.go.
+	Skipped []string
 	// Over is every function above Threshold, worst first. The functions
 	// rather than their number, because a failing row's job is to name the
 	// work: the author clears this gate by testing one of these or by taking
@@ -107,7 +114,8 @@ func (r Report) Above() int { return len(r.Over) }
 // scored no function is unmeasured, never a clean zero.
 func (r Report) Measured() bool { return r.Scored > 0 }
 
-// Measure scores every Go function the hits describe.
+// Measure scores every function the hits describe, in each language lydite
+// walks.
 //
 // root is the scan root and hits is what internal/coverage parsed out of the
 // component's profile, keyed by scan-root-relative path exactly as git names a
@@ -122,11 +130,22 @@ func (r Report) Measured() bool { return r.Scored > 0 }
 // failing to read it now says something is wrong with the tree rather than
 // with the code — and a report short one file is a count the gate would
 // compare against a baseline taken over all of them.
+//
+// A file this gate never attempted at all — a JSX-bearing TypeScript
+// extension no walk table covers — is a different thing from that failure,
+// and Report.Skipped is where it goes: named rather than silently absent from
+// both the scored count and the file list above, since a component whose
+// report holds one of these has not been fully scored and must not read as
+// though it were.
 func Measure(root string, hits coverage.LineHits) (Report, error) {
 	files := make([]string, 0, len(hits))
+	var skippedFiles []string
 	for file := range hits {
-		if strings.HasSuffix(file, ".go") {
+		switch _, walked := tracked(file); {
+		case strings.HasSuffix(file, ".go"), walked:
 			files = append(files, file)
+		case skipped(file):
+			skippedFiles = append(skippedFiles, file)
 		}
 	}
 	// Sorted, so a run over one tree produces one report. The ordering below
@@ -134,11 +153,22 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 	// since a tree with two unreadable files would otherwise name a different
 	// one on each run and a reader would be chasing a moving target.
 	slices.Sort(files)
+	slices.Sort(skippedFiles)
 
 	var rep Report
 	fset := token.NewFileSet()
 	for _, file := range files {
-		one, err := scoreFile(fset, root, file, hits[file])
+		// Which walk reads a file is its extension's to say, and the two
+		// answer the same fileScore: the formula, the span and the exclusion
+		// rules are one set, and only the parser and the decision points a
+		// language spells are per language.
+		var one fileScore
+		var err error
+		if lang, walked := tracked(file); walked {
+			one, err = scoreTree(lang, root, file, hits[file])
+		} else {
+			one, err = scoreFile(fset, root, file, hits[file])
+		}
 		if err != nil {
 			return Report{}, err
 		}
@@ -152,6 +182,7 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 			}
 		}
 	}
+	rep.Skipped = skippedFiles
 	// Worst first, then by where it is. The tie-break is what makes the order
 	// a total one, so two functions scoring the same are not reported in
 	// whichever order the walk happened to reach them — and it is written as a

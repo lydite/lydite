@@ -107,7 +107,7 @@ All nine subcommands (`scan`, `test`, `mutation`, `review`, `publish`, `threads`
 `version`, `update`) are fully implemented, plus `test plan`, `test merge`, `test record` and
 `mutation merge` — every check is a real tool invocation, not a stub. `lydite coverage` is
 **removed** (see [`coverage.md`](agentic/references/coverage.md)); the relay in
-`source/cloud-services/pr-relay` is written and tested but not yet deployed (see
+`source/cloud-services/pr-relay` is deployed and live (see
 [`surface.md`](agentic/references/surface.md)); the quality-history dashboard is a later
 slice and `source/web/` is still empty (see
 [`quality-history.md`](agentic/references/quality-history.md)).

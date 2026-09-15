@@ -13,25 +13,33 @@ import (
 // the denominator reports a score the tests did not earn.
 func TestTheDenominatorExcludesUnviableAndAcknowledged(t *testing.T) {
 	var s Summary
-	for _, o := range []Outcome{Killed, Killed, TimedOut, Survived, Unviable, Unviable, Acknowledged} {
+	for _, o := range []Outcome{Killed, Killed, TimedOut, OutOfMemory, Survived, Unviable, Unviable, Acknowledged} {
 		s.Add(Result{Outcome: o})
 	}
-	if got := s.Total(); got != 7 {
-		t.Errorf("Total() = %d, want 7", got)
+	if got := s.Total(); got != 8 {
+		t.Errorf("Total() = %d, want 8", got)
 	}
-	if got := s.Denominator(); got != 4 {
-		t.Errorf("Denominator() = %d, want 4 (2 killed + 1 timed out + 1 survived)", got)
+	if got := s.Denominator(); got != 5 {
+		t.Errorf("Denominator() = %d, want 5 (2 killed + 1 timed out + 1 out of memory + 1 survived)", got)
+	}
+	// Each outcome is counted under its own name as well as in the score. A
+	// hang and an allocation that does not stop score identically, and a row
+	// that folded one into the other would say the wrong thing about a suite
+	// full of either.
+	if s.Killed != 2 || s.TimedOut != 1 || s.OutOfMemory != 1 || s.Survived != 1 ||
+		s.Unviable != 2 || s.Acknowledged != 1 {
+		t.Errorf("the outcomes were counted as %+v", s)
 	}
 	killed, total := s.Score()
-	if killed != 3 || total != 4 {
-		t.Errorf("Score() = %d/%d, want 3/4 — a timeout scores as a kill", killed, total)
+	if killed != 4 || total != 5 {
+		t.Errorf("Score() = %d/%d, want 4/5 — a hang and an allocation that does not stop are both behaviour changes something noticed", killed, total)
 	}
 }
 
 // The gate is a boolean over survivors, which is what lets it survive a
 // changing operator catalogue. Nothing else votes.
 func TestOnlyASurvivorFailsTheGate(t *testing.T) {
-	for _, o := range []Outcome{Killed, TimedOut, Unviable, Acknowledged} {
+	for _, o := range []Outcome{Killed, TimedOut, OutOfMemory, Unviable, Acknowledged} {
 		var s Summary
 		s.Add(Result{Outcome: o})
 		if !s.Passed() {

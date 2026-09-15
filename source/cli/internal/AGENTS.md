@@ -12,6 +12,7 @@ says why it is that way and what breaks if it changes.
 | `coverage`, `gitstate` | [`coverage.md`](../../../agentic/references/coverage.md) |
 | `crap`, `annotation` | [`crap.md`](../../../agentic/references/crap.md) |
 | `mutation` | [`mutation.md`](../../../agentic/references/mutation.md) |
+| `treesitter` | [`crap.md`](../../../agentic/references/crap.md) and [`mutation.md`](../../../agentic/references/mutation.md) for the shared grammar tables, function spans and test-code classification both gates read; [`coverage.md`](../../../agentic/references/coverage.md) for exclusion resolution |
 | `finding` | [`findings.md`](../../../agentic/references/findings.md) |
 | `ledger`, `junit` | [`quality-history.md`](../../../agentic/references/quality-history.md) |
 | `typescript` | [`linters.md`](../../../agentic/references/linters.md) |

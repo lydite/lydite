@@ -7,11 +7,32 @@
 # this run, which grants nothing by itself: the relay decides which repository
 # and which pull request may be written to from the claims GitHub signed.
 #
-# The fallback is required rather than a stopgap, and there are two ways into
-# it: no relay configured, and a relay that answers that the app is not
-# installed on this repository. A consumer who has installed nothing still gets
-# a comment, from `github-actions[bot]`, and the only thing they lose is whose
-# name is on it.
+# The fallback is required rather than a stopgap, but it is not the answer to
+# every status. A consumer who has installed nothing still gets a comment, from
+# `github-actions[bot]`, and the only thing they lose is whose name is on it; a
+# consumer who has configured the relay wrongly gets a red step instead,
+# because a fallback there posts the right verdict under the wrong byline on
+# every run and never once says so. The relay's answer sorts into three:
+#
+#   - No relay configured, or 409 — the App is not installed on this
+#     repository. Both fall back silently; the second is the ordinary state of
+#     every repository that has not opted in.
+#   - A 5xx, or curl's `000` for a relay it could not reach at all. Falls back,
+#     under a `::warning::`: a lydite outage must not fail a consumer's pull
+#     request, and must not pass unremarked either.
+#   - Anything else — 401 for a token the relay would not verify, 400 for a
+#     payload it would not read, 403 for a run whose `ref` is not a pull
+#     request's or whose number does not match it. Each is deterministic, so
+#     the next run answers the same. The step fails.
+#
+# `/comment` is stricter about 403 than `/review` is, and deliberately: the
+# id-not-on-this-pull-request check that makes a 403 ambiguous exists only on
+# `/review`, so a 403 here can only be the ref or the number, and only here can
+# a 403 be failed on without failing a live race.
+#
+# A fork's pull request is untouched by any of this. It cannot mint an OIDC
+# token, so it fails at the mint below, under `set -e`, before a status exists
+# to sort.
 #
 # Nothing here interpolates an expression into a `run:` body. Every value
 # arrives through `env:` and is referenced as a shell variable — Semgrep's
@@ -79,8 +100,24 @@ runs:
           echo "posted=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        echo "posted=false" >> "$GITHUB_OUTPUT"
-        echo "the relay answered ${status}; falling back to this workflow's token" >&2
+        case "$status" in
+          409)
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+            echo "the relay answered ${status}; falling back to this workflow's token" >&2
+            ;;
+          000|5??)
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::the relay answered ${status}; falling back to this workflow's token" >&2
+            ;;
+          *)
+            # No `posted` output: the step's own failure is the whole of what
+            # this branch says, and it skips the fallback step below rather
+            # than choosing for it.
+            echo "::error::the relay answered ${status}; this is a configuration problem, not an outage, so it fails the step rather than falling back" >&2
+            cat "${RUNNER_TEMP}/relay-out.json" >&2 || true
+            exit 1
+            ;;
+        esac
         cat "${RUNNER_TEMP}/relay-out.json" >&2 || true
 
     - if: steps.relay.outputs.posted != 'true'

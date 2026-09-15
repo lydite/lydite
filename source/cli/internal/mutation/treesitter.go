@@ -1,9 +1,7 @@
 package mutation
 
 import (
-	"path"
 	"strconv"
-	"strings"
 
 	"github.com/odvcencio/gotreesitter"
 
@@ -69,7 +67,10 @@ const (
 
 // grammar is everything lydite knows about one tree-sitter language: which
 // node types the catalogue's five operators apply to, and how to tell a
-// comment and a test file.
+// comment. Which files and which modules are the suite rather than the code
+// under test is internal/treesitter's, asked through tables: the coverage
+// gates classify test code by the same rule, and a second copy would agree
+// until one of them was edited for one gate's reason.
 //
 // A table rather than a function per language, because the operators are the
 // same five and only the node names differ. A language that needed its own
@@ -101,22 +102,6 @@ type grammar struct {
 	removable map[string]bool
 	// literals maps a literal's node type to what it holds.
 	literals map[string]literalKind
-	// testFile reports whether a path is the suite rather than the code under
-	// test. Mutating an assertion asks whether a suite notices its own tests
-	// changing, which is a question with no useful answer.
-	testFile func(path string) bool
-	// testModule is the node type of a module whose contents are the suite,
-	// or empty for a language that puts none inside the file it tests.
-	//
-	// Rust needs it and the other two do not: `#[cfg(test)] mod tests` sits
-	// inside the file under test, so no path rule can see it, and mutating
-	// it reports an assertion nobody asserts as a survivor an author can
-	// only answer by declaring it equivalent. A gate that fires on ordinary
-	// work is one that gets switched off.
-	testModule string
-	// testAttribute is the attribute, whitespace removed, that marks such a
-	// module. It is a preceding sibling of the module rather than a child.
-	testAttribute string
 }
 
 // rustGrammar and tsGrammar are the two tables, verified against the grammars
@@ -139,9 +124,6 @@ var rustGrammar = grammar{
 		"float_literal":   floatLiteral,
 		"string_literal":  stringLiteral,
 	},
-	testFile:      rustTestFile,
-	testModule:    "mod_item",
-	testAttribute: "#[cfg(test)]",
 }
 
 var tsGrammar = grammar{
@@ -164,7 +146,6 @@ var tsGrammar = grammar{
 		"number": intLiteral,
 		"string": stringLiteral,
 	},
-	testFile: typeScriptTestFile,
 }
 
 // tsxGrammar is the same catalogue read under the TSX tables: every node type
@@ -178,7 +159,6 @@ var tsxGrammar = grammar{
 	statement: tsGrammar.statement,
 	removable: tsGrammar.removable,
 	literals:  tsGrammar.literals,
-	testFile:  tsGrammar.testFile,
 }
 
 // grammarFor picks the operator catalogue for one file, off the same tables
@@ -205,33 +185,6 @@ func grammarFor(lang runner.Lang, file string) (grammar, bool) {
 		// here must yield no mutants rather than the last catalogue written.
 		return grammar{}, false
 	}
-}
-
-// rustTestFile reports whether a whole file is Rust's test code: the
-// integration and benchmark directories the toolchain treats as test targets.
-//
-// The unit tests Rust puts *inside* the file they test are excluded by
-// testModule instead, since no path rule can see them.
-func rustTestFile(p string) bool {
-	for _, dir := range []string{"tests/", "benches/"} {
-		if strings.HasPrefix(p, dir) || strings.Contains(p, "/"+dir) {
-			return true
-		}
-	}
-	return false
-}
-
-// typeScriptTestFile recognises the two conventions every JavaScript runner
-// lydite ships supports: a `.test.` or `.spec.` infix, and a `__tests__`
-// directory.
-func typeScriptTestFile(p string) bool {
-	base := path.Base(p)
-	ext := path.Ext(base)
-	stem := strings.TrimSuffix(base, ext)
-	if strings.HasSuffix(stem, ".test") || strings.HasSuffix(stem, ".spec") {
-		return true
-	}
-	return strings.HasPrefix(p, "__tests__/") || strings.Contains(p, "/__tests__/")
 }
 
 // ErrUnparsed reports a file the grammar could not read.
@@ -262,7 +215,7 @@ func GenerateTreeSitter(lang runner.Lang, path string, src []byte, lines map[int
 	if !ok {
 		return nil, nil, ErrNoGenerator{Lang: lang}
 	}
-	if g.testFile(path) {
+	if g.tables.TestFile(path) {
 		return nil, nil, nil
 	}
 	// A file the tables refuse is not mutated at all. Mutating the parts the
@@ -287,41 +240,6 @@ type tsGen struct {
 	sites
 	g    grammar
 	lang *gotreesitter.Language
-}
-
-// isTestModule reports whether a node is a module whose contents are the
-// suite.
-//
-// The attribute is a *preceding sibling* of the module rather than a child, so
-// this reads the tree's own order rather than looking inside the module. The
-// comparison is against the attribute with its whitespace removed, so
-// `#[cfg( test )]` is recognised and `#[cfg(feature = "test")]` is not.
-//
-// A module reached only through a broader condition — `#[cfg(all(test,
-// unix))]` — is not recognised, and is mutated. That is the direction the rule
-// has to fail in: a form this does not know about produces survivors an author
-// can see and answer, where a looser match would silently stop mutating code
-// that ships.
-func (t *tsGen) isTestModule(n *gotreesitter.Node) bool {
-	if t.g.testModule == "" || t.g.testAttribute == "" {
-		return false
-	}
-	if n.Type(t.lang) != t.g.testModule {
-		return false
-	}
-	prev := n.PrevSibling()
-	return prev != nil && strings.EqualFold(compact(prev.Text(t.src)), t.g.testAttribute)
-}
-
-// compact removes every space from an attribute, so one form is recognised
-// however it is spaced.
-func compact(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			return -1
-		}
-		return r
-	}, s)
 }
 
 // comments reports every line comment the grammar found.
@@ -364,7 +282,7 @@ func (t *tsGen) walk(n *gotreesitter.Node, fn func(*gotreesitter.Node)) {
 // edges only the module itself could reach is a boundary no test could ever be
 // asked about.
 func (t *tsGen) visit(n *gotreesitter.Node) {
-	if n == nil || t.isTestModule(n) {
+	if n == nil || t.g.tables.TestModule(n, t.src, t.lang) {
 		return
 	}
 	switch typ := n.Type(t.lang); {

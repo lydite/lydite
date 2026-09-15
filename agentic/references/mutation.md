@@ -31,15 +31,18 @@ quantity to record and nothing to compare against last time; the gate is absolut
 `coverage.floor` is. `lydite test record` is untouched, and the single `gitstate.Write`
 call site stays the one place a baseline is written.
 
-**Four outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run
+**Five outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run
 exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. A mutant
-whose run **hangs** counts as killed, because an infinite loop is a behaviour change something
-noticed. An **unviable** mutant — one that does not compile — is excluded from the denominator
-entirely and never counted as killed: it is evidence about the generator rather than about the
-tests, and scoring it as a kill inflates the score silently and permanently. Telling it from a kill
-is the whole reason a runner derives a build-only variant, since both exit non-zero. A component
-whose **baseline suite fails** is `unmeasured`, not zero-killed — failing would report one broken
-suite as two red gates whose second names a cause its author clears by fixing the first.
+whose run **hangs** or whose run **allocates without stopping** both count as killed: a runaway is
+a behaviour change something noticed, whether the harness caught it by clock or by peak memory,
+and the two are kept as separate outcomes — `TimedOut` and `OutOfMemory` — rather than folded into
+one, because a suite full of either is worth seeing even when every one of them scores correctly.
+An **unviable** mutant — one that does not compile — is excluded from the denominator entirely and
+never counted as killed: it is evidence about the generator rather than about the tests, and
+scoring it as a kill inflates the score silently and permanently. Telling it from a kill is the
+whole reason a runner derives a build-only variant, since both exit non-zero. A component whose
+**baseline suite fails** is `unmeasured`, not zero-killed — failing would report one broken suite
+as two red gates whose second names a cause its author clears by fixing the first.
 
 **A component declaring `mutation: false` gets one `context` row.** Present, so ADR 0026's
 completeness rule holds with no exception and the fold needs no second copy of the opt-out rule to
@@ -133,6 +136,12 @@ fail in, since a form the rule does not know about produces survivors an author 
 where a looser match would silently stop mutating code that ships. `tests/` and `benches/` are
 recognised by path as well, being whole files. TypeScript needs none of this and has the conventions
 every runner lydite ships supports: a `.test.` or `.spec.` infix, and a `__tests__` directory.
+
+**The classification lives in `internal/treesitter`, not here.** `Grammar.TestFile` and
+`Grammar.TestModule` are the one answer both this gate and `internal/crap` ask: mutating an
+assertion and scoring one are both "is this the suite", and a second, gate-local copy would agree
+with this one only until somebody edited it for one gate's own reason. See
+[`crap.md`](crap.md) for the other caller.
 
 **The golden fixtures are what hold the grammars.** `internal/mutation/testdata/` carries a Rust, a
 TypeScript and a TSX fixture beside the exact mutant set each produces — offsets, operators and
@@ -294,7 +303,7 @@ of the port list directly, so the predicate that decides what may run beside wha
 implementation: they carry the component's published ports so they conflict exactly when it
 publishes one, and they carry no directory, because a mutant is not a second tree.
 
-## The timeout is derived, and there is no runtime budget
+## The timeout and the memory ceiling are both derived, and there is no runtime budget
 
 Nothing caps how long a run takes. A budget shipped now would be an invented number and every way
 of exceeding one is bad: capping and passing is a gate that silently checked less, capping and
@@ -305,6 +314,25 @@ document, and the fold already fails a declared component with no row.
 The **per-mutant** timeout is a different thing, and is a multiple of what this run measured: three
 times the component's own observed baseline, with a 60-second floor for a suite too fast to measure
 and `--timeout` overriding. Without one, `TimedOut` is an outcome nothing can produce.
+
+**The per-mutant memory ceiling is derived the same way, off the same baseline run, and bounds a
+different failure.** It is four times the baseline's own peak — `Result.MaxRSS` — with a 2GiB
+floor and `--memory` overriding. The multiplier is larger than the timeout's three because memory
+is the less elastic of the two: a suite is routinely slower under a mutation and is rarely much
+larger, so a ceiling this close to the baseline is still generous. It also has to be, because the
+error it can make is one-sided in a way the timeout's is not — a bound too tight kills a mutant
+nothing about the tests killed, which is an inflated score that is permanent and silent, where a
+false survivor merely costs an author the afternoon spent tracing it. A baseline whose own peak
+would not fit under its derived ceiling is reported `unmeasured` rather than run at all, for the
+same reason a `mutation: false` component gets a row that says so instead of one that quietly
+passed: every mutant would then die of the bound before its tests ran. See
+[ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md) for the measurements the
+multipliers were chosen against.
+
+**The ceiling is a Linux thing.** It is applied through `RLIMIT_DATA`, which Darwin's `setrlimit`
+refuses at any value with `EINVAL` — so on that platform a mutant still runs under the timeout but
+under no memory bound at all, and the row says so with a note rather than staying silent about it:
+a bound quietly not applied would render exactly the green of one that held.
 
 ## The fold
 

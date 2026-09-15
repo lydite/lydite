@@ -1,0 +1,150 @@
+//! Every branching construct ADR 0036 names a Rust counting rule for, one
+//! function per shape, so a complexity walk can be checked against a number
+//! derived by hand in the README beside this file.
+
+/// An `else if` chain: three `if_expression` nodes, the inner two nested in the
+/// outer's `else` branch.
+pub fn classify(n: i64) -> &'static str {
+    if n < 0 {
+        "negative"
+    } else if n == 0 {
+        "zero"
+    } else if n < 10 {
+        "small"
+    } else {
+        "large"
+    }
+}
+
+/// One `if`, one `&&` and one `||`.
+pub fn guarded(a: bool, b: bool, c: bool) -> i64 {
+    if a && b || c {
+        1
+    } else {
+        0
+    }
+}
+
+/// `if let` — the same `if_expression` node as the boolean form, with a pattern
+/// where the condition would be.
+pub fn unwrap_or_zero(value: Option<i64>) -> i64 {
+    if let Some(n) = value {
+        n
+    } else {
+        0
+    }
+}
+
+/// `while let`, likewise one `while_expression`.
+pub fn drain(mut items: Vec<i64>) -> i64 {
+    let mut total = 0;
+    while let Some(n) = items.pop() {
+        total += n;
+    }
+    total
+}
+
+/// A plain `while`.
+pub fn countdown(mut n: i64) -> i64 {
+    let mut steps = 0;
+    while n > 0 {
+        n -= 1;
+        steps += 1;
+    }
+    steps
+}
+
+/// A `for`, with an `if` in its body.
+pub fn first_even(items: &[i64]) -> Option<i64> {
+    for item in items {
+        if item % 2 == 0 {
+            return Some(*item);
+        }
+    }
+    None
+}
+
+/// An unconditional `loop`, which counts even though it branches nowhere by
+/// itself — Go's `complexity()` counts a bare `for {}` the same way.
+pub fn poll_until(limit: i64) -> i64 {
+    let mut n = 0;
+    loop {
+        n += 1;
+        if n >= limit {
+            return n;
+        }
+    }
+}
+
+/// A `match` whose catch-all is the literal `_` wildcard, which does not count.
+pub fn describe(n: i64) -> &'static str {
+    match n {
+        0 => "zero",
+        1 => "one",
+        2 => "two",
+        _ => "many",
+    }
+}
+
+/// A `match` whose catch-all is a binding, which does count: only the wildcard
+/// token itself is treated as `default`.
+pub fn label(n: i64) -> String {
+    match n {
+        0 => "zero".to_string(),
+        other => format!("n={}", other),
+    }
+}
+
+/// Two `?` operators, each the `if err != nil { return err }` a Go author
+/// writes out.
+pub fn parse_pair(text: &str) -> Result<(i64, i64), std::num::ParseIntError> {
+    let mut parts = text.split(',');
+    let first: i64 = parts.next().unwrap_or("0").trim().parse()?;
+    let second: i64 = parts.next().unwrap_or("0").trim().parse()?;
+    Ok((first, second))
+}
+
+/// A closure, whose branches count toward the function whose span contains it.
+pub fn tally(items: &[i64]) -> i64 {
+    let keep = |n: &&i64| **n > 0 && **n < 100;
+    items.iter().filter(keep).copied().sum()
+}
+
+/// A nested `fn` item: scored as its own function, with its lines out of this
+/// one's span and a flat +1 left behind here.
+pub fn outer(n: i64) -> i64 {
+    fn inner(n: i64) -> i64 {
+        if n % 2 == 0 {
+            n / 2
+        } else {
+            n * 3 + 1
+        }
+    }
+    if n > 0 {
+        inner(n)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_names_each_band() {
+        assert_eq!(classify(-1), "negative");
+        if classify(0) != "zero" {
+            panic!("zero misnamed");
+        }
+        for n in [1, 2, 3] {
+            assert_eq!(classify(n), "small");
+        }
+    }
+
+    #[test]
+    fn outer_folds_odd_and_even() {
+        assert_eq!(outer(4), 2);
+        assert_eq!(outer(-1), 0);
+    }
+}

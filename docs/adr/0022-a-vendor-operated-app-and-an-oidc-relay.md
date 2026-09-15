@@ -184,3 +184,33 @@ naturally do on install, the way Codecov does, and it is what
 `administration: write`, which neither App requests. Until either that or gt's
 side of #34 lands, the referral status is published and flipped correctly and
 blocks no merge. That is a stated temporary state, not the design.
+
+## Amended by ADR 0037: a deterministic misconfiguration fails the step, not the fallback
+
+[ADR 0037](0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md)
+narrows one sentence of "The `github-token` fallback is a required path":
+
+> A consumer who has not installed the App still gets a comment, posted with the
+> workflow's own token as `github-actions[bot]`. So does one whose request the
+> relay could not serve.
+
+The second sentence is the one that narrows. *Could not serve* covers two
+different things, and only one of them is a reason to fall back. A relay that is
+down could not serve the request this time; a relay handed an audience that is
+not its own, or an operations document of a version it does not apply, will not
+serve it on this run or on any run after it — and falling back there substitutes
+`github-actions[bot]` for the identity the consumer configured, permanently and
+without saying so.
+
+So the fallback still takes: no relay configured; `409`, the App not installed on
+this repository, which stays an *answer* and not an error; `5xx` and an
+unreachable relay, now under a `::warning::`; and `/review`'s `403`, which is
+ambiguous with a live comment-id race precisely because a rejection here carries
+no detail. It no longer takes `401`, `400`, or `/comment`'s `403` — those fail
+the composite step, and the fallback never runs.
+
+Everything else the section says survives. The fallback is still a required path
+rather than a stopgap, the App is still genuinely optional, a repository that
+installed nothing still gets the whole surface, and the marker is still what lets
+the two paths hand a standing comment over. What changes is only that a consumer
+who configured the relay and got it wrong is told so.

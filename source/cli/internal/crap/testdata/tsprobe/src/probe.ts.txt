@@ -1,0 +1,94 @@
+/**
+ * Every branching construct ADR 0036 names a TypeScript counting rule for, one
+ * function per shape, so a complexity walk can be checked against a number
+ * derived by hand in the README beside this file.
+ */
+
+/** A ternary. */
+export function pick(a: number, b: number): number {
+  return a > b ? a : b;
+}
+
+/** Optional chaining on a member, and nullish coalescing. */
+export function title(user: { name?: string } | null): string {
+  return user?.name ?? "anonymous";
+}
+
+/** Optional chaining on a call. */
+export function notify(fn?: (message: string) => void): void {
+  fn?.("ping");
+}
+
+/** The three logical-assignment operators. */
+export function settle(o: { a?: number; b?: number; c?: boolean }): void {
+  o.a ??= 1;
+  o.b ||= 2;
+  o.c &&= false;
+}
+
+/** A catch clause. */
+export function readNumber(text: string): number {
+  try {
+    return JSON.parse(text) as number;
+  } catch {
+    return 0;
+  }
+}
+
+/** Two non-default cases and a default, which does not count. */
+export function describe(n: number): string {
+  switch (n) {
+    case 0:
+      return "zero";
+    case 1:
+      return "one";
+    default:
+      return "many";
+  }
+}
+
+/** Two default parameters, each desugaring to a real branch. */
+export function greet(name = "world", punctuation = "!"): string {
+  return `hello ${name}${punctuation}`;
+}
+
+/** A for-of, a while and a do-while. */
+export function total(items: number[]): number {
+  let sum = 0;
+  for (const item of items) {
+    sum += item;
+  }
+  let i = 1;
+  while (i < 2) {
+    i += 1;
+  }
+  do {
+    i -= 1;
+  } while (i > 0);
+  return sum;
+}
+
+/** An arrow used as a callback, whose branches fold into this function. */
+export function evens(items: number[]): number[] {
+  return items.filter((n) => n % 2 === 0 && n > 0);
+}
+
+/** An arrow written as a real declaration, which is its own scoring unit. */
+export const bucket = (n: number): string => {
+  if (n < 0) {
+    return "negative";
+  }
+  return n > 10 ? "large" : "small";
+};
+
+/** A method, with an `if`, an `||` and an `&&`. */
+export class Gate {
+  private open = false;
+
+  allow(user: string | null, admin: boolean): boolean {
+    if (admin || (user !== null && user.length > 0)) {
+      this.open = true;
+    }
+    return this.open;
+  }
+}
