@@ -1,0 +1,11 @@
+[package]
+name = "denyprobe"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# MPL-2.0 — weak copyleft, the case an allow-list has to decide on.
+cbindgen = { version = "0.27", default-features = false }
+# Apache-2.0 OR MIT — the dual-licence case.
+libc = "0.2"
