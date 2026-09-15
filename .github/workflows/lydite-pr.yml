@@ -651,7 +651,7 @@ jobs:
         with:
           body-file: comment.md
           pull-request: ${{ github.event.pull_request.number }}
-          relay: ${{ vars.LYDITE_RELAY_URL }}
+          relay: https://pr.lydite.org/
 
       # After the comment, so a run that can post only one of the two posts
       # the one carrying the verdict. A thread the platform refuses fails this
@@ -661,4 +661,4 @@ jobs:
         with:
           reports: ${{ steps.render.outputs.dirs }}
           ops-file: threads.json
-          relay: ${{ vars.LYDITE_RELAY_URL }}
+          relay: https://pr.lydite.org/
