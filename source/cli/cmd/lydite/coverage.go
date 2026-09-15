@@ -150,7 +150,14 @@ func (m measurement) crapEntry() gitstate.CRAPEntry {
 // default — it would score zero functions, which reads exactly like a component
 // that scored clean.
 func (m measurement) scorable() bool {
-	switch m.Lang {
+	return scorableLang(m.Lang)
+}
+
+// scorableLang is the same predicate as scorable, applied to a bare language
+// rather than a measurement — merge.go's fold needs it against a component
+// declaration, before any measurement exists to ask.
+func scorableLang(lang runner.Lang) bool {
+	switch lang {
 	case runner.Go, runner.Rust, runner.TypeScript:
 		return true
 	default:
