@@ -1,0 +1,7 @@
+{
+  "cli": {
+    "above": 0,
+    "worst": 30,
+    "producer": "go 1.26.6"
+  }
+}
