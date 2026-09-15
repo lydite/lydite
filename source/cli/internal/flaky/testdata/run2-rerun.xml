@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="5" failures="1" errors="0" time="0.730475">
+	<testsuite tests="5" failures="1" time="0.730000" name="flakyprobe" timestamp="2026-09-15T08:34:59+01:00">
+		<properties>
+			<property name="go.version" value="go1.26.5 darwin/arm64"></property>
+		</properties>
+		<testcase classname="flakyprobe" name="TestFlakyNew" time="0.000000">
+			<failure message="Failed" type="">=== RUN   TestFlakyNew&#xA;    probe_test.go:34: a second process saw the marker this test left behind&#xA;--- FAIL: TestFlakyNew (0.00s)&#xA;</failure>
+		</testcase>
+		<testcase classname="flakyprobe" name="TestDeterministicNew" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests/one" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests/two" time="0.000000"></testcase>
+		<testcase classname="flakyprobe" name="TestNewSubtests" time="0.000000"></testcase>
+	</testsuite>
+</testsuites>

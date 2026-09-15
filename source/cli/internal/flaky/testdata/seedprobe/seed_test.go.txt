@@ -1,0 +1,19 @@
+package seedprobe
+
+import (
+	"fmt"
+	"testing"
+)
+
+// TestOrder prints the order a six-entry map — one hash bucket — iterates in.
+// Two -count runs share one process and one hash seed; two invocations do not.
+func TestOrder(t *testing.T) {
+	m := map[int]string{1: "a", 2: "b", 3: "c", 4: "d", 5: "e", 6: "f"}
+	for pass := range 2 {
+		var got []int
+		for k := range m {
+			got = append(got, k)
+		}
+		fmt.Printf("range %d: %v\n", pass, got)
+	}
+}

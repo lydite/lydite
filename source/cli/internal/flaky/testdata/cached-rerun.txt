@@ -1,0 +1,7 @@
+$ go clean -testcache
+$ go test -run '^(TestDeterministicNew|TestNewSubtests)$' .
+ok  	flakyprobe	0.607s
+$ go test -run '^(TestDeterministicNew|TestNewSubtests)$' .
+ok  	flakyprobe	(cached)
+$ go test -run '^(TestDeterministicNew|TestNewSubtests)$' -count=1 .
+ok  	flakyprobe	0.518s

@@ -1,0 +1,5 @@
+// Package flakyprobe is what the flaky gate's own fixtures were captured from.
+package flakyprobe
+
+// Sum adds two numbers, so the module has a file to build that is not a test.
+func Sum(a, b int) int { return a + b }
