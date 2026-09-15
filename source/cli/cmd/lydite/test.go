@@ -1443,6 +1443,14 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 	case unexamined == len(results):
 		row.Status = ui.StatusUnmeasured
 		row.Value = fmt.Sprintf("not examined — none of the %d new test(s) could be measured", len(results))
+	case unexamined > 0:
+		// Some agreed and none disagreed, but a test this run could not
+		// measure is not one it can call agreeing either: a pass here would
+		// count a test that never had a second run among the ones that did,
+		// and a gate that examined part of the change must not render as one
+		// that examined all of it.
+		row.Status = ui.StatusUnmeasured
+		row.Value = fmt.Sprintf("%d of %d new test(s) could not be measured", unexamined, len(results))
 	default:
 		row.Status = ui.StatusPass
 		row.Value = fmt.Sprintf("%d new test(s), 2 runs each", len(results))

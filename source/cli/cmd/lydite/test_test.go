@@ -1342,6 +1342,21 @@ func TestTheFlakyRowReportsTheStrongestVerdictAndSaysTheRest(t *testing.T) {
 	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
 		t.Errorf("row = %+v, findings = %+v; want an unmeasured row and no claim", row, found)
 	}
+
+	// One test agreed and one could not be measured, and neither disagreed:
+	// a pass here would count the unexamined test among the ones that were,
+	// and a gate that examined part of the change must not render as one
+	// that examined all of it.
+	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{results[0], results[2]})
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured: an agreement and an unexamined test is not a pass", row)
+	}
+	if !strings.Contains(row.Value, "1 of 2") {
+		t.Errorf("value = %q, want the unexamined test counted against every new test", row.Value)
+	}
+	if len(found) != 0 {
+		t.Errorf("findings = %+v, want none: nothing disagreed", found)
+	}
 }
 
 // flakyProbeRepo is a repository whose one component holds the flakyprobe
