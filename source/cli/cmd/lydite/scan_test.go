@@ -1160,7 +1160,7 @@ func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) 
 		{Name: "cli", Dir: "cli", Runner: "go-test"},
 	}}
 
-	perComponent, root := findingCounts(decl, config.Default(), []finding.Finding{{
+	perComponent, root := findingCounts(t.TempDir(), decl, config.Default(), []finding.Finding{{
 		Gate: secrets.Gate, Path: "cli/config.yml", Line: 3,
 		Message: "Detected a Generic API Key. " + "Rotate this credential",
 		Site:    "generic-api-key\x1faws_key: ",
