@@ -536,10 +536,13 @@ func findingsOf(results []executil.Result) []finding.Finding {
 // reflects the verdict.
 //
 // A failing check also prints its Detail, which is the only place some
-// findings exist. Most tools stream their own output live through
-// executil.Run, so it is already on the terminal and in the log the action
-// captures; Biome does not, because lydite sends its report to a file so the
-// JSON cannot be corrupted by Biome's own chatter. Printing only a status
+// findings' full text exists. Most tools stream their own output live
+// through executil.Run, so it is already on the terminal and in the log the
+// action captures; Biome's report never reaches the terminal at all, because
+// lydite sends it to a file so the JSON cannot be corrupted by Biome's own
+// chatter. clippy, cargo-audit and cargo-deny run once in JSON mode, so their
+// stream is that same JSON rather than a second, richer rendering worth
+// reprinting, and Detail carries the claim instead. Printing only a status
 // line left the developer to re-run the pinned toolchain by hand to find out
 // what was wrong, and put nothing in the PR comment either.
 func report(cmd *cobra.Command, rep *ui.Report, root string, changed map[string][]int, results []executil.Result, asJSON, noColor bool) error {

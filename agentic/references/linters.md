@@ -75,14 +75,17 @@ noted:
   from here: a nested config could set `"security": "off"` and silently narrow what lydite
   checks.
 
-**A check whose findings never stream must set `executil.Result.Detail`.** `executil.Run`
-streams every tool's stdout/stderr live, so for gosec, clippy, cargo-audit and Semgrep the
-findings are on the terminal and in the job log before anyone reads the
-`Result`. Biome is the exception: its report goes to a file via `--reporter-file` so its own
-chatter cannot corrupt the JSON, so nothing streams and `Output` holds no findings.
-`cmd/lydite/scan.go`'s `report` prints `Detail` under a failing check — without it a
-developer sees a bare `✗ biome(.)` row and has to re-run the pinned toolchain by hand to learn why,
-and the PR comment carries nothing at all. Detail lines are **indented**, and that is
+**A check whose findings never stream, or whose only stream is its own raw JSON, must set
+`executil.Result.Detail`.** `executil.Run` streams every tool's stdout/stderr live, so for gosec
+and Semgrep the findings are on the terminal and in the job log before anyone reads the `Result`.
+Biome's report never streams at all: it goes to a file via `--reporter-file` so its own chatter
+cannot corrupt the JSON, so nothing reaches the terminal and `Output` holds no findings. clippy,
+cargo-audit and cargo-deny stream something, but it is the tool's own JSON rather than text a
+developer could read, so `Detail` renders the claim and each finding's own `Finding.Detail`
+instead of leaving a reader to parse the log by hand. `cmd/lydite/scan.go`'s `report` prints
+`Detail` under a failing check — without it a developer sees a bare `✗ biome(.)` row and has to
+re-run the pinned toolchain by hand to learn why, and the PR comment carries nothing at all.
+Detail lines are **indented**, and that is
 load-bearing rather than cosmetic: a finding quotes source, which can contain anything the
 source contains — including something shaped like a verdict — and indentation is what stops
 it from beginning a line the way a status row does.
