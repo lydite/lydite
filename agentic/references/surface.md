@@ -101,14 +101,23 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
 - **Each Worker holds only its own App's credential**, as a per-Worker secret rather than an
   account-level store. `pr-relay` cannot read the dashboard's, which is the whole reason the
   read half is a separate App.
-- **The `github-token` fallback is required, not a stopgap.** No relay configured, or a relay
-  answering that the App is not installed, posts as `github-actions[bot]`. A consumer who
-  installed nothing still gets the surface. That is why "not installed" is an *answer* and not
-  an error.
-- **The relay is written and tested, and not yet deployed.** Until `vars.LYDITE_RELAY_URL` is
-  set, every comment and every thread goes through the `github-token` fallback above — a
-  supported path, not a temporary one. No finding appears in both surfaces regardless of which
-  path is live.
+- **The `github-token` fallback is required, not a stopgap — for three of the relay's answers,
+  not for all of them.** No relay configured, or a `409` saying the App is not installed, falls
+  back silently: a consumer who installed nothing still gets the surface, which is why "not
+  installed" is an *answer* and not an error. A `5xx` or an unreachable relay (curl's `000`)
+  falls back under a `::warning::`, because an outage must not fail a consumer's pull request
+  and must not pass unremarked. **A `401`, a `400`, or a `403` on `/comment` fails the composite
+  step and posts nothing**: each is a deterministic misconfiguration — an audience that is not
+  the relay's exact origin, a CLI-and-relay ops-version skew, a `ref` that is not a pull
+  request's — that the next run answers identically, so a fallback there posts the right verdict
+  under the wrong byline forever. `/review`'s `403` falls back with a warning instead, because it
+  is ambiguous with a comment-id race the relay refuses without detail. See
+  [ADR 0037](../../docs/adr/0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md).
+- **The relay is deployed and live.** `pr-relay` runs at `pr.lydite.org`, its secrets are synced,
+  `vars.LYDITE_RELAY_URL` is set on `lydite/lydite`, and the lydite App is installed on this
+  repository. The `github-token` fallback above stays a supported path, not a temporary one, for
+  any consumer without the relay configured or the App installed. No finding appears in both
+  surfaces regardless of which path is live.
 
 ## The threads
 

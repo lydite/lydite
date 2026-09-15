@@ -15,7 +15,7 @@ The one difference is that `lydite-binary` uses the binary the pull request buil
 release tests the last release. When the shape here changes, that repository is where the change
 has to land as well; nothing enforces it.
 
-**One such change is outstanding.** `lydite-pr.yml`'s `merge`, `mutation-merge` and `publish`
+**Two such changes are outstanding.** `lydite-pr.yml`'s `merge`, `mutation-merge` and `publish`
 jobs now find each shard's report by the document it wrote rather than by globbing a fixed
 directory depth — `actions/download-artifact` only nests a matched artifact when the pattern
 matched more than one, and a single-component repository's lone shard was falling through every
@@ -23,6 +23,14 @@ one of those globs. `lydite/actions`'s reusable workflow folds the same way and 
 bug; it is tracked there as lydite/actions#4, not fixed in this repository. See
 [`ci.md`](ci.md) for the discovery pattern and [`find-a-folds-inputs-by-document-not-by-directory-depth.md`](../rules/find-a-folds-inputs-by-document-not-by-directory-depth.md)
 for the rule.
+
+`lydite-comment` and `lydite-threads` also now sort the relay's response into three buckets —
+fall back silently, fall back under a `::warning::`, or fail the step with no fallback — instead
+of treating any non-`200` as one undifferentiated fallback. `lydite/actions`'s composites carry
+the copy consumers actually run and still implement the old binary check; nothing enforces the
+same classification landing there. See
+[ADR 0037](../../docs/adr/0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md)
+for the classification and [`surface.md`](surface.md) for the summary.
 
 **A consumer's comment is rendered by `lydite publish` and nothing else, and its review threads
 are computed by `lydite threads` and nothing else.** The posting step takes a file and a marker

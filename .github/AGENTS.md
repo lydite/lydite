@@ -13,5 +13,7 @@ shape that means the runner went away rather than the job failing.
 Read [`actions.md`](../agentic/references/actions.md) before changing anything under
 `actions/`: the same shape has to land in `lydite/actions`, and nothing enforces it.
 
-Two rules bind hardest here, and both are in [`agentic/rules/`](../agentic/rules/): never
-interpolate an expression into a `run:` body, and pin the exact Go patch version.
+Three rules bind hardest here, and all are in [`agentic/rules/`](../agentic/rules/): never
+interpolate an expression into a `run:` body, pin the exact Go patch version, and — for
+`lydite-comment` and `lydite-threads` — sort a fallback transport's response into three
+buckets rather than treating any non-`200` as one undifferentiated fallback.
