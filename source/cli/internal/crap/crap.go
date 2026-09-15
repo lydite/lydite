@@ -10,11 +10,12 @@
 // term is what makes that a cliff rather than a slope — a complexity-12
 // function at 100% is 12, at 50% is 30, and at 0% is 156.
 //
-// Go alone, and that is a property of the language rather than a stage of the
-// work. lydite is Go and walks go/ast in-process, so complexity costs no tool,
-// no pin, no install and no staleness risk. Rust and TypeScript have no
-// equivalent in hand, and inventing a language-shaped abstraction from one
-// implementation would be an abstraction fitted to Go.
+// Go, Rust and TypeScript, each walked in-process: go/ast for Go, which ships
+// its own parser, and internal/treesitter's tables for the other two. No
+// language costs a tool, a pin, an install or a staleness risk, which is what
+// rules out the complexity tools neither of those two communities has kept
+// current — see ADR 0036. The counting rules are per language and the formula
+// is not: a Function and Index are the same in all three.
 //
 // Nothing here executes anything or reads a coverage report. The component's
 // instrumented run already wrote one and internal/coverage already parsed it
@@ -107,7 +108,8 @@ func (r Report) Above() int { return len(r.Over) }
 // scored no function is unmeasured, never a clean zero.
 func (r Report) Measured() bool { return r.Scored > 0 }
 
-// Measure scores every Go function the hits describe.
+// Measure scores every function the hits describe, in each language lydite
+// walks.
 //
 // root is the scan root and hits is what internal/coverage parsed out of the
 // component's profile, keyed by scan-root-relative path exactly as git names a
@@ -125,7 +127,8 @@ func (r Report) Measured() bool { return r.Scored > 0 }
 func Measure(root string, hits coverage.LineHits) (Report, error) {
 	files := make([]string, 0, len(hits))
 	for file := range hits {
-		if strings.HasSuffix(file, ".go") {
+		_, walked := tracked(file)
+		if strings.HasSuffix(file, ".go") || walked {
 			files = append(files, file)
 		}
 	}
@@ -138,7 +141,17 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 	var rep Report
 	fset := token.NewFileSet()
 	for _, file := range files {
-		one, err := scoreFile(fset, root, file, hits[file])
+		// Which walk reads a file is its extension's to say, and the two
+		// answer the same fileScore: the formula, the span and the exclusion
+		// rules are one set, and only the parser and the decision points a
+		// language spells are per language.
+		var one fileScore
+		var err error
+		if lang, walked := tracked(file); walked {
+			one, err = scoreTree(lang, root, file, hits[file])
+		} else {
+			one, err = scoreFile(fset, root, file, hits[file])
+		}
 		if err != nil {
 			return Report{}, err
 		}
