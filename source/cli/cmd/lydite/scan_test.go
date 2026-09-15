@@ -123,6 +123,33 @@ func TestSemgrepBase(t *testing.T) {
 	}
 }
 
+// semgrep.Check's writer parameter is only useful if the call site actually
+// passes cmd.ErrOrStderr() rather than some other stream — a unit test in
+// internal/semgrep can prove warnSemgrepignore itself works and still miss a
+// caller that wired the writer to the wrong place. PATH is stripped so
+// neither semgrep nor pipx is found: ensure() then fails immediately, with no
+// network and no pipx install, and Check still runs warnSemgrepignore first.
+func TestScanPassesItsStderrToSemgrepsWriter(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, ".semgrepignore", "docs/\n")
+
+	var out, errOut bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	if !strings.Contains(errOut.String(), ".semgrepignore") {
+		t.Fatalf("stderr = %q, want the .semgrepignore warning cmd.ErrOrStderr() was told about", errOut.String())
+	}
+}
+
 // A failing check whose findings never streamed must print them. Biome sends
 // its report to a file so the JSON cannot be corrupted by its own chatter,
 // which means nothing reaches the terminal on its own — printing a bare

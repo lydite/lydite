@@ -73,6 +73,12 @@ moment it was tried. A scanner's own repository is the last place to accept eith
 the prototypes render statically and `docs/design/README.md` says how to view one
 fully.
 
+> Closed by naming what the file drops: `lydite scan` stats the scan root for a
+> `.semgrepignore` and, when one is there, warns on stderr with every default pattern
+> Semgrep consequently stops applying. It is informational — the file is still the
+> repository's to write, and the scan is never gated on it. See
+> [`semgrep.md`](../../agentic/references/semgrep.md).
+
 The **light theme and responsive behaviour are gaps, not defaults.** The token ramp
 for light surfaces exists and the PR comment uses it, but no product screen has been
 designed light, and nothing below 1240px has been designed at all. Both are recorded
