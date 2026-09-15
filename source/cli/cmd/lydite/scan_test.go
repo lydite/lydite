@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
@@ -1336,6 +1337,145 @@ func TestTheRustLicenceRowIsUnmeasuredWhereCargoDenyCouldNotRun(t *testing.T) {
 	}
 }
 
+// denyProbeLock is the captured Rust probe's lockfile, as the one file a
+// component's licence gate locates its claims in.
+func denyProbeLock(t *testing.T) string {
+	t.Helper()
+	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "denyprobe"))
+	data, err := os.ReadFile(filepath.Join(tree, "Cargo.lock"))
+	if err != nil {
+		t.Fatalf("reading the probe's lockfile: %v", err)
+	}
+	return string(data)
+}
+
+// cargoDenyStub puts a captured cargo-deny run in the version-keyed tool cache,
+// so the gate runs a real invocation against a real stream with nothing
+// installed and nothing fetched. capture names the stream and the file holding
+// the status it exited with.
+func cargoDenyStub(t *testing.T, capture string) {
+	t.Helper()
+	home := t.TempDir()
+	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
+	// $HOME/Library/Caches on macOS.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	pin, err := os.ReadFile(filepath.Join("..", "..", "internal", "rust", "cargo-deny-pin", "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("reading the pin: %v", err)
+	}
+	bin, err := (cargotool.Tool{Name: "cargo-deny", Version: cargotool.MustPinnedVersion(pin, "cargo-deny")}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	dir := filepath.Dir(bin)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("creating the cache directory: %v", err)
+	}
+	stream, err := os.ReadFile(filepath.Join("..", "..", "internal", "licence", "testdata", capture))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stream"), stream, 0o600); err != nil {
+		t.Fatalf("writing the stream: %v", err)
+	}
+	status, err := os.ReadFile(filepath.Join("..", "..", "internal", "licence", "testdata",
+		strings.TrimSuffix(capture, filepath.Ext(capture))+".exit"))
+	if err != nil {
+		t.Fatalf("reading the fixture's exit status: %v", err)
+	}
+	// cargo-deny writes its NDJSON to stderr, and exits non-zero on a check it
+	// failed — both of which the gate reads.
+	script := "#!/bin/sh\ncat \"$(dirname \"$0\")/stream\" >&2\nexit " + strings.TrimSpace(string(status)) + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
+		t.Fatalf("writing the stub: %v", err)
+	}
+}
+
+// The gate's whole shape for a Rust component: a lockfile the merge-base did
+// not carry is a set every crate of which the change introduced, the row fails
+// and names the document that decided it, and each claim is anchored to what
+// the change touched — without which every claim reaches the review surface at
+// no anchor at all.
+func TestTheRustLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"svc/README.md": "the component this change adds a lockfile to\n"},
+		map[string]string{"svc/Cargo.lock": denyProbeLock(t)})
+	cargoDenyStub(t, "deny-licenses-rejected.ndjson")
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	// Line 12 of the probe's lockfile is the stanza naming cbindgen, the crate
+	// the captured run rejected.
+	changed := map[string][]int{"svc/Cargo.lock": {12}}
+	recordRustLicence(context.Background(), &rep, tree, component.Component{Name: "svc", Dir: "svc"},
+		filepath.Join(root, "svc"), executil.Env{}, licenceConfig(), changed)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
+		t.Fatalf("rows = %+v, want one failing licence row", rows)
+	}
+	if rows[0].Label != "licence(svc)" || !strings.Contains(rows[0].Value, "introduced") {
+		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) {
+		t.Errorf("value = %q, want the document that decided the licences named on it", rows[0].Value)
+	}
+	found := rep.Findings()
+	if len(found) != 1 {
+		t.Fatalf("claims = %+v, want one per introduced pair", found)
+	}
+	if found[0].Path != "svc/Cargo.lock" {
+		t.Errorf("claim located at %q, want the component's lockfile from the scan root", found[0].Path)
+	}
+	if found[0].Anchor != finding.AnchorLine {
+		t.Errorf("anchor = %q, want %q — the claim is on the line the change touched", found[0].Anchor, finding.AnchorLine)
+	}
+}
+
+// A component's own deny.toml is evaluated whole and absolutely, so a failing
+// row counts every crate it rejected rather than what this change introduced —
+// and a passing one still reads as the pass it is, never as a count of nothing.
+func TestARustComponentsOwnPolicyCountsEveryCrateItRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		capture string
+		status  ui.Status
+		says    string
+	}{
+		{"rejected", "deny-licenses-rejected.ndjson", ui.StatusFail, "1 non-conforming licence(s)"},
+		{"allowed", "deny-licenses-allowed.ndjson", ui.StatusPass, "passed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "denyprobe"))
+			// A configuration of the component's own, which is what makes the
+			// component rather than lydite the document that decided.
+			writeLydite(t, dir, rust.DenyConfigFile, "[licenses]\nallow = [\"MIT\"]\n")
+			cargoDenyStub(t, c.capture)
+
+			var rep ui.Report
+			recordRustLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
+				component.Component{Name: "svc", Dir: "."}, dir, executil.Env{}, config.Default(), nil)
+
+			rows := rep.Rows()
+			if len(rows) != 1 || rows[0].Status != c.status {
+				t.Fatalf("rows = %+v, want one %q licence row", rows, c.status)
+			}
+			if !strings.Contains(rows[0].Value, c.says) {
+				t.Errorf("value = %q, want %q in it", rows[0].Value, c.says)
+			}
+			if strings.Contains(rows[0].Value, "merge-base") {
+				t.Errorf("value = %q, want no delta against a base: the component's own policy carries none", rows[0].Value)
+			}
+			if !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
+				t.Errorf("value = %q, want the document that decided named on it", rows[0].Value)
+			}
+		})
+	}
+}
+
 // Which document decided a Rust component's licences cannot be read off the
 // verdict, and a reader told only that nothing was gated has no way to find the
 // file an edit would go in.
@@ -1445,6 +1585,40 @@ func TestABaseWorktreeAnswersTheScanRootInsideIt(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "api", depsManifest)); err != nil {
 		t.Fatalf("the base tree holds no manifest at %s: %v", dir, err)
+	}
+}
+
+// A worktree with nowhere to be created answers no tree either, and names the
+// step that failed rather than the checkout that was never reached: a directory
+// answered beside a reason is read as the checkout that did not happen, and
+// every component is measured against it.
+func TestABaseWorktreeWithNoTemporaryDirectoryAnswersNoTree(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"api/" + depsManifest: "golden MIT\n"},
+		map[string]string{"api/" + depsManifest: "golden MIT\n"})
+	// A file where the temporary directory belongs, so nothing can be created
+	// under it.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	dir, reason := tree.open(context.Background())
+	if reason == "" {
+		t.Fatal("a worktree with nowhere to live was created")
+	}
+	if dir != "" {
+		t.Fatalf("dir = %q, want none beside a reason", dir)
+	}
+	if !strings.Contains(reason, "no temporary directory") {
+		t.Errorf("reason = %q, want the step that failed", reason)
+	}
+	if strings.Contains(reason, shortSHA(baseSHA)) {
+		t.Errorf("reason = %q, want it distinct from a merge-base that would not check out", reason)
 	}
 }
 
