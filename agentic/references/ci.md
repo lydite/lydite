@@ -73,11 +73,50 @@ scan uploads under `lydite-scan-repository` for the mirror-image reason — it i
 `record` downloads both patterns into one directory so the fold walks them together.
 
 `ci-end2end.yml`'s `proving ground — coverage gate` job is what holds all of that to a real
-repository: the plan, a baseline miss measured in a throwaway worktree, the recording, three shards
-that must then *hit* the cache, the fold, and the fold with one shard's directory omitted — which is
-how a dead runner is exercised without one dying. It is the only job whose failure to record is
+repository: the plan, a baseline miss measured in a throwaway worktree, the recording, the shards
+that must then *hit* the cache, and the fold. It is the only job whose failure to record is
 caught: `lydite-baseline.yml` runs `lydite test record` too, but on pushes to the default branch
 alone, where a baseline nothing writes costs a slower run rather than a red one.
+
+**It runs those steps twice, over a declaration of four components and over one narrowed to one.**
+A cargo or npm workspace is one component by lydite's model, so a single-service repository plans
+exactly one shard — and `actions/download-artifact` gives a lone match no subdirectory of its own,
+extracting it straight into `path`. This repository declares two components and its own matrix
+therefore always nests, so the flat layout every fold has to read is reached from no run here
+unless a leg goes looking for it. The count is a matrix parameter and not a second job, because
+between two jobs the narrow one is the one that stops being maintained. The one-component
+declaration is derived from the proving ground's own — the kept component is named by the matrix
+and each dropped component's directory becomes an exclude — so a rename over there moves the leg
+with it instead of leaving orphans behind.
+
+The legs differ in two places and nowhere else. The one-shard leg sends its shard through a real
+`upload-artifact`/`download-artifact` round trip, which is what produces the flat layout its fold
+then reads; the other folds the report directories the runner already holds. And the fold with one
+shard's directory omitted — how a dead runner is exercised without one dying — belongs to the
+four-component leg: omitting the only shard is a fold of nothing, which the other leg's own
+emptiness check already covers. The assertions in `.github/assert-proving-ground.py` name the four
+components the proving ground declares, so the one-component leg asserts inline what it can: one
+shard planned, one baseline entry with counts and a producer, and one row each of `test(api)`,
+`coverage(api)`, `coverage(repo)` and `patch(repo)` out of the fold.
+
+That fold discovers its report directories the way `lydite-pr.yml`'s `merge` job discovers them,
+and the two move together. Nothing calls one workflow's steps from another, so what the proving
+ground holds is the shape of the discovery rather than the code performing it — a fold changed
+there and not here leaves this leg failing against a layout the pull-request workflow has already
+learnt to read.
+
+The one-shard leg repeats this for `mutation-merge` and for `publish`, because each discovers its
+report directories with its own independent check — `mutation-merge` by the document
+(`mutation.json`) it finds, `publish` by whether a `lydite-reports-*`-named subdirectory exists at
+all — and a change proven correct for `merge`'s discovery says nothing about the other two. The
+mutation leg runs `lydite mutation` on the one declared component through the same
+`upload-artifact`/`download-artifact` round trip and asserts the fold holds that component's row.
+The publish leg goes further and builds both layouts on purpose: two real report artifacts
+downloaded together, which nests, and a directory holding only a log and no document, uploaded
+alone, which flattens — the exact shape of the regression this leg exists to catch, where a job
+wrote logs and died before its document. `lydite publish` must still render that directory, as
+"holds no report document", rather than drop the section, which is asserted directly on the
+rendered comment rather than inferred from an exit code.
 
 `ci-end2end.yml`'s `proving ground — mutation` job is the equivalent for the mutation engine, and it
 needs one thing the others do not. A green `lydite mutation` says "nothing survived", which is what

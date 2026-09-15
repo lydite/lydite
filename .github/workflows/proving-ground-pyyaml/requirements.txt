@@ -1,0 +1,5 @@
+# Version pin for the PyYAML the proving-ground coverage gate installs when
+# the runner's own interpreter lacks it. Nothing here is ever pip-installed
+# outside that one CI step; this file exists so Dependabot's `pip` ecosystem
+# can see the version and open bump PRs, and it is the version's one home.
+pyyaml==6.0.3

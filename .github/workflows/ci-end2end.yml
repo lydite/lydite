@@ -206,9 +206,31 @@ jobs:
   #
   # Its own runner and its own local bare origin, so the recording is exercised
   # for real and pushes nowhere.
+  #
+  # It runs twice over the same steps, once against the proving ground's own
+  # four-component declaration and once against a declaration narrowed to one.
+  # A cargo or npm workspace is one component by lydite's model, so a
+  # single-service repository plans exactly one shard — and
+  # `actions/download-artifact` gives a lone match no subdirectory of its own,
+  # which is a layout no declaration in this repository reaches. The count is a
+  # matrix parameter rather than a second job because the narrow case is the one
+  # that stops being maintained when the two drift.
   proving-ground-coverage:
-    name: proving ground — coverage gate
+    name: proving ground — coverage gate (${{ matrix.shape }})
     runs-on: ubuntu-latest
+    strategy:
+      # A leg that fails says nothing about the other, and both verdicts are
+      # what a reader came for.
+      fail-fast: false
+      matrix:
+        include:
+          # `component` empty means the declaration is taken as it stands.
+          - shape: every component
+            slug: every
+            component: ""
+          - shape: one component
+            slug: one
+            component: api
     steps:
       # No step here uses git as an authenticated client: the probes commit
       # locally and push only to a bare repository under $RUNNER_TEMP, and
@@ -249,6 +271,54 @@ jobs:
         working-directory: source/cli
         run: go build -o /tmp/lydite ./cmd/lydite
 
+      # 0. The one-component declaration, committed before anything reads it so
+      # the base tree and the probe branch both carry it.
+      #
+      # It is derived from the proving ground's own declaration rather than
+      # written out here: the component kept is named by the matrix, and every
+      # dropped component's directory becomes an exclude. Nothing in this
+      # repository pins that repository's layout, so a directory named here
+      # would turn a move over there into a leg failing on orphans it was never
+      # about. `scripts/seed.ts` stays orphaned, which keeps this leg's verdict
+      # the same shape as the other's.
+      - name: narrow to one component (proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          # Pinned rather than latest: the version has one home, in
+          # .github/workflows/proving-ground-pyyaml/requirements.txt, which
+          # Dependabot watches the way it watches internal/semgrep's.
+          python3 -c 'import yaml' 2>/dev/null || \
+            pip install --quiet -r .github/workflows/proving-ground-pyyaml/requirements.txt
+          python3 - "$COMPONENT" <<'PY'
+          import sys
+
+          import yaml
+
+          keep = sys.argv[1]
+          path = "proving-ground/.lydite/components.yml"
+          with open(path, encoding="utf-8") as fh:
+              declaration = yaml.safe_load(fh)
+          components = declaration["components"]
+          kept = [c for c in components if c["name"] == keep]
+          if len(kept) != 1:
+              sys.exit(f"{path} declares no component named {keep}")
+          dropped = [c for c in components if c["name"] != keep]
+          declaration["components"] = kept
+          declaration["excludes"] = list(declaration.get("excludes", [])) + [
+              c["dir"].rstrip("/") + "/**" for c in dropped
+          ]
+          with open(path, "w", encoding="utf-8") as fh:
+              yaml.safe_dump(declaration, fh, sort_keys=False)
+          PY
+          cat proving-ground/.lydite/components.yml
+          git -C proving-ground config user.email ci@lydite.invalid
+          git -C proving-ground config user.name "lydite ci"
+          git -C proving-ground add .lydite/components.yml
+          git -C proving-ground commit --quiet -m "declare one component"
+
       # 1. The planner, which runs no suite and needs no git at all. `api` and
       # `tally` publish host port 5432 under services deliberately named `db`
       # and `postgres`, so they have to land in one shard: apart, they are safe
@@ -258,7 +328,19 @@ jobs:
           set -euo pipefail
           /tmp/lydite test plan --dir proving-ground --out matrix.json
           cat matrix.json
-          python3 .github/assert-proving-ground.py --plan matrix.json
+
+      - name: the plan groups the contended components (proving ground)
+        if: matrix.component == ''
+        run: python3 .github/assert-proving-ground.py --plan matrix.json
+
+      # One declared component is one shard, and that is the whole premise of
+      # this leg: a plan emitting two would exercise the nested artifact layout
+      # the other leg already covers.
+      - name: the plan is one shard (proving ground)
+        if: matrix.component != ''
+        run: |
+          set -euo pipefail
+          python3 -c 'import json, sys; n = len(json.load(open("matrix.json"))); sys.exit(0 if n == 1 else f"the declaration names one component and the plan emitted {n} shard(s)")'
 
       # 2. A local bare origin, the base commit B as `main`, and a probe branch
       # P adding an untested exported function under go/api/. Nothing leaves
@@ -303,7 +385,10 @@ jobs:
           /tmp/lydite test --dir proving-ground --affected --gate-coverage --json > miss.json || status=$?
           echo "lydite test --gate-coverage exited $status"
           cat miss.json
-          python3 .github/assert-proving-ground.py --miss miss.json
+
+      - name: the baseline miss measured the base tree (proving ground)
+        if: matrix.component == ''
+        run: python3 .github/assert-proving-ground.py --miss miss.json
 
       # 4. The measure/record split, on the base tree. `lydite test` writes
       # nothing to the lydite branch; `lydite test record` lands it, executing
@@ -327,7 +412,13 @@ jobs:
           /tmp/lydite test record --dir proving-ground --branch main \
             --reports proving-ground/.lydite-reports --json > recorded.json || recorded=$?
           echo "lydite test record exited $recorded"
+          echo "$recorded" > "$RUNNER_TEMP/record-status"
           cat recorded.json
+
+      - name: the baseline landed (proving ground)
+        if: matrix.component == ''
+        run: |
+          set -uo pipefail
           python3 .github/assert-proving-ground.py --record gated.json recorded.json || exit 1
           # The branch itself, not only the row that claims to have written it.
           # A partial entry reads as a cache hit on every later change, so what
@@ -346,6 +437,40 @@ jobs:
           git -C proving-ground show "origin/lydite:history/v1/${month}.ndjson" > history.ndjson
           cat history.ndjson
           python3 .github/assert-proving-ground.py --history history.ndjson "$tree"
+
+      # The same claim over one component. `assert-proving-ground.py` names the
+      # four the proving ground declares, so this leg holds the entry it can:
+      # the record command succeeded, and the branch carries one entry, for the
+      # one declared component, with the counts and the producer a later run
+      # compares against.
+      - name: the baseline landed (one component, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          status=$(cat "$RUNNER_TEMP/record-status")
+          if [ "$status" -ne 0 ]; then
+            echo "lydite test record exited $status: a repository of one component records a baseline like any other" >&2
+            exit 1
+          fi
+          tree=$(git -C proving-ground rev-parse 'HEAD^{tree}')
+          git -C proving-ground fetch --quiet origin lydite
+          git -C proving-ground show "origin/lydite:v4/${tree}.json" > entries.json
+          cat entries.json
+          python3 - "$COMPONENT" <<'PY'
+          import json
+          import sys
+
+          name = sys.argv[1]
+          with open("entries.json", encoding="utf-8") as fh:
+              entries = json.load(fh)
+          if sorted(entries) != [name]:
+              sys.exit(f"the recorded baseline holds {sorted(entries)}, want ['{name}']")
+          entry = entries[name]
+          if not entry.get("total") or not entry.get("producer"):
+              sys.exit(f"{name} was recorded without counts or a producer: {entry!r}")
+          PY
 
       # 5. The shards, run sequentially in this one job rather than on three
       # runners: what is being asserted is what each shard reports, and a matrix
@@ -378,13 +503,275 @@ jobs:
             reports+=("reports-$name")
           done
           printf '%s\n' "${reports[@]}" > "$RUNNER_TEMP/shard-dirs"
-          python3 .github/assert-proving-ground.py --hit shard-*.json
 
-      # 6. The fold. Every declared component takes exactly one row, the
-      # whole-tree gates collapse to one each, and the two figures no shard can
+      - name: the shards hit the baseline (proving ground)
+        if: matrix.component == ''
+        run: python3 .github/assert-proving-ground.py --hit shard-*.json
+
+      # The one shard's report directory, through an artifact, because the
+      # layout a fold reads is made by the round trip and not by the shard.
+      # `actions/download-artifact` gives an artifact its own subdirectory only
+      # when the pattern matched more than one, and extracts a lone match
+      # straight into `path` — so this leg is the only place the flat layout is
+      # produced from a real upload rather than argued about.
+      - name: upload the shard (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-shard-${{ matrix.slug }}
+          path: proving-ground/.lydite-reports
+          # The report directory disowns itself with a .gitignore and is hidden
+          # by its own name, so without this the upload matches no file at all
+          # and warns rather than failing — leaving the fold below nothing to
+          # read for a reason that is not the one it is about.
+          include-hidden-files: true
+
+      - name: download the shards (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: proving-ground-shard-${{ matrix.slug }}*
+          path: shards
+
+      # 6. The fold over one shard, reading the directories the download left,
+      # the way `lydite-pr.yml`'s `merge` job reads them. The layout is printed
+      # before anything reads it: a fold that reads the wrong directory folds
+      # something, and what separates that from a fold that read the right one
+      # is which paths were there to be read.
+      - name: lydite test merge (one shard, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -uo pipefail
+          find shards -maxdepth 2 | sort || echo "the download left no shards directory"
+          # The documents, not the directory layout — the discovery
+          # `lydite-pr.yml`'s `merge` job performs, over the flat layout this
+          # leg's round trip produces. Depth 2 reaches the flat shape and the
+          # nested one alike, and stops above the per-component directories,
+          # which hold logs and coverage reports rather than either document.
+          args=()
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find shards -maxdepth 2 \
+                     \( -name measurements.json -o -name test.json \) \
+                     -exec dirname {} \; | sort -u)
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no shard uploaded a report directory; there is nothing to fold" >&2
+            exit 1
+          fi
+          printf 'folding %s\n' "${dirs[@]}"
+          status=0
+          /tmp/lydite test merge --dir proving-ground "${args[@]}" --json > merged.json || status=$?
+          echo "lydite test merge exited $status"
+          cat merged.json
+          # The exit code is reported and not asserted on, as on the leg over
+          # every component: the proving ground plants an uncovered probe, so
+          # the coverage and patch gates fail here by construction and a fold
+          # that exited 0 would be the surprise. What is under test is that a
+          # lone shard is found and folded at all, which is the rows below.
+          python3 - "$COMPONENT" <<'PY'
+          import json
+          import sys
+
+          name = sys.argv[1]
+          with open("merged.json", encoding="utf-8") as fh:
+              labels = [row["label"] for row in json.load(fh)["rows"]]
+          missing = [
+              label
+              for label in (f"test({name})", f"coverage({name})", "coverage(repo)", "patch(repo)")
+              if labels.count(label) != 1
+          ]
+          if missing:
+              sys.exit(f"the fold is missing exactly one row each of {missing}: it holds {labels}")
+          PY
+
+      # `mutation-merge` discovers its documents independently of `merge` —
+      # a change to one fold does not prove the other — so the same flat
+      # round trip is repeated here for `mutation.json`.
+      - name: lydite mutation (one shard, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -uo pipefail
+          rm -rf proving-ground/.lydite-reports
+          status=0
+          /tmp/lydite mutation --dir proving-ground --affected --component "$COMPONENT" --stream --json > mutation-one.json || status=$?
+          echo "lydite mutation exited $status"
+          cat mutation-one.json
+
+      - name: upload the mutation shard (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proving-ground-mutation-shard-${{ matrix.slug }}
+          path: proving-ground/.lydite-reports
+          include-hidden-files: true
+
+      - name: download the mutation shards (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: proving-ground-mutation-shard-${{ matrix.slug }}*
+          path: mutation-shards
+
+      - name: lydite mutation merge (one shard, proving ground)
+        if: matrix.component != ''
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -uo pipefail
+          find mutation-shards -maxdepth 2 | sort || echo "the download left no mutation-shards directory"
+          args=()
+          dirs=()
+          while IFS= read -r dir; do
+            args+=(--reports "$dir")
+            dirs+=("$dir")
+          done < <(find mutation-shards -maxdepth 2 -name mutation.json \
+                     -exec dirname {} \; | sort -u)
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no shard uploaded a report directory; there is nothing to fold" >&2
+            exit 1
+          fi
+          printf 'folding %s\n' "${dirs[@]}"
+          status=0
+          /tmp/lydite mutation merge --dir proving-ground "${args[@]}" --json > mutation-merged.json || status=$?
+          echo "lydite mutation merge exited $status"
+          cat mutation-merged.json
+          if [ "$status" -ne 0 ]; then
+            echo "the mutation fold over one shard failed" >&2
+            exit 1
+          fi
+          python3 - "$COMPONENT" <<'PY'
+          import json
+          import sys
+
+          name = sys.argv[1]
+          with open("mutation-merged.json", encoding="utf-8") as fh:
+              labels = [row["label"] for row in json.load(fh)["rows"]]
+          if labels.count(f"mutation({name})") != 1:
+              sys.exit(f"the fold holds no mutation({name}) row: it holds {labels}")
+          PY
+
+      # `publish` chooses between the flat and nested layouts by whether a
+      # `lydite-reports-*`-named subdirectory exists at all, a different check
+      # from either fold above — exercised here in both directions, over
+      # artifacts this leg already produced.
+      #
+      # Nested: the coverage shard's directory (holding `test.json`) and the
+      # mutation shard's (holding `mutation.json`) are two real artifacts, so
+      # the download nests them the way two producing jobs would.
+      - name: upload two report directories (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-nested-${{ matrix.slug }}-a
+          path: shards
+          include-hidden-files: true
+
+      - name: upload the second report directory (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-nested-${{ matrix.slug }}-b
+          path: mutation-shards
+          include-hidden-files: true
+
+      - name: download the nested reports (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-reports-nested-${{ matrix.slug }}-*
+          path: nested-reports
+
+      # A directory with no document at all, uploaded alone: the exact shape
+      # of the regression this leg exists to catch, where a job wrote logs and
+      # died before its document — `publish` must still render it, as "holds
+      # no report document", rather than drop the section.
+      - name: create a documentless report directory (proving ground)
+        if: matrix.component != ''
+        run: |
+          set -euo pipefail
+          mkdir -p docless-source/api
+          echo "log line, no document" > docless-source/api/test.log
+
+      - name: upload the documentless report directory (proving ground)
+        if: matrix.component != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lydite-reports-docless-${{ matrix.slug }}
+          path: docless-source
+
+      - name: download the documentless report (proving ground)
+        if: matrix.component != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-reports-docless-${{ matrix.slug }}*
+          path: docless-reports
+
+      - name: lydite publish (one shard, proving ground)
+        if: matrix.component != ''
+        run: |
+          set -euo pipefail
+          # The same discovery `lydite-pr.yml`'s `publish` job performs,
+          # against each of the two layouts this leg produced.
+          fold_publish_dirs() {
+            local root="$1"
+            shopt -s nullglob
+            local nested=false
+            for dir in "$root"/*/; do
+              case "${dir#"$root"/}" in
+                lydite-reports-*) nested=true ;;
+              esac
+            done
+            if [ "$nested" = true ]; then
+              for dir in "$root"/*/; do echo "${dir%/}"; done
+            elif [ -d "$root" ]; then
+              echo "$root"
+            fi
+          }
+
+          base_sha=$(git -C proving-ground rev-parse HEAD)
+
+          nested_dirs=()
+          while IFS= read -r dir; do nested_dirs+=("$dir"); done \
+            < <(fold_publish_dirs nested-reports)
+          if [ "${#nested_dirs[@]}" -ne 2 ]; then
+            echo "the nested layout resolved to ${#nested_dirs[@]} directory(ies), want 2: ${nested_dirs[*]}" >&2
+            exit 1
+          fi
+          args=()
+          for dir in "${nested_dirs[@]}"; do args+=(--reports "$dir"); done
+          /tmp/lydite publish "${args[@]}" --base "$base_sha" --out nested-comment.md
+          cat nested-comment.md
+          if grep -q "holds no report document" nested-comment.md; then
+            echo "the nested comment reports a missing document where both directories hold one" >&2
+            exit 1
+          fi
+
+          flat_dirs=()
+          while IFS= read -r dir; do flat_dirs+=("$dir"); done \
+            < <(fold_publish_dirs docless-reports)
+          if [ "${#flat_dirs[@]}" -ne 1 ]; then
+            echo "the flat layout resolved to ${#flat_dirs[@]} directory(ies), want 1: ${flat_dirs[*]}" >&2
+            exit 1
+          fi
+          /tmp/lydite publish --reports "${flat_dirs[0]}" --base "$base_sha" --out flat-comment.md
+          cat flat-comment.md
+          if ! grep -q "holds no report document" flat-comment.md; then
+            echo "a flat, documentless directory did not render as holding no report document" >&2
+            exit 1
+          fi
+
+      # 6. The fold over every shard. Every declared component takes exactly
+      # one row, the whole-tree gates collapse to one each, and the two figures no shard can
       # produce — coverage(repo) and patch(repo) — are computed here and
       # nowhere else.
       - name: lydite test merge (proving ground)
+        if: matrix.component == ''
         run: |
           set -uo pipefail
           args=()
@@ -398,8 +785,11 @@ jobs:
       # 7. The same fold with one shard's directory omitted. This is how a dead
       # runner is exercised without one dying: an `unmeasured` row does not
       # vote, so a fold that reported one would publish `"verdict": "pass"`
-      # over a repository half of which was never tested.
+      # over a repository half of which was never tested. It needs a shard to
+      # omit and still leave one, so it is the other leg's: a plan of one shard
+      # omitted is a fold of nothing, which the step above already covers.
       - name: a shard that never reported (proving ground)
+        if: matrix.component == ''
         run: |
           set -uo pipefail
           args=()
@@ -423,7 +813,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: proving-ground-coverage-logs
+          name: proving-ground-coverage-logs-${{ matrix.slug }}
           path: |
             proving-ground/.lydite-reports/
             reports-*/
