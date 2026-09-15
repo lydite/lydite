@@ -26,6 +26,7 @@ governs what you are about to change, before you change it.
 | [`coverage.md`](../../agentic/references/coverage.md) | `internal/coverage`, `internal/gitstate`, the baseline, the floor, the patch gate |
 | [`crap.md`](../../agentic/references/crap.md) | `internal/crap`, `internal/annotation` |
 | [`mutation.md`](../../agentic/references/mutation.md) | `internal/mutation` |
+| [`crap.md`](../../agentic/references/crap.md), [`mutation.md`](../../agentic/references/mutation.md) | `internal/treesitter` — the shared grammar tables, function spans and test-code classification both gates read |
 | [`findings.md`](../../agentic/references/findings.md) | `internal/finding` |
 | [`quality-history.md`](../../agentic/references/quality-history.md) | `internal/ledger`, `internal/junit` |
 | [`scanning.md`](../../agentic/references/scanning.md) | which units each language's checks run over, and `internal/secrets`, the root-scoped secret scan |
