@@ -11,9 +11,9 @@ That was true before this branch (`docs/adr/0037-...`, landed on `lydite/lydite`
 `.github/actions/lydite-comment/action.yml` and `.github/actions/lydite-threads/action.yml` now
 classify the relay's answer into three buckets, and `401` (an audience the relay would not
 accept), `400`, `404`, and `/comment`'s unambiguous `403`s fail the composite step outright —
-`::error::`, `exit 1`, no `posted`/`applied` output set, no fallback comment posted. Only `409`,
-an unset relay, `5xx`, curl's `000`, and `/review`'s comment-id-race `403` still fall back (the
-last two under a `::warning::`).
+`::error::`, `exit 1`, no `posted`/`applied` output set, no fallback comment posted. Only `409`
+and an unset relay still fall back silently; `5xx`, curl's `000`, and `/review`'s
+comment-id-race `403` fall back under a `::warning::`.
 
 An audience drift (trailing slash, http vs https, a stale value after a custom-domain change)
 now produces a red `publish` job naming the status, not a silent green one under the wrong
