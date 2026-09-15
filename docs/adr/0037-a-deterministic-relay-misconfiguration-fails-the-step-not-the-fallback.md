@@ -39,14 +39,18 @@ for a lydite outage is the thing the fallback exists to prevent. Passing it unre
 how an outage lasts a week, so the fallback still happens and the annotation is what says
 it did.
 
-**Fails the step: `401`, `400`, and — on `/comment` — `403`.** A `401` is no bearer token
-presented, or an OIDC token whose signature, issuer, audience or expiry the relay would
-not accept; the audience case is the one a consumer reaches by writing the origin with a
-trailing slash, since the relay compares `aud` by exact string. A `400` on `/comment` is a
-payload missing its `marker` or `body`; a `400` on `/review` is an operations document
-whose `version` this relay does not apply, which is a CLI-and-relay skew. A `403` on
-`/comment` is a run whose `ref` is not a pull-request ref, or a submitted `pull_request`
-number that does not match the one the relay derived from `ref`.
+**Fails the step: `401`, `404`, `400`, and — on `/comment` — `403`.** A `401` is no bearer
+token presented, or an OIDC token whose signature, issuer, audience or expiry the relay
+would not accept — a genuinely wrong `aud`, one built from a `LYDITE_RELAY_URL` naming the
+wrong scheme, host, or port, since the relay compares `aud` by exact string. A `404` is the
+request path itself malformed before any token is checked — the case a consumer reaches by
+writing the origin with a trailing slash, since both composite actions build the request as
+`${RELAY}/comment` (or `/review`) and a trailing slash turns that into a double slash the
+relay's router does not recognize as either route. A `400` on `/comment` is a payload
+missing its `marker` or `body`; a `400` on `/review` is an operations document whose
+`version` this relay does not apply, which is a CLI-and-relay skew. A `403` on `/comment`
+is a run whose `ref` is not a pull-request ref, or a submitted `pull_request` number that
+does not match the one the relay derived from `ref`.
 
 Every one of those is deterministic. The same run, retried, answers the same, and no
 amount of waiting fixes any of them — what fixes them is an edit to a variable, a
