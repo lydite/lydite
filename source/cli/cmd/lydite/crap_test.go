@@ -731,6 +731,9 @@ func TestASkippedFileIsNamedRatherThanSilentlyDropped(t *testing.T) {
 	if !strings.Contains(value, "1 file(s) not walked") {
 		t.Errorf("crapValue = %q, want it to name the skipped .jsx file", value)
 	}
+	if clean := crapValue(crap.Report{Scored: 1}); strings.Contains(clean, "not walked") {
+		t.Errorf("crapValue = %q, want no clause when nothing was skipped", clean)
+	}
 
 	all := measured("web", runner.TypeScript, 0, 3)
 	all.Hits = coverage.LineHits{"web/src/widget.jsx": {1: 1, 2: 1, 3: 1}}

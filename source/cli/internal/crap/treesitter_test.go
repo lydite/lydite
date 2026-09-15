@@ -2,6 +2,7 @@ package crap
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -411,10 +412,12 @@ func TestMtsAndCtsAreWalkedAsTypeScript(t *testing.T) {
 func TestAJSXFileIsNamedSkippedRatherThanSilentlyDropped(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "src/plain.ts", "export function f(a: number): number {\n  return a\n}\n")
-	write(t, root, "src/widget.jsx", "export function Widget() {\n  return 1\n}\n")
+	write(t, root, "src/zebra.jsx", "export function Zebra() {\n  return 1\n}\n")
+	write(t, root, "src/apple.jsx", "export function Apple() {\n  return 1\n}\n")
 	rep, err := Measure(root, coverage.LineHits{
-		"src/plain.ts":   covering(3, 3),
-		"src/widget.jsx": covering(3, 3),
+		"src/plain.ts":  covering(3, 3),
+		"src/zebra.jsx": covering(3, 3),
+		"src/apple.jsx": covering(3, 3),
 	})
 	if err != nil {
 		t.Fatalf("Measure: %v", err)
@@ -422,8 +425,12 @@ func TestAJSXFileIsNamedSkippedRatherThanSilentlyDropped(t *testing.T) {
 	if rep.Scored != 1 {
 		t.Fatalf("scored = %d, want 1 (only the .ts file): %+v", rep.Scored, rep.Over)
 	}
-	if len(rep.Skipped) != 1 || rep.Skipped[0] != "src/widget.jsx" {
-		t.Errorf("skipped = %v, want [src/widget.jsx]", rep.Skipped)
+	// Sorted, the same reason Measure sorts the files it scores: a run over
+	// one tree produces one report, not one that reads differently depending
+	// on map iteration order.
+	want := []string{"src/apple.jsx", "src/zebra.jsx"}
+	if !slices.Equal(rep.Skipped, want) {
+		t.Errorf("skipped = %v, want %v (sorted)", rep.Skipped, want)
 	}
 }
 
