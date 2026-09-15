@@ -271,6 +271,12 @@ func score(root string, m measurement) (crap.Report, string) {
 		// travels with the reason, so the declarations it holds are still
 		// named.
 		return rep, fmt.Sprintf("every function the coverage report describes is excluded (%d)", rep.Excluded)
+	case len(rep.Skipped) > 0:
+		// Every file the report described was one this walk could not read —
+		// a JSX-bearing component, most likely — rather than a component with
+		// nothing in it. The reason says so instead of reading the same as an
+		// empty one.
+		return rep, fmt.Sprintf("every file the coverage report describes could not be walked (%d)", len(rep.Skipped))
 	default:
 		return rep, "the coverage report describes no function to score"
 	}
@@ -1052,10 +1058,19 @@ func crapFindings(label string, m measurement) []finding.Finding {
 // annotate its way to nothing above the threshold and this is the number that
 // makes it visible when one does. Absent when nothing was excluded, since a
 // trailing "0 excluded" on every clean row is a clause readers learn to skip.
+//
+// A skipped file rides on it the same way, for the same reason a gate that
+// could not run must never render as one that passed: a TypeScript component
+// carrying a JSX-bearing file this walk cannot read has not been fully
+// scored, and a row with nothing to say about that would look identical to
+// one that scored every file it was handed.
 func crapValue(rep crap.Report) string {
 	value := fmt.Sprintf("%d function(s) above %d, worst %.1f", rep.Above(), crap.Threshold, rep.Worst)
 	if rep.Excluded > 0 {
 		value += fmt.Sprintf(", %d excluded", rep.Excluded)
+	}
+	if len(rep.Skipped) > 0 {
+		value += fmt.Sprintf(", %d file(s) not walked", len(rep.Skipped))
 	}
 	return value
 }

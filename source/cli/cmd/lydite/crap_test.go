@@ -708,6 +708,41 @@ func TestATypeScriptComponentWithNoFunctionToScoreIsNotAPass(t *testing.T) {
 	}
 }
 
+// A TypeScript component mixing a .ts file with a .jsx file scores the .ts
+// file and names the .jsx one skipped, on both branches of that split: a
+// still-scored component says so in its value rather than reading as fully
+// scored, and a component that is nothing but skipped files reads amber for
+// that specific reason rather than the generic "no function to score".
+func TestASkippedFileIsNamedRatherThanSilentlyDropped(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "web/src/plain.ts", "export function f(a: number): number {\n  return a\n}\n")
+	write(t, root, "web/src/widget.jsx", "export function Widget() {\n  return 1\n}\n")
+	m := measured("web", runner.TypeScript, 0, 6)
+	m.Hits = coverage.LineHits{
+		"web/src/plain.ts":   {1: 1, 2: 1, 3: 1},
+		"web/src/widget.jsx": {1: 1, 2: 1, 3: 1},
+	}
+	m.CRAP, m.CRAPWhy = score(root, m)
+	if !m.Scored() {
+		t.Fatalf("score = (%+v, %q), want the .ts file scored", m.CRAP, m.CRAPWhy)
+	}
+	value := crapValue(m.CRAP)
+	if !strings.Contains(value, "1 file(s) not walked") {
+		t.Errorf("crapValue = %q, want it to name the skipped .jsx file", value)
+	}
+
+	all := measured("web", runner.TypeScript, 0, 3)
+	all.Hits = coverage.LineHits{"web/src/widget.jsx": {1: 1, 2: 1, 3: 1}}
+	all.CRAP, all.CRAPWhy = score(root, all)
+	if all.Scored() || !strings.Contains(all.CRAPWhy, "could not be walked") {
+		t.Fatalf("score = (%+v, %q), want it to say every file could not be walked", all.CRAP, all.CRAPWhy)
+	}
+	if row, _ := crapRow(all, nil, true); row.Status != ui.StatusUnmeasured {
+		t.Errorf("crap(web) = %+v, want amber rather than a silent pass", row)
+	}
+}
+
 // The denominator is every component CRAP applies to, across all three
 // languages. A repository reporting its Rust and TypeScript components as
 // outside the metric would understate how much of itself the figure covers.

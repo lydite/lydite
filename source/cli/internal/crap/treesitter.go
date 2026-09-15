@@ -17,14 +17,15 @@ import (
 // walked is the extensions scored through a tree-sitter walk, and the language
 // whose tables read each one.
 //
-// It is the three extensions ADR 0036's counting rules were worked out and
-// measured over, rather than every extension runner.LangForExt calls
-// TypeScript: `.js` and `.jsx` are in that table too, and a JSX file read under
-// the TypeScript tables produces a tree full of errors — which this gate reads
-// as a file it could not parse and refuses the whole report over. A file this
-// map does not name is not scored, the same way a `.py` beside a Go package is
-// not.
-var walked = map[string]bool{".rs": true, ".ts": true, ".tsx": true}
+// `.mts` and `.cts` join `.ts` and `.tsx` because they parse under the same
+// TypeScript grammar with nothing JSX-shaped to trip over. `.js`, `.mjs`,
+// `.cjs` and `.jsx` are in runner.LangForExt's TypeScript table too, and stay
+// out: a JSX file read under the TypeScript tables produces a tree full of
+// errors, which this gate reads as a file it could not parse and refuses the
+// whole report over. A file in that second group is not silently dropped —
+// skipped names it, and Measure carries the list forward rather than letting
+// it vanish from a hit map nobody double-checks.
+var walked = map[string]bool{".rs": true, ".ts": true, ".tsx": true, ".mts": true, ".cts": true}
 
 // tracked reports whether a file the coverage report describes is one this gate
 // scores, and which walk scores it.
@@ -34,6 +35,21 @@ func tracked(file string) (runner.Lang, bool) {
 		return "", false
 	}
 	return runner.LangForExt(ext)
+}
+
+// skipped reports whether a file belongs to a language this gate otherwise
+// scores, but is written in an extension outside walked — the JSX-risking
+// TypeScript extensions above, or any later addition to runner.LangForExt's
+// tables this gate has not caught up with. Never true for Go or for an
+// extension no runner claims at all, both of which are simply not this gate's
+// concern.
+func skipped(file string) bool {
+	ext := strings.ToLower(filepath.Ext(file))
+	if walked[ext] || ext == ".go" {
+		return false
+	}
+	_, ok := runner.LangForExt(ext)
+	return ok
 }
 
 // scoreTree scores every function one Rust or TypeScript file declares, the way

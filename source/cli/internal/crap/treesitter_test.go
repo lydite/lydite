@@ -376,3 +376,71 @@ func TestARustOrTypeScriptFileThatCannotBeReadIsAnErrorNamingIt(t *testing.T) {
 		}
 	}
 }
+
+// An extension no walk table names returns the empty language, not merely a
+// false bool — a mutant that swapped the empty string for anything else would
+// pass every test that only checked the bool half of tracked's answer.
+func TestAnUnwalkedExtensionTracksAsTheEmptyLanguage(t *testing.T) {
+	lang, walked := tracked("src/component.py")
+	if walked {
+		t.Fatalf("walked = true for a .py file, want false")
+	}
+	if lang != "" {
+		t.Errorf("lang = %q for an untracked extension, want the empty string", lang)
+	}
+}
+
+// .mts and .cts parse under the same grammar .ts and .tsx already do, and are
+// walked rather than silently dropped or reported as skipped.
+func TestMtsAndCtsAreWalkedAsTypeScript(t *testing.T) {
+	for _, file := range []string{"src/a.mts", "src/a.cts"} {
+		lang, walked := tracked(file)
+		if !walked || lang != runner.TypeScript {
+			t.Errorf("tracked(%q) = %q, %v, want typescript, true", file, lang, walked)
+		}
+		if skipped(file) {
+			t.Errorf("skipped(%q) = true, want false — it is walked", file)
+		}
+	}
+}
+
+// A .jsx or .js file is TypeScript by runner.LangForExt's own table, but this
+// gate cannot walk it — JSX parses badly under the TypeScript grammar — so it
+// is neither silently dropped nor scored as though it were absent: Measure
+// names it in Report.Skipped.
+func TestAJSXFileIsNamedSkippedRatherThanSilentlyDropped(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "src/plain.ts", "export function f(a: number): number {\n  return a\n}\n")
+	write(t, root, "src/widget.jsx", "export function Widget() {\n  return 1\n}\n")
+	rep, err := Measure(root, coverage.LineHits{
+		"src/plain.ts":   covering(3, 3),
+		"src/widget.jsx": covering(3, 3),
+	})
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if rep.Scored != 1 {
+		t.Fatalf("scored = %d, want 1 (only the .ts file): %+v", rep.Scored, rep.Over)
+	}
+	if len(rep.Skipped) != 1 || rep.Skipped[0] != "src/widget.jsx" {
+		t.Errorf("skipped = %v, want [src/widget.jsx]", rep.Skipped)
+	}
+}
+
+// A component whose every file is skipped is not scored, and the report says
+// which is why: not "no function to score", which would read the same as an
+// empty component, but named as unwalked.
+func TestAllFilesSkippedIsNotConfusedWithNothingToScore(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "src/widget.jsx", "export function Widget() {\n  return 1\n}\n")
+	rep, err := Measure(root, coverage.LineHits{"src/widget.jsx": covering(3, 3)})
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if rep.Scored != 0 {
+		t.Fatalf("scored = %d, want 0", rep.Scored)
+	}
+	if len(rep.Skipped) != 1 || rep.Skipped[0] != "src/widget.jsx" {
+		t.Errorf("skipped = %v, want [src/widget.jsx]", rep.Skipped)
+	}
+}

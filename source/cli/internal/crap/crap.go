@@ -87,6 +87,12 @@ type Report struct {
 	// Unused names each declaration that covers no function, so an author who
 	// believes they have answered a score is told when nothing they wrote did.
 	Unused []string
+	// Skipped names each file this gate could not walk despite its language
+	// otherwise being scored — a JSX-bearing TypeScript extension today. A
+	// component whose report holds one of these is not fully scored, and this
+	// is what keeps that from reading as though it were: see skipped in
+	// treesitter.go.
+	Skipped []string
 	// Over is every function above Threshold, worst first. The functions
 	// rather than their number, because a failing row's job is to name the
 	// work: the author clears this gate by testing one of these or by taking
@@ -124,12 +130,22 @@ func (r Report) Measured() bool { return r.Scored > 0 }
 // failing to read it now says something is wrong with the tree rather than
 // with the code — and a report short one file is a count the gate would
 // compare against a baseline taken over all of them.
+//
+// A file this gate never attempted at all — a JSX-bearing TypeScript
+// extension no walk table covers — is a different thing from that failure,
+// and Report.Skipped is where it goes: named rather than silently absent from
+// both the scored count and the file list above, since a component whose
+// report holds one of these has not been fully scored and must not read as
+// though it were.
 func Measure(root string, hits coverage.LineHits) (Report, error) {
 	files := make([]string, 0, len(hits))
+	var skippedFiles []string
 	for file := range hits {
-		_, walked := tracked(file)
-		if strings.HasSuffix(file, ".go") || walked {
+		switch _, walked := tracked(file); {
+		case strings.HasSuffix(file, ".go"), walked:
 			files = append(files, file)
+		case skipped(file):
+			skippedFiles = append(skippedFiles, file)
 		}
 	}
 	// Sorted, so a run over one tree produces one report. The ordering below
@@ -137,6 +153,7 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 	// since a tree with two unreadable files would otherwise name a different
 	// one on each run and a reader would be chasing a moving target.
 	slices.Sort(files)
+	slices.Sort(skippedFiles)
 
 	var rep Report
 	fset := token.NewFileSet()
@@ -165,6 +182,7 @@ func Measure(root string, hits coverage.LineHits) (Report, error) {
 			}
 		}
 	}
+	rep.Skipped = skippedFiles
 	// Worst first, then by where it is. The tie-break is what makes the order
 	// a total one, so two functions scoring the same are not reported in
 	// whichever order the walk happened to reach them — and it is written as a
