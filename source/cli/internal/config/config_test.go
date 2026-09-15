@@ -306,6 +306,105 @@ func TestLoadToolchainOverride(t *testing.T) {
 	}
 }
 
+// An absent policy is the gate's "not configured" state, not a policy with
+// zero allowed licences — the zero value must round-trip through Load
+// untouched.
+func TestLoadLicencePolicyDefaultsToUnconfigured(t *testing.T) {
+	got, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Licence.Policy.Allow) != 0 {
+		t.Fatalf("Licence.Policy.Allow = %v, want empty (not configured)", got.Licence.Policy.Allow)
+	}
+}
+
+// A multi-entry allow-list round-trips through Load exactly as written.
+func TestLoadLicencePolicyAllowList(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "licence:\n  policy:\n    allow: [Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0]\n")
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "Unicode-3.0"}
+	if !reflect.DeepEqual(got.Licence.Policy.Allow, want) {
+		t.Fatalf("Licence.Policy.Allow = %v, want %v", got.Licence.Policy.Allow, want)
+	}
+	// Naming the policy must not disturb an unrelated default.
+	if !got.Rust.Enabled || !got.Secrets.Enabled {
+		t.Fatalf("a licence section disturbed other defaults: %+v", got)
+	}
+}
+
+// `license:` (American spelling) is a policy silently absent and a gate
+// silently off, so it is rejected by name at load time rather than ignored.
+func TestLoadRejectsAmericanSpelling(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "license:\n  policy:\n    allow: [MIT]\n")
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load silently accepted the license: (American spelling) key")
+	}
+	for _, want := range []string{"license", "licence"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q, so it cannot be acted on: %v", want, err)
+		}
+	}
+}
+
+// A correctly-spelled `licence:` section is unaffected by the misspelling
+// check: the rejection must fire on the wrong key being present, not on the
+// right key's mere existence.
+func TestLoadAcceptsCorrectSpellingAlongsideOthers(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "licence:\n  policy:\n    allow: [MIT]\n")
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Licence.Policy.Allow, []string{"MIT"}) {
+		t.Fatalf("Licence.Policy.Allow = %v, want [MIT]", got.Licence.Policy.Allow)
+	}
+}
+
+// An invalid SPDX identifier in the allow-list is a load-time error naming
+// the bad entry, not a gate that silently never matches it at scan time.
+func TestLoadRejectsInvalidSPDXIdentifier(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "licence:\n  policy:\n    allow: [MIT, Not-A-Real-Licence]\n")
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load accepted an allow-list entry that is not a real SPDX licence identifier")
+	}
+	if !strings.Contains(err.Error(), "Not-A-Real-Licence") {
+		t.Errorf("error does not name the offending entry: %v", err)
+	}
+	if !strings.Contains(err.Error(), "licence.policy.allow") {
+		t.Errorf("error does not name the offending key: %v", err)
+	}
+}
+
+// The allow-list holds atomic SPDX identifiers a dependency's own expression
+// is checked against, not an expression itself — an "OR" belongs to the
+// dependency's licence, never to the policy.
+func TestLoadRejectsLicenceExpressionInAllowList(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "licence:\n  policy:\n    allow: [\"MIT OR Apache-2.0\"]\n")
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load accepted a licence expression in policy.allow, want a single identifier per entry")
+	}
+	if !strings.Contains(err.Error(), "licence.policy.allow") {
+		t.Errorf("error does not name the offending key: %v", err)
+	}
+}
+
 func TestLoadInvalidYAML(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "rust: [this is not a mapping\n")
