@@ -91,6 +91,17 @@ type Options struct {
 	// bounds each phase separately rather than the mutant as a whole, since
 	// what it is watching for is one suite that stopped making progress.
 	Timeout time.Duration
+	// MaxMemory bounds one suite execution in bytes, and zero asks for no
+	// bound at all.
+	//
+	// A deadline alone is not a bound on a mutant: a removed statement on a
+	// loop counter turns a bounded append into an unbounded one, and the
+	// machine's memory is exhausted long before a budget derived from the
+	// baseline fires — which kills the agent running the job rather than the
+	// job, and loses every result the run had. It bounds each execution
+	// separately for the reason Timeout does, and the platform decides whether
+	// it reaches the child at all.
+	MaxMemory int64
 	// Workers is how many mutants are staged at once. One, for a component
 	// whose suites would share a running service: eight mutants against one
 	// database truncate each other's tables, which surfaces as mutants
@@ -249,13 +260,21 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 // run builds one mutant and, if it built, runs it against each phase in turn.
 func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 	started := time.Now()
+	// Whether the ceiling this run asked for reached this mutant, as each
+	// execution reports it: one execution the platform could not bound is a
+	// mutant that was held to nothing, whatever the others managed.
+	unbounded := false
+	finish := func(r Result) Result {
+		r.MemoryUnbounded = unbounded
+		return log(opts, m, r, started)
+	}
 	staged, err := w.Stage(m)
 	if err != nil {
 		// Evidence about the generator rather than about the tests, which is
 		// what Unviable already means: a mutant whose source moved under it
 		// was never built, so counting it as a kill or as a survivor would
 		// put the engine's own defect into the score.
-		return log(opts, m, Result{Mutant: m, Outcome: Unviable, Detail: err.Error()}, started)
+		return finish(Result{Mutant: m, Outcome: Unviable, Detail: err.Error()})
 	}
 	defer func() {
 		if err := w.Release(); err != nil {
@@ -263,23 +282,33 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 		}
 	}()
 
-	switch res, v := execute(ctx, staged.Dir, staged.Build, opts); v {
+	res, v := execute(ctx, staged.Dir, staged.Build, opts)
+	unbounded = unbounded || res.MemoryLimit > 0 && !res.MemoryBounded
+	switch v {
 	case cutShort:
 		// An interrupted build is not a mutant that would not compile, and
 		// reporting it as one blames the generator for a CI job timeout.
-		return log(opts, m, Result{Mutant: m, Outcome: Unviable,
-			Detail: "the run was interrupted before this mutant was built"}, started)
+		return finish(Result{Mutant: m, Outcome: Unviable,
+			Detail: "the run was interrupted before this mutant was built"})
 	case exceeded:
 		// A compilation that outran the budget says nothing about the tests
 		// either: nothing was run, so nothing observed the change.
-		return log(opts, m, Result{Mutant: m, Outcome: Unviable,
-			Detail: fmt.Sprintf("the mutant did not compile within %s", opts.Timeout)}, started)
+		return finish(Result{Mutant: m, Outcome: Unviable,
+			Detail: fmt.Sprintf("the mutant did not compile within %s", opts.Timeout)})
+	case starved:
+		// A compilation that reached the ceiling says nothing about the tests
+		// either, for the same reason: what the bound observed is the
+		// compiler's appetite rather than the mutant's behaviour.
+		return finish(Result{Mutant: m, Outcome: Unviable,
+			Detail: fmt.Sprintf("the mutant did not compile within %d byte(s) of memory", opts.MaxMemory)})
 	case failed:
-		return log(opts, m, Result{Mutant: m, Outcome: Unviable, Detail: lastLines(res.Output)}, started)
+		return finish(Result{Mutant: m, Outcome: Unviable, Detail: lastLines(res.Output)})
 	}
 
 	for _, phase := range staged.Phases {
-		switch _, v := execute(ctx, staged.Dir, phase, opts); v {
+		res, v := execute(ctx, staged.Dir, phase, opts)
+		unbounded = unbounded || res.MemoryLimit > 0 && !res.MemoryBounded
+		switch v {
 		case passed:
 			continue
 		case exceeded:
@@ -287,16 +316,24 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 			// is a behaviour change something noticed. It keeps its own name
 			// because a suite full of timeouts is worth seeing even when
 			// every one of them scores correctly.
-			return log(opts, m, Result{Mutant: m, Outcome: TimedOut,
-				Detail: fmt.Sprintf("no result within %s", opts.Timeout)}, started)
+			return finish(Result{Mutant: m, Outcome: TimedOut,
+				Detail: fmt.Sprintf("no result within %s", opts.Timeout)})
+		case starved:
+			// Killed by the ceiling, and counted as killed for the reason a
+			// hang is: an allocation that does not stop is a behaviour change
+			// something noticed. It keeps its own name because a suite full of
+			// them is evidence about the bound as much as about the tests.
+			return finish(Result{Mutant: m, Outcome: OutOfMemory,
+				Detail: fmt.Sprintf("the suite reached its %d byte memory bound, holding %d byte(s)",
+					res.MemoryLimit, res.MaxRSS)})
 		case cutShort:
-			return log(opts, m, Result{Mutant: m, Outcome: Unviable,
-				Detail: "the run was interrupted before this mutant finished"}, started)
+			return finish(Result{Mutant: m, Outcome: Unviable,
+				Detail: "the run was interrupted before this mutant finished"})
 		default:
-			return log(opts, m, Result{Mutant: m, Outcome: Killed}, started)
+			return finish(Result{Mutant: m, Outcome: Killed})
 		}
 	}
-	return log(opts, m, Result{Mutant: m, Outcome: Survived}, started)
+	return finish(Result{Mutant: m, Outcome: Survived})
 }
 
 // verdict is what running one command established, and it is deliberately not
@@ -316,6 +353,8 @@ const (
 	failed
 	// exceeded is the per-suite budget expiring.
 	exceeded
+	// starved is the command dying at its memory ceiling.
+	starved
 	// cutShort is the whole run being cancelled.
 	cutShort
 )
@@ -341,14 +380,18 @@ func execute(ctx context.Context, dir string, inv runner.Invocation, opts Option
 		within, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
-	// RunOutput and not RunQuiet, because the words that matter here are on
+	// Bounded in memory as well as in time, since a mutant that allocates
+	// without stopping exhausts the machine long before the budget fires — and
+	// what dies then is the agent running the job rather than the job.
+	//
+	// A writing variant and not RunQuiet, because the words that matter are on
 	// stderr: a compiler writes its errors there, and an unviable mutant's
 	// detail is the only place they reach a reader. It merges the two
 	// streams for that reason, and discards them as they arrive — a mutant's
 	// output is worth keeping only when it turns out not to have compiled,
 	// and forty copies of a passing suite is what buries the one that did
 	// not.
-	res := executil.RunOutput(within, dir, opts.Env, io.Discard, inv.Name, inv.Args...)
+	res := executil.RunOutputBounded(within, dir, opts.Env, io.Discard, opts.MaxMemory, inv.Name, inv.Args...)
 	switch {
 	case ctx.Err() != nil:
 		// The run's own context, asked first: a cancellation that lands
@@ -357,6 +400,11 @@ func execute(ctx context.Context, dir string, inv runner.Invocation, opts Option
 		return res, cutShort
 	case within.Err() != nil:
 		return res, exceeded
+	case res.HitMemoryLimit():
+		// Asked before Ok, and of the peak rather than of the exit status: a
+		// command killed at the ceiling exits non-zero exactly as a failing
+		// suite does, and every language dies differently there.
+		return res, starved
 	case res.Ok():
 		return res, passed
 	default:

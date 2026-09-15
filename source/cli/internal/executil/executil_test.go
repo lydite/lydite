@@ -3,8 +3,12 @@ package executil
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -186,5 +190,165 @@ func TestARelativeWorkingDirectoryResolvesARelativePathEntryOnce(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "found") {
 		t.Errorf("output = %q, want the child's own", res.Output)
+	}
+}
+
+// helperAllocEnv carries the size, in MiB, the helper child below allocates.
+// Its presence is also what tells that child apart from an ordinary run of
+// the same test binary.
+const helperAllocEnv = "LYDITE_EXECUTIL_ALLOC_MIB"
+
+// TestExecutilAllocatingChild is the child a memory bound is measured
+// against, re-executed out of this test binary so the measurement needs no
+// toolchain to build one.
+func TestExecutilAllocatingChild(t *testing.T) {
+	mib, err := strconv.Atoi(os.Getenv(helperAllocEnv))
+	if err != nil {
+		t.Skip("not the allocating child")
+	}
+	// Every byte is written, because a page is counted against RLIMIT_DATA
+	// when it is mapped and against ru_maxrss only when it is touched — a
+	// child that allocates without touching dies at a peak nothing recognises
+	// as the bound. The writes go through copy so the race detector
+	// instruments a chunk rather than a byte.
+	chunk := make([]byte, 1<<20)
+	for i := range chunk {
+		chunk[i] = 1
+	}
+	held := make([][]byte, 0, mib)
+	for range mib {
+		b := make([]byte, len(chunk))
+		copy(b, chunk)
+		held = append(held, b)
+	}
+	fmt.Printf("allocated %d MiB\n", len(held))
+}
+
+// allocateBounded runs the child above under maxMemory bytes, asking it for
+// mib MiB.
+func allocateBounded(t *testing.T, maxMemory int64, mib int) Result {
+	t.Helper()
+	return RunOutputBounded(context.Background(), t.TempDir(),
+		[]string{helperAllocEnv + "=" + strconv.Itoa(mib)}, io.Discard, maxMemory,
+		os.Args[0], "-test.run=^TestExecutilAllocatingChild$")
+}
+
+// A bound that is reached kills the run, and says so as a bound rather than
+// as an ordinary failure: every runtime dies differently at the ceiling and
+// all of them exit non-zero, so the exit status alone would make a mutant
+// that allocated without stopping indistinguishable from one whose tests
+// failed.
+func TestRunOutputBoundedKillsAChildThatReachesTheLimit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RLIMIT_DATA is settable only on linux — darwin's setrlimit refuses it with EINVAL at any value — so this is proven by the linux CI job")
+	}
+	const limit = 1 << 30
+	r := allocateBounded(t, limit, 1536)
+
+	if r.Ok() {
+		t.Fatalf("a child allocating 1.5GiB survived a %d byte bound, peak %d", limit, r.MaxRSS)
+	}
+	if !r.MemoryBounded {
+		t.Fatal("MemoryBounded is false, so the bound never reached the child")
+	}
+	if !r.HitMemoryLimit() {
+		t.Errorf("HitMemoryLimit is false: peak %d against limit %d", r.MaxRSS, r.MemoryLimit)
+	}
+	if r.MemoryLimit != limit {
+		t.Errorf("MemoryLimit = %d, want %d", r.MemoryLimit, limit)
+	}
+}
+
+// A run that stays under its bound is untouched by it, and reports a peak the
+// bound is compared against — without which a failure for an unrelated reason
+// would read as a failure at the ceiling.
+func TestRunOutputBoundedLeavesAChildUnderTheLimitAlone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RLIMIT_DATA is settable only on linux — darwin's setrlimit refuses it with EINVAL at any value — so this is proven by the linux CI job")
+	}
+	const limit = 1 << 30
+	r := allocateBounded(t, limit, 16)
+
+	if !r.Ok() {
+		t.Fatalf("a child allocating 16MiB died under a 1GiB bound: %v\n%s", r.Err, r.Output)
+	}
+	if !r.MemoryBounded {
+		t.Error("MemoryBounded is false, so the bound never reached the child")
+	}
+	if r.HitMemoryLimit() {
+		t.Errorf("HitMemoryLimit on a run that succeeded, peak %d against limit %d", r.MaxRSS, r.MemoryLimit)
+	}
+	if r.MaxRSS < 8<<20 {
+		t.Errorf("MaxRSS = %d, want the bytes a 16MiB child touched — ru_maxrss is kilobytes on linux and reading it raw is a factor of 1024", r.MaxRSS)
+	}
+}
+
+// Three states have to be told apart, and a bound requested on a platform
+// that cannot set one is the state that matters: reported as enforced it
+// would render the green of a bound that held.
+func TestRunOutputBoundedReportsWhetherTheBoundReachedTheChild(t *testing.T) {
+	r := RunOutputBounded(context.Background(), t.TempDir(), nil, io.Discard, 1<<30, "echo", "bounded")
+
+	if !r.Ok() {
+		t.Fatalf("echo: %v", r.Err)
+	}
+	if r.MemoryLimit != 1<<30 {
+		t.Errorf("MemoryLimit = %d, want the bound the caller asked for", r.MemoryLimit)
+	}
+	if want := runtime.GOOS == "linux"; r.MemoryBounded != want {
+		t.Errorf("MemoryBounded = %v on %s, want %v", r.MemoryBounded, runtime.GOOS, want)
+	}
+}
+
+// Every other lydite command runs through this package and asks for no
+// bound. Nothing about such a run is limited, and the absence of a request is
+// distinct from a request nothing applied.
+func TestRunOutputWithoutABoundIsUnbounded(t *testing.T) {
+	var buf bytes.Buffer
+	r := RunOutput(context.Background(), t.TempDir(), nil, &buf, "sh", "-c", "echo out; echo err >&2")
+
+	if !r.Ok() {
+		t.Fatalf("sh: %v", r.Err)
+	}
+	if r.MemoryLimit != 0 || r.MemoryBounded {
+		t.Errorf("MemoryLimit = %d, MemoryBounded = %v, want no bound requested", r.MemoryLimit, r.MemoryBounded)
+	}
+	if r.HitMemoryLimit() {
+		t.Error("HitMemoryLimit on a run nothing bounded")
+	}
+	if r.MaxRSS <= 0 {
+		t.Error("MaxRSS = 0, want the peak of a run that happened")
+	}
+	if !strings.Contains(buf.String(), "out") || !strings.Contains(buf.String(), "err") {
+		t.Errorf("both streams should reach the writer, got %q", buf.String())
+	}
+	if !strings.Contains(r.Output, "out") || !strings.Contains(r.Output, "err") {
+		t.Errorf("both streams should be captured, got %q", r.Output)
+	}
+}
+
+// The peak against the limit is the whole discriminator, so its boundary is
+// part of the meaning: a run whose peak reaches the fraction has hit the
+// bound, and one a byte under it has not.
+func TestHitMemoryLimitReadsThePeakAgainstTheLimit(t *testing.T) {
+	const limit = 3 << 30
+	for _, tc := range []struct {
+		name string
+		r    Result
+		want bool
+	}{
+		{"at the threshold", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit / 3}, true},
+		{"a byte under it", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit/3 - 1}, false},
+		{"well over it", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit - 1}, true},
+		{"a failure that never approached the bound", Result{Err: os.ErrClosed, MemoryBounded: true, MemoryLimit: limit, MaxRSS: 12 << 20}, false},
+		{"a bound the platform could not apply", Result{Err: os.ErrClosed, MemoryLimit: limit, MaxRSS: limit}, false},
+		{"no bound asked for", Result{Err: os.ErrClosed, MaxRSS: limit}, false},
+		{"a run that succeeded", Result{MemoryBounded: true, MemoryLimit: limit, MaxRSS: limit}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.HitMemoryLimit(); got != tc.want {
+				t.Errorf("HitMemoryLimit = %v, want %v (peak %d, limit %d)", got, tc.want, tc.r.MaxRSS, tc.r.MemoryLimit)
+			}
+		})
 	}
 }

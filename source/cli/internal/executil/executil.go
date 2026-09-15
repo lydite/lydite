@@ -70,10 +70,47 @@ type Result struct {
 	// YAML document turns a valid exemptions file into a parse error.
 	Stderr string
 	Err    error
+	// MaxRSS is the peak resident set of the command and everything it
+	// forked, in bytes on every OS. ru_maxrss is kilobytes on Linux and
+	// bytes on Darwin — the same 256MiB child reports 268,912 on one and
+	// 274,432,000 on the other — so the conversion happens here rather than
+	// leaving every reader a factor of 1024 to get right.
+	MaxRSS int64
+	// MemoryLimit is the ceiling the caller asked for, in bytes, and zero
+	// when no bound was asked for at all.
+	MemoryLimit int64
+	// MemoryBounded reports whether that ceiling actually reached the child.
+	// The two are separate because three states have to be told apart: no
+	// bound requested, a bound requested and enforced, and a bound requested
+	// that the platform refused — Darwin's setrlimit rejects RLIMIT_DATA at
+	// any value. The third renders as its own outcome, because a bound
+	// quietly not applied otherwise reports the green of one that held.
+	MemoryBounded bool
 }
 
 // Ok reports whether the command exited zero.
 func (r Result) Ok() bool { return r.Err == nil }
+
+// HitMemoryLimit reports whether the command died at its memory bound rather
+// than for some unrelated reason.
+//
+// The exit status cannot tell the two apart: every language dies differently
+// at the ceiling — a Go runtime's own out-of-memory error, a failed
+// allocation, a signal — and all of them exit non-zero. The peak against the
+// limit is the number that separates them, and it is a fraction rather than
+// an equality because RLIMIT_DATA bounds the mappings a process holds while
+// ru_maxrss counts the pages it touched: a runtime that dies on a refused
+// mmap has reserved more than it ever faulted in. A Go child killed at a
+// 1GiB ceiling reports a peak of 0.94 of it, and the same child under the
+// race detector 0.58 — the shadow mappings count against the bound and are
+// never all resident, which is the shape a mutated Go suite runs in. A third
+// is the threshold because the ceiling a mutation run derives is a multiple
+// of the baseline's own peak, so a run that failed for its own reasons sits
+// well under it: that child failing under a bound it never approached reports
+// 0.01.
+func (r Result) HitMemoryLimit() bool {
+	return r.Err != nil && r.MemoryBounded && r.MaxRSS*3 >= r.MemoryLimit
+}
 
 // Run executes name with args in dir, streaming combined stdout+stderr live
 // to the terminal while also capturing it into the returned Result.
@@ -100,7 +137,21 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 // the one component that failed among the ones that did not. The caller
 // decides what out is — a log file, or a log file and the terminal both.
 func RunOutput(ctx context.Context, dir string, extraEnv []string, out io.Writer, name string, args ...string) Result {
-	return runTo(ctx, dir, extraEnv, out, out, name, args...)
+	return runTo(ctx, dir, extraEnv, out, out, 0, name, args...)
+}
+
+// RunOutputBounded is RunOutput with a ceiling, in bytes, on the memory the
+// command and everything it forks may hold.
+//
+// It exists for a mutant's suite. A deadline alone is not a bound on one: a
+// removed statement on a loop counter turns a bounded append into an
+// unbounded one, and the runner's memory is exhausted long before a timeout
+// derived from the baseline fires — which kills the agent rather than the
+// step, and loses every result the shard had. The bound reaches the child
+// only where the platform has one to set, so the caller reads MemoryBounded
+// before treating it as held.
+func RunOutputBounded(ctx context.Context, dir string, extraEnv []string, out io.Writer, maxMemory int64, name string, args ...string) Result {
+	return runTo(ctx, dir, extraEnv, out, out, maxMemory, name, args...)
 }
 
 // RunQuiet captures output without streaming it.
@@ -138,7 +189,11 @@ func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
-	return Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
+	res := Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
+	if cmd.ProcessState != nil {
+		res.MaxRSS = peakRSS(cmd.ProcessState.SysUsage())
+	}
+	return res
 }
 
 // resolve finds name on the PATH the child is being given, rather than on the
@@ -202,10 +257,10 @@ func resolve(dir, name string, extraEnv []string) string {
 }
 
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
-	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, name, args...)
+	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, 0, name, args...)
 }
 
-func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, name string, args ...string) Result {
+func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, maxMemory int64, name string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
@@ -223,8 +278,24 @@ func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io
 	}
 	cmd.Stdout = io.MultiWriter(out, captured)
 	cmd.Stderr = io.MultiWriter(errOut, captured)
-	err := cmd.Run()
-	return Result{Name: name, Args: args, Output: buf.String(), Err: err}
+	res := Result{Name: name, Args: args, MemoryLimit: maxMemory}
+	if err := cmd.Start(); err != nil {
+		res.Err = err
+		return res
+	}
+	// After Start, because the limit is set on the child's own process and
+	// there is no process to set it on before that. The window this leaves is
+	// the child's exec, which allocates nothing a ceiling meant for a test
+	// suite would catch.
+	if maxMemory > 0 {
+		res.MemoryBounded = limitMemory(cmd.Process.Pid, maxMemory) == nil
+	}
+	res.Err = cmd.Wait()
+	res.Output = buf.String()
+	if cmd.ProcessState != nil {
+		res.MaxRSS = peakRSS(cmd.ProcessState.SysUsage())
+	}
+	return res
 }
 
 type lockedWriter struct {

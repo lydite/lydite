@@ -276,6 +276,79 @@ above is a refusal to cap work at an invented number; a timeout that multiplies
 something this run measured is not that, and without one `TimedOut` is an
 outcome nothing can produce.
 
+**A mutant is bounded in memory as well as in time, and the bound is
+`RLIMIT_DATA`.** A deadline alone is not a bound: a removed statement on a loop
+counter turns a bounded `append` into an unbounded one, and a 16GB runner is
+exhausted in around eighty seconds while a timeout derived from a suite that
+takes half a minute has not yet fired. What dies then is the runner agent
+rather than the job — the step exits 143, every `if: always()` step is skipped,
+the shard uploads no document, and the fold reports a shard that died with
+nothing its author can act on. `RLIMIT_DATA` has covered anonymous mappings
+since Linux 4.7, which is where a Go, Rust or Node heap lives, and a limit is
+inherited across `fork` and `exec`, so the per-package binaries `go test`
+spawns and the processes `cargo nextest` and `vitest` fork are each held to the
+same number without lydite knowing their shape. Measured on `ubuntu-latest`
+against a child holding a 256MiB live set, peak resident 268,912: at half that
+peak the child dies with the runtime's own out-of-memory error and exit 2, and
+at twice and at four times it completes untouched. `Maxrss` is kilobytes on
+Linux and bytes on Darwin — the same 256MiB child reports 268,912 on one and
+274,432,000 on the other — so reading it as one unit is a factor of 1024 in
+whichever direction is not noticed.
+
+**The same measurement rejects `RLIMIT_AS` and `GOMEMLIMIT`.** `RLIMIT_AS`
+bounds address space, which a runtime reserves far beyond what it uses: at
+twice the observed peak the child aborted inside `runtime.rt0_go` before `main`
+ran, and only four times let it start at all. The multiple that would be safe
+is a property of the runtime's reservation rather than of anything the run
+measured, and a bound that kills a mutant for existing is a kill the score
+counts. `GOMEMLIMIT` bounds nothing: it is a soft target the collector aims at,
+so at half the live set the child completed in 80ms at full residency, and it
+is a Go-only knob in a tool that gates three languages.
+
+**A cgroup v2 scope is rejected because the runner delegates none.**
+`/sys/fs/cgroup` is `cgroup2fs` with `memory` among the root controllers, and
+the cgroup the job actually runs in —
+`/system.slice/hosted-compute-agent.service` — has an empty
+`cgroup.subtree_control` and refuses `mkdir` with `EPERM`. `systemd-run
+--scope` answers "Interactive authentication required"; `systemd-run --user
+--scope` works, and rests on a user manager a container job and a self-hosted
+runner need not have. It is the stronger mechanism where it exists, which is
+the case against it: a bound present on one runner shape and absent on the next
+is the failure mode this one exists to remove.
+
+**The limit multiplies the component's own baseline, and never the machine's
+memory.** The baseline run reports its own peak through the same `wait4` usage
+the elapsed time comes from, so the derivation is `budget`'s exactly: four
+times that peak, a floor of 2GiB under it, and `--memory` overriding both. Four
+rather than the timeout's three because memory is the less elastic of the two —
+a suite is routinely slower under a mutation and is rarely four times larger —
+and because the error that matters is one-sided: a bound too tight kills a
+mutant nothing about the tests killed, and an inflated score is permanent and
+silent where a false survivor is an author's afternoon. Reading `MemTotal` and
+dividing by the slots in flight is rejected for a reason the fixed operator
+catalogue already gives: a bound that moves with the machine makes a mutant
+killed on a small runner and surviving on a large one, so the verdict stops
+meaning one thing. The machine is what sets the floor's value instead — 2GiB
+against `defaultConcurrency`'s four slots is 8GiB of the 16GB runner this is
+measured on, with the agent, the toolchains and the page cache in the rest.
+Nothing here bounds the sum: `--concurrency` is the number that does, and
+`--concurrency max` is a request for no such bound, which memory makes a
+sharper request than it was when only time was bounded.
+
+**Reaching the bound is a kill, reported as its own outcome.** An allocation
+that does not stop is a behaviour change something noticed, exactly as a hang
+is, so it scores as `TimedOut` scores. It is told from an ordinary failure by
+the run's reported peak against the limit rather than by an exit code, because
+every language dies differently at the ceiling and all of them exit non-zero:
+the peak is a number lydite already has for the comparison it already makes.
+
+**The bound is Linux's, and its absence is on the row.** Darwin rejects
+`setrlimit` for `RLIMIT_DATA` and `RLIMIT_AS` alike with `EINVAL` — neither
+limit is settable there at any value — so a mutant on macOS runs bounded in
+time and unbounded in memory. The row and the `--json` document say so. A bound
+that is quietly not applied reports the green of one that held, which is the
+failure the amber tag exists for.
+
 **The fold emits a `mutation` summary row, never `mutation(repo)`.** There is no
 repository-wide figure only the fold can compute: `survived == 0` for every
 component is `survived == 0` for the repository, so a gating row could only

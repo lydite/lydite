@@ -247,7 +247,7 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 	// lost every measurement still has to say the repository had components it
 	// could have scored, the way the coverage and floor rows do below.
 	for _, c := range decl.Components {
-		if langOf(c) == runner.Go {
+		if scorableLang(langOf(c)) {
 			out.scorable++
 		}
 	}

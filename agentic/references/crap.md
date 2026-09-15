@@ -38,20 +38,26 @@ already follows. `carriedScore` is the one implementation of which entry a compo
 both the row a run renders and the document it hands the fold; two copies would have one tree
 report one figure sharded and another unsharded.
 
-**Go alone, and that is a property of the language.** lydite is Go and walks `go/ast` in-process —
-no tool, no pin, no install, no staleness risk. Rust and TypeScript have no equivalent in hand and
-are [#17](https://github.com/lydite/lydite/issues/17), which is research; a `lang`-shaped
-abstraction invented from one implementation is an abstraction fitted to Go. Every other component
-gets one **`context`** row naming the limit — present, because a component silently absent reads as
-one that scored clean, and context rather than amber because nothing about that repository could
-make the row green. A Go component whose score could not be taken is the opposite, and is amber.
+**All three languages, and none of them by a pinned tool.** Go walks `go/ast` in-process; Rust and
+TypeScript walk the same function-span and construct tables `internal/treesitter` already builds
+for exclusion resolution ([ADR 0034](../../docs/adr/0034-an-exclusion-declaration-is-scoped-by-a-parser-in-every-language.md)).
+No language costs a tool, a pin, an install or a staleness risk — see
+[ADR 0036](../../docs/adr/0036-crap-scores-rust-and-typescript-from-a-hand-rolled-walk.md) for why
+a hand-rolled walk was chosen over the pinned-tool candidates that exist for each language, and for
+the counting rules themselves. The **`context`** row survives for a component whose language
+`.lydite/components.yml` never states — a raw `command:` component, which no walk can be pointed
+at — present because a component silently absent reads as one that scored clean, and context
+rather than amber because nothing about that component could make the row green. A component whose
+language *is* known and whose score could not be taken is the opposite, and is amber.
 
-**Complexity is counted the way gocyclo and cyclop count it**: one, plus every `if`, `for` and
+**Go's complexity is counted the way gocyclo and cyclop count it**: one, plus every `if`, `for` and
 `range`, every non-default `case`, every communicating `select` clause, and every `&&` and `||`.
 A number lydite reports and a number a developer gets from either agree, which is most of what
-makes a threshold arguable. A closure counts towards the function that declares it, because the
-coverage half of the score is that function's whole line span and contains the closure's lines —
-excluding its branches would score one span's coverage against another span's complexity.
+makes a threshold arguable. Rust and TypeScript each get their own rule, chosen against their own
+ecosystem's tool rather than restated from Go's — see ADR 0036 for both in full. A closure counts
+towards the function that declares it in every language, because the coverage half of the score is
+that function's whole line span and contains the closure's lines — excluding its branches would
+score one span's coverage against another span's complexity.
 
 **Generated files are excluded by reuse and not by a second rule.** The hit map bounds what is
 scored, and `ParseGoProfile` has already dropped generated files and the blank and comment lines a
