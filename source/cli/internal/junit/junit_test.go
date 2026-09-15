@@ -2,6 +2,8 @@ package junit
 
 import (
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -300,6 +302,23 @@ func TestReadOutcomesFileNamesAReportThatIsNotThere(t *testing.T) {
 	_, err := ReadOutcomesFile("/nonexistent/lydite/junit.xml")
 	if err == nil {
 		t.Fatal("ReadOutcomesFile reported success for a report that does not exist")
+	}
+	if !strings.Contains(err.Error(), "junit.xml") {
+		t.Errorf("error = %q, want it to name the report", err)
+	}
+}
+
+// A report that is there but does not parse is an error naming the path, the
+// same as one that is not there at all — ReadOutcomesFile wraps ReadOutcomes's
+// own rejection rather than swallowing it.
+func TestReadOutcomesFileNamesAReportThatDoesNotParse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "junit.xml")
+	if err := os.WriteFile(path, []byte("<testsuites><testcase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadOutcomesFile(path)
+	if err == nil {
+		t.Fatal("ReadOutcomesFile reported success for a report that does not parse")
 	}
 	if !strings.Contains(err.Error(), "junit.xml") {
 		t.Errorf("error = %q, want it to name the report", err)

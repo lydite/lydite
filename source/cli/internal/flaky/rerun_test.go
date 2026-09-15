@@ -387,3 +387,68 @@ func without(args []string, drop string) []string {
 	}
 	return out
 }
+
+// A name neither report records, from a rerun that otherwise succeeded, is
+// unmeasured for a reason distinct from either report alone missing it: this
+// is a name that never existed anywhere, and the gate says so rather than
+// picking one report's absence to blame.
+func TestATestNeitherReportRecordsIsUnmeasured(t *testing.T) {
+	dir, env := probe(t)
+	ghost := append(append([]Test{}, probeTests...),
+		Test{Package: ".", Name: "TestGhost", Path: "probe_test.go", Line: 1})
+	got, err := Rerun(t.Context(), ghost, Options{
+		Root: dir, Dir: ".", Env: env,
+		Run1: map[string]junit.Outcome{"TestDeterministicNew": junit.Pass, "TestNewSubtests": junit.Pass},
+	})
+	if err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+	r := result(t, got, "TestGhost")
+	if r.Verdict != Unmeasured || r.Why != "neither run's report records it" {
+		t.Errorf("TestGhost = %s (%q), want %s naming that neither report holds it", r.Verdict, r.Why, Unmeasured)
+	}
+	if r.Run1 != nil || r.Run2 != nil {
+		t.Errorf("an outcome was recorded for a test neither report ran: run1=%v run2=%v", show(r.Run1), show(r.Run2))
+	}
+}
+
+// relPackage is asked for a pattern only when a package directory is a real
+// scan-root-relative path, but the check exists because nothing upstream of
+// it enforces that: an absolute one cannot be made relative to the
+// component's own relative directory, and filepath.Rel says so rather than
+// producing a pattern go test would misread.
+func TestRelPackageNamesAPathItCannotRelate(t *testing.T) {
+	if _, err := relPackage(".", "/etc/passwd"); err == nil {
+		t.Fatal("relPackage accepted a package an absolute path could not be made relative to a relative directory")
+	}
+}
+
+// Rerun asks relPackage the same question for real, and refuses to build an
+// invocation over a package it could not locate rather than guessing a
+// pattern from the raw directory.
+func TestRerunRefusesAPackageItCannotLocate(t *testing.T) {
+	_, err := Rerun(t.Context(), []Test{{Package: "/etc", Name: "TestX", Path: "x_test.go", Line: 1}},
+		Options{Root: t.TempDir(), Dir: "."})
+	if err == nil {
+		t.Fatal("Rerun accepted a package it could not locate inside the component")
+	}
+}
+
+// A report left by an earlier rerun is removed before the run, but a
+// directory sitting at the report's own path is not a report — os.Remove
+// refuses a non-empty directory, and rerunPackage says why rather than
+// silently measuring nothing.
+func TestARerunPackageWhoseReportPathIsAnOccupiedDirectoryIsUnmeasured(t *testing.T) {
+	dir := t.TempDir()
+	report := filepath.Join(dir, "junit.xml")
+	if err := os.Mkdir(report, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(report, "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, why := rerunPackage(context.Background(), dir, runner.Invocation{JUnitReport: "junit.xml"}, Options{})
+	if !strings.Contains(why, "could not be removed") {
+		t.Errorf("why = %q, want the leftover report named as the cause", why)
+	}
+}

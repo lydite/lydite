@@ -1278,6 +1278,11 @@ func TestTheFlakyGateNamesWhatItCannotExamine(t *testing.T) {
 			c:    component.Component{Name: "web", Dir: "web", Command: []string{"make", "test"}},
 			want: "raw command",
 		},
+		{
+			name: "an unknown runner",
+			c:    component.Component{Name: "web", Dir: "web", Runner: "bogus"},
+			want: "no runner lydite knows",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			row := examineComponent(t, root, "HEAD", tc.c)
@@ -1303,6 +1308,119 @@ func TestAnUnresolvableMergeBaseLeavesTheFlakyRowUnmeasured(t *testing.T) {
 	}
 	if !strings.Contains(row.Value, "merge-base") {
 		t.Errorf("value = %q, want the unresolvable revision named as the cause", row.Value)
+	}
+}
+
+// The merge-base resolves and the change introduces real tests, but the
+// invocation names no JUnit report at all — the shape a raw variant that was
+// never asked for the gate would leave behind. There is no first outcome to
+// read, so the row says that rather than guessing one.
+func TestExamineNamesAnInvocationThatWroteNoReport(t *testing.T) {
+	root := flakyProbeRepo(t)
+	row, found := examineWithInvocation(t, root, "", component.Component{
+		Name: "probe", Dir: "probe", Runner: runner.GoTest,
+	}, runner.Invocation{})
+	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
+		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
+	}
+	if !strings.Contains(row.Value, "no test report") {
+		t.Errorf("value = %q, want the missing report named as the cause", row.Value)
+	}
+}
+
+// The merge-base resolves and the change introduces real tests, and the
+// invocation names a report — but the suite's own run did not write it. The
+// gate's first outcome is missing, not zero, and the row says so rather than
+// reading a passing suite's silence as agreement.
+func TestExamineNamesASuiteReportThatCannotBeRead(t *testing.T) {
+	root := flakyProbeRepo(t)
+	row, found := examineWithInvocation(t, root, "", component.Component{
+		Name: "probe", Dir: "probe", Runner: runner.GoTest,
+	}, runner.Invocation{JUnitReport: "nothing-wrote-this.xml"})
+	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
+		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
+	}
+	if !strings.Contains(row.Value, "could not be read") {
+		t.Errorf("value = %q, want the unreadable report named as the cause", row.Value)
+	}
+}
+
+// A changed test file that does not parse cannot be told to declare a name or
+// not, so the whole component is unmeasured rather than silently missing
+// whatever the broken file would have contributed.
+func TestExamineNamesATestFileThatDoesNotParse(t *testing.T) {
+	root := flakyProbeRepo(t)
+	commitChange(t, root, "probe/broken_test.go", "package flakyprobe\n\nfunc TestBroken(t *testing.T) {\n")
+	row, found := examineWithInvocation(t, root, "", component.Component{
+		Name: "probe", Dir: "probe", Runner: runner.GoTest,
+	}, runner.Invocation{JUnitReport: "absent.xml"})
+	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
+		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
+	}
+	if !strings.Contains(row.Value, "could not be read") {
+		t.Errorf("value = %q, want the parse failure named as the cause", row.Value)
+	}
+}
+
+// A component whose suite never started still takes a row: its new tests
+// were not examined, and a gate that could not run must never render as one
+// that passed by simply having no row at all.
+func TestReportNamesAComponentWhoseSuiteNeverRan(t *testing.T) {
+	g := newFlakyGate(t.Context(), t.TempDir(), "", true)
+	rep := ui.NewReport("test")
+	g.report(rep, []component.Component{{Name: "never-ran"}})
+	row := reportRowByLabel(t, rep, flakyLabel("never-ran"))
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured: the gate never examined this component", row)
+	}
+	if !strings.Contains(row.Value, "did not run") {
+		t.Errorf("value = %q, want the reason named", row.Value)
+	}
+}
+
+// reportRowByLabel finds one row a *ui.Report was given, for a test that
+// builds the report directly rather than through the CLI's JSON output.
+func reportRowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
+	t.Helper()
+	for _, r := range rep.Rows() {
+		if r.Label == label {
+			return r
+		}
+	}
+	t.Fatalf("no row labelled %q", label)
+	return ui.Row{}
+}
+
+// outcomeOf names an outcome a report may not have recorded at all: a nil
+// pointer is what compare leaves behind for exactly that case, and it is
+// named plainly rather than dereferenced.
+func TestOutcomeOfNamesAnAbsentOutcome(t *testing.T) {
+	if got := outcomeOf(nil); got != "absent" {
+		t.Errorf("outcomeOf(nil) = %q, want %q", got, "absent")
+	}
+}
+
+// Every new test agreeing with itself is the ordinary case, and the row says
+// so in the same voice a passing suite does — a count and what was done, not
+// a claim about anything that disagreed.
+func TestTheFlakyRowPassesWhenEveryNewTestAgrees(t *testing.T) {
+	pass := junit.Pass
+	c := component.Component{Name: "svc", Dir: "svc"}
+	results := []flaky.Result{
+		{Test: flaky.Test{Package: "svc", Name: "TestA", Path: "svc/x_test.go", Line: 3},
+			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
+		{Test: flaky.Test{Package: "svc", Name: "TestB", Path: "svc/x_test.go", Line: 9},
+			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
+	}
+	row, found := flakyRow(flakyLabel(c.Name), c, results)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v, want a pass: every new test agreed with itself", row)
+	}
+	if !strings.Contains(row.Value, "2 new test(s), 2 runs each") {
+		t.Errorf("value = %q, want the count and what was done", row.Value)
+	}
+	if len(found) != 0 {
+		t.Errorf("findings = %+v, want none: nothing disagreed", found)
 	}
 }
 
@@ -1443,15 +1561,22 @@ func copyTree(t *testing.T, src, root, dir string) {
 // that cannot be examined at all.
 func examineComponent(t *testing.T, root, base string, c component.Component) ui.Row {
 	t.Helper()
-	g := newFlakyGate(t.Context(), root, base, true)
-	log := openLog(root, c.Name, "test.log", false, len(c.Name))
-	t.Cleanup(log.Close)
-	row, found := g.examine(t.Context(), root, filepath.Join(root, filepath.FromSlash(c.Dir)), c,
-		runner.Invocation{JUnitReport: "absent.xml"}, nil, log)
+	row, found := examineWithInvocation(t, root, base, c, runner.Invocation{JUnitReport: "absent.xml"})
 	if len(found) != 0 {
 		t.Fatalf("findings = %+v, want none: nothing was rerun", found)
 	}
 	return row
+}
+
+// examineWithInvocation is examineComponent with the invocation exposed, for
+// the cases that turn on what the suite's own run reported rather than on
+// what the component or the merge-base is.
+func examineWithInvocation(t *testing.T, root, base string, c component.Component, inv runner.Invocation) (ui.Row, []finding.Finding) {
+	t.Helper()
+	g := newFlakyGate(t.Context(), root, base, true)
+	log := openLog(root, c.Name, "test.log", false, len(c.Name))
+	t.Cleanup(log.Close)
+	return g.examine(t.Context(), root, filepath.Join(root, filepath.FromSlash(c.Dir)), c, inv, nil, log)
 }
 
 // jsonFindings is the located claims the document carries, which is the
