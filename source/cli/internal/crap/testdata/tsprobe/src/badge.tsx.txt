@@ -1,0 +1,15 @@
+/**
+ * TSX reads under its own tables, and every node type the TypeScript counting
+ * rules name is spelled identically in both grammars. One component carries a
+ * default parameter, a ternary and a nullish coalescing to prove it.
+ */
+
+export function Badge({
+  count = 0,
+  label,
+}: {
+  count?: number;
+  label?: string;
+}) {
+  return <span className={count > 0 ? "on" : "off"}>{label ?? "none"}</span>;
+}

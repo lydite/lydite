@@ -1,0 +1,15 @@
+//! A whole file under `benches/`, skipped by the same path rule as `tests/`.
+
+fn churn(rounds: i64) -> i64 {
+    let mut total = 0;
+    for r in 0..rounds {
+        if r % 2 == 0 {
+            total += r;
+        }
+    }
+    total
+}
+
+fn main() {
+    println!("{}", churn(1000));
+}

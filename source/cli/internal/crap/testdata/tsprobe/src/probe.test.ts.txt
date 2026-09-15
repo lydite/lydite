@@ -1,0 +1,20 @@
+/**
+ * A whole file with a `.test.` infix, skipped by its path before anything in it
+ * is walked. Its functions branch so that scoring it would be visible.
+ */
+
+import { describe as describeNumber } from "./probe";
+
+function band(n: number): string {
+  if (n < 0) {
+    return "negative";
+  }
+  return n === 0 ? "zero" : "positive";
+}
+
+test("bands are named", () => {
+  for (const n of [-1, 0, 1]) {
+    expect(band(n)).not.toBe("");
+  }
+  expect(describeNumber(0)).toBe("zero");
+});

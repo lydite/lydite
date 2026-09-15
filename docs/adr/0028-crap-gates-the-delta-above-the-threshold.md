@@ -184,3 +184,10 @@ so a change that adds one is referred and a human reads the claim.
 - The exclusion is Go-only for the same reason the score is: it is read out of
   a Go doc comment by `go/ast`. A Rust or TypeScript function has no way to say
   this yet, and needs none while neither is scored.
+
+> Superseded in one detail by
+> [ADR 0036](0036-crap-scores-rust-and-typescript-from-a-hand-rolled-walk.md):
+> Rust and TypeScript are scored too, from a hand-rolled walk over
+> `internal/treesitter` rather than a pinned tool, and both languages gained
+> their own `[lydite:exclude_from_crap]` scope resolution once ADR 0034 gave
+> every language a parser to resolve it with.
