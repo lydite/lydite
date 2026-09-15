@@ -186,8 +186,15 @@ func TestTheMemoryOverrideIsReadAsASize(t *testing.T) {
 	// A negative ceiling bounds nothing and a suffix that overflowed reads as
 	// one, so both are refused where the number is read.
 	for _, in := range []string{"lots", "4TiB", "-1", "-4GiB", "9223372036854775807GiB", "4 GiB extra"} {
-		if got, err := parseBytes(in); err == nil {
+		got, err := parseBytes(in)
+		if err == nil {
 			t.Errorf("parseBytes(%q) = %d, want an error naming the fix", in, got)
+		}
+		// Nothing beside the error, because zero is what asks for the
+		// derivation: a quantity nobody could read must not leave a ceiling
+		// nobody chose.
+		if got != 0 {
+			t.Errorf("parseBytes(%q) = %d beside its error, want no bound at all", in, got)
 		}
 	}
 }
