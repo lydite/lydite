@@ -173,12 +173,6 @@ func load(t *testing.T, dir string) *apidiff.Module {
 	return module
 }
 
-// internalPath answers whether Go's own import rule already hides the package.
-func internalPath(path string) bool {
-	return path == "internal" || strings.HasPrefix(path, "internal/") ||
-		strings.HasSuffix(path, "/internal") || strings.Contains(path, "/internal/")
-}
-
 // record compares the report against what is committed, or rewrites it under
 // -update.
 func record(t *testing.T, name, got string) {
