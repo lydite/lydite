@@ -248,6 +248,33 @@ func CommitsBetween(ctx context.Context, dir, from, to string) (int, bool) {
 	return n - 1, true
 }
 
+// CommitMessages returns the full message — subject and body — of every commit
+// strictly between from and to, oldest first.
+//
+// The whole message and not the subject, because a breaking change may be
+// declared in a footer rather than in the type, and a reader given subjects
+// alone would report a range that declared one as declaring nothing.
+//
+// The first parent alone, for the reason CommitsBetween and DescribeCommit
+// follow it: that is the chain a branch's history is, and a merge commit's
+// second parent is work that was already counted where it was written.
+//
+// Messages are separated by a NUL rather than by a blank line, which a body
+// with a blank line in it is otherwise indistinguishable from.
+func CommitMessages(ctx context.Context, dir, from, to string) ([]string, error) {
+	r := executil.RunQuiet(ctx, dir, "git", "log", "--first-parent", "--reverse", "--format=%B%x00", from+".."+to)
+	if !r.Ok() {
+		return nil, fmt.Errorf("git log %s..%s: %w", from, to, r.Err)
+	}
+	var messages []string
+	for _, message := range strings.Split(r.Output, "\x00") {
+		if message = strings.TrimSpace(message); message != "" {
+			messages = append(messages, message)
+		}
+	}
+	return messages, nil
+}
+
 // BaseBranchFlag names the flag every command that resolves a merge-base
 // offers, so an error raised here can name the fix without each caller
 // restating it.

@@ -47,7 +47,10 @@ name: lydite
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `edited` because the title is read as a breaking-change declaration, and
+    # a title edited after the last push would otherwise leave the run's answer
+    # about a title that no longer exists.
+    types: [opened, synchronize, reopened, edited]
 
 # One verdict per revision. A superseded push is about to be re-decided, and
 # two runs racing to write the same status and the same comment would leave

@@ -54,17 +54,24 @@ func LoadCommentEvent(path string) (CommentEvent, error) {
 func (e CommentEvent) OnPullRequest() bool { return e.Issue.PullRequest != nil }
 
 // PullRequestEvent is the part of a pull_request payload the producing side
-// needs: which pull request, and which revision is its head.
+// needs: which pull request, which revision is its head, and what it is
+// titled.
 //
 // The head is taken from the payload rather than from GITHUB_SHA, and the
 // difference is not cosmetic. On a pull_request event the checked-out
 // revision is a merge commit the platform synthesises, which exists on no
 // branch and which no clearance can ever be given for. Publishing a verdict
 // against it would put the status somewhere nobody looks.
+//
+// The title is read because a squash merge lands it as the commit message, so
+// a breaking change declared there is the declaration the history keeps —
+// while a declaration in a commit about to be squashed away leaves no marker
+// at all.
 type PullRequestEvent struct {
 	Number      int `json:"number"`
 	PullRequest struct {
-		Number int `json:"number"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
 		Head   struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
