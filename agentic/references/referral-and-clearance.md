@@ -2,9 +2,15 @@
 
 > **The reference for `internal/referral`, `internal/clearance`, `internal/forge` and `.lydite/exemptions.yml`.**
 
-`lydite review` decides whether a change may merge unattended. It runs no check — no
-scanner, no test suite — so almost nothing in it is a failure: it emits pass or refer, and a malformed
-exemptions file or an unresolvable merge-base is an error, exit 1. See
+`lydite review` decides whether a change may merge unattended. Almost nothing in the referral
+model itself is a failure: exemptions, disqualifiers and the isolation rule below emit pass or
+refer, and a malformed exemptions file or an unresolvable merge-base is an error, exit 1. `review`
+runs one check, a public-API diff for every component that opts in with `api_surface` (see
+[ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
+and [`components.md`](components.md)), and that check *can* fail: an undeclared break is a gate,
+because the author clears it by not breaking the API or by declaring the break, and both are work
+they can do. A declared break refers instead, and a surface that could not be compared refers as
+well — see [below](#a-declared-api-break-refers-an-undeclared-one-fails). See
 [ADR 0013](../../docs/adr/0013-referral-not-approval.md) for the model and
 [ADR 0014](../../docs/adr/0014-evidence-only-referral-matching.md) for what it matches on.
 
@@ -57,10 +63,13 @@ Five properties are load-bearing and easy to weaken by accident:
   branch — the diff is passed `--text` so the trick does not work, and the edit is referred
   anyway.
 - **Everything matched on is evidence off the diff.** Nothing an author asserts about their
-  own change may earn an exemption or clear a disqualifier — ADR 0013's `!` conventional-commit
-  marker is deliberately *not* implemented, because nothing detects an undeclared API break and
-  a claim-based veto works only for the author who would have declared anyway. The rule for any
-  future addition: an author-controlled claim may add a referral, never remove one.
+  own change may earn an exemption or clear a disqualifier. The `!` conventional-commit marker
+  ADR 0013 held back stayed unimplemented for exactly that reason — nothing detected an
+  undeclared API break, so a claim-based veto would have worked only for the author who would
+  have declared anyway. The rule for any future addition: an author-controlled claim may add a
+  referral, never remove one. The declared-API-break disqualifier below is the first thing built
+  to that rule rather than merely stated by it — see
+  [below](#a-declared-api-break-refers-an-undeclared-one-fails).
 - **A change that edits the exemption set may edit nothing else**, and this is the one thing
   `review` reports as a *failure* rather than a referral: the author clears it by splitting the
   change in two, which is work they can do, and that is exactly what separates a gate from a
@@ -102,6 +111,52 @@ The verdict is computed from `<merge-base>..HEAD`, so the local answer and the C
 from identical inputs. A dirty working tree gets its own row saying the uncommitted work was
 excluded, because silently deciding on HEAD while the developer is looking at edited files is
 the one way this command gives a confidently wrong answer.
+
+## A declared API break refers, an undeclared one fails
+
+`review`'s `addAPISurfaceRows` (`cmd/lydite/review_apisurface.go`) is the one check in the
+command, and it renders three verdicts for a component that opted in with `api_surface`:
+
+- an undeclared incompatible change is `ui.StatusFail` — the author clears it by restoring the
+  API or by declaring the break, and both are work they can do;
+- a declared incompatible change is `ui.StatusRefer` (`referral.DisqualificationAPIBreakDeclared`)
+  — every breaking change should reach a person, and the disqualification is what makes it one;
+- a surface `apisurface.Compare` could not build or load — the base tree fails to build, the
+  module path moved between the merge-base and this change — is also `ui.StatusRefer`
+  (`referral.DisqualificationAPISurfaceUncomputable`), because `review` genuinely cannot tell a
+  break from no break and neither pass nor fail would be true. See
+  [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
+  for why the third verdict exists rather than one of the first two standing in for it, and
+  [the rule](../rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md) it follows.
+
+Both API-surface `Disqualification` kinds are the first ones `internal/referral` carries that are not
+derived from the line-level diff evidence `Disqualifications` computes everything else from.
+`internal/referral` still imports nothing about git history or webhooks — it never reads a
+commit message or a PR title itself. `breakDeclaration`, in `cmd/lydite`, is what reads the
+declaration (through `declaration.Declared`, over the pull request title from
+`internal/forge.PullRequestEvent` and over every commit in `base..HEAD` from
+`internal/gitstate.CommitMessages`) and hands `review` only the resulting
+`referral.Disqualification` to append. The fact of the declaration crosses the package boundary
+already decided; the evidence-only computation inside `internal/referral` never touches it.
+
+The declaration is a claim, not evidence, so it obeys the rule two paragraphs up: it may only
+ever add a referral, never remove one. It can never clear the undeclared-break gate — a
+disqualification adds a referral and has no power over a gate at all — and it is checked once
+per run, independent of whether any component opted in. A change that declares a break refers
+even in a repository with no `api_surface` component and nothing compared, because the claim
+needs no corroboration from the surface diff to be worth a person's attention.
+
+Computing any of this costs `review` three things it otherwise has no reason to pay for:
+loading components, resolving a Go toolchain, and materialising the merge-base as a real tree on
+disk, since `go/packages` loads a module by running the `go` tool over one and `git show
+<base>:<path>` cannot supply that. `baseWorktree` in `review_apisurface.go` does the last of
+those with `git worktree add --detach` and a `context.WithoutCancel` cleanup — the same shape
+`cmd/lydite/coverage.go`'s `measureBaseTree` already uses, kept as its own separate
+implementation rather than shared, since `coverage.go` is not this feature's file to touch. A
+repository where no component opts in pays none of it: `addAPISurfaceRows` returns before
+loading a toolchain or adding a worktree once it finds no component asked, the same "day-one
+state" an absent `.lydite/exemptions.yml` gets above — nothing was asked for, so there is
+nothing here that could fail to run.
 
 # Clearance: `/lydite clear`
 
