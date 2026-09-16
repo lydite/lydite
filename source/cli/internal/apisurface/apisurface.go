@@ -52,6 +52,12 @@ const removalDetail = "removed in this change; located at its declaration in the
 // Both are supplied rather than fixed here because this package knows nothing
 // about report rows or declared components.
 //
+// env is the environment the loader runs under, layered over this process's
+// own — the resolved Go toolchain a caller provisioned, which is what makes
+// the comparison run under the version the module declares rather than under
+// whatever `go` the PATH happens to lead to. Nil runs the loader under the
+// ambient environment.
+//
 // The findings come back raw. Path is relative to the tree the symbol was
 // located in — headDir, or baseDir for a removal — and **not** to the scan
 // root, so a caller that knows the component's directory rebases them the way
@@ -59,12 +65,12 @@ const removalDetail = "removed in this change; located at its declaration in the
 // left at their zero values for the same reason: both are decisions made over
 // a report's whole set and against the lines the change touched, neither of
 // which this package is given.
-func Compare(baseDir, headDir, gate, component string) ([]finding.Finding, error) {
-	base, err := loadTree(baseDir)
+func Compare(baseDir, headDir, gate, component string, env []string) ([]finding.Finding, error) {
+	base, err := loadTree(baseDir, env)
 	if err != nil {
 		return nil, fmt.Errorf("merge-base tree: %w", err)
 	}
-	head, err := loadTree(headDir)
+	head, err := loadTree(headDir, env)
 	if err != nil {
 		return nil, fmt.Errorf("head tree: %w", err)
 	}
@@ -236,7 +242,7 @@ type tree struct {
 // The comparison is over the default, untagged build. A symbol that exists
 // only under a build tag is invisible to it, because comparing every tag
 // combination is a combinatorial question no single gate can answer.
-func loadTree(dir string) (*tree, error) {
+func loadTree(dir string, env []string) (*tree, error) {
 	module, err := modulePath(dir)
 	if err != nil {
 		return nil, err
@@ -246,8 +252,11 @@ func loadTree(dir string) (*tree, error) {
 			packages.NeedSyntax | packages.NeedImports | packages.NeedDeps,
 		Dir: dir,
 		// A tree outside this module must not be read through this module's
-		// workspace, and must resolve against its own go.mod.
-		Env:   append(os.Environ(), "GOWORK=off"),
+		// workspace, and must resolve against its own go.mod. GOWORK is set
+		// last, since the last occurrence of a key is the one a child process
+		// reads and a caller's environment must not be able to reinstate a
+		// workspace.
+		Env:   append(append(os.Environ(), env...), "GOWORK=off"),
 		Tests: false,
 	}
 	loaded, err := packages.Load(cfg, "./...")

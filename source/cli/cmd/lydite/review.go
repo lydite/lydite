@@ -29,12 +29,16 @@ func newReviewCmd() *cobra.Command {
 		Short:         "Decide whether this change needs a human before it merges",
 		Long: `Decide whether this change needs a human before it merges.
 
-review runs no check. It compares the change against the exemptions declared
-in ` + referral.FileName + ` and reports one of two things: the change matches a
-declared shape and may merge unattended, or it is referred to a person.
+review compares the change against the exemptions declared in ` + referral.FileName + `
+and reports one of two things: the change matches a declared shape and may
+merge unattended, or it is referred to a person.
 
 A referral names no defect. With no exemptions declared, every change is
-referred — including a correct one.`,
+referred — including a correct one.
+
+It runs one check: for each component that declares api_surface, the exported
+API of its Go module is compared against the merge-base. A break this change
+did not declare fails, and a declared one is referred.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
@@ -59,6 +63,13 @@ referred — including a correct one.`,
 					Label:  "uncommitted changes",
 					Value:  "not included in this verdict",
 				})
+			}
+			// Before the decision is rendered, because a declared break and a
+			// surface nothing could be compared are both referrals, and they
+			// reach the report through the same disqualification the verdict
+			// line is derived from.
+			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
+				return err
 			}
 			addDecisionRows(report, decision, len(file.Exemptions))
 

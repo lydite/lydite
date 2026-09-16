@@ -41,7 +41,7 @@ func TestCompareReportsEachIncompatibleShape(t *testing.T) {
 		t.Run(c.shape, func(t *testing.T) {
 			base := repo.worktree(t, repo.base)
 			head := repo.worktree(t, repo.heads[c.shape])
-			findings, err := Compare(base, head, testGate, testComponent)
+			findings, err := Compare(base, head, testGate, testComponent, nil)
 			if err != nil {
 				t.Fatalf("Compare: %v", err)
 			}
@@ -99,7 +99,7 @@ func TestCompareIgnoresCompatibleAndUnreachableChanges(t *testing.T) {
 	repo := newProbe(t)
 	for _, shape := range []string{"compatible-addition", "excluded-packages"} {
 		t.Run(shape, func(t *testing.T) {
-			findings, err := Compare(repo.worktree(t, repo.base), repo.worktree(t, repo.heads[shape]), testGate, testComponent)
+			findings, err := Compare(repo.worktree(t, repo.base), repo.worktree(t, repo.heads[shape]), testGate, testComponent, nil)
 			if err != nil {
 				t.Fatalf("Compare: %v", err)
 			}
@@ -126,7 +126,7 @@ func TestComparePackageRemovedAndAdded(t *testing.T) {
 		"kept/kept.go":   "package kept\n\n// Kept stays.\nfunc Kept() {}\n",
 		"added/added.go": "package added\n\n// Added breaks nobody.\nfunc Added() {}\n",
 	})
-	findings, err := Compare(base, head, testGate, testComponent)
+	findings, err := Compare(base, head, testGate, testComponent, nil)
 	if err != nil {
 		t.Fatalf("Compare: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestCompareRefusesAMovedModulePath(t *testing.T) {
 		"go.mod":  "module lydite.example/moved/v2\n\ngo 1.26\n",
 		"root.go": "package moved\n\n// Root stays.\nfunc Root() {}\n",
 	})
-	if _, err := Compare(base, head, testGate, testComponent); !errors.Is(err, ErrModulePathChanged) {
+	if _, err := Compare(base, head, testGate, testComponent, nil); !errors.Is(err, ErrModulePathChanged) {
 		t.Fatalf("err = %v, want ErrModulePathChanged", err)
 	}
 }

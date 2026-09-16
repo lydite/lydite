@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
@@ -19,6 +20,13 @@ import (
 // reviewRepo commits baseFiles as the base revision, then headFiles on top,
 // and returns the repo directory and the base SHA.
 func reviewRepo(t *testing.T, baseFiles, headFiles map[string]string) (string, string) {
+	t.Helper()
+	return reviewRepoSaying(t, baseFiles, headFiles, "head")
+}
+
+// reviewRepoSaying is reviewRepo with the head commit's message spelled out,
+// which is one of the two places a breaking change is declared.
+func reviewRepoSaying(t *testing.T, baseFiles, headFiles map[string]string, message string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -51,7 +59,7 @@ func reviewRepo(t *testing.T, baseFiles, headFiles map[string]string) (string, s
 	base := run("rev-parse", "HEAD")
 	write(headFiles)
 	run("add", "-A")
-	run("commit", "-m", "head")
+	run("commit", "-m", message)
 	return dir, base
 }
 
@@ -379,5 +387,174 @@ func TestReviewErrorsWhenTheExemptionsFileCannotBeRead(t *testing.T) {
 	var exit ui.ExitError
 	if errors.As(err, &exit) {
 		t.Fatalf("an unreadable allowlist produced a verdict (exit %d) rather than an error", exit.Code)
+	}
+}
+
+// A module whose exported API the gate compares, and the declaration that
+// opts it in. `go 1.26` rather than a patch version so the comparison runs
+// under whatever Go the machine already has, without provisioning one.
+const (
+	sdkGoMod = "module example.com/sdk\n\ngo 1.26\n"
+	sdkAPI   = "package sdk\n\n// Do runs the thing.\nfunc Do(n int) error { return nil }\n"
+	sdkOptIn = "components:\n  - name: sdk\n    dir: sdk\n    runner: go-test\n    api_surface: {}\n"
+	sdkPlain = "components:\n  - name: sdk\n    dir: sdk\n    runner: go-test\n"
+)
+
+func sdkBase(componentsYML string) map[string]string {
+	return map[string]string{
+		"README.md":        "hello",
+		component.FileName: componentsYML,
+		"sdk/go.mod":       sdkGoMod,
+		"sdk/api.go":       sdkAPI,
+		referral.FileName:  "exemptions:\n  - name: sdk-source\n    reason: ordinary source edits\n    paths: [\"sdk/**\"]\n",
+	}
+}
+
+// An undeclared break is a gate, not a referral: the author clears it by
+// restoring the API or by declaring the break, and both are work they can do.
+func TestReviewFailsAnUndeclaredAPIBreak(t *testing.T) {
+	dir, base := reviewRepo(t, sdkBase(sdkOptIn),
+		map[string]string{"sdk/api.go": "package sdk\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "sdk/api.go") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The same break, declared, reaches a person instead: every breaking change
+// should, and the declaration decides which verdict a break gets rather than
+// whether it is reported at all.
+func TestReviewRefersADeclaredAPIBreak(t *testing.T) {
+	dir, base := reviewRepoSaying(t, sdkBase(sdkOptIn),
+		map[string]string{"sdk/api.go": "package sdk\n"},
+		"feat(sdk)!: drop Do")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration it read, got:\n%s", out)
+	}
+	if strings.Contains(out, "undeclared") {
+		t.Errorf("a declared break must not also fire the gate:\n%s", out)
+	}
+}
+
+// Ordinary growth is not a break. An added function is a compatible change,
+// and a gate that fired on one would fire on every release.
+func TestReviewPassesAnAdditiveAPIChange(t *testing.T) {
+	dir, base := reviewRepo(t, sdkBase(sdkOptIn),
+		map[string]string{"sdk/api.go": sdkAPI + "\n// Also runs the thing.\nfunc Also() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("an additive change must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// Nil means not measured. A component that did not ask has its API compared
+// by nothing, and nothing is said about it — the comparison costs a worktree
+// and a toolchain, and most components are binaries nobody imports.
+func TestReviewComparesNothingForAComponentThatDidNotOptIn(t *testing.T) {
+	dir, base := reviewRepo(t, sdkBase(sdkPlain),
+		map[string]string{"sdk/api.go": "package sdk\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a component that did not opt in must not be gated, got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, gateAPISurface) {
+		t.Errorf("nothing asked for a comparison, so nothing may be reported about one:\n%s", out)
+	}
+}
+
+// Neither pass nor fail is true of a surface that could not be computed.
+// Failing is a gate the author cannot clear, since the merge-base's tree is
+// not theirs to fix, and passing is a gate that could not run rendering as
+// one that ran and found nothing.
+func TestReviewRefersASurfaceItCouldNotCompare(t *testing.T) {
+	base := sdkBase(sdkOptIn)
+	base["sdk/api.go"] = "package sdk\n\nfunc Do(n int) error { return \n"
+	dir, baseSHA := reviewRepo(t, base,
+		map[string]string{"sdk/api.go": sdkAPI})
+
+	out, err := runReview(t, dir, baseSHA)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an uncomputable surface must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "sdk") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+}
+
+// A major bump is spelled as a new module path, so every package reads as
+// removed and added again. The range is out of scope and the report says so,
+// rather than reporting an entire module removed.
+func TestReviewRefersAModulePathThatMoved(t *testing.T) {
+	dir, base := reviewRepo(t, sdkBase(sdkOptIn),
+		map[string]string{"sdk/go.mod": "module example.com/sdk/v2\n\ngo 1.26\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a moved module path must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "module path changed") {
+		t.Errorf("the referral must name the module path as the reason, got:\n%s", out)
+	}
+}
+
+// The declaration is honoured on its own, with no corroboration from a
+// surface diff and in a repository where no component opted in at all. That
+// is the one-way ratchet the marker is only safe under: the claim adds a
+// referral and can never remove one, so a change an exemption covers is
+// referred the moment its author says it breaks something.
+func TestReviewRefersADeclarationWithNothingCompared(t *testing.T) {
+	exemptions := "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n"
+	dir, base := reviewRepoSaying(t,
+		map[string]string{referral.FileName: exemptions, "README.md": "hello"},
+		map[string]string{"README.md": "hello again"},
+		"docs: reword\n\nBREAKING CHANGE: the wording is load-bearing\n")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred even with nothing compared (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration, got:\n%s", out)
+	}
+}
+
+// Squash merge makes the title the commit that lands, so a break declared
+// only there — in commits that are about to be squashed away — still refers.
+func TestReviewReadsTheDeclarationFromThePullRequestTitle(t *testing.T) {
+	exemptions := "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n"
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: exemptions, "README.md": "hello"},
+		map[string]string{"README.md": "hello again"})
+	event := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(event, []byte(`{"number":7,"pull_request":{"title":"refactor!: move the thing"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReview(t, dir, base, "--event", event)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a title-declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "the pull request title") {
+		t.Errorf("the referral must name the source it read, got:\n%s", out)
 	}
 }
