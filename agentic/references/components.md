@@ -24,6 +24,7 @@ components:
     setup: ["make migrate"]
     teardown: ["rm -rf ./data"]
     mutation: false                # opt-out; the default is true
+    api_surface: {}                # opt-in; the default is unmeasured
 ```
 
 **A component is the unit its build tool treats as a whole** — a Cargo workspace, a Go module, a
@@ -61,6 +62,18 @@ without the environment it declared — while every run still reports a result.
 scan root, `depends_on` that resolves to declared components, and no cycles. A dangling edge is
 rejected rather than dropped, because the edge exists to make a dependent run on a change to its
 dependency and an edge naming nothing silently stops doing that while the dependent keeps passing.
+
+**`api_surface` opts a component into a public-API diff against the merge-base, and is opt-in
+rather than opt-out** — the reverse of `mutation` — because most components declared here are
+binaries and services nobody imports, and a surface diff over one is pure noise. It is an object
+rather than a boolean: presence alone (`api_surface: {}`) is the opt-in, and the empty shape
+leaves room for a field a later language needs — a Rust crate root, a TypeScript entry point —
+to arrive additively instead of as a breaking change to this one's own shape. It carries nothing
+today because Go needs nothing named: `internal/` is already the language's own public/private
+boundary. Setting it on a component whose `Lang()` is not Go is a load-time error, not a row
+reported `unmeasured`: a load error is unmissable and correct on the day another language lands,
+where a silent row is something a reader learns to scroll past — see
+[ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md).
 
 ## Runners: three invocations of one suite
 

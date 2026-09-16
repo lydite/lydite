@@ -171,6 +171,16 @@ func TestParseRejects(t *testing.T) {
 			yaml: "components:\n  - {name: a, dir: cli, runner: go-test, depends_on: [b]}\n  - {name: b, dir: cli, runner: go-test, depends_on: [a]}\n",
 			want: "cycle",
 		},
+		{
+			name: "api_surface on a non-Go runner",
+			yaml: "components:\n  - {name: a, dir: cli, runner: cargo-nextest, api_surface: {}}\n",
+			want: "api_surface is only supported for Go components in this version",
+		},
+		{
+			name: "api_surface on a command component",
+			yaml: "components:\n  - {name: a, dir: cli, command: [make, test], api_surface: {}}\n",
+			want: "api_surface is only supported for Go components in this version",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse([]byte(tc.yaml), "components.yml")
@@ -178,6 +188,30 @@ func TestParseRejects(t *testing.T) {
 				t.Fatalf("want an error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// api_surface is opt-in: absent, a component is not measured, and presence
+// alone — an empty object — is what opts it in.
+func TestAPISurfaceOptIn(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: sdk
+    dir: sdk
+    runner: go-test
+    api_surface: {}
+  - name: cli
+    dir: cli
+    runner: go-test
+`), "components.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Components[0].APISurface == nil {
+		t.Error("api_surface: {} must set APISurface")
+	}
+	if f.Components[1].APISurface != nil {
+		t.Error("an omitted api_surface must leave APISurface nil")
 	}
 }
 
