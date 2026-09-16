@@ -27,6 +27,7 @@ import (
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/licence"
 )
 
 // The gates this package reports under. A gate's name is the label its row
@@ -38,6 +39,11 @@ const (
 	GateAudit  = "cargo-audit"
 	GateDeny   = "cargo-deny"
 )
+
+// GateLicence is the licence gate as this package reports it. It is
+// licence.Gate rather than a second literal, so the row a Rust component
+// carries and the row a Go component carries can never drift apart.
+const GateLicence = licence.Gate
 
 // FindingGates is every gate here that reports its findings as data.
 //
@@ -51,7 +57,7 @@ const (
 // formatting diff is never a finding, and a gate listed here with no parser
 // behind it would record nought findings on every commit as though it had
 // looked.
-func FindingGates() []string { return []string{GateClippy, GateAudit, GateDeny} }
+func FindingGates() []string { return []string{GateClippy, GateAudit, GateDeny, GateLicence} }
 
 // Check runs every Rust check in dir, with env on top of the caller's own
 // environment — the component's resolved toolchain, which is what decides

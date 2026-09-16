@@ -1,0 +1,5 @@
+# go list -deps -json ./... over a module with a vendor/ directory.
+# Module.Dir is absent for every vendored module; the package Dir points into vendor/.
+github.com/hashicorp/go-version	Module.Dir=(absent)	package Dir=vendor/github.com/hashicorp/go-version
+github.com/juju/errors	Module.Dir=(absent)	package Dir=vendor/github.com/juju/errors
+gopkg.in/yaml.v2	Module.Dir=(absent)	package Dir=vendor/gopkg.in/yaml.v2

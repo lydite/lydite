@@ -13,7 +13,9 @@
 //     that job's reports. These aren't narrowing anything — they're facts
 //     about how the repo is built that every invocation in it shares, which
 //     is exactly why they belong in a file at the scan root rather than in a
-//     flag each caller has to remember to repeat.
+//     flag each caller has to remember to repeat. licence.policy.allow is
+//     the same kind of fact: which SPDX-licensed dependencies this
+//     organisation may ship, not any one run's business.
 package config
 
 import (
@@ -24,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/github/go-spdx/v2/spdxexp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -195,6 +198,24 @@ type Toolchain struct {
 	Node string `yaml:"node,omitempty"`
 }
 
+// LicencePolicy is the SPDX allow-list a change's introduced dependency
+// licences are checked against.
+type LicencePolicy struct {
+	// Allow lists the SPDX identifiers this organisation may ship, each
+	// validated at load time against the SPDX licence list. It carries the
+	// section's whole on/off state: non-empty is configured, absent or empty
+	// is not — there is no separate enabled key to disagree with it. See
+	// docs/adr/0038.
+	Allow []string `yaml:"allow"`
+}
+
+// Licence is the opt-in surface for the licence-compliance gate: which
+// licences a change may introduce. Unlike Secrets or a Language, there is no
+// Enabled field — LicencePolicy.Allow is itself the switch.
+type Licence struct {
+	Policy LicencePolicy `yaml:"policy"`
+}
+
 // Config is lydite's full, resolved configuration for one scan.
 type Config struct {
 	Rust       Language           `yaml:"rust"`
@@ -202,6 +223,7 @@ type Config struct {
 	Go         Language           `yaml:"go"`
 	Semgrep    Semgrep            `yaml:"semgrep"`
 	Secrets    Secrets            `yaml:"secrets"`
+	Licence    Licence            `yaml:"licence"`
 	Coverage   Coverage           `yaml:"coverage"`
 	Toolchain  Toolchain          `yaml:"toolchain"`
 }
@@ -250,6 +272,12 @@ func Load(root string) (Config, error) {
 		return Config{}, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	if err := rejectRemoved(data); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := rejectLicenseMisspelling(data); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := validateLicencePolicy(cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := validateTolerances(cfg); err != nil {
@@ -401,6 +429,52 @@ func nodeAt(n *yaml.Node, path []string) *yaml.Node {
 // reportKeyRemoved is the one sentence every removed report path wants, said
 // once so the four cannot drift.
 const reportKeyRemoved = "lydite writes every coverage report itself, at a path derived from the component's runner, so there is nothing left to locate"
+
+// rejectLicenseMisspelling refuses a config file carrying a top-level
+// `license:` key, the American spelling.
+//
+// The licence policy is spelled `licence:`, matching this repository's own
+// prose and the package name, and SPDX and every scanning tool spell it
+// `license`. Config has no License field, so yaml.Unmarshal would silently
+// drop the key and read the policy back empty — a repository believing it
+// had configured the gate would have configured nothing, with every run
+// still reporting a pass. rejectRemoved's own document walk is reused rather
+// than a second mechanism, for the same reason coverage.source and
+// linter: eslint are errors rather than omissions: nodeAt answers "was this
+// key present" independent of what a struct's field types would accept, and
+// a walk finds the key regardless of what a consumer nested beneath it.
+func rejectLicenseMisspelling(data []byte) error {
+	var doc yaml.Node
+	// A document this cannot parse is one Load's own unmarshal has already
+	// rejected with a better message.
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil //nolint:nilerr // the parse error is the caller's to report
+	}
+	if nodeAt(&doc, []string{"license"}) != nil {
+		return errors.New("license is not a recognized key — the licence policy is spelled \"licence\", matching this repository's own prose; see docs/adr/0038-a-licence-policy-gates-the-licences-a-change-introduces.md")
+	}
+	return nil
+}
+
+// validateLicencePolicy rejects an allow-list entry that is not a real SPDX
+// licence identifier at load time, rather than letting a typo silently
+// grandfather nothing and fail every dependency the gate compares it
+// against. Each entry is validated as a single identifier — not a licence
+// expression like "MIT OR Apache-2.0" — because the allow-list is the set a
+// dependency's own expression is checked against, not an expression itself.
+//
+// An absent or empty Allow is valid: it is the gate's "not configured" state
+// (docs/adr/0038), not a policy with zero permitted licences.
+func validateLicencePolicy(cfg Config) error {
+	if len(cfg.Licence.Policy.Allow) == 0 {
+		return nil
+	}
+	ok, invalid := spdxexp.ValidateLicensesWithOptions(cfg.Licence.Policy.Allow, spdxexp.ValidateLicensesOptions{FailComplexExpressions: true})
+	if !ok {
+		return fmt.Errorf("licence.policy.allow: not a recognized SPDX licence identifier: %s — see https://spdx.org/licenses/", strings.Join(invalid, ", "))
+	}
+	return nil
+}
 
 // validateLinter accepts only LinterBiome, and gives the retired ESLint value
 // its own message.

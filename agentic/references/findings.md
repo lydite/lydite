@@ -63,6 +63,7 @@ line-keyed identity reports the same finding as new on every push. `site` is con
 |---|---|
 | a scanner over source (`biome`, `gosec`, `semgrep`, `cargo clippy`) | the rule with the source text it fired on, read from the tree rather than from the report |
 | a scanner over dependencies (`cargo-audit`, `cargo-deny`, `govulncheck`) | the advisory's own identifier with the package and version — **not** the line's text. See below |
+| the licence gate (`internal/golang`, `internal/rust`) | the package and the licence, never the version — see below |
 | `crap` | the function's name with its receiver, which `crap.Function.Name` already carries |
 | `mutation` | the operator with the text it replaced and the text replacing it |
 | `patch` | the stretch's two ends. Its length is deliberately not an ingredient, or adding one untested line to an untested block would orphan the claim already made about it |
@@ -86,6 +87,14 @@ a site read from the line would make them one claim and `finding.Set` would drop
 ordinal cannot save it, because that separates a repeat in source order and these are two
 different claims. So the site is `RUSTSEC-2020-0071␟time 0.1.44` — stable across exactly what
 should not re-identify it: a lockfile reordering, a line moving, the advisory being reworded.
+
+**The licence gate is the same departure, keyed on the licence rather than on an advisory id.** A
+module offering more than one licence — `gopkg.in/yaml.v2` under Apache-2.0 and MIT — produces two
+non-conforming pairs against one `go.mod` require line, so `licence.Pair.Site()` is
+`licence␟<package> <licence>` rather than the line's text, and the version is excluded from the
+key entirely: keyed on it, an ordinary bump of an already-grandfathered dependency would read as a
+new pair and fail the row for maintenance the gate has no claim about. See
+[ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-introduces.md).
 
 **A line that cannot be found is `Line: 0` and unanchorable**, never a guess. That is a module no
 manifest names because it was resolved transitively, or a lockfile lydite could not read. Since

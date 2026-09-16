@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -15,7 +16,9 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
+	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/ui"
@@ -162,7 +165,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 
 	// How many claims each scanner gate made, which is the one scalar in a
 	// recording that comes from `lydite scan` rather than from `lydite test`.
-	perComponent, root := findingCounts(decl, cfg, read.found, read.scanned)
+	perComponent, root := findingCounts(dir, decl, cfg, read.found, read.scanned)
 	rep.Add(findingsRow(perComponent, root, read.scanned))
 
 	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root)
@@ -642,6 +645,13 @@ func readReports(rep *ui.Report, reports []string) reportsRead {
 // not is not a key, which is ADR 0029's "absent is not zero" for a quantity a
 // single integer cannot express.
 //
+// A language's gate set is not the whole answer for the licence gate, which
+// runs only where a policy governs the component: the repository's own
+// licence.policy.allow, or — for Rust — the component's deny.toml. Its nought
+// is seeded under the same condition scan gates on, so a repository that never
+// stated a policy records no licence key at all rather than the trend line of
+// one whose policy ran clean on every commit.
+//
 // Nothing at all is returned when no scan document was read. Every applicable
 // gate would otherwise record nought, which says the gate ran and found
 // nothing — the one thing a recording must not invent about a scan that never
@@ -656,10 +666,11 @@ func readReports(rep *ui.Report, reports []string) reportsRead {
 // the gate set from the scan's own rows would answer both and cost the thing
 // this channel exists for: the rows are prose, and `gosec(cli)` parsed back
 // into a gate and a component is the text-scraping findings-as-data removed.
-func findingCounts(decl component.File, cfg config.Config, found []finding.Finding, scanned bool) (map[string]map[string]int, map[string]int) {
+func findingCounts(dir string, decl component.File, cfg config.Config, found []finding.Finding, scanned bool) (map[string]map[string]int, map[string]int) {
 	if !scanned {
 		return nil, nil
 	}
+	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	perComponent := map[string]map[string]int{}
 	for _, c := range decl.Components {
 		lang := langOf(c)
@@ -671,12 +682,16 @@ func findingCounts(decl component.File, cfg config.Config, found []finding.Findi
 			continue
 		}
 		gates := scannerGates(lang)
-		if len(gates) == 0 {
-			continue
-		}
+		gated := licenceGated(filepath.Join(dir, c.Dir), lang, policy)
 		counts := make(map[string]int, len(gates))
 		for _, gate := range gates {
+			if gate == licence.Gate && !gated {
+				continue
+			}
 			counts[gate] = 0
+		}
+		if len(counts) == 0 {
+			continue
 		}
 		perComponent[c.Name] = counts
 	}
@@ -717,6 +732,25 @@ func findingCounts(decl component.File, cfg config.Config, found []finding.Findi
 		}
 	}
 	return perComponent, root
+}
+
+// licenceGated reports whether the licence gate runs over the component in
+// cdir, which is what decides whether its nought is seeded.
+//
+// The same condition each language's scan gates on, asked from the tree rather
+// than from the scan's rows: Go runs the gate only under the repository's own
+// policy, and Rust runs it under that policy or under the component's own
+// deny.toml, which is rust.PolicyFor's answer. Every other language declares no
+// licence gate, so none applies.
+func licenceGated(cdir string, lang runner.Lang, policy licence.Policy) bool {
+	switch lang {
+	case runner.Go:
+		return policy.Configured()
+	case runner.Rust:
+		return rust.PolicyFor(cdir, policy) != rust.PolicyFromNone
+	default:
+		return false
+	}
 }
 
 // missingFromRecord names a declared component the fold has no entry for.
