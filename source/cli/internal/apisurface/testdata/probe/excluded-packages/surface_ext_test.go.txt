@@ -1,0 +1,13 @@
+package probe_test
+
+import (
+	"testing"
+
+	"lydite.example/probe"
+)
+
+func TestCached(t *testing.T) {
+	if probe.Cached("k") != "k" {
+		t.Fatal("the probe's own suite is never run; it exists to be a package the loader must leave out")
+	}
+}

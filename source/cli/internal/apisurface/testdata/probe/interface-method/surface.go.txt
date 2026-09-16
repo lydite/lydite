@@ -1,0 +1,28 @@
+// Package probe is a synthetic public API held still, so that what a tool
+// reports about a change to it is a measurement of the tool.
+package probe
+
+import "lydite.example/probe/internal/store"
+
+// Removed is dropped by the removed-function shape.
+func Removed() {}
+
+// Signature gains a parameter in the changed-signature shape.
+func Signature(a int) error { return nil }
+
+// Store is implemented outside this package, so a method added to it breaks
+// every implementer while breaking nobody who only calls it.
+type Store interface {
+	Get(key string) (string, bool)
+	Put(key, value string) error
+}
+
+// Config is constructed by callers, by field name.
+type Config struct {
+	Timeout int
+	Name    string
+}
+
+// Cached reaches the internal package from the public surface, so that package
+// is loaded without being part of the API.
+func Cached(key string) string { return store.Get(key) }
