@@ -1,0 +1,5 @@
+import { expect, it } from "vitest";
+
+it("shared title", () => {
+  expect(1).toBe(1);
+});

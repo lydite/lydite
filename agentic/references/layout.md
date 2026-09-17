@@ -39,6 +39,10 @@ source/cli/internal/coverage/     # reads a component's coverage report (see cov
 source/cli/internal/crap/         # the CRAP index per function, Go, Rust and TypeScript alike (see crap.md)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
                                   #   (see mutation.md)
+source/cli/internal/treesitter/   # the shared grammar tables crap and mutation both read: function
+                                  #   spans, test-code classification, and which tests a file
+                                  #   declares (see crap.md and mutation.md; coverage.md for
+                                  #   exclusion resolution)
 source/cli/internal/finding/      # the located claims a gate makes, as data: the fingerprint
                                   #   that identifies one and how precisely it reaches the
                                   #   change (see findings.md). A leaf, so the report
@@ -50,6 +54,8 @@ source/cli/internal/gitstate/     # the base branch, and lydite branch read/writ
 source/cli/internal/ledger/       # the quality history: append-only NDJSON and the daily
                                   #   projection the dashboard reads (see quality-history.md)
 source/cli/internal/junit/        # the test counts every runner's JUnit report holds
+source/cli/internal/flaky/        # which tests a change declares as new, and what two JUnit
+                                  #   runs of them establish about each (see components.md)
 source/cli/internal/gotool/       # the version-keyed `go install` internal/golang and
                                   #   internal/runner both provision through
 source/cli/internal/executil/     # shared external-command runner every scanner package uses

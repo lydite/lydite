@@ -344,6 +344,159 @@ func TestReadOutcomesFileNamesAReportThatDoesNotParse(t *testing.T) {
 	}
 }
 
+// One crate's nextest run records `shared_name` in two of its binaries, which
+// is the collision the composite key exists for: keyed by name alone the two
+// are one entry, and a gate comparing two runs of a named test would let a pass
+// in one binary answer for a flake in the other.
+func TestTwoBinariesSharingATestNameAreOneEntryByNameAndTwoByClass(t *testing.T) {
+	path := filepath.Join("testdata", "nextest-suite.xml")
+
+	byName, err := ReadOutcomesFile(path)
+	if err != nil {
+		t.Fatalf("ReadOutcomesFile: %v", err)
+	}
+	if _, ok := byName["shared_name"]; !ok {
+		t.Fatalf("ReadOutcomesFile = %v, want an entry for shared_name", byName)
+	}
+	counts, err := ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(byName) >= counts.Total {
+		t.Errorf("ReadOutcomesFile holds %d of the report's %d tests, want the two shared_name cases merged",
+			len(byName), counts.Total)
+	}
+
+	byClass, err := ReadOutcomesByClassFile(path)
+	if err != nil {
+		t.Fatalf("ReadOutcomesByClassFile: %v", err)
+	}
+	want := map[string]Outcome{
+		ClassKey("nextestprobe::b", "shared_name"):                    Pass,
+		ClassKey("nextestprobe::a", "shared_name"):                    Pass,
+		ClassKey("nextestprobe::a", "inner::only_in_a"):               Pass,
+		ClassKey("nextestprobe", "tests::nested::doubles_deeper"):     Pass,
+		ClassKey("nextestprobe", "tests::doubles"):                    Pass,
+		ClassKey("nextestprobe::c", "async_cases::awaits_and_agrees"): Pass,
+	}
+	if !maps.Equal(byClass, want) {
+		t.Errorf("ReadOutcomesByClassFile = %v, want %v", byClass, want)
+	}
+	if len(byClass) != counts.Total {
+		t.Errorf("ReadOutcomesByClassFile holds %d tests and ReadFile counted %d", len(byClass), counts.Total)
+	}
+}
+
+// Each binary's copy of a shared name carries its own outcome. A flake in one
+// is a flake in that one, and the other's pass neither masks nor is masked.
+func TestASharedNameCarriesOneOutcomePerClass(t *testing.T) {
+	got, err := ReadOutcomesByClass(strings.NewReader(`<testsuites>
+		<testsuite name="nextestprobe::a">
+			<testcase classname="nextestprobe::a" name="shared_name"></testcase>
+		</testsuite>
+		<testsuite name="nextestprobe::b">
+			<testcase classname="nextestprobe::b" name="shared_name">
+				<failure type="test failure">assertion failed</failure>
+			</testcase>
+		</testsuite>
+	</testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomesByClass: %v", err)
+	}
+	want := map[string]Outcome{
+		ClassKey("nextestprobe::a", "shared_name"): Pass,
+		ClassKey("nextestprobe::b", "shared_name"): Fail,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("ReadOutcomesByClass = %v, want %v", got, want)
+	}
+}
+
+// One classname and name recorded twice is a real ambiguity, and it resolves
+// the way a repeated name does for the name-keyed reader: the worse outcome.
+func TestOneClassAndNameRecordedTwiceKeepsTheWorseOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   Outcome
+	}{
+		{"pass then fail", `<testcase classname="C" name="X"></testcase><testcase classname="C" name="X"><failure/></testcase>`, Fail},
+		{"fail then pass", `<testcase classname="C" name="X"><failure/></testcase><testcase classname="C" name="X"></testcase>`, Fail},
+		{"skip then pass", `<testcase classname="C" name="X"><skipped/></testcase><testcase classname="C" name="X"></testcase>`, Skip},
+		{"skip then fail", `<testcase classname="C" name="X"><skipped/></testcase><testcase classname="C" name="X"><failure/></testcase>`, Fail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReadOutcomesByClass(strings.NewReader("<testsuites><testsuite>" + tc.report + "</testsuite></testsuites>"))
+			if err != nil {
+				t.Fatalf("ReadOutcomesByClass: %v", err)
+			}
+			if key := ClassKey("C", "X"); got[key] != tc.want {
+				t.Errorf("ReadOutcomesByClass[C,X] = %v, want %v", got[key], tc.want)
+			}
+		})
+	}
+}
+
+// A testcase missing either half of the key is not addressable by a caller
+// holding both, and recording it under a half-empty key would answer for every
+// test the report left as unclassed or unnamed.
+func TestATestcaseMissingEitherHalfOfTheKeyIsNotRecorded(t *testing.T) {
+	got, err := ReadOutcomesByClass(strings.NewReader(`<testsuites><testsuite>
+		<testcase name="unclassed"><failure/></testcase>
+		<testcase classname="C"><failure/></testcase>
+		<testcase classname="C" name="ok"></testcase>
+	</testsuite></testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomesByClass: %v", err)
+	}
+	if !maps.Equal(got, map[string]Outcome{ClassKey("C", "ok"): Pass}) {
+		t.Errorf("ReadOutcomesByClass = %v, want the fully identified testcase alone", got)
+	}
+}
+
+// An outcome element outside a testcase is nobody's outcome here too — the
+// composite reader walks the same document under the same bound.
+func TestAnOutcomeOutsideATestcaseIsNobodysOutcomeByClassEither(t *testing.T) {
+	got, err := ReadOutcomesByClass(strings.NewReader(`<testsuites>
+		<testsuite>
+			<properties><error message="not a test"></error></properties>
+			<testcase classname="C" name="ok"></testcase>
+		</testsuite>
+	</testsuites>`))
+	if err != nil {
+		t.Fatalf("ReadOutcomesByClass: %v", err)
+	}
+	if !maps.Equal(got, map[string]Outcome{ClassKey("C", "ok"): Pass}) {
+		t.Errorf("ReadOutcomesByClass = %v, want the one testcase passing", got)
+	}
+}
+
+func TestReadOutcomesByClassRejectsADocumentThatIsNotXML(t *testing.T) {
+	if _, err := ReadOutcomesByClass(strings.NewReader("this is not xml <<<")); err == nil {
+		t.Error("ReadOutcomesByClass accepted a document that is not XML")
+	}
+}
+
+// A report that is not there, and one that is there but does not parse, are
+// each an error naming the path — it is what a gate reports as the cause it
+// could not measure.
+func TestReadOutcomesByClassFileNamesAReportItCannotRead(t *testing.T) {
+	if _, err := ReadOutcomesByClassFile("/nonexistent/lydite/junit.xml"); err == nil {
+		t.Fatal("ReadOutcomesByClassFile reported success for a report that does not exist")
+	}
+	path := filepath.Join(t.TempDir(), "junit.xml")
+	if err := os.WriteFile(path, []byte("<testsuites><testcase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadOutcomesByClassFile(path)
+	if err == nil {
+		t.Fatal("ReadOutcomesByClassFile reported success for a report that does not parse")
+	}
+	if !strings.Contains(err.Error(), "junit.xml") {
+		t.Errorf("error = %q, want it to name the report", err)
+	}
+}
+
 // A report that is not there is an error naming the path. It is what a
 // component's row reports as the reason it contributed no counts, so a bare
 // "no such file" with no path in it tells its reader nothing to act on.

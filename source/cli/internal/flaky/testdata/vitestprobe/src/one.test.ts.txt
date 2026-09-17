@@ -1,0 +1,33 @@
+import { describe, expect, it, test } from "vitest";
+
+describe("outer", () => {
+  describe("inner", () => {
+    it("holds a title two describes deep", () => {
+      expect(1).toBe(1);
+    });
+  });
+
+  it("holds a title one describe deep", () => {
+    expect(1).toBe(1);
+  });
+});
+
+it("shared title", () => {
+  expect(1).toBe(1);
+});
+
+it("matches ^a (b) [c] + d$", () => {
+  expect(1).toBe(1);
+});
+
+const suffix = "computed";
+it(`a title built from a ${suffix} expression`, () => {
+  expect(1).toBe(1);
+});
+
+test.each([
+  [1, 2],
+  [2, 4],
+])("doubles %i into %i", (n, want) => {
+  expect(n * 2).toBe(want);
+});

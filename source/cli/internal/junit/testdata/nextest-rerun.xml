@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="4" failures="0" errors="0" uuid="25d7941c-ab18-44ea-a458-db7141d586f5" timestamp="2026-09-17T06:16:11.314+01:00" time="0.014">
+    <testsuite name="nextestprobe::a" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="shared_name" classname="nextestprobe::a" timestamp="2026-09-17T06:16:11.315+01:00" time="0.013">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe::c" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="async_cases::awaits_and_agrees" classname="nextestprobe::c" timestamp="2026-09-17T06:16:11.315+01:00" time="0.013">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe::b" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="shared_name" classname="nextestprobe::b" timestamp="2026-09-17T06:16:11.315+01:00" time="0.013">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="tests::nested::doubles_deeper" classname="nextestprobe" timestamp="2026-09-17T06:16:11.315+01:00" time="0.013">
+        </testcase>
+    </testsuite>
+</testsuites>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="6" failures="0" errors="0" uuid="03243d82-ffe7-4d8b-8e2c-3f80e40c84e1" timestamp="2026-09-17T06:16:11.063+01:00" time="0.020">
+    <testsuite name="nextestprobe::b" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="shared_name" classname="nextestprobe::b" timestamp="2026-09-17T06:16:11.063+01:00" time="0.014">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe::a" tests="2" disabled="0" errors="0" failures="0">
+        <testcase name="shared_name" classname="nextestprobe::a" timestamp="2026-09-17T06:16:11.063+01:00" time="0.014">
+        </testcase>
+        <testcase name="inner::only_in_a" classname="nextestprobe::a" timestamp="2026-09-17T06:16:11.063+01:00" time="0.015">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe" tests="2" disabled="0" errors="0" failures="0">
+        <testcase name="tests::nested::doubles_deeper" classname="nextestprobe" timestamp="2026-09-17T06:16:11.063+01:00" time="0.018">
+        </testcase>
+        <testcase name="tests::doubles" classname="nextestprobe" timestamp="2026-09-17T06:16:11.063+01:00" time="0.019">
+        </testcase>
+    </testsuite>
+    <testsuite name="nextestprobe::c" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="async_cases::awaits_and_agrees" classname="nextestprobe::c" timestamp="2026-09-17T06:16:11.063+01:00" time="0.019">
+        </testcase>
+    </testsuite>
+</testsuites>
