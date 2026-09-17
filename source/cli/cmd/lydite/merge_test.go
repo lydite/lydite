@@ -60,6 +60,17 @@ func shardDir(t *testing.T, rows []ui.Row, doc *measurementsDoc) string {
 	return dir
 }
 
+// ungatedFlaky is the flaky row a shard writes for a component whose new tests
+// it was not asked to rerun.
+//
+// Every shard writes one per component it is responsible for, gated or not, so
+// the fold holds them against the declaration the way it holds the suite rows:
+// a component with no flaky row anywhere is a shard whose job died.
+func ungatedFlaky(name string) ui.Row {
+	return ui.Row{Status: ui.StatusContext, Label: "flaky(" + name + ")",
+		Value: "not gated — --gate-flaky reruns the tests a change introduces"}
+}
+
 func runMergeCmd(t *testing.T, root string, reports ...string) (string, error) {
 	t.Helper()
 	cmd := newRootCmd()
@@ -85,6 +96,7 @@ func shardOf(t *testing.T, name string, covered, total int) string {
 			{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
 			{Status: ui.StatusPass, Label: "schedule", Value: "1 component(s), max 1 concurrent"},
 			{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+			ungatedFlaky(name),
 			{Status: ui.StatusPass, Label: "coverage(" + name + ")", Value: "measured"},
 		},
 		&measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{
@@ -143,7 +155,9 @@ func TestMergeFailsWhenAComponentHasTwoRows(t *testing.T) {
 	root := mergeRepo(t)
 	both := shardDir(t, []ui.Row{
 		{Status: ui.StatusPass, Label: "test(a)", Value: "passed"},
+		ungatedFlaky("a"),
 		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		ungatedFlaky("b"),
 	}, nil)
 	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), both)
 	if err == nil {
@@ -151,6 +165,57 @@ func TestMergeFailsWhenAComponentHasTwoRows(t *testing.T) {
 	}
 	if got := jsonRowByLabel(t, out, "shards"); !strings.Contains(strings.Join(got.Detail, "\n"), "a has a row in 2") {
 		t.Errorf("shards detail %q does not name the duplicate", got.Detail)
+	}
+}
+
+// A flaky row folds the way a suite row does, because it is the same shape:
+// exactly one per declared component across the shards. A component with none
+// is a shard whose job died, and one with two is two jobs that reran the same
+// new tests.
+func TestMergeFoldsTheFlakyRowsLikeTheSuiteRows(t *testing.T) {
+	root := mergeRepo(t)
+	gated := func(name string) ui.Row {
+		return ui.Row{Status: ui.StatusPass, Label: "flaky(" + name + ")", Value: "2 new test(s), 2 runs each"}
+	}
+	shard := func(rows ...ui.Row) string { return shardDir(t, rows, nil) }
+
+	// One shard's flaky row is missing while its suite row is not, which is
+	// exactly the gap a fold that only counted suite rows would pass.
+	out, err := runMergeCmd(t, root,
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}, gated("a")),
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(b)", Value: "passed"}))
+	if err == nil {
+		t.Fatalf("a component with no flaky row folded cleanly:\n%s", out)
+	}
+	if detail := strings.Join(jsonRowByLabel(t, out, "shards").Detail, "\n"); !strings.Contains(detail, "flaky: b has no row") {
+		t.Errorf("shards detail %q does not name the gate whose row is missing", detail)
+	}
+
+	// Two shards claiming one component's new tests is two jobs running the
+	// same rerun, and a consumer keying rows by label picks one of two answers.
+	out, err = runMergeCmd(t, root,
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}, gated("a")),
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(b)", Value: "passed"}, gated("b"), gated("a")))
+	if err == nil {
+		t.Fatalf("a duplicated flaky row folded cleanly:\n%s", out)
+	}
+	if detail := strings.Join(jsonRowByLabel(t, out, "shards").Detail, "\n"); !strings.Contains(detail, "flaky: a has a row in 2") {
+		t.Errorf("shards detail %q does not name the duplicate", detail)
+	}
+
+	// And a complete matrix carries each shard's own row, once.
+	out, err = runMergeCmd(t, root,
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}, gated("a")),
+		shard(ui.Row{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+			ui.Row{Status: ui.StatusFail, Label: "flaky(b)", Value: "1 of 2 new test(s) disagreed between two runs"}))
+	if err == nil {
+		t.Fatalf("a shard whose flaky gate failed folded to a pass:\n%s", out)
+	}
+	if got := jsonRowByLabel(t, out, "flaky(b)"); got.Status != "fail" {
+		t.Errorf("flaky(b) = %+v, want the shard's own failure carried", got)
+	}
+	if n := strings.Count(out, `"flaky(a)"`); n != 1 {
+		t.Errorf("flaky(a) appears %d times", n)
 	}
 }
 
@@ -163,6 +228,7 @@ func TestMergeFailsWhenTheWholeTreeGatesDisagree(t *testing.T) {
 		{Status: ui.StatusFail, Label: "orphans", Value: "1 under no component"},
 		{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
 		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		ungatedFlaky("b"),
 	}, nil)
 	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), odd)
 	if err == nil {
@@ -180,9 +246,11 @@ func TestMergeToleratesAShardThatMeasuredNothing(t *testing.T) {
 	root := mergeRepo(t)
 	bare := shardDir(t, []ui.Row{
 		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		ungatedFlaky("b"),
 	}, nil)
 	plain := shardDir(t, []ui.Row{
 		{Status: ui.StatusPass, Label: "test(a)", Value: "passed"},
+		ungatedFlaky("a"),
 	}, nil)
 	out, err := runMergeCmd(t, root, plain, bare)
 	if err != nil {
@@ -199,6 +267,7 @@ func TestMergeCarriesAShardsVerdict(t *testing.T) {
 	root := mergeRepo(t)
 	failing := shardDir(t, []ui.Row{
 		{Status: ui.StatusFail, Label: "test(b)", Value: "failed"},
+		ungatedFlaky("b"),
 	}, nil)
 	out, err := runMergeCmd(t, root, shardOf(t, "a", 1, 2), failing)
 	if err == nil {
@@ -252,6 +321,7 @@ func TestMergeHoldsTheFloorAgainstWhatTheShardsMeasured(t *testing.T) {
 	carried := shardDir(t,
 		[]ui.Row{
 			{Status: ui.StatusUnmeasured, Label: "test(b)", Value: "not affected"},
+			ungatedFlaky("b"),
 			{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the component was not selected for this run"},
 		},
 		&measurementsDoc{Tree: "tree", Components: map[string]componentMeasurement{
@@ -279,6 +349,7 @@ func TestMergeDoesNotGateWhatTheShardsDidNot(t *testing.T) {
 		return shardDir(t,
 			[]ui.Row{
 				{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+				ungatedFlaky(name),
 				{Status: ui.StatusContext, Label: "coverage(" + name + ")", Value: "measured"},
 			},
 			&measurementsDoc{Tree: "tree", Components: map[string]componentMeasurement{
@@ -306,8 +377,8 @@ func TestMergeDoesNotGateWhatTheShardsDidNot(t *testing.T) {
 func TestMergeSaysAFloorItCouldNotApply(t *testing.T) {
 	root := mergeRepo(t)
 	write(t, root, ".lydite/config.yml", "coverage:\n  floor: 80\n")
-	plain := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}}, nil)
-	bare := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(b)", Value: "passed"}}, nil)
+	plain := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(a)", Value: "passed"}, ungatedFlaky("a")}, nil)
+	bare := shardDir(t, []ui.Row{{Status: ui.StatusPass, Label: "test(b)", Value: "passed"}, ungatedFlaky("b")}, nil)
 
 	out, err := runMergeCmd(t, root, plain, bare)
 	if err != nil {
@@ -329,10 +400,12 @@ func TestMergeFoldsWhatTheSchedulersDid(t *testing.T) {
 		{Status: ui.StatusPass, Label: "schedule", Value: "2 component(s), max 2 concurrent, 1 pair(s) serialised",
 			Detail: []string{"a and b serialised on port 5432"}},
 		{Status: ui.StatusPass, Label: "test(a)", Value: "passed"},
+		ungatedFlaky("a"),
 	}, nil)
 	cut := shardDir(t, []ui.Row{
 		{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 0 of 1 component(s)"},
 		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		ungatedFlaky("b"),
 	}, nil)
 
 	out, err := runMergeCmd(t, root, busy, cut)
@@ -365,6 +438,7 @@ func TestMergeInventsNoScheduleRow(t *testing.T) {
 	idle := func(name string) string {
 		return shardDir(t, []ui.Row{
 			{Status: ui.StatusUnmeasured, Label: "test(" + name + ")", Value: "not affected"},
+			ungatedFlaky(name),
 		}, nil)
 	}
 	out, err := runMergeCmd(t, root, idle("a"), idle("b"))
@@ -385,6 +459,7 @@ func TestMergeSaysItLostTheFigureItCannotCompose(t *testing.T) {
 	measuredOnly := func(name string) string {
 		return shardDir(t, []ui.Row{
 			{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+			ungatedFlaky(name),
 			{Status: ui.StatusContext, Label: "coverage(" + name + ")", Value: "50.0% (1/2 lines)"},
 		}, nil)
 	}
@@ -405,7 +480,7 @@ func TestMergeReportsAFoldWithNothingToRecord(t *testing.T) {
 	root := mergeRepo(t)
 	barren := func(name string) string {
 		return shardDir(t,
-			[]ui.Row{{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"}},
+			[]ui.Row{{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"}, ungatedFlaky(name)},
 			&measurementsDoc{Tree: "tree", Gated: true, Reason: "no component produced a measurement"})
 	}
 	out, err := runMergeCmd(t, root, barren("a"), barren("b"))
@@ -428,6 +503,7 @@ func TestMergeDoesNotPromiseARecordingThatWillBeRefused(t *testing.T) {
 	root := mergeRepo(t)
 	partial := shardDir(t, []ui.Row{
 		{Status: ui.StatusPass, Label: "test(b)", Value: "passed"},
+		ungatedFlaky("b"),
 		// b ran and its report was unreadable, so it contributes no entry.
 		{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the coverage report lists no coverable line"},
 	}, &measurementsDoc{Tree: "tree", Gated: true, Components: map[string]componentMeasurement{}})
@@ -644,6 +720,7 @@ func TestMergeSumsTheScoresNoShardCanAnswerFor(t *testing.T) {
 				{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
 				{Status: ui.StatusPass, Label: "schedule", Value: "1 component(s), max 1 concurrent"},
 				{Status: ui.StatusPass, Label: "test(" + name + ")", Value: "passed"},
+				ungatedFlaky(name),
 				{Status: ui.StatusPass, Label: "coverage(" + name + ")", Value: "measured"},
 				{Status: ui.StatusPass, Label: "crap(" + name + ")",
 					Value: fmt.Sprintf("%d function(s) above 30, worst %.1f, baseline %d", above, worst, above)},
@@ -666,6 +743,7 @@ func TestMergeSumsTheScoresNoShardCanAnswerFor(t *testing.T) {
 			{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
 			{Status: ui.StatusPass, Label: "schedule", Value: "1 component(s), max 1 concurrent"},
 			{Status: ui.StatusUnmeasured, Label: "test(b)", Value: "not measured — the component was not selected for this run"},
+			ungatedFlaky("b"),
 			{Status: ui.StatusUnmeasured, Label: "coverage(b)", Value: "not measured — the component was not selected for this run"},
 			{Status: ui.StatusUnmeasured, Label: "crap(b)", Value: "not measured — the component was not selected for this run"},
 		},
@@ -730,9 +808,11 @@ func TestMergeCountsARustComponentTowardTheDenominatorEvenUnmeasured(t *testing.
 			{Status: ui.StatusPass, Label: "watch", Value: "none declared"},
 			{Status: ui.StatusPass, Label: "schedule", Value: "2 component(s), max 1 concurrent"},
 			{Status: ui.StatusPass, Label: "test(svc)", Value: "passed"},
+			ungatedFlaky("svc"),
 			{Status: ui.StatusPass, Label: "coverage(svc)", Value: "measured"},
 			{Status: ui.StatusPass, Label: "crap(svc)", Value: "3 function(s) above 30, worst 41.5, baseline 3"},
 			{Status: ui.StatusPass, Label: "test(web)", Value: "passed"},
+			ungatedFlaky("web"),
 			{Status: ui.StatusUnmeasured, Label: "coverage(web)", Value: "not measured — no shard's measurements hold this component"},
 			{Status: ui.StatusUnmeasured, Label: "crap(web)", Value: "not measured — no shard's measurements hold this component"},
 		},

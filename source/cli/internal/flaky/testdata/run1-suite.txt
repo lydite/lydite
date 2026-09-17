@@ -1,0 +1,3 @@
+✓  . (1.771s) (coverage: 100.0% of statements in ./...)
+
+DONE 6 tests in 1.771s

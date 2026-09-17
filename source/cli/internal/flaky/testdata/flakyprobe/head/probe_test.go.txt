@@ -1,0 +1,52 @@
+package flakyprobe
+
+import (
+	"os"
+	"testing"
+)
+
+// marker is how TestFlakyNew tells one process invocation from the next. The
+// probe is deterministically flaky — a clock or a rand here would make the
+// fixture proving the gate the gate's own first false positive.
+const marker = "second-run.marker"
+
+// TestPreExistingStable is declared at the merge-base as well as at HEAD, so
+// it is not new and the gate never reruns it.
+func TestPreExistingStable(t *testing.T) {
+	if Sum(2, 2) != 4 {
+		t.Fatal("Sum(2, 2) != 4")
+	}
+}
+
+// TestDeterministicNew is new at HEAD and agrees with itself across the two
+// runs, which is the whole of what the gate asks of a new test.
+func TestDeterministicNew(t *testing.T) {
+	if Sum(1, 2) != 3 {
+		t.Fatal("Sum(1, 2) != 3")
+	}
+}
+
+// TestFlakyNew is new at HEAD and disagrees with itself: it passes in the
+// process that finds no marker and leaves one behind, and fails in the next
+// process, which finds it.
+func TestFlakyNew(t *testing.T) {
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a second process saw the marker this test left behind")
+	}
+	if err := os.WriteFile(marker, []byte("1"), 0o600); err != nil {
+		t.Fatalf("writing the marker: %v", err)
+	}
+}
+
+// TestNewSubtests is new at HEAD and names its subtests at runtime, which is
+// why the top-level function is the unit the gate reruns: a report records
+// `TestNewSubtests/one`, and no parse of the source can enumerate that.
+func TestNewSubtests(t *testing.T) {
+	for _, n := range []string{"one", "two"} {
+		t.Run(n, func(t *testing.T) {
+			if Sum(1, 1) != 2 {
+				t.Fatal("Sum(1, 1) != 2")
+			}
+		})
+	}
+}

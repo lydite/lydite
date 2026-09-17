@@ -17,7 +17,9 @@ import (
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
+	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/typescript"
@@ -687,17 +689,83 @@ func TestNoScanDocumentRecordsNoFindingCountAtAll(t *testing.T) {
 	decl := component.File{Components: []component.Component{
 		{Name: "svc", Dir: "svc", Runner: "go-test"},
 	}}
-	perComponent, root := findingCounts(decl, config.Default(), nil, false)
+	perComponent, root := findingCounts(t.TempDir(), decl, config.Default(), nil, false)
 	if perComponent != nil || root != nil {
 		t.Errorf("findingCounts = %v / %v, want nothing recorded for a recording that read no scan", perComponent, root)
 	}
 	// And with a scan that read clean, the same declaration records noughts.
-	perComponent, root = findingCounts(decl, config.Default(), nil, true)
+	perComponent, root = findingCounts(t.TempDir(), decl, config.Default(), nil, true)
 	if got, ok := perComponent["svc"][golang.GateGosec]; !ok || got != 0 {
 		t.Errorf("gosec = %d (present %v), want a recorded nought for a clean scan", got, ok)
 	}
 	if got, ok := root[semgrep.Gate]; !ok || got != 0 {
 		t.Errorf("semgrep = %d (present %v), want a recorded nought for a clean scan", got, ok)
+	}
+	// The default configuration states no licence policy, so the gate ran over
+	// nothing and a nought for it would be the same invention.
+	if got, ok := perComponent["svc"][licence.Gate]; ok {
+		t.Errorf("licence = %d, want no key: no policy governs the component", got)
+	}
+}
+
+// A licence nought is seeded only where a policy governs the component.
+//
+// Go gates on the repository's own licence.policy.allow alone; a Rust component
+// gates on that or on its own deny.toml. A count seeded where neither applies
+// gives a repository that never turned the gate on the trend line of one whose
+// policy ran clean on every commit, which is absent-is-not-zero in the gate
+// whose configuration is most often left unset.
+func TestALicenceCountIsSeededOnlyWhereAPolicyGates(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "api", Dir: "api", Runner: runner.GoTest},
+		{Name: "svc", Dir: "svc", Runner: runner.CargoNextest},
+	}}
+	stated := config.Default()
+	stated.Licence.Policy.Allow = []string{"MIT"}
+
+	for _, tc := range []struct {
+		name  string
+		cfg   config.Config
+		deny  bool
+		wants map[string]bool // component name -> licence key expected
+	}{
+		{name: "no policy anywhere", cfg: config.Default(), wants: map[string]bool{"api": false, "svc": false}},
+		{name: "a stated policy", cfg: stated, wants: map[string]bool{"api": true, "svc": true}},
+		{name: "a consumer deny.toml alone", cfg: config.Default(), deny: true,
+			wants: map[string]bool{"api": false, "svc": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, c := range decl.Components {
+				if err := os.MkdirAll(filepath.Join(dir, c.Dir), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.deny {
+				if err := os.WriteFile(filepath.Join(dir, "svc", "deny.toml"), []byte("[licenses]\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			perComponent, _ := findingCounts(dir, decl, tc.cfg, nil, true)
+
+			for name, want := range tc.wants {
+				got, ok := perComponent[name][licence.Gate]
+				if ok != want {
+					t.Errorf("%s licence present = %v (%d), want %v", name, ok, got, want)
+				}
+				if ok && got != 0 {
+					t.Errorf("%s licence = %d, want a nought for a clean scan", name, got)
+				}
+			}
+			// The rest of each language's gate set is unaffected by the policy.
+			if _, ok := perComponent["api"][golang.GateGosec]; !ok {
+				t.Errorf("api = %v, want gosec recorded whatever the licence policy says", perComponent["api"])
+			}
+			if _, ok := perComponent["svc"][rust.GateClippy]; !ok {
+				t.Errorf("svc = %v, want clippy recorded whatever the licence policy says", perComponent["svc"])
+			}
+		})
 	}
 }
 
@@ -712,7 +780,7 @@ func TestNoScanDocumentRecordsNoFindingCountAtAll(t *testing.T) {
 func TestARootScopedClaimIsRecordedWithItsGateSwitchedOff(t *testing.T) {
 	cfg := config.Default()
 	cfg.Semgrep.Enabled = false
-	_, root := findingCounts(component.File{}, cfg, []finding.Finding{{
+	_, root := findingCounts(t.TempDir(), component.File{}, cfg, []finding.Finding{{
 		Gate: semgrep.Gate, Path: "svc/lib.go", Line: 2, Message: "tainted input",
 		Site: "rule\x1fn + 1",
 	}}, true)
@@ -822,7 +890,7 @@ func TestAComponentWithNoApplicableGateRecordsNoCount(t *testing.T) {
 	cfg.Semgrep.Enabled = false
 	cfg.Secrets.Enabled = false
 
-	perComponent, root := findingCounts(decl, cfg, nil, true)
+	perComponent, root := findingCounts(t.TempDir(), decl, cfg, nil, true)
 
 	if len(perComponent) != 0 {
 		t.Errorf("findingCounts = %v, want no component recorded: one declares its own command and the other's language is off", perComponent)
@@ -853,7 +921,7 @@ func TestEachRootScopedGateSeedsItsOwnNought(t *testing.T) {
 			cfg.Semgrep.Enabled = tc.semgrep
 			cfg.Secrets.Enabled = !tc.semgrep
 
-			_, root := findingCounts(component.File{}, cfg, nil, true)
+			_, root := findingCounts(t.TempDir(), component.File{}, cfg, nil, true)
 
 			if got, ok := root[tc.wants]; !ok || got != 0 {
 				t.Errorf("%s = %d (present %v), want a recorded nought for a clean scan", tc.wants, got, ok)

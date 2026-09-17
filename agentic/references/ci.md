@@ -52,7 +52,7 @@ pull-request jobs read is filled by `lydite-baseline.yml`, since a cache written
 branch is visible to every branch and one written on a branch is not.
 
 **Both lydite workflows shard.** `lydite-pr.yml` is `setup` → `plan` → `test` (a matrix, each job
-running `--affected --component <slice> --gate-coverage` under `contents: read`) → `merge` →
+running `--affected --component <slice> --gate-coverage --gate-flaky` under `contents: read`) → `merge` →
 `publish`. `plan`'s output feeds a second matrix beside it — `mutation` → `mutation-merge`, each
 job running `--affected --component <slice>` under the same read-only token — because a shard is
 the same conflict closure whichever command consumes it, and mutation shares a checkout with the

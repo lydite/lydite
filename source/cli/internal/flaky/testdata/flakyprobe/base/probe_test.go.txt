@@ -1,0 +1,11 @@
+package flakyprobe
+
+import "testing"
+
+// TestPreExistingStable is declared at the merge-base as well as at HEAD, so
+// it is not new and the gate never reruns it.
+func TestPreExistingStable(t *testing.T) {
+	if Sum(2, 2) != 4 {
+		t.Fatal("Sum(2, 2) != 4")
+	}
+}

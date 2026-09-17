@@ -245,6 +245,15 @@ lydite will not install `jest-junit` into a workspace it is about to gate, for t
 installs no coverage provider — so a jest component contributes no counts and says so. The plain
 variant asks for none of it: that is what mutation runs once per mutant.
 
+**`runner.GoJUnitPlain` is a fourth invocation, not a fourth `Variant`.** `--gate-flaky` reads a
+new test's first outcome out of run 1's own JUnit report, and under `--no-coverage` the plain
+variant is a bare `go test`, which writes none — so asking for the gate has to make the plain
+run write one whichever variant it ran. It is a function of its own rather than a widening of
+`Plain` itself, because the wrapper has to stay off `Plain` everywhere else: mutation runs it
+once per mutant ([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)), and a JUnit
+report written and discarded thousands of times is a process sitting in the way of the thing
+being timed.
+
 
 ## Output: captured, not streamed
 

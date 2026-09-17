@@ -95,6 +95,17 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		rep.Add(row)
 	}
 	problems = append(problems, componentRows(rep, decl, inputs, testLabel)...)
+	// The same rule the suite rows follow, because it is the same shape: every
+	// component takes exactly one flaky row from the shard responsible for it,
+	// whether or not that run was asked to gate. A component with none is a
+	// shard whose job died.
+	//
+	// Its problems say which gate they are about. A dead shard takes both of a
+	// component's rows with it, and two identical lines under `shards` read as
+	// the fold repeating itself rather than as two rows gone.
+	for _, problem := range componentRows(rep, decl, inputs, flakyLabel) {
+		problems = append(problems, "flaky: "+problem)
+	}
 	for _, c := range decl.Components {
 		for _, label := range []string{"coverage(" + c.Name + ")", "patch(" + c.Name + ")", "crap(" + c.Name + ")", "floor(" + c.Name + ")"} {
 			for _, row := range rowsFor(inputs, label) {
@@ -170,7 +181,7 @@ func foldedRow(label string, decl component.File) bool {
 		return true
 	}
 	for _, c := range decl.Components {
-		if label == testLabel(c.Name) || label == "coverage("+c.Name+")" ||
+		if label == testLabel(c.Name) || label == flakyLabel(c.Name) || label == "coverage("+c.Name+")" ||
 			label == "patch("+c.Name+")" || label == "crap("+c.Name+")" || label == "floor("+c.Name+")" {
 			return true
 		}

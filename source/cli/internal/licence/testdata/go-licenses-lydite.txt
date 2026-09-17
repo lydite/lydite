@@ -1,0 +1,85 @@
+E library.go:159] Package errors does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package fmt does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package bytes does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/base64 does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package io does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "math" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/math/dim_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/math/exp_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/math/floor_arm64.s
+E library.go:159] Package math does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "reflect" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/reflect/asm_arm64.s
+E library.go:159] Package reflect does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package regexp does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package sort does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package strconv does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package strings does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package sync does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package time does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package unicode does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package unicode/utf8 does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package os does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package path/filepath does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package path does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package archive/tar does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package compress/gzip does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package context does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package crypto/sha256 does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/hex does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package net/http does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package os/exec does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/json does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package embed does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "runtime" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/asm_ppc64x.h
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/funcdata.h
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/go_tls.h
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/textflag.h
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/tls_arm64.h
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/asm.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/asm_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/atomic_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/ints.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/memclr_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/memmove_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/preempt_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/rt0_darwin_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/secret_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/sys_darwin_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/runtime/tls_arm64.s
+E library.go:159] Package runtime does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package bufio does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package cmp does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/binary does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/gob does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package math/bits does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package slices does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "sync/atomic" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/sync/atomic/asm.s
+E library.go:159] Package sync/atomic does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package go/parser does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package go/token does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package unicode/utf16 does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package container/list does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package go/scanner does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package hash/fnv does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package go/ast does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package maps does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package net/url does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/xml does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package io/fs does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package encoding/csv does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package flag does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package net does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package text/template does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "os/signal" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/os/signal/sig.s
+E library.go:159] Package os/signal does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+W library.go:141] "syscall" contains non-Go code that can't be inspected for further dependencies:
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/syscall/asm_darwin_arm64.s
+$GOMODCACHE/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64/src/syscall/zsyscall_darwin_arm64.s
+E library.go:159] Package syscall does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+E library.go:159] Package testing does not have module info. Non go modules projects are no longer supported. For feedback, refer to https://github.com/google/go-licenses/issues/128.
+F main.go:75] some errors occurred when loading direct and transitive dependency packages

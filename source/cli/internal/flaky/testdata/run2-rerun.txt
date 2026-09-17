@@ -1,0 +1,7 @@
+✖  . (730ms)
+
+=== Failed
+=== FAIL: . TestFlakyNew (0.00s)
+    probe_test.go:34: a second process saw the marker this test left behind
+
+DONE 5 tests, 1 failure in 0.730s
