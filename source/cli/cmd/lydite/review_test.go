@@ -577,6 +577,23 @@ func TestReviewRefersADeclaredBreakEvenWithAnEmptyDiff(t *testing.T) {
 	if strings.Contains(out, "no changes against the base") {
 		t.Errorf("the summary must not read as a pass beside the refer row it contradicts, got:\n%s", out)
 	}
+	// The reason and detail text are their own claims, not just the row's
+	// status: naming an exemption outcome ("no exemption matched") would
+	// describe a step Decide never ran, since it returns before that loop on
+	// an empty diff, and the remedy must not tell the author the declaration
+	// is undroppable when they wrote it themselves.
+	if !strings.Contains(out, "no path in the diff at all") {
+		t.Errorf("the reason must not describe the exemption match, which never ran, got:\n%s", out)
+	}
+	if strings.Contains(out, "no exemption matched") || strings.Contains(out, "no exemptions declared") {
+		t.Errorf("the reason must not claim the exemption match ran, got:\n%s", out)
+	}
+	if strings.Contains(out, "not annotations a change can drop") {
+		t.Errorf("the remedy must not claim the declaration cannot be dropped, got:\n%s", out)
+	}
+	if !strings.Contains(out, "does not clear a real break") {
+		t.Errorf("the remedy must say what dropping the declaration actually does, got:\n%s", out)
+	}
 }
 
 // Squash merge makes the title the commit that lands, so a break declared

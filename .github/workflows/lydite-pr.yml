@@ -153,6 +153,12 @@ jobs:
   scan:
     name: scan
     needs: setup
+    # `edited` fires on a title, a body or a base-branch edit alike, and only
+    # the title is anything lydite reads: the referral job re-reads it below,
+    # and nothing here does. Skipped rather than run again over code an edit
+    # to the description did not touch — every job past `setup` and `referral`
+    # carries this same condition, for the same reason.
+    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -182,6 +188,7 @@ jobs:
   plan:
     name: plan
     needs: setup
+    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -213,6 +220,7 @@ jobs:
   test:
     name: test (${{ matrix.shard.name }})
     needs: [setup, plan]
+    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -315,6 +323,7 @@ jobs:
   mutation:
     name: mutation (${{ matrix.shard.name }})
     needs: [setup, plan]
+    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     # Longer than the test matrix on purpose: a mutant is a suite run, and a
     # component's budget is its mutant count times its own suite. Nothing caps
@@ -405,7 +414,9 @@ jobs:
   mutation-merge:
     name: mutation merge
     needs: [setup, plan, mutation]
-    if: always()
+    # always() so a shard that died still folds; the title condition beside it
+    # is `mutation`'s own, since a skipped `mutation` leaves nothing to fold.
+    if: always() && (github.event.action != 'edited' || github.event.changes.title)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -480,8 +491,9 @@ jobs:
     needs: [setup, plan, test]
     # Whatever the shards did. A shard that failed is exactly the run whose
     # fold a reader wants, and a shard that died is what the fold exists to
-    # report rather than to inherit as silence.
-    if: always()
+    # report rather than to inherit as silence. The title condition beside
+    # always() is `test`'s own: a skipped `test` leaves nothing to fold.
+    if: always() && (github.event.action != 'edited' || github.event.changes.title)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -563,8 +575,12 @@ jobs:
     needs: [setup, referral, scan, merge, mutation-merge]
     # Runs whatever the others did. A comment that only appears when everything
     # passed is a comment nobody needs: the run that failed is the one whose
-    # reader wants to know why.
-    if: always()
+    # reader wants to know why. The title condition beside always() matches
+    # scan/merge/mutation-merge's own: when those are skipped there is nothing
+    # new to render, and re-publishing from referral's report alone would
+    # overwrite the standing comment's scan/test/mutation sections with
+    # nothing rather than leave them as the last run actually found them.
+    if: always() && (github.event.action != 'edited' || github.event.changes.title)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
