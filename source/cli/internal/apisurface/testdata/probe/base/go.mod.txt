@@ -1,0 +1,3 @@
+module lydite.example/probe
+
+go 1.26

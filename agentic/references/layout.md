@@ -10,6 +10,8 @@ source/cli/internal/ui/           # the output grammar every command renders thr
                                   #   and the standing PR comment (see surface.md)
 source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see referral-and-clearance.md)
 source/cli/internal/clearance/    # the comment surface and the clearance decision (see referral-and-clearance.md)
+source/cli/internal/apisurface/   # a Go module's exported API, compared between two trees (see referral-and-clearance.md)
+source/cli/internal/declaration/  # the breaking-change claim, read from a commit message or PR title (see referral-and-clearance.md)
 source/cli/internal/threads/      # the review threads a located finding becomes: the marker, the
                                   #   delta, and the operations document two transports apply
                                   #   (see surface.md)

@@ -29,12 +29,16 @@ func newReviewCmd() *cobra.Command {
 		Short:         "Decide whether this change needs a human before it merges",
 		Long: `Decide whether this change needs a human before it merges.
 
-review runs no check. It compares the change against the exemptions declared
-in ` + referral.FileName + ` and reports one of two things: the change matches a
-declared shape and may merge unattended, or it is referred to a person.
+review compares the change against the exemptions declared in ` + referral.FileName + `
+and reports one of two things: the change matches a declared shape and may
+merge unattended, or it is referred to a person.
 
 A referral names no defect. With no exemptions declared, every change is
-referred — including a correct one.`,
+referred — including a correct one.
+
+It runs one check: for each component that declares api_surface, the exported
+API of its Go module is compared against the merge-base. A break this change
+did not declare fails, and a declared one is referred.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
@@ -59,6 +63,13 @@ referred — including a correct one.`,
 					Label:  "uncommitted changes",
 					Value:  "not included in this verdict",
 				})
+			}
+			// Before the decision is rendered, because a declared break and a
+			// surface nothing could be compared are both referrals, and they
+			// reach the report through the same disqualification the verdict
+			// line is derived from.
+			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
+				return err
 			}
 			addDecisionRows(report, decision, len(file.Exemptions))
 
@@ -148,7 +159,13 @@ func addDecisionRows(report *ui.Report, d referral.Decision, declared int) {
 	}
 
 	switch {
-	case d.Empty:
+	// Empty alone is not enough: the API-surface check can refer a change
+	// from its title or its commit messages with no path in the diff at all
+	// — an empty commit, or a title edited after the last push, which the
+	// `edited` trigger now re-runs on. Reading d.Empty on its own here would
+	// print a passing "no changes" row beside a refer row that just fired,
+	// contradicting the verdict this row states.
+	case d.Empty && !d.Referred:
 		report.Add(ui.Row{
 			Status: ui.StatusPass,
 			Label:  "referral",
@@ -172,6 +189,13 @@ func addDecisionRows(report *ui.Report, d referral.Decision, declared int) {
 
 func referralReason(d referral.Decision, declared int) string {
 	switch {
+	// Decide returns before the exemption match ever runs when the diff is
+	// empty, so a disqualification reaching the report here came from outside
+	// that loop entirely — the API-surface check's declaration or an
+	// uncomputable surface. Naming an exemption outcome would describe a step
+	// that never executed.
+	case d.Empty:
+		return "a disqualifier reached the change with no path in the diff at all"
 	case d.Exemption != "":
 		return fmt.Sprintf("%s matched, then disqualified", d.Exemption)
 	case declared == 0:
@@ -184,6 +208,12 @@ func referralReason(d referral.Decision, declared int) string {
 // referralDetail is the reason, then the cause, then a runnable next step,
 // per the copy rules in docs/design/tokens.md.
 func referralDetail(d referral.Decision, declared int) []string {
+	if d.Empty {
+		return []string{
+			"the disqualifier row above stands on its own evidence, not on a changed path",
+			remedyFor(d.Disqualifications),
+		}
+	}
 	if d.Exemption != "" {
 		return []string{
 			"a disqualifier vetoes any exemption, and cannot be cleared by the change that produced it",
@@ -214,14 +244,24 @@ func referralDetail(d referral.Decision, declared int) []string {
 // something that is not there, and the remedy is the single actionable line
 // in the whole report.
 func remedyFor(ds []referral.Disqualification) string {
-	annotations := false
+	annotations, declaredBreak := false, false
 	for _, d := range ds {
-		if d.Kind == "suppression added" || d.Kind == "test disabled" {
+		switch d.Kind {
+		case "suppression added", "test disabled":
 			annotations = true
+		case referral.DisqualificationAPIBreakDeclared:
+			declaredBreak = true
 		}
 	}
 	if annotations {
 		return "drop the annotation named above, or ask a human to clear this change"
+	}
+	// The author did write the declaration, unlike the vetoes below, but
+	// dropping it does not clear an actual break — it only turns this back
+	// into the undeclared-break gate. It is a way out of the referral only
+	// where nothing else made this change one.
+	if declaredBreak {
+		return "removing the declaration does not clear a real break, only which verdict it gets — ask a human to clear this change"
 	}
 	return "these are not annotations a change can drop — ask a human to clear this change"
 }

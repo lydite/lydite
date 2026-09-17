@@ -49,6 +49,17 @@ So `lydite review` ships the evidence-based set and not the claim-based one. The
 `!` marker returns alongside something that can catch its absence; until then,
 lydite does not detect API breaks and says nothing that implies otherwise.
 
+> The marker has returned, on the condition this section names.
+> [ADR 0040](0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
+> is the something that catches its absence, for Go: a component that opts in
+> has its exported API compared against the merge-base, and an undeclared break
+> **fails** as a gate. The rule below binds that detector unmodified — the
+> declaration is honoured only as a disqualifier, turning a detected break into
+> a referral and adding one where no break was detected. It can never clear the
+> gate, so rewriting `feat!:` as `feat:` no longer costs nothing. Rust and
+> TypeScript have no such detector yet, and the marker asserts nothing about
+> them.
+
 The general rule, which every future disqualifier and every future exemption
 condition has to satisfy:
 
