@@ -1047,3 +1047,18 @@ func TestCommitMessagesReturnsWholeMessagesOldestFirst(t *testing.T) {
 		t.Errorf("CommitMessages over an empty range = %q, %v, want no messages and no error", got, err)
 	}
 }
+
+// A range naming a revision git cannot resolve is an error, not an empty
+// slice — the two read alike to a caller that only checks length, and one of
+// them means "nothing declared a break" while the other means the range was
+// never read at all.
+func TestCommitMessagesErrorsOnAnUnresolvableRange(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if r := executil.Run(ctx, repo, "git", "init", "-b", "main", "."); !r.Ok() {
+		t.Fatalf("git init: %v\n%s", r.Err, r.Output)
+	}
+	if _, err := CommitMessages(ctx, repo, "0000000000000000000000000000000000000000", "HEAD"); err == nil {
+		t.Error("CommitMessages over an unknown revision must error")
+	}
+}

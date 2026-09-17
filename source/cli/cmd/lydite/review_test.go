@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
 )
@@ -647,5 +649,115 @@ func TestReviewReadsTheDeclarationFromThePullRequestTitle(t *testing.T) {
 	}
 	if !strings.Contains(out, "the pull request title") {
 		t.Errorf("the referral must name the source it read, got:\n%s", out)
+	}
+}
+
+// A malformed .lydite/components.yml is review's to refuse, the same way
+// scan and test already do — silently ignoring it would mean api_surface
+// opted a component in without anyone knowing whether the file was even
+// read.
+func TestReviewErrorsOnAMalformedComponentsFile(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName:  "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n",
+			component.FileName: "components:\n  - name: sdk\n    dir: sdk\n    runner: go-test\n    not_a_real_key: true\n",
+			"README.md":        "hello",
+		},
+		map[string]string{"README.md": "hello again"})
+
+	_, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatal("a malformed components.yml must fail the run, got nil")
+	}
+	var exit ui.ExitError
+	if errors.As(err, &exit) {
+		t.Errorf("a load error is not a verdict and must not carry an ExitError, got %v", err)
+	}
+}
+
+// A malformed .lydite/config.yml is only reached once a component opts in —
+// api_surface is the first thing in review that needs it at all.
+func TestReviewErrorsOnAMalformedConfigFile(t *testing.T) {
+	dir, base := reviewRepo(t, sdkBase(sdkOptIn),
+		map[string]string{
+			"sdk/api.go":    sdkAPI,
+			config.FileName: "coverage:\n  tolerance: -1\n",
+		})
+
+	_, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatal("a malformed config.yml must fail the run once a component opts in, got nil")
+	}
+}
+
+// A payload that cannot be read is warned about and treated as no title,
+// never fatal — the title can only add a referral, so failing the whole run
+// over an unreadable one would turn an additive source into a blocker.
+func TestPullRequestTitleWarnsOnAMalformedEvent(t *testing.T) {
+	var warn bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
+	if got := pullRequestTitle(&warn, missing); got != "" {
+		t.Errorf("pullRequestTitle(missing) = %q, want empty", got)
+	}
+	if !strings.Contains(warn.String(), "warning:") {
+		t.Errorf("a missing event file must be warned about, got %q", warn.String())
+	}
+
+	warn.Reset()
+	malformed := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(malformed, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pullRequestTitle(&warn, malformed); got != "" {
+		t.Errorf("pullRequestTitle(malformed) = %q, want empty", got)
+	}
+	if !strings.Contains(warn.String(), "warning:") {
+		t.Errorf("a malformed event file must be warned about, got %q", warn.String())
+	}
+}
+
+// A finding the loader could not place carries no path, and locate must
+// report its message on its own rather than joining an empty path onto the
+// component's directory, which would point at the directory as though it
+// were the file.
+func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
+	got := locate([]finding.Finding{{Message: "Removed: removed"}}, "sdk")
+	if len(got) != 1 || got[0] != "Removed: removed" {
+		t.Errorf("locate = %v, want the bare message", got)
+	}
+}
+
+// A directory that is not a git repository at all cannot be entered at any
+// prefix, so the failure is reported before a worktree is ever attempted.
+func TestBaseWorktreeFailsOutsideAGitRepository(t *testing.T) {
+	if _, _, err := baseWorktree(context.Background(), t.TempDir(), "HEAD"); err == nil {
+		t.Error("baseWorktree over a non-repository directory must fail")
+	}
+}
+
+// A base that resolves the repository but names no real commit fails at the
+// worktree checkout itself, and the temp directory it made is cleaned up
+// rather than left behind.
+func TestBaseWorktreeFailsOnAnUnknownCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if r := executil.RunQuiet(ctx, dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+		}
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "one")
+
+	_, _, err := baseWorktree(ctx, dir, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Error("baseWorktree over an unknown commit must fail")
 	}
 }

@@ -214,6 +214,23 @@ func TestCredentialFreeDropsAnythingTokenShaped(t *testing.T) {
 	}
 }
 
+// Compare names which side failed to load, since a caller reading "loading
+// x: y" has no way to tell the merge-base's tree from the head's without it.
+func TestCompareNamesWhichTreeFailedToLoad(t *testing.T) {
+	valid := module(t, map[string]string{
+		"go.mod":  "module lydite.example/one\n\ngo 1.26\n",
+		"root.go": "package one\n\n// Root stays.\nfunc Root() {}\n",
+	})
+	noGoMod := t.TempDir()
+
+	if _, err := Compare(noGoMod, valid, testGate, testComponent, nil); err == nil || !strings.Contains(err.Error(), "merge-base tree") {
+		t.Errorf("Compare with no base go.mod: err = %v, want it to name the merge-base tree", err)
+	}
+	if _, err := Compare(valid, noGoMod, testGate, testComponent, nil); err == nil || !strings.Contains(err.Error(), "head tree") {
+		t.Errorf("Compare with no head go.mod: err = %v, want it to name the head tree", err)
+	}
+}
+
 // module writes a tree of Go sources and answers where it wrote them.
 func module(t *testing.T, files map[string]string) string {
 	t.Helper()
