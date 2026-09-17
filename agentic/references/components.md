@@ -232,14 +232,27 @@ lydite will not install `jest-junit` into a workspace it is about to gate, for t
 installs no coverage provider — so a jest component contributes no counts and says so. The plain
 variant asks for none of it: that is what mutation runs once per mutant.
 
-**`runner.GoJUnitPlain` is a fourth invocation, not a fourth `Variant`.** `--gate-flaky` reads a
-new test's first outcome out of run 1's own JUnit report, and under `--no-coverage` the plain
-variant is a bare `go test`, which writes none — so asking for the gate has to make the plain
-run write one whichever variant it ran. It is a function of its own rather than a widening of
-`Plain` itself, because the wrapper has to stay off `Plain` everywhere else: mutation runs it
-once per mutant ([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)), and a JUnit
-report written and discarded thousands of times is a process sitting in the way of the thing
-being timed.
+**`runner.GoJUnitPlain`, `runner.CargoNextestJUnitPlain` and `runner.VitestJUnitPlain` are a
+fourth invocation per gated language, not a fourth `Variant`.** `--gate-flaky` reads a new
+test's first outcome out of run 1's own JUnit report, and under `--no-coverage` the plain
+variant is a bare `go test` / `cargo nextest run` / `vitest run`, which writes none — so asking
+for the gate has to make the plain run write one whichever variant it ran. Each is a function of
+its own rather than a widening of `Plain` itself, because the wrapper has to stay off `Plain`
+everywhere else: mutation runs it once per mutant
+([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)), and a JUnit report written and
+discarded thousands of times is a process sitting in the way of the thing being timed. jest gets
+none of the three: it has no JUnit reporter lydite will install, for the reason given above.
+
+**`--gate-flaky` covers cargo-nextest and vitest components on the same terms as `go test`**
+([ADR 0041](../../docs/adr/0041-a-new-test-is-rerun-in-rust-and-typescript-too.md)): one rerun
+per component, filtered to the tests a change declares as new, reading both runs' JUnit reports.
+A Rust or TypeScript test's identity in this gate is its report's `classname` and `name`
+together (`internal/junit.ReadOutcomesByClass`), because neither `cargo nextest`'s test binaries
+nor vitest's files share Go's scope — one process per package, one name per function inside
+it — so a name alone collides across them where it cannot for Go. Run 2's nextest report goes
+through a second, static reporting profile lydite's staged tool config declares
+(`[profile.rerun.junit]`), so it lands at `target/nextest/rerun/junit-rerun.xml` beside run 1's
+`target/nextest/default/junit.xml` rather than over it.
 
 
 ## Output: captured, not streamed
