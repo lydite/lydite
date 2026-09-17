@@ -126,6 +126,14 @@ func TestATitleOnlyARunCanProduceIsDeclaredUnreadable(t *testing.T) {
 // a function before the title, such as `.skipIf(cond)`, is recognised as one
 // by its shape and not by its name, and loses its title the same way `.each`
 // does.
+//
+// A call this table does not recognise is not a test itself, but the walk
+// still descends into it: a test declared inside a plain wrapper function is
+// found exactly as one declared inside a describe is. A test nested inside
+// another test's own callback is found the same way — an unusual shape, but
+// the walk does not stop descending just because it is already inside one
+// call it recognised. An empty title is a title: the shortest string literal
+// there is, and still readable.
 func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
 	rel := "src/modifiers.test.ts"
@@ -136,6 +144,10 @@ func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 		{Name: "two stacked modifiers still name it", Line: 19},
 		{Line: 23, Unreadable: true},
 		{Line: 27, Unreadable: true},
+		{Name: "nested inside a call this table does not recognise", Line: 32},
+		{Name: "outer test", Line: 37},
+		{Name: "nested inside another test's callback", Line: 38},
+		{Name: "", Line: 43},
 	})
 }
 

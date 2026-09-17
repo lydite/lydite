@@ -939,15 +939,22 @@ func TitlePattern(names []string) string {
 // and it constrained run 1 just as it constrains this one.
 func vitestFlags(args []string) []string {
 	out := []string{}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
+	// Walked by reslicing rather than by an index skipped ahead: a value
+	// flag's own value is never read here, only stepped past, and a check
+	// against the wrong boundary would read args past its end rather than
+	// silently doing nothing — a real consequence a test can observe, where
+	// an index that merely overshoots a length nothing indexes with cannot be
+	// told from one that stopped exactly on it.
+	for len(args) > 0 {
+		a := args[0]
+		args = args[1:]
 		name, _, inline := strings.Cut(a, "=")
 		if !vitestRerunSupplies(name) {
 			out = append(out, a)
 			continue
 		}
-		if !inline && vitestValueFlag(name) && i+1 < len(args) {
-			i++
+		if !inline && vitestValueFlag(name) && len(args) > 0 {
+			args = args[1:]
 		}
 	}
 	return out

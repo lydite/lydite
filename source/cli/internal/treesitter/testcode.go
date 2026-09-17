@@ -307,10 +307,10 @@ func (w *testWalk) typeScriptCall(n *gotreesitter.Node) (kind callKind, title st
 	case typeScriptCases[base]:
 		kind = testCase
 	default:
-		return notATest, "", false
+		return notATest, "", false // [lydite:exclude_from_mutation][the caller's switch branches on kind alone for notATest and never reads title or readable, so no pair spliced in here can be told from another]
 	}
 	if chained {
-		return kind, "", false
+		return kind, "", false // [lydite:exclude_from_mutation][readable=false here always sends the caller past title — a chained suite marks every descendant unreadable regardless of the prefix it built, and a chained case takes the branch that does not read title at all]
 	}
 	args := n.ChildByFieldName("arguments", w.language)
 	if args == nil || args.NamedChildCount() == 0 {
@@ -331,7 +331,7 @@ func (w *testWalk) typeScriptCallee(n *gotreesitter.Node) (base string, chained 
 	case "member_expression":
 		base, ok := w.baseIdentifierThroughModifiers(n)
 		if !ok {
-			return "", false
+			return "", false // [lydite:exclude_from_mutation][the caller looks this base up in typeScriptSuites and typeScriptCases, which "" fails the same way any other unrecognised name would, and chained is never read once that lookup fails]
 		}
 		return base, false
 	case "call_expression":
@@ -373,7 +373,7 @@ func (w *testWalk) baseIdentifierThroughModifiers(n *gotreesitter.Node) (string,
 		object := n.ChildByFieldName("object", w.language)
 		property := w.text(n.ChildByFieldName("property", w.language))
 		if object == nil || !typeScriptModifiers[property] {
-			return "", false
+			return "", false // [lydite:exclude_from_mutation][every caller destructures (base, ok) and reads base only when ok is true — this pair is only ever produced alongside ok=false, so its own content is discarded on arrival]
 		}
 		return w.baseIdentifierThroughModifiers(object)
 	default:
@@ -389,7 +389,7 @@ func (w *testWalk) baseIdentifierThroughModifiers(n *gotreesitter.Node) (string,
 // rerun a filter matching nothing and report the test as skipped.
 func (w *testWalk) stringLiteral(n *gotreesitter.Node) (string, bool) {
 	if n == nil || n.Type(w.language) != "string" {
-		return "", false
+		return "", false // [lydite:exclude_from_mutation][readable=false here sends every caller past title — typeScript's switch never reads a title beside a false readable, so the empty string is never compared or stored]
 	}
 	text := n.Text(w.src)
 	if len(text) < 2 || text[0] != text[len(text)-1] {
@@ -397,7 +397,7 @@ func (w *testWalk) stringLiteral(n *gotreesitter.Node) (string, bool) {
 	}
 	inner := text[1 : len(text)-1]
 	if strings.Contains(inner, `\`) {
-		return "", false
+		return "", false // [lydite:exclude_from_mutation][the same guard as above: readable=false is what a caller acts on, and no caller reads a title beside it]
 	}
 	return inner, true
 }

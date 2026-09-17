@@ -27,3 +27,19 @@ it.concurrent.each([[1], [2]])("row %i behind two modifiers", (n) => {
 it.skipIf(process.platform === "win32")("runs only where the condition allows it", () => {
   expect(1).toBe(1);
 });
+
+wrapper(() => {
+  it("nested inside a call this table does not recognise", () => {
+    expect(1).toBe(1);
+  });
+});
+
+it("outer test", () => {
+  it("nested inside another test's callback", () => {
+    expect(1).toBe(1);
+  });
+});
+
+it("", () => {
+  expect(1).toBe(1);
+});

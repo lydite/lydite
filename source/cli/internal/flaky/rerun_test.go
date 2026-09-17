@@ -595,6 +595,29 @@ func TestANameRunOneRecordsUnderNoClassnameIsUnmeasured(t *testing.T) {
 	}
 }
 
+// scopeRelative treats an empty scope the same as ".": both mean the rerun
+// runs at the component's own root, so a path is already relative to it. The
+// paths here are not ones a real caller would pass — Test.Path never carries
+// a leading "/" or "./" — but the function's own contract has to hold
+// regardless of what any one caller happens to send it, and only a path with
+// something to strip can tell "" and "." apart from a scope that expected a
+// prefix and did not get it.
+func TestScopeRelativeTreatsEmptyAndDotAsTheComponentsOwnRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope, path, want string
+	}{
+		{"an empty scope strips nothing", "", "/abs/path.ts", "/abs/path.ts"},
+		{"a dot scope strips nothing", ".", "./file.ts", "./file.ts"},
+		{"a real scope strips its own prefix", "libs/probe", "libs/probe/src/one.test.ts", "src/one.test.ts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scopeRelative(tc.scope, tc.path); got != tc.want {
+				t.Errorf("scopeRelative(%q, %q) = %q, want %q", tc.scope, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // captured is one of the reports internal/junit holds, read in the key space a
 // language whose names collide is compared in.
 func captured(t *testing.T, name string) map[string]junit.Outcome {
