@@ -1221,6 +1221,9 @@ func invocationFor(c component.Component, variant runner.Variant, gate *flakyGat
 		// and under --no-coverage a plain variant writes none. Asking for the
 		// gate therefore makes the run write one whichever variant it ran
 		// (ADR 0039, ADR 0041).
+		// cargo-llvm-cov-nextest is absent on purpose: its plain variant
+		// already runs through cargo-llvm-cov, which asks for the JUnit
+		// report unconditionally, so it needs no substitute here.
 		junitPlain := map[runner.Name]func([]string) (runner.Invocation, bool){
 			runner.GoTest:       runner.GoJUnitPlain,
 			runner.CargoNextest: runner.CargoNextestJUnitPlain,
@@ -1332,7 +1335,7 @@ func (g *flakyGate) gates(c component.Component) bool {
 // about to gate is a scanner changing what the repository resolves to.
 func gatedRunner(name runner.Name) bool {
 	switch name {
-	case runner.GoTest, runner.CargoNextest, runner.Vitest:
+	case runner.GoTest, runner.CargoNextest, runner.CargoLLVMCovNextest, runner.Vitest:
 		return true
 	}
 	return false
@@ -1417,7 +1420,11 @@ func (g *flakyGate) examine(ctx context.Context, root, dir string, c component.C
 // regexp — and an interface per call would say the same thing in more words.
 func flakyRerunner(c component.Component) (flaky.Identity, func(string, []flaky.Test) (runner.Invocation, bool)) {
 	switch c.Runner {
-	case runner.CargoNextest:
+	case runner.CargoNextest, runner.CargoLLVMCovNextest:
+		// The rerun is plain cargo-nextest either way: instrumentation is a
+		// runner substitution rather than a flag (ADR 0041), so a component
+		// whose ordinary variant already runs through cargo-llvm-cov reruns
+		// its new tests exactly as an uninstrumented one does.
 		return flaky.ByClassAndName, func(_ string, tests []flaky.Test) (runner.Invocation, bool) {
 			return runner.RustRerun(c.Args, flakyNames(tests))
 		}

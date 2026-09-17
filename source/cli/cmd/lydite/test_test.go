@@ -1261,8 +1261,8 @@ func TestWithoutTheFlagEveryComponentTakesAContextRow(t *testing.T) {
 // A repository that asked for the gate and got silence anywhere must be able
 // to see where. jest is the one runner with a reason of its own — it ships no
 // JUnit reporter and lydite will install none into the workspace it is about
-// to gate — and a runner the gate has no second run for says which. A raw
-// `command:` opts out of the derived variants the same way.
+// to gate. A raw `command:` opts out of the derived variants the same way, and
+// a runner lydite has never heard of says so generically.
 func TestTheFlakyGateNamesWhatItCannotExamine(t *testing.T) {
 	root := gitRepo(t, map[string]string{"web/package.json": `{"name":"web"}`})
 	for _, tc := range []struct {
@@ -1274,11 +1274,6 @@ func TestTheFlakyGateNamesWhatItCannotExamine(t *testing.T) {
 			name: "a jest component",
 			c:    component.Component{Name: "web", Dir: "web", Runner: runner.Jest},
 			want: "jest has no JUnit output lydite will install",
-		},
-		{
-			name: "a runner with no second run",
-			c:    component.Component{Name: "web", Dir: "web", Runner: runner.CargoLLVMCovNextest},
-			want: "no second run for a cargo-llvm-cov-nextest suite",
 		},
 		{
 			name: "a raw command",
@@ -1678,7 +1673,7 @@ func TestTheFlakyGateGatesTheRunnersItCanExamine(t *testing.T) {
 		{component.Component{Runner: runner.CargoNextest}, true},
 		{component.Component{Runner: runner.Vitest}, true},
 		{component.Component{Runner: runner.Jest}, false},
-		{component.Component{Runner: runner.CargoLLVMCovNextest}, false},
+		{component.Component{Runner: runner.CargoLLVMCovNextest}, true},
 		{component.Component{Runner: "bogus"}, false},
 		{component.Component{Runner: runner.Vitest, Command: []string{"make", "test"}}, false},
 	} {
