@@ -64,8 +64,30 @@ per process. Over twenty processes it produced six distinct orders, every one a 
 same cycle and six of them ascending; under `-test.count=2`, three of six processes drew the
 identical order in both passes.
 
-It is the measurement behind the ADR's refusal to fold the rerun into run 1 as `-count=2`: a
+It is the measurement behind ADR 0039's refusal to fold the rerun into run 1 as `-count=2`: a
 second iteration inside one process is not a second sample of anything that process fixed once.
 The numbers are of one machine and one Go version and are recorded because the decision rests on
 them being measured rather than assumed. `seedprobe` prints and asserts nothing, so it is evidence
 rather than a test — an assertion about map order is the flake, not the check for it.
+
+## `nextestprobe/` and `vitestprobe/`
+
+The Rust and TypeScript probes
+[ADR 0041](../../../../../docs/adr/0041-a-new-test-is-rerun-in-rust-and-typescript-too.md) decides
+on. Each holds the shapes a language's test names can take that the repository's own suites do not:
+a name declared in two nextest binaries and a title declared in two vitest files, a nested `mod` and
+a nested `describe`, `#[tokio::test]` and `#[ignore]`, a `test.each`, a template-literal title, and
+a title made of regex metacharacters.
+
+Their captured reports are in [`../../junit/testdata/`](../../junit/testdata/), whose README says
+what each one shows and how it was taken. Sources carry a `.txt` suffix for the reason
+`flakyprobe/`'s do.
+
+## `nextest-tool-config-shadowed.txt`
+
+Two runs over `nextestprobe/` given a `.config/nextest.toml` of its own declaring
+`[profile.default.junit] path = "repo-owned.xml"`, with lydite's tool config passed beside it. The
+repository's file wins for the profile it declares and only that one: the default profile writes
+`target/nextest/default/repo-owned.xml` and no `junit.xml`, while `rerun` still writes lydite's
+`junit-rerun.xml`. It is why a shadowed profile is a named `unmeasured` reason rather than a report
+lydite goes looking for and does not find.

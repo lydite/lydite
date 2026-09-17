@@ -158,9 +158,10 @@ each of these is a count and a reason in the row's detail, never a silent drop a
   a test skipped in one run and run in the other *is* a disagreement and fails the gate.
 - **A merge-base that will not resolve.** There is no "new" without it, and the whole row is
   `unmeasured`, the way `--gate-coverage` already fails towards a named cause.
-- **A component whose runner is not Go.** `unmeasured`, naming the language. Rust and TypeScript
-  are a later slice, and a repository that asked for the gate and got silence in two of its three
-  languages must be able to see that it did.
+- **A component whose runner is not Go.** `unmeasured`, naming the language. A repository that
+  asked for the gate and got silence in two of its three languages must be able to see that it
+  did. [ADR 0041](0041-a-new-test-is-rerun-in-rust-and-typescript-too.md) covers cargo-nextest
+  and vitest on these same terms, leaving jest the one runner this answer still names.
 
 ## The flag, the row, and the finding
 
@@ -227,9 +228,10 @@ issue, with its own measurement.
   to whoever meets it first.
 - The `flaky` row is green on a change that modified an existing test into a coin flip. The set
   difference cannot see it, and nothing else in the pipeline can either.
-- Rust and TypeScript components render `unmeasured` under `--gate-flaky` until the next slice. A
-  repository with no Go component gets an entirely amber gate, which is a truthful report of a gate
-  that covers none of its code.
+- A component this slice's parser cannot enumerate renders `unmeasured` under `--gate-flaky`, and a
+  repository with none it can gets an entirely amber gate — a truthful report of a gate that covers
+  none of its code. [ADR 0041](0041-a-new-test-is-rerun-in-rust-and-typescript-too.md) settles what
+  enumerating, filtering and reporting mean for cargo-nextest and vitest.
 - The probe under `source/cli/internal/flaky/testdata/` is deterministically flaky, by a marker
   file rather than a clock or a generator. A probe that flakes at random would make the test that
   proves this gate the gate's own first false positive.
