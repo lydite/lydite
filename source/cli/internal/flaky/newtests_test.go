@@ -678,6 +678,7 @@ func TestAnUnrecognisedRustAttributeIsUnreadable(t *testing.T) {
 	want := []Test{
 		{Scope: ".", Name: "", Path: "src/lib.rs", Line: 18, Unreadable: true},
 		{Scope: ".", Name: "tests::doubles", Path: "src/lib.rs", Line: 12},
+		{Scope: ".", Name: "tests::doubles_on_multi_thread", Path: "src/lib.rs", Line: 23},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)

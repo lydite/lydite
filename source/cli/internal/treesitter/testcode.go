@@ -240,11 +240,22 @@ func (w *testWalk) rustAttributes(n *gotreesitter.Node) (recognised, attributed 
 			return recognised, attributed
 		}
 		attributed = true
-		if rustTestAttributes[strings.ToLower(compact(p.Text(w.src)))] {
+		if rustTestAttributes[strings.ToLower(attributePath(compact(p.Text(w.src))))] {
 			recognised = true
 		}
 	}
 	return recognised, attributed
+}
+
+// attributePath is an attribute's path with any argument list dropped:
+// `#[tokio::test(flavor="multi_thread")]` names the same attribute as
+// `#[tokio::test]` — the arguments configure the runtime, not which attribute
+// it is — so a comparison against rustTestAttributes must not see them.
+func attributePath(compact string) string {
+	if i := strings.IndexByte(compact, '('); i != -1 && strings.HasSuffix(compact, ")]") {
+		return compact[:i] + "]"
+	}
+	return compact
 }
 
 // typeScript enumerates the tests under n, prefixed by every enclosing
@@ -324,11 +335,15 @@ func (w *testWalk) typeScriptCallee(n *gotreesitter.Node) (base string, chained 
 		}
 		return base, false
 	case "call_expression":
+		// Any modifier that returns a function before the title and body are
+		// given — `.each([...])`, `.skipIf(cond)`, `.runIf(cond)` and
+		// whichever of these vitest adds next — is chained. The property name
+		// is not checked against a fixed list: what marks a call as one of
+		// these is the shape (a call on a call on a recognised base), not
+		// which word it spells, so a modifier this table has never seen is
+		// still recognised as one rather than read as not a test at all.
 		inner := n.ChildByFieldName("function", w.language)
 		if inner == nil || inner.Type(w.language) != "member_expression" {
-			return "", false
-		}
-		if w.text(inner.ChildByFieldName("property", w.language)) != "each" {
 			return "", false
 		}
 		object := inner.ChildByFieldName("object", w.language)

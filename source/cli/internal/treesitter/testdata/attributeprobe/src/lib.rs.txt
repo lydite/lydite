@@ -19,6 +19,11 @@ mod tests {
         assert_eq!(double(n), want);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn doubles_on_multi_thread() {
+        assert_eq!(double(4), 8);
+    }
+
     fn helper() -> i32 {
         1
     }

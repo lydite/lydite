@@ -75,12 +75,15 @@ func TestATestBehindASecondAttributeIsStillDeclared(t *testing.T) {
 // itself, so a function carrying one inside test code is declared with its
 // name unreadable rather than assumed inert. A function with no attribute at
 // all is a helper no runner names, and an attribute on shipped code says
-// nothing about tests.
+// nothing about tests. A recognised attribute carrying its own arguments —
+// `#[tokio::test(flavor = "multi_thread")]` — is still recognised: the
+// arguments configure the runtime, not which attribute it is.
 func TestAnUnrecognisedRustAttributeIsDeclaredUnreadable(t *testing.T) {
 	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
 	assertDeclared(t, "src/lib.rs", declared(t, runner.Rust, tree, "src/lib.rs"), []DeclaredTest{
 		{Name: "tests::doubles", Line: 12},
 		{Line: 18, Unreadable: true},
+		{Name: "tests::doubles_on_multi_thread", Line: 23},
 	})
 }
 
@@ -119,7 +122,10 @@ func TestATitleOnlyARunCanProduceIsDeclaredUnreadable(t *testing.T) {
 // `.skip` and `.only` select how a test runs without changing what it is
 // called, however many of them are stacked; `.each` expands its title per
 // row, and takes the tests written inside it with it — whether it is reached
-// directly or through another modifier first.
+// directly or through another modifier first. Any other modifier that returns
+// a function before the title, such as `.skipIf(cond)`, is recognised as one
+// by its shape and not by its name, and loses its title the same way `.each`
+// does.
 func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
 	rel := "src/modifiers.test.ts"
@@ -129,6 +135,7 @@ func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 		{Line: 15, Unreadable: true},
 		{Name: "two stacked modifiers still name it", Line: 19},
 		{Line: 23, Unreadable: true},
+		{Line: 27, Unreadable: true},
 	})
 }
 

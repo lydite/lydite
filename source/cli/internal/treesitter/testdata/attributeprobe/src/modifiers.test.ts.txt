@@ -23,3 +23,7 @@ it.concurrent.skip("two stacked modifiers still name it", () => {
 it.concurrent.each([[1], [2]])("row %i behind two modifiers", (n) => {
   expect(n).toBe(n);
 });
+
+it.skipIf(process.platform === "win32")("runs only where the condition allows it", () => {
+  expect(1).toBe(1);
+});
