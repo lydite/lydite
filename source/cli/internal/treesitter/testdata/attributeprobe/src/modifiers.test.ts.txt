@@ -1,0 +1,17 @@
+import { describe, expect, it, test } from "vitest";
+
+describe.only("selected", () => {
+  it.skip("is named the same as an unskipped one", () => {
+    expect(1).toBe(1);
+  });
+});
+
+describe.each([[1], [2]])("row %i", () => {
+  it("is named under a describe nothing can name", () => {
+    expect(1).toBe(1);
+  });
+});
+
+test("carries an escape \" nothing decodes", () => {
+  expect(1).toBe(1);
+});

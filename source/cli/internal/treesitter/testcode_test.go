@@ -1,0 +1,160 @@
+package treesitter
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"lydite/lydite/internal/fixture"
+	"lydite/lydite/internal/runner"
+)
+
+// declared enumerates one file of a materialised probe tree. The path handed
+// to the enumerator is relative to the probe's own root, because that is what
+// the test-code conventions read.
+func declared(t *testing.T, lang runner.Lang, tree, rel string) []DeclaredTest {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests, err := DeclaredTests(lang, rel, src)
+	if err != nil {
+		t.Fatalf("%s: %v", rel, err)
+	}
+	return tests
+}
+
+func assertDeclared(t *testing.T, rel string, got, want []DeclaredTest) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: %d test(s), want %d: %+v", rel, len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("%s: test %d is %+v, want %+v", rel, i, got[i], w)
+		}
+	}
+}
+
+// The names cargo-nextest reports for this probe, cross-checked against
+// internal/junit/testdata/nextest-suite.xml: a unit test is qualified by every
+// module it is written in, `#[cfg(test)] mod tests` included, and an
+// integration test by the modules inside its own file alone.
+func TestTheNextestProbeDeclaresTheNamesNextestReports(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "flaky", "testdata", "nextestprobe"))
+	assertDeclared(t, "src/lib.rs", declared(t, runner.Rust, tree, "src/lib.rs"), []DeclaredTest{
+		{Name: "tests::doubles", Line: 10},
+		{Name: "tests::nested::doubles_deeper", Line: 18},
+	})
+	assertDeclared(t, "tests/a.rs", declared(t, runner.Rust, tree, "tests/a.rs"), []DeclaredTest{
+		{Name: "shared_name", Line: 2},
+		{Name: "inner::only_in_a", Line: 8},
+	})
+	assertDeclared(t, "tests/b.rs", declared(t, runner.Rust, tree, "tests/b.rs"), []DeclaredTest{
+		{Name: "shared_name", Line: 2},
+	})
+}
+
+// `#[test] #[ignore] fn` leaves `#[ignore]` as the function's immediate
+// preceding sibling, so a check of that one sibling alone reads a test as no
+// test. The whole run of attributes above the function is read.
+//
+// It is enumerated whether or not it runs: an ignored test is declared, and
+// what became of it is the report's answer rather than the parser's.
+func TestATestBehindASecondAttributeIsStillDeclared(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "flaky", "testdata", "nextestprobe"))
+	assertDeclared(t, "tests/c.rs", declared(t, runner.Rust, tree, "tests/c.rs"), []DeclaredTest{
+		{Name: "async_cases::awaits_and_agrees", Line: 3},
+		{Name: "ignored_by_attribute", Line: 10},
+	})
+}
+
+// An attribute macro lydite does not recognise names the tests it generates
+// itself, so a function carrying one inside test code is declared with its
+// name unreadable rather than assumed inert. A function with no attribute at
+// all is a helper no runner names, and an attribute on shipped code says
+// nothing about tests.
+func TestAnUnrecognisedRustAttributeIsDeclaredUnreadable(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
+	assertDeclared(t, "src/lib.rs", declared(t, runner.Rust, tree, "src/lib.rs"), []DeclaredTest{
+		{Name: "tests::doubles", Line: 12},
+		{Line: 18, Unreadable: true},
+	})
+}
+
+// The titles vitest reports for this probe, cross-checked against
+// internal/junit/testdata/vitest-probe-suite.xml: every enclosing describe's
+// title joined to the test's own with " > ", and a title containing regex
+// metacharacters read as the text it is.
+func TestTheVitestProbeDeclaresTheTitlesVitestReports(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "flaky", "testdata", "vitestprobe"))
+	assertDeclared(t, "src/one.test.ts", declared(t, runner.TypeScript, tree, "src/one.test.ts"), []DeclaredTest{
+		{Name: "outer > inner > holds a title two describes deep", Line: 5},
+		{Name: "outer > holds a title one describe deep", Line: 10},
+		{Name: "shared title", Line: 15},
+		{Name: "matches ^a (b) [c] + d$", Line: 19},
+		{Line: 24, Unreadable: true},
+		{Line: 28, Unreadable: true},
+	})
+	assertDeclared(t, "src/two.test.ts", declared(t, runner.TypeScript, tree, "src/two.test.ts"), []DeclaredTest{
+		{Name: "shared title", Line: 3},
+	})
+}
+
+// A template literal and a `test.each` row are named only once the file has
+// run. Each is declared at its line with no name, never skipped and never
+// guessed at: a guess gives the rerun a filter matching nothing, and a skip
+// gives a green row for a test nothing looked at.
+func TestATitleOnlyARunCanProduceIsDeclaredUnreadable(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "flaky", "testdata", "vitestprobe"))
+	for _, test := range declared(t, runner.TypeScript, tree, "src/one.test.ts") {
+		if (test.Line == 24 || test.Line == 28) && (!test.Unreadable || test.Name != "") {
+			t.Errorf("line %d declared %+v, want a test with no readable name", test.Line, test)
+		}
+	}
+}
+
+// `.skip` and `.only` select how a test runs without changing what it is
+// called; `.each` expands its title per row, and takes the tests written
+// inside it with it.
+func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
+	rel := "src/modifiers.test.ts"
+	assertDeclared(t, rel, declared(t, runner.TypeScript, tree, rel), []DeclaredTest{
+		{Name: "selected > is named the same as an unskipped one", Line: 4},
+		{Line: 10, Unreadable: true},
+		{Line: 15, Unreadable: true},
+	})
+}
+
+// A file the grammar could not read is an error and never an empty answer: a
+// parse failure is not a file declaring no tests, and a gate reading it as one
+// goes green on the change that broke the parser.
+func TestAFileTheGrammarCannotReadIsAnError(t *testing.T) {
+	for _, c := range []struct {
+		lang runner.Lang
+		rel  string
+		src  string
+	}{
+		{runner.Rust, "tests/broken.rs", "#[test]\nfn unbalanced( {\n"},
+		{runner.TypeScript, "src/broken.test.ts", "it(\"unbalanced\", () => {\n"},
+	} {
+		got, err := DeclaredTests(c.lang, c.rel, []byte(c.src))
+		var unparsed ErrUnparsed
+		if !errors.As(err, &unparsed) {
+			t.Errorf("%s: %d test(s) and error %v, want ErrUnparsed", c.rel, len(got), err)
+		}
+	}
+}
+
+// A language lydite holds no tree-sitter tables for is named rather than
+// reported as a file declaring nothing.
+func TestDeclaredTestsRefusesALanguageWithNoGrammar(t *testing.T) {
+	_, err := DeclaredTests(runner.Go, "pkg/thing_test.go", []byte("package pkg\n"))
+	var noGrammar ErrNoGrammar
+	if !errors.As(err, &noGrammar) {
+		t.Fatalf("Go came back with %v, want ErrNoGrammar", err)
+	}
+}
