@@ -436,6 +436,19 @@ func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
 		t.Errorf("components = %+v, want the declaration read as written", lenient.Components)
 	}
 
+	// api_surface on a non-Go component is Load's rejection to make, not
+	// LoadHistorical's: the coverage baseline that calls LoadHistorical never
+	// reads api_surface, and a base tree carrying it — set before the
+	// component's runner changed, or before this repository's own history —
+	// must still be measurable.
+	nonGo := "components:\n  - {name: svc, dir: svc, runner: cargo-nextest, api_surface: {}}\n"
+	if _, err := Load(write(t, nonGo)); err == nil {
+		t.Error("Load accepted api_surface on a non-Go component")
+	}
+	if _, err := LoadHistorical(write(t, nonGo)); err != nil {
+		t.Errorf("LoadHistorical refused a historical tree over api_surface, which it never reads: %v", err)
+	}
+
 	// Everything that makes a declaration runnable is still checked, because
 	// a tree that cannot be run cannot be measured either.
 	for name, body := range map[string]string{

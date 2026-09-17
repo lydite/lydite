@@ -251,12 +251,17 @@ func loadTree(dir string, env []string) (*tree, error) {
 		Mode: packages.NeedName | packages.NeedTypes | packages.NeedTypesInfo |
 			packages.NeedSyntax | packages.NeedImports | packages.NeedDeps,
 		Dir: dir,
-		// A tree outside this module must not be read through this module's
-		// workspace, and must resolve against its own go.mod. GOWORK is set
-		// last, since the last occurrence of a key is the one a child process
+		// packages.Load runs the go tool over a tree the change under review
+		// controls, inside a job that holds a token this package must not let
+		// that tree reach. credentialFree drops anything token-shaped from the
+		// inherited environment before a caller's own env or GOWORK is
+		// layered over it, and CGO_ENABLED=0 is set last of all so the tree
+		// cannot turn a build flag into arbitrary code running with
+		// whatever's left in the environment. GOWORK is set last of the
+		// rest, since the last occurrence of a key is the one a child process
 		// reads and a caller's environment must not be able to reinstate a
 		// workspace.
-		Env:   append(append(os.Environ(), env...), "GOWORK=off"),
+		Env:   append(append(credentialFree(os.Environ()), env...), "GOWORK=off", "CGO_ENABLED=0"),
 		Tests: false,
 	}
 	loaded, err := packages.Load(cfg, "./...")
@@ -278,6 +283,43 @@ func loadTree(dir string, env []string) (*tree, error) {
 		t.packages[strings.TrimPrefix(loadedPkg.PkgPath, module)] = p
 	}
 	return t, nil
+}
+
+// credentialToken is what a key is checked for, case-insensitively, to decide
+// whether it might carry a secret. Broad on purpose: this filters the
+// environment handed to a build run over code the change under review
+// controls, so a variable let through by mistake is worse than one held back
+// that the load never needed.
+var credentialTokens = []string{"TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL"}
+
+// credentialFree drops every entry of env whose key looks like it might carry
+// a secret.
+//
+// packages.Load runs the go tool, and with it any code the tree under
+// comparison declares, over a tree the pull request being reviewed controls —
+// inside review, which holds a token that can write the referral status
+// clearance depends on. Handing that token to a build of untrusted code is
+// exactly what CONTEXT.md's Relay entry and this repository's workflows both
+// forbid a job running the change's own code from doing, so nothing
+// token-shaped reaches the loader regardless of what the caller passes
+// alongside it.
+func credentialFree(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		upper := strings.ToUpper(key)
+		suspect := false
+		for _, token := range credentialTokens {
+			if strings.Contains(upper, token) {
+				suspect = true
+				break
+			}
+		}
+		if !suspect {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // modulePath reads the module the tree declares, rather than assuming the

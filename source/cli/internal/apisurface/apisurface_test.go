@@ -162,6 +162,35 @@ func TestCompareRefusesAMovedModulePath(t *testing.T) {
 	}
 }
 
+// The loader runs the go tool over a tree the change under review controls,
+// inside a job that holds a token that can write the referral status
+// clearance depends on. Nothing token-shaped may reach it, whatever the
+// caller's own environment carries or the ambient process exports.
+func TestCredentialFreeDropsAnythingTokenShaped(t *testing.T) {
+	in := []string{
+		"GITHUB_TOKEN=ghs_secret",
+		"GH_TOKEN=ghp_secret",
+		"AWS_SECRET_ACCESS_KEY=aws",
+		"API_KEY=k",
+		"DB_PASSWORD=p",
+		"SOME_CREDENTIAL=c",
+		"github_token=lowercase-still-counts",
+		"PATH=/usr/bin",
+		"HOME=/root",
+		"GOFLAGS=-mod=mod",
+	}
+	got := credentialFree(in)
+	want := []string{"PATH=/usr/bin", "HOME=/root", "GOFLAGS=-mod=mod"}
+	if len(got) != len(want) {
+		t.Fatalf("credentialFree(%v) = %v, want %v", in, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // module writes a tree of Go sources and answers where it wrote them.
 func module(t *testing.T, files map[string]string) string {
 	t.Helper()

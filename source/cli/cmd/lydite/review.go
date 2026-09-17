@@ -159,7 +159,13 @@ func addDecisionRows(report *ui.Report, d referral.Decision, declared int) {
 	}
 
 	switch {
-	case d.Empty:
+	// Empty alone is not enough: the API-surface check can refer a change
+	// from its title or its commit messages with no path in the diff at all
+	// — an empty commit, or a title edited after the last push, which the
+	// `edited` trigger now re-runs on. Reading d.Empty on its own here would
+	// print a passing "no changes" row beside a refer row that just fired,
+	// contradicting the verdict this row states.
+	case d.Empty && !d.Referred:
 		report.Add(ui.Row{
 			Status: ui.StatusPass,
 			Label:  "referral",

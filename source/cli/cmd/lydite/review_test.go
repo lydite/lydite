@@ -537,6 +537,48 @@ func TestReviewRefersADeclarationWithNothingCompared(t *testing.T) {
 	}
 }
 
+// d.Empty alone is not "nothing to report": the API-surface check can refer a
+// change from its commit messages with no path in the diff at all — an empty
+// commit, or (since the edited trigger re-runs the whole check) a title
+// edited after the last push with no new commit either. The summary row must
+// not read as a pass next to the refer row the declaration produced.
+func TestReviewRefersADeclaredBreakEvenWithAnEmptyDiff(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		r := executil.RunQuiet(ctx, dir, "git", args...)
+		if !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+		}
+		return strings.TrimSpace(r.Output)
+	}
+	exemptions := "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n"
+	run("init", "-b", "main")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, referral.FileName)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, referral.FileName), []byte(exemptions), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "base")
+	base := run("rev-parse", "HEAD")
+	// No path changes at all — an empty commit, carrying only the declaration.
+	run("commit", "--allow-empty", "-m", "feat!: nothing changed, but say so anyway")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred even with an empty diff (exit 2), got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, "no changes against the base") {
+		t.Errorf("the summary must not read as a pass beside the refer row it contradicts, got:\n%s", out)
+	}
+}
+
 // Squash merge makes the title the commit that lands, so a break declared
 // only there — in commits that are about to be squashed away — still refers.
 func TestReviewReadsTheDeclarationFromThePullRequestTitle(t *testing.T) {

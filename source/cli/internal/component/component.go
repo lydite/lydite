@@ -294,7 +294,7 @@ func (f File) validate(source string, strict bool) error {
 		if err := validateWatch(where, c.Watch); err != nil {
 			return err
 		}
-		if err := validateAPISurface(where, c); err != nil {
+		if err := validateAPISurface(where, c, strict); err != nil {
 			return err
 		}
 	}
@@ -426,8 +426,15 @@ func validateInvocation(where string, c Component) error {
 // validateInvocation having already run: a command-invoked component
 // declares no language either, and Lang() answers "" for it the same way it
 // does for an unknown runner.
-func validateAPISurface(where string, c Component) error {
-	if c.APISurface == nil {
+//
+// Only when this tree is the one being configured, the same reason
+// validateName is gated the same way: a historical tree is being measured
+// rather than distributed, and LoadHistorical's only caller — the coverage
+// baseline — never reads api_surface. Enforcing it there would abort a
+// baseline measurement over a key that tree's author cannot act on, which is
+// exactly the migration failure LoadHistorical exists to refuse.
+func validateAPISurface(where string, c Component, strict bool) error {
+	if !strict || c.APISurface == nil {
 		return nil
 	}
 	if c.Lang() != runner.Go {
