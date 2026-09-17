@@ -730,8 +730,12 @@ func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
 // A directory that is not a git repository at all cannot be entered at any
 // prefix, so the failure is reported before a worktree is ever attempted.
 func TestBaseWorktreeFailsOutsideAGitRepository(t *testing.T) {
-	if _, _, err := baseWorktree(context.Background(), t.TempDir(), "HEAD"); err == nil {
-		t.Error("baseWorktree over a non-repository directory must fail")
+	root, _, err := baseWorktree(context.Background(), t.TempDir(), "HEAD")
+	if err == nil {
+		t.Fatal("baseWorktree over a non-repository directory must fail")
+	}
+	if root != "" {
+		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
 	}
 }
 
@@ -756,8 +760,11 @@ func TestBaseWorktreeFailsOnAnUnknownCommit(t *testing.T) {
 	run("add", "-A")
 	run("commit", "-m", "one")
 
-	_, _, err := baseWorktree(ctx, dir, "0000000000000000000000000000000000000000")
+	root, _, err := baseWorktree(ctx, dir, "0000000000000000000000000000000000000000")
 	if err == nil {
-		t.Error("baseWorktree over an unknown commit must fail")
+		t.Fatal("baseWorktree over an unknown commit must fail")
+	}
+	if root != "" {
+		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
 	}
 }

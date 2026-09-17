@@ -231,6 +231,23 @@ func TestCompareNamesWhichTreeFailedToLoad(t *testing.T) {
 	}
 }
 
+// modulePath on error returns no path at all, checked directly since
+// Compare and loadTree both discard the string the moment err is non-nil —
+// a caller reading only their own error message can't tell an empty path
+// from a wrong one.
+func TestModulePathErrorsWithNoPath(t *testing.T) {
+	if path, err := modulePath(t.TempDir()); err == nil || path != "" {
+		t.Errorf("modulePath(no go.mod) = %q, %v, want empty path and an error", path, err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("go 1.26\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if path, err := modulePath(dir); err == nil || path != "" {
+		t.Errorf("modulePath(no module line) = %q, %v, want empty path and an error", path, err)
+	}
+}
+
 // module writes a tree of Go sources and answers where it wrote them.
 func module(t *testing.T, files map[string]string) string {
 	t.Helper()
