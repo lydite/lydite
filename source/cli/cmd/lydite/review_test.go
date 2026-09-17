@@ -445,6 +445,38 @@ func TestReviewRefersADeclaredAPIBreak(t *testing.T) {
 	if strings.Contains(out, "undeclared") {
 		t.Errorf("a declared break must not also fire the gate:\n%s", out)
 	}
+	// The disqualification row above is the verdict; this one is what a
+	// reader actually reviews — the break itself, not the claim that there
+	// is one. Removing it would leave the report saying something broke
+	// without ever saying what.
+	if !strings.Contains(out, gateAPISurface+"(sdk)") || !strings.Contains(out, ", declared") {
+		t.Errorf("the per-component row naming the declared break is missing, got:\n%s", out)
+	}
+	if !strings.Contains(out, "merge-base sdk/api.go") {
+		t.Errorf("a removed symbol must be located at its merge-base declaration, got:\n%s", out)
+	}
+}
+
+// A symbol that changed but was not removed is located in the head's own
+// tree, never the merge-base's — a reader who opens the path this names
+// must find the line that means what the report says, and the merge-base's
+// copy is not that line for anything still there.
+func TestReviewLocatesAChangedSymbolAtHead(t *testing.T) {
+	dir, base := reviewRepoSaying(t, sdkBase(sdkOptIn),
+		map[string]string{"sdk/api.go": "package sdk\n\n// Do runs the thing.\nfunc Do(n int, extra string) error { return nil }\n"},
+		"feat(sdk)!: widen Do's signature")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "sdk/api.go:4") {
+		t.Errorf("a changed-but-present symbol must be located in the head tree, got:\n%s", out)
+	}
+	if strings.Contains(out, "merge-base sdk/api.go") {
+		t.Errorf("a symbol still in head must not be located at the merge-base, got:\n%s", out)
+	}
 }
 
 // Ordinary growth is not a break. An added function is a compatible change,

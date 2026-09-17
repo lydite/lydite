@@ -277,8 +277,15 @@ func loadTree(dir string, env []string) (*tree, error) {
 			continue
 		}
 		p := &pkg{types: loadedPkg.Types, fset: loadedPkg.Fset, root: dir}
-		if len(loadedPkg.Syntax) > 0 {
-			p.clause = loadedPkg.Syntax[0].Name.Pos()
+		// A package with no Errors and NeedSyntax set always has at least one
+		// file — there is no such thing as an error-free, file-less Go
+		// package — so the range runs exactly once. Written this way rather
+		// than as a length check because p.clause's zero value is already
+		// safe (at() treats an invalid Pos as no location, never a guess),
+		// and a check that can never be false is not a check.
+		for _, f := range loadedPkg.Syntax {
+			p.clause = f.Name.Pos()
+			break
 		}
 		t.packages[strings.TrimPrefix(loadedPkg.PkgPath, module)] = p
 	}

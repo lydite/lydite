@@ -145,6 +145,29 @@ func TestComparePackageRemovedAndAdded(t *testing.T) {
 	}
 }
 
+// head declaring more packages than base is the shape that tells union's
+// capacity hint from a wrong one: base+head is a safe over-estimate whatever
+// either holds, while base-head goes negative the moment head is the larger
+// side, which make() panics on rather than silently mis-sizing.
+func TestComparePackageAddedWithNothingRemoved(t *testing.T) {
+	base := module(t, map[string]string{
+		"go.mod":  "module lydite.example/grown\n\ngo 1.26\n",
+		"root.go": "package grown\n\n// Root stays.\nfunc Root() {}\n",
+	})
+	head := module(t, map[string]string{
+		"go.mod":         "module lydite.example/grown\n\ngo 1.26\n",
+		"root.go":        "package grown\n\n// Root stays.\nfunc Root() {}\n",
+		"added/added.go": "package added\n\n// Added breaks nobody.\nfunc Added() {}\n",
+	})
+	findings, err := Compare(base, head, testGate, testComponent, nil)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("a package only the head declares breaks nobody, got %+v", findings)
+	}
+}
+
 // A module whose path moves cannot be compared at all: every package reads as
 // removed and added again, so the caller is told rather than handed a module's
 // worth of findings.
@@ -226,4 +249,34 @@ func line(t *testing.T, path string, n int) string {
 func lastSegment(site string) string {
 	parts := strings.Split(site, ".")
 	return parts[len(parts)-1]
+}
+
+// resolved must actually resolve a symlink, not merely pass every path
+// through unchanged — the two are indistinguishable on a tree with no
+// symlink in it, which is why this needs one built by hand rather than
+// relying on Compare's own temp directories.
+//
+// The comparison is against resolved(real) rather than the literal path
+// t.TempDir() returned, because on macOS that path is itself reached through
+// a symlink (/var -> /private/var) — asserting equality with the raw string
+// would fail for a reason this test has nothing to do with.
+func TestResolvedFollowsASymlink(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(real, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	want := resolved(real)
+	if got := resolved(link); got != want {
+		t.Errorf("resolved(%q) = %q, want the real path %q", link, got, want)
+	}
+	// Proof the two paths actually differ before resolution — otherwise a
+	// negated check that always returned the input unchanged would pass this
+	// test for the wrong reason.
+	if link == want {
+		t.Fatalf("link %q already equals the resolved path %q; this test proves nothing", link, want)
+	}
 }
