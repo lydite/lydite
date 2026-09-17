@@ -585,6 +585,32 @@ func TestEveryRustTestInAComponentSharesOneScope(t *testing.T) {
 	}
 }
 
+// A name is not unique across a Rust component's files the way it is within a
+// Go package, so the base-vs-head comparison has to key on the file as well:
+// a scope-wide "was this name declared before" check would let an unrelated
+// file's existing shared_name hide a newly added file's own shared_name test.
+func TestASharedNameInANewFileIsNewEvenWhenAnEditedFileAlreadyDeclaresIt(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{
+		"Cargo.toml": "[package]\nname = \"nextestprobe\"\n",
+		"tests/a.rs": "#[test]\nfn shared_name() {\n    assert!(true);\n}\n",
+	})
+	base := r.commit("base")
+	r.write(map[string]string{
+		// Edited, not merely touched: the assertion body changed, and the
+		// declaration is still named shared_name — the same test, unmoved.
+		"tests/a.rs": "#[test]\nfn shared_name() {\n    assert_eq!(1, 1);\n}\n",
+		"tests/b.rs": "#[test]\nfn shared_name() {\n    assert!(true);\n}\n",
+	})
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.Rust, ".", "tests/a.rs", "tests/b.rs")
+	want := []Test{{Scope: ".", Name: "shared_name", Path: "tests/b.rs", Line: 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v — an edited tests/a.rs must not hide tests/b.rs's own new shared_name", got, want)
+	}
+}
+
 // A vitest title is qualified by every describe around it, joined the way
 // vitest writes it, and the component is the scope for the same reason Rust's
 // is. A title no parser can state is enumerated with its line and no name.

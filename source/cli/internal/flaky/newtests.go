@@ -126,11 +126,23 @@ func NewTests(ctx context.Context, dir, base string, lang runner.Lang, scope str
 	}
 	defer func() { _ = root.Close() }()
 
-	// Both sides are gathered per scope before the difference is taken. A name
-	// that moved from one changed file to another within one scope is in the
-	// scope's base set and its head set, and nets to "not new" only because the
-	// union happens first; differencing file by file would report every moved
-	// test as new and miss nothing in exchange.
+	// Both sides are gathered per scope before the difference is taken, keyed
+	// by l.identity rather than by name alone. For Go that key is the name:
+	// one `go test` process is filtered over one package, so a name moved from
+	// one changed file to another within it is in the scope's base set and its
+	// head set, and nets to "not new" only because the union happens first —
+	// differencing file by file would report every moved test as new and miss
+	// nothing in exchange.
+	//
+	// Rust and TypeScript key on the file as well, because their scope is the
+	// whole component and a name is not unique within it: `tests/a.rs`
+	// declaring `shared_name` must not hide a newly added `tests/b.rs` that
+	// also declares `shared_name` — ADR 0041's own capture shows nextest
+	// treats those as two distinct tests. A test that moves between two files
+	// which happen to share one nextest binary or one vitest suite then reads
+	// as new when it strictly is not, which is the same direction ADR 0039
+	// already accepts for a renamed Go package: one rerun of a test that
+	// already passes, never a collision silently dropped.
 	head := map[string][]Test{}
 	was := map[string]map[string]bool{}
 	for _, p := range files {
@@ -163,7 +175,7 @@ func NewTests(ctx context.Context, dir, base string, lang runner.Lang, scope str
 			was[s] = map[string]bool{}
 		}
 		for _, d := range declared {
-			was[s][d.Name] = true
+			was[s][l.identity(d)] = true
 		}
 	}
 
@@ -174,7 +186,7 @@ func NewTests(ctx context.Context, dir, base string, lang runner.Lang, scope str
 			// no name to look up in the base tree, so it is carried through as
 			// a test the gate will count as unmeasurable rather than as one it
 			// decided anything about.
-			if t.Unreadable || !was[s][t.Name] {
+			if t.Unreadable || !was[s][l.identity(t)] {
 				out = append(out, t)
 			}
 		}
@@ -207,6 +219,13 @@ type language struct {
 	scopeOf func(p, scope string) string
 	// read enumerates the tests one file's bytes declare.
 	read func(lang runner.Lang, scope, p string, src []byte) ([]Test, error)
+	// identity is the key that decides whether a base-tree declaration and a
+	// HEAD one are the same test, within one scope. Go's is the name alone,
+	// since one `go test` process already makes a scope's names unique and a
+	// test moving between its files is not new. A language whose scope is a
+	// whole component includes the file too, because nothing this early in
+	// NewTests knows whether two same-named declarations are one test or two.
+	identity func(t Test) string
 }
 
 var languages = map[runner.Lang]language{
@@ -218,6 +237,7 @@ var languages = map[runner.Lang]language{
 		read: func(_ runner.Lang, scope, p string, src []byte) ([]Test, error) {
 			return declaredTests(scope, p, src)
 		},
+		identity: func(t Test) string { return t.Name },
 	},
 	runner.Rust: {
 		// Every changed .rs file and no narrowing by path. Rust's unit tests
@@ -228,6 +248,7 @@ var languages = map[runner.Lang]language{
 		declares: func(p string) bool { return isSource(runner.Rust, p) },
 		scopeOf:  componentScope,
 		read:     declaredByGrammar,
+		identity: fileAndName,
 	},
 	runner.TypeScript: {
 		// The convention every JavaScript runner reads: `.test.`, `.spec.` or
@@ -237,10 +258,15 @@ var languages = map[runner.Lang]language{
 		declares: func(p string) bool {
 			return isSource(runner.TypeScript, p) && treesitter.TypeScript.TestFile(p)
 		},
-		scopeOf: componentScope,
-		read:    declaredByGrammar,
+		scopeOf:  componentScope,
+		read:     declaredByGrammar,
+		identity: fileAndName,
 	},
 }
+
+// fileAndName is the identity of a language whose rerun scope is the whole
+// component, where a name alone is not unique across the files in it.
+func fileAndName(t Test) string { return t.Path + "\x00" + t.Name }
 
 // componentScope is the rerun unit of a language whose runner is invoked once
 // per component: every test in it, whatever file it sits in, shares one scope.
