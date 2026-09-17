@@ -1326,7 +1326,7 @@ func (g *flakyGate) gates(c component.Component) bool {
 	return g != nil && g.requested && len(c.Command) == 0 && gatedRunner(c.Runner)
 }
 
-// gatedRunner is the runners the gate can examine: the three that write a
+// gatedRunner is the runners the gate can examine: the four that write a
 // JUnit report lydite installs nothing into the repository to obtain, and
 // whose new tests a parser can enumerate statically.
 //
@@ -1422,7 +1422,7 @@ func flakyRerunner(c component.Component) (flaky.Identity, func(string, []flaky.
 	switch c.Runner {
 	case runner.CargoNextest, runner.CargoLLVMCovNextest:
 		// The rerun is plain cargo-nextest either way: instrumentation is a
-		// runner substitution rather than a flag (ADR 0041), so a component
+		// runner substitution rather than a flag (ADR 0016), so a component
 		// whose ordinary variant already runs through cargo-llvm-cov reruns
 		// its new tests exactly as an uninstrumented one does.
 		return flaky.ByClassAndName, func(_ string, tests []flaky.Test) (runner.Invocation, bool) {

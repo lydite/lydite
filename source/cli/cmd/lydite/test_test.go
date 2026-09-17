@@ -1659,10 +1659,10 @@ func TestWithTestCountsSaysWhyAReportIsMissing(t *testing.T) {
 	}
 }
 
-// The gate covers the three runners that write a JUnit report lydite installs
-// nothing into the repository to obtain. jest is outside it by decision, a
-// runner with no second run by absence, and a raw `command:` by opting out of
-// the derived variants entirely.
+// The gate covers the four runners that write a JUnit report lydite installs
+// nothing into the repository to obtain. jest is outside it by decision, an
+// unknown runner by absence, and a raw `command:` by opting out of the
+// derived variants entirely.
 func TestTheFlakyGateGatesTheRunnersItCanExamine(t *testing.T) {
 	g := &flakyGate{requested: true}
 	for _, tc := range []struct {
