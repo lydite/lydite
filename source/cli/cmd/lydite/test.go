@@ -1218,11 +1218,18 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 func invocationFor(c component.Component, variant runner.Variant, gate *flakyGate) (runner.Invocation, error) {
 	if gate.gates(c) && variant == runner.Plain {
 		// The gate reads run 1's outcomes out of the report the suite wrote,
-		// and under --no-coverage the plain Go variant writes none. Asking for
-		// the gate therefore makes the run write one whichever variant it ran
-		// (ADR 0039).
-		if inv, ok := runner.GoJUnitPlain(c.Args); ok {
-			return inv, nil
+		// and under --no-coverage a plain variant writes none. Asking for the
+		// gate therefore makes the run write one whichever variant it ran
+		// (ADR 0039, ADR 0041).
+		junitPlain := map[runner.Name]func([]string) (runner.Invocation, bool){
+			runner.GoTest:       runner.GoJUnitPlain,
+			runner.CargoNextest: runner.CargoNextestJUnitPlain,
+			runner.Vitest:       runner.VitestJUnitPlain,
+		}
+		if build, ok := junitPlain[c.Runner]; ok {
+			if inv, ok := build(c.Args); ok {
+				return inv, nil
+			}
 		}
 	}
 	return invocation(c, variant)
@@ -1313,7 +1320,22 @@ func newFlakyGate(ctx context.Context, dir, baseBranch string, requested bool) *
 // gates reports whether this component's suite has to write a JUnit report for
 // the gate to read its first outcomes from.
 func (g *flakyGate) gates(c component.Component) bool {
-	return g != nil && g.requested && len(c.Command) == 0 && c.Runner == runner.GoTest
+	return g != nil && g.requested && len(c.Command) == 0 && gatedRunner(c.Runner)
+}
+
+// gatedRunner is the runners the gate can examine: the three that write a
+// JUnit report lydite installs nothing into the repository to obtain, and
+// whose new tests a parser can enumerate statically.
+//
+// jest is outside it deliberately rather than by omission (ADR 0041): it ships
+// no JUnit reporter, and installing jest-junit into a workspace lydite is
+// about to gate is a scanner changing what the repository resolves to.
+func gatedRunner(name runner.Name) bool {
+	switch name {
+	case runner.GoTest, runner.CargoNextest, runner.Vitest:
+		return true
+	}
+	return false
 }
 
 // run reruns one component's new tests and records what the two runs
@@ -1343,15 +1365,15 @@ func (g *flakyGate) examine(ctx context.Context, root, dir string, c component.C
 		// invocation to filter down to a set of test names and no report to
 		// read a first outcome from.
 		return unexaminedRow(label, "the component declares a raw command, which opts out of the derived variants"), nil
-	case c.Runner != runner.GoTest:
+	case !gatedRunner(c.Runner):
 		// Named rather than skipped: a repository that asked for the gate and
-		// got silence in two of its three languages must be able to see that
-		// it did.
-		return unexaminedRow(label, flakyLanguage(c)), nil
+		// got silence in one of its languages must be able to see that it did.
+		return unexaminedRow(label, flakyGap(c)), nil
 	case g.why != "":
 		return unexaminedRow(label, g.why), nil
 	}
-	tests, err := flaky.NewTests(ctx, root, g.base, componentPaths(c.Dir, g.changed))
+	identity, build := flakyRerunner(c)
+	tests, err := flaky.NewTests(ctx, root, g.base, langOf(c), path.Clean(c.Dir), componentPaths(c.Dir, g.changed))
 	switch {
 	case errors.Is(err, flaky.ErrNoMergeBase):
 		return unexaminedRow(label, err.Error()), nil
@@ -1362,7 +1384,9 @@ func (g *flakyGate) examine(ctx context.Context, root, dir string, c component.C
 	case inv.JUnitReport == "":
 		return unexaminedRow(label, "the suite wrote no test report, so no first outcome could be read"), nil
 	}
-	run1, err := junit.ReadOutcomesFile(filepath.Join(dir, filepath.FromSlash(inv.JUnitReport)))
+	// Run 1's report is read in the same key space the rerun's will be. Two
+	// runs compared across two key spaces agree about nothing.
+	run1, err := identity.ReadOutcomes(filepath.Join(dir, filepath.FromSlash(inv.JUnitReport)))
 	if err != nil {
 		return unexaminedRow(label, "the suite's own report could not be read: "+err.Error()), nil
 	}
@@ -1372,14 +1396,104 @@ func (g *flakyGate) examine(ctx context.Context, root, dir string, c component.C
 		Args: c.Args,
 		// The rerun goes through the same pinned wrapper run 1 did, so the
 		// environment that found it is the environment that finds it again.
-		Env:  childEnv(tc, c, inv),
-		Run1: run1,
-		Log:  log.out,
+		Env:      childEnv(tc, c, inv),
+		Run1:     run1,
+		Identity: identity,
+		Build:    build,
+		Log:      log.out,
 	})
 	if err != nil {
 		return unexaminedRow(label, "the rerun did not finish: "+err.Error()), nil
 	}
 	return flakyRow(label, c, results)
+}
+
+// flakyRerunner is how one component's language addresses a test and how its
+// scope's new tests become a second invocation.
+//
+// The build closure is what keeps internal/flaky ignorant of any runner's
+// argv: the three runners filter on entirely different things — a relative
+// package pattern, an OR-ed exact-name expression, a file list and a title
+// regexp — and an interface per call would say the same thing in more words.
+func flakyRerunner(c component.Component) (flaky.Identity, func(string, []flaky.Test) (runner.Invocation, bool)) {
+	switch c.Runner {
+	case runner.CargoNextest:
+		return flaky.ByClassAndName, func(_ string, tests []flaky.Test) (runner.Invocation, bool) {
+			return runner.RustRerun(c.Args, flakyNames(tests))
+		}
+	case runner.Vitest:
+		return flaky.ByClassAndName, func(_ string, tests []flaky.Test) (runner.Invocation, bool) {
+			return runner.VitestRerun(c.Args, flakyFiles(tests), flakyNames(tests))
+		}
+	default:
+		return flaky.ByName, func(scope string, tests []flaky.Test) (runner.Invocation, bool) {
+			pattern, err := relPackage(c.Dir, scope)
+			if err != nil {
+				return runner.Invocation{}, false
+			}
+			return runner.GoRerun(c.Args, pattern, flakyNames(tests))
+		}
+	}
+}
+
+// flakyNames is the distinct names a scope's new tests carry, in order.
+//
+// Distinct because one name recorded under two classnames is two tests and one
+// filter term: `test(=shared_name)` selects the test in every binary declaring
+// it, and naming it twice would only make the expression longer.
+func flakyNames(tests []flaky.Test) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range tests {
+		if seen[t.Name] {
+			continue
+		}
+		seen[t.Name] = true
+		out = append(out, t.Name)
+	}
+	return out
+}
+
+// flakyFiles is the distinct files a scope's new tests were reported in, named
+// the way the directory the rerun runs in names them.
+//
+// Taken from the classname, which for vitest is the file's own path relative
+// to the component — the same shape a positional argument is resolved in,
+// since the rerun runs in the component's directory. A test's declaration site
+// is not the same question: a title declared in a helper the test file imports
+// is reported under the file vitest ran, and it is that file the rerun has to
+// name.
+func flakyFiles(tests []flaky.Test) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range tests {
+		if t.Classname == "" || seen[t.Classname] {
+			continue
+		}
+		seen[t.Classname] = true
+		out = append(out, t.Classname)
+	}
+	return out
+}
+
+// relPackage turns a package directory relative to the scan root into the
+// pattern `go test` takes in the component's own directory.
+//
+// A pattern and not an import path, because deriving one would need `go list`
+// over a module the gate has not otherwise had to load, and a relative pattern
+// names the same package for a component whose module path lydite never reads.
+// It is spelled with a leading "./" for the reason cmd/go requires one: a bare
+// `pkg` is a path in the module cache, and only `./pkg` is a directory here.
+func relPackage(dir, pkg string) (string, error) {
+	rel, err := filepath.Rel(filepath.FromSlash(dir), filepath.FromSlash(pkg))
+	if err != nil {
+		return "", fmt.Errorf("locating %s inside the component at %s: %w", pkg, dir, err)
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." || strings.HasPrefix(rel, "../") {
+		return rel, nil
+	}
+	return "./" + path.Clean(rel), nil
 }
 
 // report adds one row per component this run was responsible for, in
@@ -1419,12 +1533,12 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 		case flaky.Disagreed:
 			disagreed++
 			detail = append(detail,
-				fmt.Sprintf("%s: run 1 %s, run 2 %s", r.Test.Name, outcomeOf(r.Run1), outcomeOf(r.Run2)),
+				fmt.Sprintf("%s: run 1 %s, run 2 %s", flakyName(r.Test), outcomeOf(r.Run1), outcomeOf(r.Run2)),
 				"rerun in "+c.Dir+": "+r.Command)
 			found = append(found, flakyFinding(label, c, r))
 		case flaky.Unmeasured:
 			unexamined++
-			detail = append(detail, r.Test.Name+" was not examined: "+r.Why)
+			detail = append(detail, flakyName(r.Test)+" was not examined: "+r.Why)
 		case flaky.Skipped:
 			// Both runs skipped it, which agrees and examined nothing. It
 			// counts toward "could not be measured" alongside Unmeasured,
@@ -1433,14 +1547,15 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 			// each" is exactly the gate-that-could-not-run-as-a-pass failure
 			// this gate exists to refuse.
 			skipped++
-			detail = append(detail, r.Test.Name+" was skipped in both runs")
+			detail = append(detail, flakyName(r.Test)+" was skipped in both runs")
 		case flaky.Agreed:
 		}
 	}
-	// No finding.Number pass: Site is the package and the test's name, which
-	// the compiler already guarantees unique within a package, so two
-	// disagreements from one component can never share a (Path, Site) pair
-	// for an ordinal to disambiguate. Ordinal stays its zero value.
+	// No finding.Number pass: Site is the scope, the classname where the
+	// language has one, and the test's name — which the report's own keys
+	// already guarantee distinct, so two disagreements from one component can
+	// never share a (Path, Site) pair for an ordinal to disambiguate. Ordinal
+	// stays its zero value.
 	unmeasured := unexamined + skipped
 	row := ui.Row{Label: label, Detail: detail}
 	switch {
@@ -1469,10 +1584,12 @@ func flakyRow(label string, c component.Component, results []flaky.Result) (ui.R
 // flakyFinding is the claim one disagreement makes, on the line the test is
 // declared at.
 //
-// The site is the package directory and the test's name — the identity ADR
-// 0039 gives a test — so reformatting the file above the declaration does not
-// re-identify the claim. The ordinal is zero because a name is unique within a
-// package by the compiler's own rule.
+// The site is the test's identity — the scope, the classname where a name
+// alone is not one, and the name — so reformatting the file above the
+// declaration does not re-identify the claim. The ordinal is zero because that
+// triple is unique within a component: a name is unique in a Go package by the
+// compiler's own rule, and elsewhere the classname is what tells two
+// same-named tests apart.
 func flakyFinding(label string, c component.Component, r flaky.Result) finding.Finding {
 	return finding.Finding{
 		Gate:      "flaky",
@@ -1480,14 +1597,31 @@ func flakyFinding(label string, c component.Component, r flaky.Result) finding.F
 		Row:       label,
 		Path:      r.Test.Path,
 		Line:      r.Test.Line,
-		Message:   r.Test.Name + " disagreed between two runs",
+		Message:   flakyName(r.Test) + " disagreed between two runs",
 		Detail: []string{
 			"run 1: " + outcomeOf(r.Run1) + ", run 2: " + outcomeOf(r.Run2),
 			"The rerun ran it alone, in " + c.Dir + ": " + r.Command,
 			"Two runs disagreed. That is not a claim the test is random — a test that only passes because another test ran first disagrees here too, and is non-deterministic in the sense that matters.",
 		},
-		Site: r.Test.Package + " " + r.Test.Name,
+		Site: r.Test.Scope + " " + flakyName(r.Test),
 	}
+}
+
+// flakyName is how a row and a finding call one test.
+//
+// The classname comes first where there is one, because it is what tells two
+// same-named tests in one component apart — `nextestprobe::a shared_name` and
+// `nextestprobe::b shared_name` are two tests, and a row naming both
+// `shared_name` says one thing twice. A declaration no parser could name is
+// called by the only thing that identifies it: where it sits.
+func flakyName(t flaky.Test) string {
+	switch {
+	case t.Unreadable:
+		return fmt.Sprintf("the test declared at %s:%d", t.Path, t.Line)
+	case t.Classname != "":
+		return t.Classname + " " + t.Name
+	}
+	return t.Name
 }
 
 // outcomeOf names an outcome a report may not have recorded at all.
@@ -1498,13 +1632,20 @@ func outcomeOf(o *junit.Outcome) string {
 	return o.String()
 }
 
-// flakyLanguage says which language a component's suite is written in, for a
-// component this slice does not gate.
-func flakyLanguage(c component.Component) string {
-	if lang := langOf(c); lang != "" {
-		return "the flaky gate is Go only, and this component's suite is " + string(lang)
+// flakyGap says why a component's runner is one the gate cannot examine.
+//
+// jest has a reason of its own rather than the general one, because it is a
+// decision and not unshipped scope: it ships no JUnit reporter, and the only
+// implementation is the one ADR 0029 refuses — installing jest-junit into the
+// workspace lydite is about to gate.
+func flakyGap(c component.Component) string {
+	if c.Runner == runner.Jest {
+		return "jest has no JUnit output lydite will install"
 	}
-	return "the flaky gate is Go only, and this component declares no runner lydite knows"
+	if langOf(c) != "" {
+		return "the flaky gate has no second run for a " + string(c.Runner) + " suite"
+	}
+	return "this component declares no runner lydite knows"
 }
 
 // componentPaths is the changed paths that lie inside one component, which is
