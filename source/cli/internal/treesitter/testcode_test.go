@@ -117,8 +117,9 @@ func TestATitleOnlyARunCanProduceIsDeclaredUnreadable(t *testing.T) {
 }
 
 // `.skip` and `.only` select how a test runs without changing what it is
-// called; `.each` expands its title per row, and takes the tests written
-// inside it with it.
+// called, however many of them are stacked; `.each` expands its title per
+// row, and takes the tests written inside it with it — whether it is reached
+// directly or through another modifier first.
 func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 	tree := fixture.Tree(t, filepath.Join("testdata", "attributeprobe"))
 	rel := "src/modifiers.test.ts"
@@ -126,6 +127,8 @@ func TestATypeScriptModifierKeepsTheTitleAndEachLosesIt(t *testing.T) {
 		{Name: "selected > is named the same as an unskipped one", Line: 4},
 		{Line: 10, Unreadable: true},
 		{Line: 15, Unreadable: true},
+		{Name: "two stacked modifiers still name it", Line: 19},
+		{Line: 23, Unreadable: true},
 	})
 }
 

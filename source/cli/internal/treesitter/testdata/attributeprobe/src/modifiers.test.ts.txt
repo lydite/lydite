@@ -15,3 +15,11 @@ describe.each([[1], [2]])("row %i", () => {
 test("carries an escape \" nothing decodes", () => {
   expect(1).toBe(1);
 });
+
+it.concurrent.skip("two stacked modifiers still name it", () => {
+  expect(1).toBe(1);
+});
+
+it.concurrent.each([[1], [2]])("row %i behind two modifiers", (n) => {
+  expect(n).toBe(n);
+});

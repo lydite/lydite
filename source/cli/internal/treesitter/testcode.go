@@ -310,29 +310,57 @@ func (w *testWalk) typeScriptCall(n *gotreesitter.Node) (kind callKind, title st
 }
 
 // typeScriptCallee names the function a call is made on, and says whether it
-// was reached through a further call: `it`, `it.skip` and `it.each([...])` are
-// all `it`, and only the last is chained.
+// was reached through a further call: `it`, `it.skip`, `it.concurrent.skip`
+// and `it.each([...])` are all `it`, and only a chain ending in `.each(...)`
+// is chained.
 func (w *testWalk) typeScriptCallee(n *gotreesitter.Node) (base string, chained bool) {
 	switch n.Type(w.language) {
 	case "identifier":
 		return n.Text(w.src), false
 	case "member_expression":
-		object := n.ChildByFieldName("object", w.language)
-		property := w.text(n.ChildByFieldName("property", w.language))
-		if object == nil || object.Type(w.language) != "identifier" || !typeScriptModifiers[property] {
+		base, ok := w.baseIdentifierThroughModifiers(n)
+		if !ok {
 			return "", false
 		}
-		return object.Text(w.src), false
+		return base, false
 	case "call_expression":
 		inner := n.ChildByFieldName("function", w.language)
 		if inner == nil || inner.Type(w.language) != "member_expression" {
 			return "", false
 		}
-		object := inner.ChildByFieldName("object", w.language)
-		if object == nil || object.Type(w.language) != "identifier" {
+		if w.text(inner.ChildByFieldName("property", w.language)) != "each" {
 			return "", false
 		}
-		return object.Text(w.src), true
+		object := inner.ChildByFieldName("object", w.language)
+		if object == nil {
+			return "", false
+		}
+		base, ok := w.baseIdentifierThroughModifiers(object)
+		if !ok {
+			return "", false
+		}
+		return base, true
+	default:
+		return "", false
+	}
+}
+
+// baseIdentifierThroughModifiers walks a chain of member expressions whose
+// properties are every one a recognised modifier, down to the identifier they
+// are all written on — so `it.concurrent.skip` reaches `it` exactly as
+// `it.skip` does, and a chain carrying anything else (a typo, an unrecognised
+// property) reaches nothing rather than the wrong base.
+func (w *testWalk) baseIdentifierThroughModifiers(n *gotreesitter.Node) (string, bool) {
+	switch n.Type(w.language) {
+	case "identifier":
+		return n.Text(w.src), true
+	case "member_expression":
+		object := n.ChildByFieldName("object", w.language)
+		property := w.text(n.ChildByFieldName("property", w.language))
+		if object == nil || !typeScriptModifiers[property] {
+			return "", false
+		}
+		return w.baseIdentifierThroughModifiers(object)
 	default:
 		return "", false
 	}
