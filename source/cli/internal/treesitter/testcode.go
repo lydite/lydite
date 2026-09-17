@@ -307,7 +307,9 @@ func (w *testWalk) typeScriptCall(n *gotreesitter.Node) (kind callKind, title st
 	case typeScriptCases[base]:
 		kind = testCase
 	default:
-		return notATest, "", false // [lydite:exclude_from_mutation][the caller's switch branches on kind alone for notATest and never reads title or readable, so no pair spliced in here can be told from another]
+		return notATest,
+			"", // [lydite:exclude_from_mutation][the caller's switch branches on kind alone for notATest, so no string spliced in here is ever read]
+			false // [lydite:exclude_from_mutation][and never reads readable either, so no bool spliced in here is ever read]
 	}
 	if chained {
 		return kind, "", false // [lydite:exclude_from_mutation][readable=false here always sends the caller past title — a chained suite marks every descendant unreadable regardless of the prefix it built, and a chained case takes the branch that does not read title at all]
@@ -331,7 +333,8 @@ func (w *testWalk) typeScriptCallee(n *gotreesitter.Node) (base string, chained 
 	case "member_expression":
 		base, ok := w.baseIdentifierThroughModifiers(n)
 		if !ok {
-			return "", false // [lydite:exclude_from_mutation][the caller looks this base up in typeScriptSuites and typeScriptCases, which "" fails the same way any other unrecognised name would, and chained is never read once that lookup fails]
+			return "", // [lydite:exclude_from_mutation][the caller looks this base up in typeScriptSuites and typeScriptCases, which "" fails the same way any other unrecognised name would]
+				false // [lydite:exclude_from_mutation][chained is never read once that lookup fails — the default case returns before it reaches the "if chained" check]
 		}
 		return base, false
 	case "call_expression":
@@ -373,7 +376,8 @@ func (w *testWalk) baseIdentifierThroughModifiers(n *gotreesitter.Node) (string,
 		object := n.ChildByFieldName("object", w.language)
 		property := w.text(n.ChildByFieldName("property", w.language))
 		if object == nil || !typeScriptModifiers[property] {
-			return "", false // [lydite:exclude_from_mutation][every caller destructures (base, ok) and reads base only when ok is true — this pair is only ever produced alongside ok=false, so its own content is discarded on arrival]
+			return "", // [lydite:exclude_from_mutation][every caller destructures (base, ok) and reads base only when ok is true, so no string spliced in here alongside ok=false is ever read]
+				false // [lydite:exclude_from_mutation][and an empty base already fails typeScriptSuites/typeScriptCases the same way any unrecognised name would, whatever ok claims — see typeScriptCallee's member_expression case]
 		}
 		return w.baseIdentifierThroughModifiers(object)
 	default:
