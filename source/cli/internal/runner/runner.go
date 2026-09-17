@@ -38,6 +38,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -494,6 +495,15 @@ var goTestValueFlags = map[string]bool{
 // no test counts.
 const nextestJUnit = "target/nextest/default/junit.xml"
 
+// nextestRerunJUnit is where cargo-nextest writes JUnit under the rerun
+// profile, which is the flaky gate's second run.
+//
+// Nextest composes a report's path from the profile's own directory and the
+// name the config gives, so a run under `--profile rerun` lands beside run 1's
+// report rather than over it. The name differs too, so the two stay
+// distinguishable in a repository that points both profiles at one directory.
+const nextestRerunJUnit = "target/nextest/rerun/junit-rerun.xml"
+
 func buildCargoNextest(variant Variant, args []string) (Invocation, bool) {
 	switch variant {
 	case Plain:
@@ -544,18 +554,109 @@ func llvmCovNextest(args []string) Invocation {
 		CoverageReport: lcov,
 		PathDirs:       cargoBinDirs(),
 	}
-	// The JUnit report is asked for rather than assumed: nextest writes one
-	// only where a profile says to, so an invocation that merely named the
-	// path would have lydite report a component unmeasured for a file nobody
-	// was ever told to write. A machine with no usable cache directory has
-	// nowhere to stage the config, and then there is no report and no claim of
-	// one either.
-	if cfg, ok := nextestToolConfig(); ok {
-		inv.Args = append(inv.Args, "--tool-config-file", "lydite:"+cfg)
-		inv.JUnitReport = nextestJUnit
-	}
+	askNextestJUnit(&inv, nextestJUnit)
 	inv.Args = append(inv.Args, args...)
 	return inv
+}
+
+// askNextestJUnit points the invocation at the staged tool config and names the
+// report the named profile then writes, or reports false when there is nowhere
+// to stage a config.
+//
+// The report is asked for rather than assumed: nextest writes one only where a
+// profile says to, so an invocation that merely named the path would have
+// lydite report a component unmeasured for a file nobody was ever told to
+// write. A machine with no usable cache directory has nowhere to stage the
+// config, and then there is no report and no claim of one either.
+func askNextestJUnit(inv *Invocation, report string) bool {
+	cfg, ok := nextestToolConfig()
+	if !ok {
+		return false
+	}
+	inv.Args = append(inv.Args, "--tool-config-file", "lydite:"+cfg)
+	inv.JUnitReport = report
+	return true
+}
+
+// CargoNextestJUnitPlain is the plain cargo-nextest suite with the JUnit report
+// turned on, so it writes one without running through cargo-llvm-cov.
+//
+// It is GoJUnitPlain's counterpart and exists for the same reason: the flaky
+// gate reads a test's first outcome out of the report run 1 already wrote, and
+// under --no-coverage the plain variant asks for no report at all (ADR 0041).
+// A function of its own and not a fourth Variant, because mutation runs Plain
+// once per mutant and a report written and discarded thousands of times is work
+// in the way of the thing being timed.
+func CargoNextestJUnitPlain(args []string) (Invocation, bool) {
+	inv := Invocation{
+		Name:     "cargo",
+		Args:     []string{"nextest", "run"},
+		PathDirs: cargoBinDirs(),
+	}
+	askNextestJUnit(&inv, nextestJUnit)
+	inv.Args = append(inv.Args, args...)
+	return inv, true
+}
+
+// RustRerun is the flaky gate's second run for a Rust component: the named
+// tests alone, under a profile whose report lands beside run 1's.
+//
+// One invocation per component and not per test binary. A rerun per binary
+// would pay the crate's link step's worth of startup for each, for a gate whose
+// whole budget is meant to be the new tests' own duration — so the filter is
+// one OR-ed expression of exact predicates, and the caller hands this function
+// one flat set of names.
+//
+// `test(=name)` matches a name and not a binary, so a name declared in two
+// binaries reruns in both. That is the right answer for a gate — a name that is
+// new in two binaries is two new tests — and it is legible only because the
+// outcomes are read back by classname and name together.
+//
+// --no-fail-fast, because nextest stops at the first failure otherwise and a
+// component with two failing new tests would have the second reported as though
+// it never ran.
+//
+// The declared arguments are copied so the two runs differ in as little as
+// possible, and the gate's own flags are appended after them so a declared
+// duplicate cannot win. Nothing is stripped from them: Rust's instrumentation
+// is a different runner rather than a flag, so a rerun built on plain
+// `cargo nextest run` carries none of it.
+//
+// It answers false for an empty name set, for GoRerun's reason, and for an
+// invocation that has nowhere to stage its tool config: without the config
+// there is no rerun profile to select and no report to read, so the component's
+// rerun is unmeasured rather than run blind.
+func RustRerun(args []string, names []string) (Invocation, bool) {
+	if len(names) == 0 {
+		return Invocation{}, false
+	}
+	inv := Invocation{
+		Name:     "cargo",
+		Args:     []string{"nextest", "run"},
+		PathDirs: cargoBinDirs(),
+	}
+	if !askNextestJUnit(&inv, nextestRerunJUnit) {
+		return Invocation{}, false
+	}
+	inv.Args = append(inv.Args, args...)
+	inv.Args = append(inv.Args, "--profile", "rerun", "--no-fail-fast", "-E", NextestFilter(names))
+	return inv, true
+}
+
+// NextestFilter is the OR-ed expression of exact predicates cargo-nextest's -E
+// takes for an exact set of test names.
+//
+// `=` is nextest's exact matcher, so a rerun of `doubles` cannot also select
+// `doubles_deeper` — the set the gate reruns has to be the set it decided was
+// new. The names are spliced in unescaped, which is safe because a Rust test's
+// name is a path of identifiers joined with `::`, and nothing in one closes the
+// predicate.
+func NextestFilter(names []string) string {
+	terms := make([]string, 0, len(names))
+	for _, n := range names {
+		terms = append(terms, "test(="+n+")")
+	}
+	return strings.Join(terms, " or ")
 }
 
 // installCargoTools installs the pinned cargo subcommands this invocation
@@ -726,22 +827,15 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 		// rows then name a file that no longer exists. The subdirectory alone
 		// would fix it for every name but `coverage`; the flag fixes it for
 		// all of them.
-		//
-		// The default reporter is named alongside junit, and that is not
-		// redundancy: `--reporter=junit` alone REPLACES the reporter set, so
-		// the component's log would hold nothing at all and a failing row's
-		// tail would have nothing to show. Naming both keeps the log the
-		// suite's own output and adds the report beside it.
+		instrumented := append([]string{
+			"vitest", "run", "--coverage",
+			"--coverage.reporter=lcovonly",
+			"--coverage.reportsDirectory=" + coverageDir,
+			"--coverage.clean=false",
+		}, vitestJUnitArgs(junitReport)...)
 		return Invocation{
-			Name: "npx",
-			Args: append([]string{
-				"vitest", "run", "--coverage",
-				"--coverage.reporter=lcovonly",
-				"--coverage.reportsDirectory=" + coverageDir,
-				"--coverage.clean=false",
-				"--reporter=default", "--reporter=junit",
-				"--outputFile.junit=" + junitReport,
-			}, args...),
+			Name:           "npx",
+			Args:           append(instrumented, args...),
 			CoverageReport: path.Join(coverageDir, "lcov.info"),
 			JUnitReport:    junitReport,
 		}, true
@@ -754,6 +848,126 @@ func buildVitest(variant Variant, args []string) (Invocation, bool) {
 	default:
 		return Invocation{}, false
 	}
+}
+
+// vitestJUnitArgs is what turns vitest's JUnit report on, written once because
+// the plain-with-JUnit run and the rerun differ only in where the report lands.
+//
+// The default reporter is named beside junit for the reason the instrumented
+// variant names it: --reporter=junit alone replaces the reporter set, and the
+// component's log would then hold nothing for a failing row to show.
+func vitestJUnitArgs(report string) []string {
+	return []string{"--reporter=default", "--reporter=junit", "--outputFile.junit=" + report}
+}
+
+// VitestJUnitPlain is the plain vitest suite with the JUnit report turned on
+// and no instrumentation.
+//
+// GoJUnitPlain's counterpart, for the same reason and with the same shape: the
+// flaky gate reads run 1's outcomes from the report the suite wrote, and under
+// --no-coverage the plain variant writes none (ADR 0041). Not a fourth Variant,
+// because mutation runs Plain once per mutant.
+func VitestJUnitPlain(args []string) (Invocation, bool) {
+	return Invocation{
+		Name:        "npx",
+		Args:        append(append([]string{"vitest", "run"}, vitestJUnitArgs(junitReport)...), args...),
+		JUnitReport: junitReport,
+	}, true
+}
+
+// VitestRerun is the flaky gate's second run for a TypeScript component: every
+// file contributing a new test, named positionally, and one -t pattern covering
+// every new test's full name.
+//
+// One invocation per component and not per file. A rerun per file would pay a
+// fresh worker pool and module graph for each, for a gate whose whole budget is
+// meant to be the new tests' own duration.
+//
+// Every metacharacter in a title is escaped, which is where this departs from
+// RunPattern's unescaped splice: `-t` is a real regular expression matched
+// against the full name, and a title is prose written by whoever wrote the
+// test. An alternation built verbatim from `matches ^a (b) [c] + d$` does not
+// match the title it was built from, and vitest reports that test skipped —
+// which, under the gate's rule that a skip is an outcome, is a deterministic
+// test reported as flaky by lydite's own filter.
+//
+// The report is the rerun's own and never run 1's, for GoRerun's reason: the
+// ledger records run 1's counts, and a rerun of four tests overwriting them
+// would put "4 tests" in the quality history of a component that ran six
+// hundred.
+//
+// It answers false for an empty name set, for GoRerun's reason.
+func VitestRerun(args []string, files []string, names []string) (Invocation, bool) {
+	if len(names) == 0 {
+		return Invocation{}, false
+	}
+	argv := append([]string{"vitest", "run"}, vitestJUnitArgs(rerunJUnitReport)...)
+	argv = append(argv, vitestFlags(args)...)
+	argv = append(argv, files...)
+	argv = append(argv, "-t", TitlePattern(names))
+	return Invocation{Name: "npx", Args: argv, JUnitReport: rerunJUnitReport}, true
+}
+
+// TitlePattern is the anchored alternation vitest's -t takes for an exact set
+// of full test names, with every regex metacharacter in each name escaped.
+//
+// Anchored the way RunPattern is, so a rerun of `holds` cannot also select
+// `holds a title`, and escaped because a vitest title is prose rather than an
+// identifier.
+func TitlePattern(names []string) string {
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		quoted = append(quoted, regexp.QuoteMeta(n))
+	}
+	return RunPattern(quoted)
+}
+
+// vitestFlags is the declared arguments with the flags run 2 supplies itself
+// removed.
+//
+// The coverage flags go for the reason Go's do: the rerun must not overwrite
+// the measurement the coverage gate is about to read, nor pay for
+// instrumentation nothing reads. The reporter, the report path and any declared
+// test-name pattern go because the rerun states its own, and vitest resolves a
+// repeated --reporter by accumulating rather than replacing — a declared one
+// would add a reporter to a run whose output the gate parses.
+//
+// A flag may spell its value in the next argument as readily as after an equals
+// sign, so vitestValueFlag says which ones do: dropping --outputFile.junit and
+// leaving its path behind hands vitest a path where it expects a file filter.
+// A positional argument is kept, since it is the component's own file filter
+// and it constrained run 1 just as it constrains this one.
+func vitestFlags(args []string) []string {
+	out := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name, _, inline := strings.Cut(a, "=")
+		if !vitestRerunSupplies(name) {
+			out = append(out, a)
+			continue
+		}
+		if !inline && vitestValueFlag(name) && i+1 < len(args) {
+			i++
+		}
+	}
+	return out
+}
+
+// vitestRerunSupplies reports whether the rerun states this flag itself, so a
+// declared one is dropped rather than carried into run 2.
+func vitestRerunSupplies(name string) bool {
+	return name == "--coverage" || vitestValueFlag(name)
+}
+
+// vitestValueFlag reports whether a flag the rerun supplies may carry its value
+// in the argument after it, which is what keeps a dropped flag from leaving its
+// value behind as a file filter.
+func vitestValueFlag(name string) bool {
+	switch name {
+	case "--reporter", "--outputFile.junit", "-t", "--testNamePattern":
+		return true
+	}
+	return strings.HasPrefix(name, "--coverage.")
 }
 
 func buildJest(variant Variant, args []string) (Invocation, bool) {
