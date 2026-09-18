@@ -371,17 +371,17 @@ func jsonKey(line string) string {
 		return ""
 	}
 	end := strings.Index(trimmed[1:], `"`)
-	if end <= 0 {
-		// No closing quote at all, or one immediately after the opening —
-		// an empty key, which trimmed[1:end+1] would answer as "" anyway.
-		// Stated here rather than left to fall through, so the boundary is
-		// the rule itself and not an accident two branches happen to agree on.
-		return ""
+	if end < 0 {
+		return "" // unterminated: no closing quote at all
+	}
+	key := trimmed[1 : end+1]
+	if key == "" {
+		return "" // the closing quote follows the opening one directly
 	}
 	if !strings.HasPrefix(strings.TrimSpace(trimmed[end+2:]), ":") {
 		return ""
 	}
-	return trimmed[1 : end+1]
+	return key
 }
 
 // setDependency records a package's line, keeping the first of several. A
