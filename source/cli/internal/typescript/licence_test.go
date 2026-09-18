@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -321,5 +322,188 @@ func TestLicenceFindingsWithoutAManifest(t *testing.T) {
 	}
 	if findings[0].Line != 0 {
 		t.Errorf("line %d, want 0 where no manifest names the package", findings[0].Line)
+	}
+}
+
+// A path naming no installed package at all answers the empty name, not just
+// false — a caller that only checked the bool and typed the empty string in
+// by hand would not notice the name itself drifting.
+func TestPackageNameOnAPathWithNoNodeModulesIsEmpty(t *testing.T) {
+	name, ok := packageName("pr-relay")
+	if ok || name != "" {
+		t.Errorf("packageName(%q) = (%q, %v), want (\"\", false)", "pr-relay", name, ok)
+	}
+}
+
+// A dotted entry of node_modules is the manager's own bookkeeping — `.bin`,
+// `.pnpm`, `.package-lock.json` — and names no package, whatever it is on
+// disk. Reading it as one would install a dependency named ".bin".
+func TestInstalledDependenciesSkipsDottedEntries(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", ".bin"), 0o750); err != nil {
+		t.Fatalf("creating .bin: %v", err)
+	}
+	install(t, dir, "typescript", `{"name":"typescript","version":"7.0.2","license":"Apache-2.0"}`)
+
+	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	for _, d := range set.Dependencies() {
+		if d.Package == ".bin" {
+			t.Fatalf(".bin is the manager's own bookkeeping, want it excluded, got %v", set.Dependencies())
+		}
+	}
+}
+
+// Two claims that land on the identical pair are numbered apart, the way
+// finding.Number numbers any other duplicate site — otherwise they would
+// collapse into indistinguishable review threads on the same line.
+func TestLicenceFindingsNumbersADuplicatePair(t *testing.T) {
+	pairs := []licence.Dependency{
+		{Package: "lightningcss", Licence: "MPL-2.0"},
+		{Package: "lightningcss", Licence: "MPL-2.0"},
+	}
+	findings := LicenceFindings(t.TempDir(), pairs)
+	if len(findings) != 2 {
+		t.Fatalf("got %d findings, want both claims kept", len(findings))
+	}
+	if findings[0].Ordinal == findings[1].Ordinal {
+		t.Errorf("both claims carry ordinal %d, want the second numbered past the first", findings[0].Ordinal)
+	}
+}
+
+// jsonKey names the key a line opens with, and empty for anything else: a
+// line that is not a quoted key at all, one whose quote never closes, and a
+// quoted string with nothing naming it a key (no trailing colon — the shape
+// an array entry like a `keywords` list has).
+func TestJSONKey(t *testing.T) {
+	for _, tc := range []struct {
+		line, want string
+	}{
+		{`  "dependencies": {`, "dependencies"},
+		{`    "typescript": "7.0.2",`, "typescript"},
+		{`  },`, ""},
+		{`    "typescript",`, ""},
+		{`    "unterminated`, ""},
+		{`    "": 1,`, ""},
+		{``, ""},
+	} {
+		if got := jsonKey(tc.line); got != tc.want {
+			t.Errorf("jsonKey(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+// The message names the version when the dependency states one, and omits it
+// — rather than a trailing space — when it does not.
+func TestLicenceMessageNamesTheVersionWhenThereIsOne(t *testing.T) {
+	withVersion := licenceMessage(licence.Dependency{Package: "lightningcss", Version: "1.33.0", Licence: "MPL-2.0"})
+	if want := "lightningcss 1.33.0 is MPL-2.0, which the licence policy does not allow"; withVersion != want {
+		t.Errorf("licenceMessage = %q, want %q", withVersion, want)
+	}
+	withoutVersion := licenceMessage(licence.Dependency{Package: "lightningcss", Licence: "MPL-2.0"})
+	if want := "lightningcss is MPL-2.0, which the licence policy does not allow"; withoutVersion != want {
+		t.Errorf("licenceMessage = %q, want %q", withoutVersion, want)
+	}
+}
+
+// A manifest value that is neither a bare string nor a `{type}` object — a
+// number, a bool, null — states no licence lydite can read.
+func TestLicenceTextOnAnUnrecognisedShapeIsEmpty(t *testing.T) {
+	if got := licenceText(json.RawMessage("123")); got != "" {
+		t.Errorf("licenceText(123) = %q, want empty", got)
+	}
+}
+
+// A lockfile that cannot even be opened is the same kind of failure as one
+// that cannot be parsed: nothing was measured, and LicenceSet's caller reads
+// this as unmeasured rather than an empty, passing set.
+func TestLockfileDependenciesOnAMissingLockfileIsAnError(t *testing.T) {
+	if _, err := lockfileDependencies(t.TempDir()); err == nil {
+		t.Fatal("want an error over a directory with no package-lock.json")
+	}
+}
+
+// An install path that ends exactly at `node_modules/`, naming nothing past
+// it, resolves to no package — the same answer as a path with no
+// `node_modules/` segment at all.
+func TestPackageNameOnNodeModulesWithNothingAfterIsEmpty(t *testing.T) {
+	name, ok := packageName("node_modules/")
+	if ok || name != "" {
+		t.Errorf("packageName(%q) = (%q, %v), want (\"\", false)", "node_modules/", name, ok)
+	}
+}
+
+// A scope directory that cannot be read — broken, or permission-denied — is
+// skipped rather than aborting the whole read: the packages under every other
+// scope are still worth reporting.
+func TestInstalledDependenciesSkipsAnUnreadableScope(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	scopeDir := filepath.Join(dir, "node_modules", "@broken")
+	if err := os.MkdirAll(filepath.Dir(scopeDir), 0o750); err != nil {
+		t.Fatalf("preparing node_modules: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), scopeDir); err != nil {
+		t.Fatalf("linking @broken: %v", err)
+	}
+	install(t, dir, "typescript", `{"name":"typescript","version":"7.0.2","license":"Apache-2.0"}`)
+
+	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	for _, d := range set.Dependencies() {
+		if strings.HasPrefix(d.Package, "@broken") {
+			t.Errorf("an unreadable scope produced a dependency: %v", d)
+		}
+	}
+}
+
+// A node_modules entry that is a broken symlink resolves to no target, so
+// workspaceLocal cannot tell where it points and answers false — read like
+// any other installed package, which then can't read its manifest either and
+// reports Unknown rather than dropping the entry.
+func TestInstalledDependenciesReadsABrokenSymlinkAsUnknown(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	entry := filepath.Join(dir, "node_modules", "broken-pkg")
+	if err := os.MkdirAll(filepath.Dir(entry), 0o750); err != nil {
+		t.Fatalf("preparing node_modules: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), entry); err != nil {
+		t.Fatalf("linking broken-pkg: %v", err)
+	}
+
+	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	d, held := rejected(t, set)["broken-pkg"]
+	if !held {
+		t.Fatal("broken-pkg is a broken symlink, want it read as an unknown-licence dependency")
+	}
+	if d.Licence != licence.Unknown {
+		t.Errorf("broken-pkg = %q, want %q", d.Licence, licence.Unknown)
+	}
+}
+
+// A package whose manifest exists but does not parse as JSON still yields the
+// dependency, under Unknown — the same treatment as one with no manifest at
+// all, because a dependency dropped over a broken manifest is one the gate
+// silently allowed.
+func TestInstalledDependencyOnAMalformedManifestIsUnknown(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	install(t, dir, "garbled", `{"license": `)
+
+	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	d, held := rejected(t, set)["garbled"]
+	if !held {
+		t.Fatal("garbled's manifest does not parse, want it read as an unknown-licence dependency")
+	}
+	if d.Licence != licence.Unknown {
+		t.Errorf("garbled = %q, want %q", d.Licence, licence.Unknown)
 	}
 }

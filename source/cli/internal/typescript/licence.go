@@ -371,7 +371,11 @@ func jsonKey(line string) string {
 		return ""
 	}
 	end := strings.Index(trimmed[1:], `"`)
-	if end < 0 {
+	if end <= 0 {
+		// No closing quote at all, or one immediately after the opening —
+		// an empty key, which trimmed[1:end+1] would answer as "" anyway.
+		// Stated here rather than left to fall through, so the boundary is
+		// the rule itself and not an accident two branches happen to agree on.
 		return ""
 	}
 	if !strings.HasPrefix(strings.TrimSpace(trimmed[end+2:]), ":") {
