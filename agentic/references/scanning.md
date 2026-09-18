@@ -222,12 +222,17 @@ is allowed. An entry marked `link: true` is a workspace's own local package poin
 repository rather than at a downloaded tarball, and is skipped the way Go skips its own main
 module: a repository's own licence is not a dependency's, and is not this gate's to judge. Under
 yarn or pnpm, neither lockfile format states a licence at all, so `installedDependencies` reads
-whatever `node_modules` an earlier step already installed — a symlinked workspace member is
-skipped for the same `link` reason, and a package whose own manifest cannot be read or parsed
-still yields the dependency under `licence.Unknown` rather than being dropped, because a dependency
-dropped over an unreadable manifest is one the gate silently allowed. A `node_modules` that is not
-there is the caller's error, never an empty answer: `LicenceSet` reports it as a read that failed,
-not a set that came back empty.
+whatever `node_modules` an earlier step already installed. A symlink there is not, by itself, a
+workspace member: pnpm's default layout symlinks every registry package into its own `.pnpm`
+store, not only a workspace member the way yarn does, so `workspaceLocal` tells the two apart by
+resolving where the link actually points — inside `node_modules` (itself resolved first, so a
+symlinked ancestor like darwin's `/var` can't read every entry as escaping it) is an installed
+package read like any other; outside it and back into the repository is the workspace member
+`link: true` skips. A package whose own manifest cannot be read or parsed still yields the
+dependency under `licence.Unknown` rather than being dropped, because a dependency dropped over an
+unreadable manifest is one the gate silently allowed. A `node_modules` that is not there is the
+caller's error, never an empty answer: `LicenceSet` reports it as a read that failed, not a set
+that came back empty.
 
 **The base set is recomputed at the merge-base, not read from a stored baseline.** The same
 throwaway-worktree shape `measureBaseTree` uses for CRAP: check the merge-base out, run the same
