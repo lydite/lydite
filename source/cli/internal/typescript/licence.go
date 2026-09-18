@@ -371,7 +371,7 @@ func jsonKey(line string) string {
 		return ""
 	}
 	end := strings.Index(trimmed[1:], `"`)
-	if end < 0 {
+	if end == -1 {
 		return "" // unterminated: no closing quote at all
 	}
 	key := trimmed[1 : end+1]
