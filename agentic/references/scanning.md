@@ -159,23 +159,31 @@ See [ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-
 why a count, a version-keyed pair, and a stored `test record` baseline were all rejected in favour
 of this shape.
 
-**Go and Rust run it; TypeScript never gates and never enumerates dependencies.**
-`recordGoLicence` and `recordRustLicence` in `cmd/lydite/scan.go` add a `licence(<component>)`
-row per Go and Rust component, gating pass or fail against the merge-base. The `case
-runner.TypeScript` in the same switch calls `recordNoLicenceSource`, which adds the same
-`licence(<component>)` row rendered `context` and naming that lydite reads no licence source for
-TypeScript — a row present and never green, the same way `crapRow` renders `context` for a
-language it has no complexity source for
-([ADR 0028](../../docs/adr/0028-crap-gates-the-delta-above-the-threshold.md)). A TypeScript
-component's row disappearing entirely would read as a gate that ran and found nothing; the
-`context` row is what keeps that distinguishable.
+**All three languages run it.** `recordGoLicence`, `recordRustLicence` and
+`recordTypeScriptLicence` in `cmd/lydite/scan.go` each add a `licence(<component>)` row, gating
+pass or fail against the merge-base. TypeScript's own source is `internal/typescript/licence.go`'s
+`LicenceSet` (see [ADR 0042](../../docs/adr/0042-a-typescript-components-licences-are-read-from-its-lockfile.md)):
+npm's `package-lock.json` states every dependency's licence outright and is read directly, no
+install ever run to produce it; yarn and pnpm state no licence in their lockfile at all, so their
+only source is a `node_modules` an earlier step already installed, read opportunistically, and a
+component whose tree is not there answers `unmeasured` naming that no licence source exists
+without an install this scan does not perform. All three render `not configured`, `pass`, `fail`,
+`unmeasured` and `context` the same way — TypeScript is a full participant in the gate, not a
+permanently-`context` row the way `crapRow` renders `context` for a language it has no complexity
+source for at all
+([ADR 0028](../../docs/adr/0028-crap-gates-the-delta-above-the-threshold.md)).
 
 **A claim is located at the manifest line naming the package** — `go.mod`'s require line, read by
-`readGoMod`, or the `Cargo.lock` stanza, read by `readCargoLock` — and identified by the package
-and licence rather than by that line's text, `Pair.Site()`'s `licence␟<package> <licence>`. The
+`readGoMod`; the `Cargo.lock` stanza, read by `readCargoLock`; or `package.json`'s own
+`dependencies`/`devDependencies` line, read by `internal/typescript/licence.go`'s own
+`readPackageJSON`, a raw-text scan mirroring `readGoMod`'s — and identified by the package and
+licence rather than by that line's text, `Pair.Site()`'s `licence␟<package> <licence>`. The
 version takes no part in the key: a bump whose licence is unchanged is the pair that was already
-there, and a bump that changes it is a pair nothing grandfathered. This is the same departure ADR
-0032 makes for a dependency advisory, and for the same reason — see [Findings](findings.md).
+there, and a bump that changes it is a pair nothing grandfathered. A package reached only
+transitively is named by no line of the manifest and gets `Line: 0` — never guessed, for any of
+the three languages — because a guessed line is a review thread on code that has nothing to do
+with the claim. This is the same departure ADR 0032 makes for a dependency advisory, and for the
+same reason — see [Findings](findings.md).
 
 **Go classifies in-process, over `go list -deps -json ./...`.** `internal/golang/licence.go`'s
 `classifyModule` reads each dependency module's `LICENSE*`/`LICENCE*`/`COPYING*` files at its root
@@ -202,18 +210,46 @@ and inventing an implicit gate out of that default is the failure this design ex
 would fail every adopting repository on the licences it already ships, the same argument that
 chose the delta everywhere else.
 
+**TypeScript's source depends on the package manager, and neither one runs an install.**
+`nodedeps.Manager` picks the one lockfile present. Under npm, `lockfileDependencies` reads
+`package-lock.json` as schema version 3's flat `packages` map, keyed by the path an entry was
+installed at — `node_modules/wrangler/node_modules/esbuild` names `esbuild`, the segment after the
+last `node_modules/`, because that is how a duplicate is nested. Each entry's licence is
+`license`, a bare string in the current format, or the older `licenses` array of `{type, url}`
+objects composed through `licence.Expression` the way Go's `classifyModule` composes several
+classified files into one SPDX `OR` — a package offering either of two licences conforms if either
+is allowed. An entry marked `link: true` is a workspace's own local package pointing back into the
+repository rather than at a downloaded tarball, and is skipped the way Go skips its own main
+module: a repository's own licence is not a dependency's, and is not this gate's to judge. Under
+yarn or pnpm, neither lockfile format states a licence at all, so `installedDependencies` reads
+whatever `node_modules` an earlier step already installed — a symlinked workspace member is
+skipped for the same `link` reason, and a package whose own manifest cannot be read or parsed
+still yields the dependency under `licence.Unknown` rather than being dropped, because a dependency
+dropped over an unreadable manifest is one the gate silently allowed. A `node_modules` that is not
+there is the caller's error, never an empty answer: `LicenceSet` reports it as a read that failed,
+not a set that came back empty.
+
 **The base set is recomputed at the merge-base, not read from a stored baseline.** The same
 throwaway-worktree shape `measureBaseTree` uses for CRAP: check the merge-base out, run the same
 licence read there, remove the worktree — cheap here because a licence set costs one manifest read
 and one tool invocation, no suite, no compose service, no instrumented build. Unlike
 `measureBaseTree`, the checkout is **one worktree for the whole scan**, not one per component:
 `newLicenceBaseTree` in `cmd/lydite/scan.go` opens it lazily, the first time any component's
-licence gate asks for a set, and every Go and Rust component's base read shares it — a repository
-with N components pays one checkout of the merge-base commit, not N of the identical commit. A
-worktree that will not check out, a module download that will not resolve, or a cargo-deny that
-will not run reports
-`licence.Unmeasured` on the row, naming what failed; it is never folded into a passing verdict with
-an empty base set — a gate that could not run must never render as one that ran and found nothing.
+licence gate asks for a set, and every Go, Rust and TypeScript component's base read shares it — a
+repository with N components pays one checkout of the merge-base commit, not N of the identical
+commit. A worktree that will not check out, a module download that will not resolve, or a
+cargo-deny that will not run reports `licence.Unmeasured` on the row, naming what failed; it is
+never folded into a passing verdict with an empty base set — a gate that could not run must never
+render as one that ran and found nothing. TypeScript's own base, `typescriptLicenceBase`, gates the
+checkout on `package.json`'s presence rather than on a lockfile: a component declares one manifest
+whichever package manager it uses, but the lockfile that states a licence is npm's alone, and
+gating on it would make every yarn or pnpm component's base read as "not there yet" on a merge-base
+that plainly has one, reporting its whole existing dependency set as newly introduced. A component
+with no `package.json` at the base is one this change adds, so `licenceBaseTree.set` answers it a
+measured empty base — every pair it carries at the current tree is one the change introduces, and
+that is a measurement that found nothing there rather than a failure — while a base with the
+manifest but no readable lockfile is the opposite: a set that could not be read, `unmeasured`,
+never folded into the empty base that would grandfather nothing.
 A run with no diff base at all — `lydite scan` on `main` — is `context`, reporting the full
 non-conforming set and gating nothing, the shape every other diffless scan already has.
 
