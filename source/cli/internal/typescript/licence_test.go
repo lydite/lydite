@@ -200,6 +200,50 @@ func TestLicenceSetReadsAnInstalledTree(t *testing.T) {
 	}
 }
 
+// pnpm's default layout symlinks every registry package's node_modules entry
+// into its own `.pnpm` store — not only a workspace member's, the way yarn and
+// npm link one. A licence source that treated every symlink as local would
+// read almost nothing out of a real pnpm install and pass a component nothing
+// measured.
+func TestLicenceSetReadsAPnpmStoreSymlink(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	pnpmInstall(t, dir, "lightningcss", "1.33.0", `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`)
+
+	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	d, held := rejected(t, set)["lightningcss"]
+	if !held {
+		t.Fatal("lightningcss is installed via a .pnpm store symlink under MPL-2.0, want it in the set")
+	}
+	if d.Version != "1.33.0" {
+		t.Errorf("lightningcss = %q, want version 1.33.0", d.Version)
+	}
+}
+
+// pnpmInstall writes one package into dir's node_modules the way pnpm does:
+// the real manifest sits in the `.pnpm` store, inside node_modules, and
+// node_modules/<name> is a symlink to it — resolving inside node_modules,
+// unlike a workspace member's link back into the repository.
+func pnpmInstall(t *testing.T, dir, name, version, manifest string) {
+	t.Helper()
+	store := filepath.Join(dir, "node_modules", ".pnpm", name+"@"+version, "node_modules", filepath.FromSlash(name))
+	if err := os.MkdirAll(store, 0o750); err != nil {
+		t.Fatalf("installing %s via the pnpm store: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "package.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatalf("installing %s via the pnpm store: %v", name, err)
+	}
+	entry := filepath.Join(dir, "node_modules", filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(entry), 0o750); err != nil {
+		t.Fatalf("linking %s into the pnpm store: %v", name, err)
+	}
+	if err := os.Symlink(store, entry); err != nil {
+		t.Fatalf("linking %s into the pnpm store: %v", name, err)
+	}
+}
+
 // install writes one package into dir's node_modules, with manifest as its
 // package.json.
 func install(t *testing.T, dir, name, manifest string) {

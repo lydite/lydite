@@ -149,12 +149,23 @@ func packageName(path string) (string, bool) {
 // already installed is read opportunistically, and a tree that is not there is
 // the caller's error rather than an empty answer.
 //
-// A local workspace package is a symlink back into the repository, which is how
-// both managers link a workspace member where npm writes `link: true`, and it is
-// skipped for the same reason npm's is.
+// A symlink is not, by itself, a local workspace package: pnpm's default
+// layout links every registry package's node_modules entry into its own
+// `.pnpm` store, so treating every symlink as local would read almost nothing
+// out of a real pnpm install and pass a component nothing measured — the
+// fail-open ADR 0038 forbids. workspaceLocal tells the two apart by where the
+// link resolves to.
 func installedDependencies(ctx context.Context, dir string) ([]licence.Dependency, error) {
 	root := filepath.Join(dir, nodeModulesDir)
 	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	// Resolved once, and compared against below rather than root itself: a
+	// test's own TempDir, and some real systems, reach node_modules through a
+	// symlinked ancestor — /var on darwin is one — and resolving only the
+	// entry against an unresolved root would read every entry as escaping it.
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +174,7 @@ func installedDependencies(ctx context.Context, dir string) ([]licence.Dependenc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if !installedPackage(e) {
+		if !installedPackage(e) || workspaceLocal(resolvedRoot, filepath.Join(root, e.Name())) {
 			continue
 		}
 		// A scope is a plain directory holding the packages under it, so its
@@ -174,7 +185,8 @@ func installedDependencies(ctx context.Context, dir string) ([]licence.Dependenc
 				continue
 			}
 			for _, s := range scoped {
-				if !installedPackage(s) {
+				path := filepath.Join(root, e.Name(), s.Name())
+				if !installedPackage(s) || workspaceLocal(resolvedRoot, path) {
 					continue
 				}
 				out = append(out, installedDependency(root, e.Name()+"/"+s.Name()))
@@ -187,12 +199,38 @@ func installedDependencies(ctx context.Context, dir string) ([]licence.Dependenc
 }
 
 // installedPackage reports whether an entry of a node_modules directory is a
-// package to read.
-//
-// A symlink is a workspace's own package; a dotted name is the manager's own
-// bookkeeping — `.bin`, `.package-lock.json`, `.pnpm` — and names no package.
+// package to consider at all: a real directory or a symlink to one, and never
+// a dotted name — `.bin`, `.package-lock.json`, `.pnpm` — which is the
+// manager's own bookkeeping and names no package. Whether a symlink among
+// these is a workspace member rather than an installed one is workspaceLocal's
+// question, not this one.
 func installedPackage(e fs.DirEntry) bool {
-	return e.IsDir() && e.Type()&fs.ModeSymlink == 0 && !strings.HasPrefix(e.Name(), ".")
+	if strings.HasPrefix(e.Name(), ".") {
+		return false
+	}
+	return e.IsDir() || e.Type()&fs.ModeSymlink != 0
+}
+
+// workspaceLocal reports whether path — a node_modules entry, symlinked or
+// not — resolves outside resolvedRoot (node_modules, itself already resolved)
+// and back into the repository's own tree, which is how both yarn and pnpm
+// link a workspace member, the way npm writes `link: true` for the same case.
+// A registry package pnpm symlinks resolves inside node_modules' own `.pnpm`
+// store, which is not local and is read like any other installed package.
+//
+// A link that cannot be resolved at all — broken, or not a symlink — answers
+// false rather than true: installedDependency then reads it as it stands, and
+// an unreadable manifest already yields Unknown rather than being dropped.
+func workspaceLocal(resolvedRoot, path string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // installedDependency reads one installed package's manifest. A manifest that
