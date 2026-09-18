@@ -192,7 +192,8 @@ a suppression, declaring one refers the change to a human.`,
 				// under a label about all of them.
 				summary: len(components) == 0,
 			}
-			runMutation(ctx, rep, selected, ordered, skipped, cfg, envs, opts)
+			ran := runMutation(ctx, rep, selected, ordered, skipped, cfg, envs, opts)
+			recordMutants(ctx, cmd, dir, ran)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -305,8 +306,38 @@ type componentMutation struct {
 	findings []finding.Finding
 }
 
+// recordMutants writes what this run made of its mutants beside its report.
+//
+// Unconditionally, and never only under a flag: a count that reaches the
+// recording step only when somebody remembered one records nothing when they
+// forget. A run that mutated no component writes a document naming its tree and
+// holding no component, which is what a later fold needs to tell a shard that
+// ran nothing from a shard whose job died.
+//
+// The tree is resolved out from under the run's cancellation, because a run cut
+// short still reports the components that finished — the same rule the teardown
+// above runs under. Every failure warns and none of them fails the command: the
+// mutants ran, their verdict is in the report, and losing the byproduct is not
+// a reason to discard it.
+func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]mutation.Summary) {
+	tree, err := gitstate.TreeSHA(context.WithoutCancel(ctx), dir, "HEAD")
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so the mutant counts were not written: %v\n", err)
+		return
+	}
+	if err := writeMutants(dir, mutantsFrom(tree, ran)); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write the mutant counts: %v\n", err)
+	}
+}
+
 // runMutation plans every selected component, runs its mutants and adds the
 // rows in declaration order.
+//
+// It returns what became of the mutants of every component that ran, keyed by
+// component name. A component that did not run is absent from it rather than
+// present with zeros, which is the distinction mutants.json exists to carry: a
+// zeroed entry for a component nothing mutated reads, permanently, as a suite
+// that killed everything.
 //
 // The components go through the same scheduler `lydite test` uses, under the
 // same bound: a component is one item, so its compose stack is started and
@@ -317,7 +348,7 @@ type componentMutation struct {
 // `lydite test`. Two independent bounds would multiply into components times
 // mutants, which is the quadratic oversubscription defaultConcurrency is a
 // constant rather than NumCPU to avoid.
-func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) {
+func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]mutation.Summary {
 	plans := planComponents(ctx, opts.root, selected, "mutation", opts.stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -365,6 +396,21 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	if opts.summary {
 		rep.Add(mutationSummaryRow(results))
 	}
+	// Plans and results are indexed in parallel, and `ran` is set only where a
+	// component's mutants were generated and executed to a summary — including
+	// the run withdrawInterrupted took back, which resets the result and with it
+	// that flag.
+	var ran map[string]mutation.Summary
+	for i, p := range plans {
+		if !results[i].ran {
+			continue
+		}
+		if ran == nil {
+			ran = map[string]mutation.Summary{}
+		}
+		ran[p.c.Name] = results[i].summary
+	}
+	return ran
 }
 
 // withdrawInterrupted takes back every failing verdict a cancelled run reached.
@@ -866,8 +912,8 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	// The elapsed time is in the value rather than under the row, because it
 	// is what a later runtime budget would be a multiple of and the fold has
-	// no other channel to read it from — a report's rows carry rendered prose,
-	// and mutation writes no measurements document beside them.
+	// no other channel to read it from — mutants.json carries what became of
+	// each mutant, not how long the component took to say so.
 	row := ui.Row{Status: ui.StatusPass, Label: label, Log: log.Rel,
 		Value: fmt.Sprintf("%d of %d mutant(s) killed in %s", killed, total, elapsed.Round(time.Second))}
 	if a := aside(s); a != "" {

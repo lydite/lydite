@@ -31,10 +31,10 @@ func testLog(t *testing.T) *componentLog {
 	return log
 }
 
-// The fold reads each component's score back out of the row a run rendered,
-// because a report's rows carry prose and mutation writes no second document
-// beside them. Nothing else holds the two together, so a wording change here
-// is a fold that silently stops counting.
+// A shard that wrote no mutants.json — an older lydite, or a document that
+// would not parse — still has its score read back out of the row it rendered.
+// Nothing else holds the wording and the regex together, so a change to either
+// is a fold that silently stops counting that shard.
 func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -63,7 +63,7 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t), c.s, c.results, nil, 42*time.Second)
 			decl := component.File{Components: []component.Component{{Name: "app"}}}
-			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, decl)
+			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, mutantsDoc{}, decl)
 
 			want := formatScore(c.killed, c.denom, 1, 42*time.Second)
 			if folded.Value != want {
@@ -533,6 +533,147 @@ func TestTheFoldSumsTheShardsScoresAndGatesNothing(t *testing.T) {
 	}
 	if doc.Verdict != ui.VerdictPass {
 		t.Errorf("verdict is %q, want pass", doc.Verdict)
+	}
+}
+
+// countsShard writes one shard's report directory with the counts document
+// beside the rendered report, the way a matrix job leaves it behind.
+func countsShard(t *testing.T, counts mutantsDoc, rows ...ui.Row) string {
+	t.Helper()
+	dir := mutationShard(t, rows...)
+	data, err := json.Marshal(counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, mutantsName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The fold sums what the shards measured rather than what they said, and a
+// shard that ran nothing at all folds in: its document holds no component, so
+// it contributes nothing to the score and its own rows still take their place.
+func TestTheFoldSumsTheShardsCountsIncludingAShardThatRanNothing(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, Unviable: 2}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc"},
+			ui.Row{Status: ui.StatusContext, Label: mutationLabel("b"), Value: "mutation is off for this component"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, ok := rowNamed(doc, "mutation")
+	if !ok {
+		t.Fatal("the fold emitted no summary row")
+	}
+	// Seven killed of the eight that say something about the suite. The two
+	// that did not compile are outside the denominator, and the shard that ran
+	// nothing adds neither a component nor a mutant.
+	want := "7 of 8 mutant(s) killed across 1 component(s) in 1m30s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
+	}
+	// A shard that measured nothing is a shard of this run all the same: it was
+	// responsible for a component that opted out, and refusing its document
+	// would make an opt-out anywhere in the matrix a fold that cannot complete.
+	shards, _ := rowNamed(doc, "shards")
+	if shards.Status != ui.StatusPass {
+		t.Errorf("the shards row is %+v, want the shard that ran nothing folded in", shards)
+	}
+}
+
+// A component whose mutants said nothing about the suite still ran, and the
+// fold counts it because its shard's counts hold it — the rendered row is
+// `unmeasured` and carries no score at all. It is the count an unsharded run
+// reports for the same declaration, which is what a fold reading numbers rather
+// than sentences is for.
+func TestTheFoldCountsAComponentWhoseMutantsSaidNothing(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Unviable: 3}}},
+			ui.Row{Status: ui.StatusUnmeasured, Label: mutationLabel("b"),
+				Value: "3 mutant(s), none of which says anything about the suite: 3 did not compile"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "7 of 8 mutant(s) killed across 2 component(s) in 1m30s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
+	}
+}
+
+// A shard whose counts are missing still contributed a verdict, so its score
+// comes back out of its rendered row rather than silently out of the total. A
+// version skew in a matrix is what produces that, and dropping the shard would
+// under-report the run while every row still read green.
+func TestAShardWithNoCountsIsReadBackFromItsRows(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "10 of 11 mutant(s) killed across 2 component(s) in 2m0s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want the shard with no counts read back from its row", summary.Value)
+	}
+}
+
+// Counts that are there and will not parse are neither a shard that wrote none
+// nor one that measured nothing, and are named on that shard's row: read as
+// absent, the fold would answer from the prose while the row still read `pass`.
+func TestAShardWhoseCountsWillNotParseFailsItsRow(t *testing.T) {
+	root := mergeRepo(t)
+	broken := mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "4 of 4 mutant(s) killed in 10s"})
+	if err := os.WriteFile(filepath.Join(broken, mutantsName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := runMutationMerge(t, root, broken,
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("a shard whose counts would not parse passed the fold")
+	}
+	row, ok := rowNamed(doc, "read("+broken+")")
+	if !ok || row.Status != ui.StatusFail {
+		t.Fatalf("the shard's row is %+v, want a failure naming what could not be read", row)
+	}
+	// The score is still reported, from the prose: the shard rendered a
+	// verdict whatever became of its counts.
+	summary, _ := rowNamed(doc, "mutation")
+	if !strings.HasPrefix(summary.Value, "7 of 7 mutant(s) killed") {
+		t.Errorf("summary = %q, want the unreadable shard read back from its row", summary.Value)
+	}
+}
+
+// Shards that mutated different trees are not parts of one run, and the row
+// that says so is `shards` — the one row about whether these documents fold
+// into a run at all.
+func TestShardsThatMutatedDifferentTreesDoNotFold(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t, mutantsDoc{Tree: "aaaaaaaaaaaa", Components: map[string]mutantCounts{"a": {Killed: 4}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "4 of 4 mutant(s) killed in 10s"}),
+		countsShard(t, mutantsDoc{Tree: "bbbbbbbbbbbb", Components: map[string]mutantCounts{"b": {Killed: 3}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("shards of two trees folded into one run")
+	}
+	row, _ := rowNamed(doc, "shards")
+	if row.Status != ui.StatusFail || !strings.Contains(strings.Join(row.Detail, "\n"), "different trees") {
+		t.Errorf("the shards row is %+v, want it to name the disagreement", row)
 	}
 }
 
