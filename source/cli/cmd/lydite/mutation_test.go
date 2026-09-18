@@ -1320,6 +1320,203 @@ func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
 	}
 }
 
+// --base-sha is the commit it names and nothing else: no fetch and no
+// merge-base, which is what lets a run on the default branch have a range at
+// all. The fixture is two commits deep so the two flags name different
+// commits, and every spelling git resolves names the same one.
+func TestAnExplicitBaseResolvesTheCommitItNames(t *testing.T) {
+	root := twoChangesRepo(t)
+	ctx := context.Background()
+	want := revParse(t, root, "HEAD~1")
+	mergeBase, err := resolveMutationBase(ctx, root, "main", "")
+	if err != nil {
+		t.Fatalf("the merge-base against main did not resolve: %v", err)
+	}
+	if mergeBase == want {
+		t.Fatal("the fixture's merge-base is its own HEAD~1, so nothing here distinguishes the two bases")
+	}
+	for _, c := range []struct {
+		name     string
+		revision string
+	}{
+		{"the full SHA", want},
+		{"an abbreviated SHA", want[:8]},
+		{"a relative ref", "HEAD~1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveMutationBase(ctx, root, "", c.revision)
+			if err != nil {
+				t.Fatalf("%s did not resolve: %v", c.revision, err)
+			}
+			if got != want {
+				t.Errorf("--base-sha %s resolved %s, want %s", c.revision, got, want)
+			}
+		})
+	}
+}
+
+// The mutants themselves, and not only the commit behind them: pointed at a
+// base explicitly, a run produces exactly what the merge-base run over the
+// same range produces — over a repository whose merge-base is further back,
+// and so would carry an earlier change's mutants too.
+func TestAnExplicitBaseProducesTheMutantsTheMergeBaseWould(t *testing.T) {
+	score := func(t *testing.T, root string, args ...string) string {
+		t.Helper()
+		doc, _, err := runMutationCmd(t, append([]string{"--dir", root}, args...)...)
+		if err != nil {
+			t.Fatalf("the run failed: %v\n%+v", err, doc.Rows)
+		}
+		row, ok := rowNamed(doc, mutationLabel("app"))
+		if !ok {
+			t.Fatalf("no row for the component: %+v", doc.Rows)
+		}
+		// The counts alone. The elapsed time is in the same value and
+		// differs between two runs of the same range.
+		counts, _, _ := strings.Cut(row.Value, " in ")
+		return counts
+	}
+	// The second change alone, as a branch whose merge-base holds the first.
+	want := score(t, goModuleRepo(t, shallower, killsShallower), "--base-branch", "main")
+	if !strings.Contains(want, "mutant(s) killed") {
+		t.Fatalf("the fixture mutated nothing, so the two runs agree about nothing: %q", want)
+	}
+	got := score(t, twoChangesRepo(t), "--base-sha", "HEAD~1")
+	if got != want {
+		t.Errorf("--base-sha HEAD~1 mutated %q, want the equivalent merge-base run's %q", got, want)
+	}
+}
+
+// twoChangesRepo is a branch carrying two changes over main, so the merge-base
+// with main is a commit behind HEAD~1 and the two bases name different ranges.
+func twoChangesRepo(t *testing.T) string {
+	t.Helper()
+	root := goModuleRepoWith(t, goModuleDecl, "", nil, deeper, killsItsMutants)
+	write(t, root, "paths/paths.go", baseSource+deeper+shallower)
+	write(t, root, "paths/paths_test.go", baseSuite+killsItsMutants+killsShallower)
+	commitAll(t, root, "the second change")
+	return root
+}
+
+// shallower is a second change, on its own commit: one comparison, on a line
+// the suite below executes.
+const shallower = "\nfunc Shallower(a, b string) bool { return Depth(a) < Depth(b) }\n"
+
+const killsShallower = `
+func TestShallower(t *testing.T) {
+	if !Shallower("a", "a/b") {
+		t.Error("a is shallower than a/b")
+	}
+	if Shallower("a", "a") {
+		t.Error("a is not shallower than itself")
+	}
+}
+`
+
+// revParse is what the fixture's own git says a revision is, which is what
+// resolution is checked against rather than against itself.
+func revParse(t *testing.T, root, revision string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", revision)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v", revision, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// --affected answers about the range the mutants came from. Selection
+// resolving a base of its own would report a component untouched while its own
+// mutants were being run, or the reverse — so the fixture is built where the
+// two bases disagree: the last commit touches web alone, and the merge-base
+// with main is behind a commit that touched app.
+func TestAnExplicitBaseSelectsTheComponentsItsMutantsCameFrom(t *testing.T) {
+	root := goModuleRepoWith(t,
+		"components:\n  - name: app\n    dir: app\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: web\n    dir: web\n    runner: go-test\n    args: [\"./...\"]\n",
+		"app",
+		map[string]string{
+			"web/go.mod": "module fixture/web\n\ngo 1.26.4\n",
+			"web/web.go": "package web\n\nfunc Version() int { return 1 }\n",
+		},
+		deeper, killsItsMutants)
+	write(t, root, "web/web.go", "package web\n\nfunc Version() int { return 2 }\n")
+	commitAll(t, root, "a change to web alone")
+
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-sha", "HEAD~1", "--affected")
+	if err != nil {
+		t.Fatalf("an affected run against an explicit base failed: %v\n%+v", err, doc.Rows)
+	}
+	app, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("the deselected component took no row: %+v", doc.Rows)
+	}
+	// The component the explicit base's range does not touch, and the one
+	// whose mutants that same range produced none of.
+	if app.Status != ui.StatusUnmeasured || app.Value != "not affected" {
+		t.Errorf("app = %+v, want unmeasured/not affected — the range this run mutated does not touch it", app)
+	}
+	if _, ok := rowNamed(doc, mutationLabel("web")); !ok {
+		t.Fatalf("the selected component took no row: %+v", doc.Rows)
+	}
+	sel, ok := rowNamed(doc, "select")
+	if !ok {
+		t.Fatal("an affected run emitted no select row")
+	}
+	if !strings.Contains(sel.Value, "1 of 2 affected") {
+		t.Errorf("select = %q, want 1 of 2 affected", sel.Value)
+	}
+}
+
+// commitAll commits everything in the fixture as one commit.
+func commitAll(t *testing.T, root, message string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "--quiet", "-m", message}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@example.com",
+			"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// Two answers to one question. Refused rather than resolved by precedence: a
+// mis-wired workflow supplying both would otherwise mutate a range nobody
+// asked for, silently.
+func TestABaseBranchAndABaseSHATogetherAreRefused(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	// Both of them resolvable in this fixture, so what is under test is the
+	// refusal rather than one of the two failing on its own.
+	_, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--base-sha", "HEAD")
+	if err == nil {
+		t.Fatal("both bases were accepted, so one of them silently decided the range")
+	}
+	for _, want := range []string{"base-branch", "base-sha"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run failed with %q, want it to name %s", err, want)
+		}
+	}
+}
+
+// An unresolvable explicit base is an error naming the revision and the fix,
+// exactly as an unresolvable merge-base is — never a run that mutates nothing
+// and reports a pass.
+func TestAnUnresolvableExplicitBaseIsAnErrorNamingTheFix(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	_, _, err := runMutationCmd(t, "--dir", root, "--base-sha", "HEAD~99")
+	if err == nil {
+		t.Fatal("a base no commit answers to was accepted")
+	}
+	for _, want := range []string{"--base-sha", "HEAD~99", "depth 0"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run failed with %q, want it to say %q", err, want)
+		}
+	}
+}
+
 // A ceiling the component's own baseline would not fit under gates nothing and
 // says why. Under one, every mutant dies of the bound rather than of a test,
 // and a row reporting that as a suite that killed everything is a score

@@ -51,7 +51,7 @@ func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
 	var asJSON, noColor, stream, onlyAffected bool
-	var concurrency, baseBranch, memory string
+	var concurrency, baseBranch, baseSHA, memory string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
@@ -66,7 +66,8 @@ change to one of those lines, and the suite is asked whether anything fails. A
 change nothing notices is a survivor, and a survivor is the only outcome that
 fails the gate.
 
-Mutants come only from lines in the change against the merge-base, and only
+Mutants come only from lines in the change against the base — the merge-base
+with the base branch, or the commit --base-sha names — and only
 from lines the component's own coverage reports as executed. There is no
 whole-repository mode: it would run for hours on any mature codebase, and a
 mutant on an uncovered line cannot be killed by construction.
@@ -124,21 +125,27 @@ a suppression, declaring one refers the change to a human.`,
 				return err
 			}
 
-			// Mutation is diff-scoped always, so the merge-base is not a flag
-			// this command can do without: an unresolvable one is an error
-			// naming the fix rather than a run that quietly mutates nothing
-			// and reports a pass.
-			base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+			// Mutation is diff-scoped always, so the base is not something this
+			// command can do without: an unresolvable one is an error naming
+			// the fix rather than a run that quietly mutates nothing and
+			// reports a pass. --base-sha names the commit outright and
+			// --base-branch asks where this branch diverged from one; they
+			// answer the same question two ways, which is why cobra refuses
+			// both at once.
+			base, err := resolveMutationBase(ctx, dir, baseBranch, baseSHA)
 			if err != nil {
-				return fmt.Errorf("mutation is scoped to the change against the merge-base, and it could not be resolved: %w"+
-					"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
+				return err
 			}
 
 			selected := own
 			var skipped map[string]ui.Row
 			var ordered []component.Component
 			if onlyAffected {
-				res, err := selectAffected(ctx, dir, file, baseBranch)
+				// From the base already resolved, never from the flag again:
+				// selection answering about a different range than the mutants
+				// were generated against would report a component untouched
+				// while its own mutants ran, or the reverse.
+				res, err := affectedFrom(ctx, dir, file, base)
 				if err != nil {
 					return err
 				}
@@ -198,8 +205,18 @@ a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().StringVar(&concurrency, "concurrency", strconv.Itoa(defaultConcurrency),
 		`how many suites to run at once, or "max" for no bound`)
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
-		"of the components this run is responsible for, mutate only those the change against the merge-base could have broken")
+		"of the components this run is responsible for, mutate only those the change against the base could have broken")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	// The base a caller states rather than one lydite discovers. A post-merge
+	// run is where the difference is load-bearing: on the default branch the
+	// merge-base against the default branch is HEAD itself, so a run there has
+	// no diff and nothing to mutate.
+	cmd.Flags().StringVar(&baseSHA, "base-sha", "",
+		"exact commit the change is measured against, as a SHA or a relative ref such as HEAD~1; "+
+			"resolved with git rev-parse and never fetched, so no merge-base is computed")
+	// Two answers to one question. Picking a winner silently would let a
+	// mis-wired workflow mutate a range nobody asked for.
+	cmd.MarkFlagsMutuallyExclusive("base-branch", "base-sha")
 	// Overrides the budget derived from the component's own baseline. A
 	// number nobody measured is what ADR 0027 refuses as a runtime budget;
 	// this is the escape for a suite whose own timing is not representative,
@@ -214,6 +231,31 @@ a suppression, declaring one refers the change to a human.`,
 		"how much memory one mutant's suite may hold before it counts as killed, e.g. 4GiB; derived from the component's own baseline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	return cmd
+}
+
+// resolveMutationBase is the commit this run's mutants come from the diff
+// against, resolved once for the whole run.
+//
+// Each flag fails with its own value named. The two resolutions fail for
+// different reasons and have different fixes — a branch that could not be
+// fetched or merged-base against, and a revision this checkout does not hold —
+// so one message covering both would name a cause the caller can act on only
+// half the time.
+func resolveMutationBase(ctx context.Context, dir, baseBranch, baseSHA string) (string, error) {
+	if baseSHA != "" {
+		base, err := gitstate.ResolveRevision(ctx, dir, baseSHA)
+		if err != nil {
+			return "", fmt.Errorf("mutation is scoped to the change against %s %s, and it could not be resolved: %w",
+				gitstate.BaseSHAFlag, baseSHA, err)
+		}
+		return base, nil
+	}
+	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+	if err != nil {
+		return "", fmt.Errorf("mutation is scoped to the change against the merge-base, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
+	}
+	return base, nil
 }
 
 // annotationMarker is the declaration an author writes to say no test could
