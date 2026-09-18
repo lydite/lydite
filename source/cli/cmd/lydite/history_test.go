@@ -710,15 +710,16 @@ func TestNoScanDocumentRecordsNoFindingCountAtAll(t *testing.T) {
 
 // A licence nought is seeded only where a policy governs the component.
 //
-// Go gates on the repository's own licence.policy.allow alone; a Rust component
-// gates on that or on its own deny.toml. A count seeded where neither applies
-// gives a repository that never turned the gate on the trend line of one whose
-// policy ran clean on every commit, which is absent-is-not-zero in the gate
-// whose configuration is most often left unset.
+// Go and TypeScript gate on the repository's own licence.policy.allow alone; a
+// Rust component gates on that or on its own deny.toml. A count seeded where
+// neither applies gives a repository that never turned the gate on the trend
+// line of one whose policy ran clean on every commit, which is
+// absent-is-not-zero in the gate whose configuration is most often left unset.
 func TestALicenceCountIsSeededOnlyWhereAPolicyGates(t *testing.T) {
 	decl := component.File{Components: []component.Component{
 		{Name: "api", Dir: "api", Runner: runner.GoTest},
 		{Name: "svc", Dir: "svc", Runner: runner.CargoNextest},
+		{Name: "web", Dir: "web", Runner: runner.Vitest},
 	}}
 	stated := config.Default()
 	stated.Licence.Policy.Allow = []string{"MIT"}
@@ -729,10 +730,12 @@ func TestALicenceCountIsSeededOnlyWhereAPolicyGates(t *testing.T) {
 		deny  bool
 		wants map[string]bool // component name -> licence key expected
 	}{
-		{name: "no policy anywhere", cfg: config.Default(), wants: map[string]bool{"api": false, "svc": false}},
-		{name: "a stated policy", cfg: stated, wants: map[string]bool{"api": true, "svc": true}},
+		{name: "no policy anywhere", cfg: config.Default(), wants: map[string]bool{"api": false, "svc": false, "web": false}},
+		{name: "a stated policy", cfg: stated, wants: map[string]bool{"api": true, "svc": true, "web": true}},
+		// A component's own deny.toml is Rust's alone: no other language has a
+		// second policy source, so neither of its neighbours gates on it.
 		{name: "a consumer deny.toml alone", cfg: config.Default(), deny: true,
-			wants: map[string]bool{"api": false, "svc": true}},
+			wants: map[string]bool{"api": false, "svc": true, "web": false}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

@@ -37,7 +37,7 @@ const GateBiome = "biome"
 // language implies is the only thing that makes a zero distinguishable from an
 // absence. A fresh slice per call, because a package-level one is a variable
 // every caller can edit.
-func FindingGates() []string { return []string{GateBiome} }
+func FindingGates() []string { return []string{GateBiome, GateLicence} }
 
 // Check lints dir, with env on top of the caller's own environment — the
 // component's resolved Node toolchain.
