@@ -154,6 +154,14 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		return nil
 	}
 
+	// What became of the mutants, bound to the same tree the measurements are
+	// bound to and dropped silently when it does not bind. Absence is a
+	// legitimate answer for this document at every step — most recordings read
+	// none at all — so a set of counts that cannot be tied to this checkout is
+	// counts this recording does not have, and never a refusal to record the
+	// measurements that did bind.
+	mutants := boundMutants(read.mutants, head)
+
 	// The quality history is decided independently of the baseline. The two
 	// are different policies over one branch: a baseline is a cache, refused
 	// whenever it would be partial, because a partial one reads as a cache hit
@@ -168,7 +176,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	perComponent, root := findingCounts(dir, decl, cfg, read.found, read.scanned)
 	rep.Add(findingsRow(perComponent, root, read.scanned))
 
-	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root)
+	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, mutants)
 
 	// What may be recorded as a baseline, and the row that says why when
 	// nothing may. An empty snapshot is a legitimate answer here, and is what
@@ -316,7 +324,8 @@ func baselineToRecord(ctx context.Context, dir string, decl component.File, cfg 
 // branch a concurrent run may have advanced, and an answer computed once would
 // have that retry declare a gap the intervening run had just filled.
 func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc,
-	perComponent map[string]map[string]int, root map[string]int) (gitstate.Records, string) {
+	perComponent map[string]map[string]int, root map[string]int,
+	mutants map[string]mutantCounts) (gitstate.Records, string) {
 	// A branch and never a guess. History is per branch, so a record filed
 	// under a branch this checkout is not on puts one line's points on
 	// another line, and nothing downstream can tell. The caller's own
@@ -331,7 +340,7 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 	// scalar is a record naming a commit and holding no number, which is a
 	// point on no line — and there is no reason to describe a commit nothing
 	// is going to be filed against.
-	components := historyComponents(folded, perComponent)
+	components := historyComponents(folded, perComponent, mutants)
 	// The root-scoped counts are a scalar of their own and keep a recording
 	// worth making on their own: a repository whose every suite was carried and
 	// whose scan found something still has a point to put on that line.
@@ -418,7 +427,15 @@ func gapBefore(ctx context.Context, dir, worktree, branch string, head gitstate.
 //
 // The per-gate finding counts come in from the side, because they are measured
 // by `lydite scan` and not by the run that wrote these measurements.
-func historyComponents(doc measurementsDoc, perComponent map[string]map[string]int) map[string]ledger.Component {
+//
+// The mutant counts come in from the side for the same reason, out of a
+// `lydite mutation` run, and are empty for every recording that read none. A
+// component absent from them is a component nothing mutated — untouched by the
+// diff, declared `mutation: false`, or a run that did not complete — and
+// records no mutation at all, because a zeroed one reads as a suite that killed
+// everything and nothing later corrects it.
+func historyComponents(doc measurementsDoc, perComponent map[string]map[string]int,
+	mutants map[string]mutantCounts) map[string]ledger.Component {
 	out := map[string]ledger.Component{}
 	for name, m := range doc.Components {
 		c := ledger.Component{Producer: m.Producer}
@@ -448,14 +465,51 @@ func historyComponents(doc measurementsDoc, perComponent map[string]map[string]i
 		c.Findings = gates
 		out[name] = c
 	}
+	// And the mutant counts reach one the measurements never mention for the
+	// same reason: a component the merge commit's diff touched is mutated
+	// whatever its suite was carried or measured by.
+	for name, counts := range mutants {
+		c := out[name]
+		c.Mutation = &ledger.Mutation{
+			Killed:       counts.Killed,
+			TimedOut:     counts.TimedOut,
+			OutOfMemory:  counts.OutOfMemory,
+			Survived:     counts.Survived,
+			Unviable:     counts.Unviable,
+			Acknowledged: counts.Acknowledged,
+		}
+		out[name] = c
+	}
 	// A component holding no scalar at all contributes nothing but its name,
 	// which is a point on no line.
 	for name, c := range out {
-		if c.Coverage == nil && c.CRAP == nil && c.Tests == nil && c.Findings == nil {
+		if c.Coverage == nil && c.CRAP == nil && c.Tests == nil && c.Findings == nil && c.Mutation == nil {
 			delete(out, name)
 		}
 	}
 	return out
+}
+
+// boundMutants is the folded mutant counts for the tree being recorded, and
+// nothing at all when they describe another one.
+//
+// The binding is the same one the measurements carry and the answer to failing
+// it is not: measurements name the tree a record is filed against, so a
+// document describing another tree fails the command, while counts that cannot
+// be tied to this checkout are simply counts this recording does not have.
+// Absence is a legitimate answer for this document at every step — most
+// recordings read none — so degrading to it loses nothing a reader could have
+// acted on, and refusing the whole recording over it would drop the coverage
+// and test series of a commit that measured both.
+func boundMutants(docs []mutantsDoc, tree string) map[string]mutantCounts {
+	if len(docs) == 0 {
+		return nil
+	}
+	folded, err := foldMutants(docs)
+	if err != nil || folded.Tree != tree {
+		return nil
+	}
+	return folded.Components
 }
 
 // findingsRow says how much of a scan reached the record.
@@ -552,15 +606,19 @@ func sameSnapshot(a, b gitstate.Snapshot) bool {
 
 // reportsRead is what a recording's report directories hold.
 //
-// Two documents and not one, because the two are written by different commands
-// in different jobs: `lydite test` writes what it measured, `lydite scan`
-// writes what it found, and a recording folds both. A directory holding only
-// one of them is the ordinary shape of each of those jobs rather than a
-// malfunction.
+// Three documents and not one, because each is written by a different command
+// in a different job: `lydite test` writes what it measured, `lydite scan`
+// writes what it found, `lydite mutation` writes what became of its mutants,
+// and a recording folds all three. A directory holding only one of them is the
+// ordinary shape of each of those jobs rather than a malfunction.
 type reportsRead struct {
 	// docs is every measurements document read, which is what the baseline and
 	// the tree binding are folded from.
 	docs []measurementsDoc
+	// mutants is every mutant-counts document read, absent for a directory no
+	// mutation run ever wrote to — a `lydite test` shard with no mutation
+	// matrix beside it, or a lydite that predates the document.
+	mutants []mutantsDoc
 	// found is every located claim the scan documents made.
 	found []finding.Finding
 	// scanned says that some directory held a readable scan document, which is
@@ -570,10 +628,10 @@ type reportsRead struct {
 	scanned bool
 }
 
-// readReports reads both documents out of each named directory, adding a row
+// readReports reads each document out of each named directory, adding a row
 // for each so a folded recording says what it was folded from.
 //
-// A directory holding neither is named and skipped rather than failing the
+// A directory holding none of them is named and skipped rather than failing the
 // command: a run with --no-coverage writes no measurements, and a caller
 // passing the same directory list to `record` as to `publish` is doing
 // something reasonable.
@@ -609,6 +667,20 @@ func readReports(rep *ui.Report, reports []string) reportsRead {
 			held = append(held, fmt.Sprintf("%d finding(s) from scan", len(scan.Findings)))
 		case !errors.Is(scanErr, os.ErrNotExist):
 			detail = append(detail, scanErr.Error())
+		}
+
+		// The counts are the third document and the one absent from almost
+		// every directory: a `lydite test` shard writes none, and a mutation
+		// run writes one whether or not it mutated anything. Its absence is
+		// therefore never reported — only a document that is there and will
+		// not parse is.
+		counts, countsErr := readMutants(dir)
+		switch {
+		case countsErr == nil:
+			out.mutants = append(out.mutants, counts)
+			held = append(held, fmt.Sprintf("%d component(s) mutated for %s", len(counts.Components), shortSHA(counts.Tree)))
+		case !errors.Is(countsErr, os.ErrNotExist):
+			detail = append(detail, countsErr.Error())
 		}
 
 		if len(held) == 0 {

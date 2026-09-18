@@ -371,7 +371,7 @@ func TestOnlyAComponentWithNoScalarAtAllIsDropped(t *testing.T) {
 		},
 		Tests: map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
 	}
-	got := historyComponents(doc, nil)
+	got := historyComponents(doc, nil, nil)
 
 	for _, name := range []string{"measured", "scored", "red"} {
 		if _, ok := got[name]; !ok {
@@ -390,6 +390,155 @@ func TestOnlyAComponentWithNoScalarAtAllIsDropped(t *testing.T) {
 	if c := got["red"]; c.Tests == nil || c.Tests.Failed != 2 {
 		t.Errorf("red = %+v, want the counts from a suite that failed", c.Tests)
 	}
+}
+
+// The counts a mutation run took reach the component they were taken for,
+// including one the measurements never mention: the merge commit's diff decides
+// what is mutated, and a component whose suite was carried is mutated all the
+// same.
+func TestTheMutantCountsReachTheComponentTheyWereTakenFor(t *testing.T) {
+	doc := measurementsDoc{
+		Components: map[string]componentMeasurement{
+			"measured": {Entry: producing(3, 4, "go 1.26")},
+		},
+	}
+	got := historyComponents(doc, nil, map[string]mutantCounts{
+		"measured": {Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5},
+		"carried":  {Killed: 1},
+	})
+
+	want := ledger.Mutation{Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5}
+	if c := got["measured"]; c.Mutation == nil || *c.Mutation != want {
+		t.Errorf("measured = %+v, want %+v", c.Mutation, want)
+	}
+	// A component the measurements say nothing about carries its mutation and
+	// nothing else, rather than being dropped as a point on no line.
+	c, ok := got["carried"]
+	if !ok {
+		t.Fatalf("a component known only from the counts was dropped: %+v", got)
+	}
+	if c.Mutation == nil || c.Mutation.Killed != 1 || c.Coverage != nil || c.Tests != nil {
+		t.Errorf("carried = %+v, want its counts alone", c)
+	}
+}
+
+// A recording that read no counts records none, and never a zeroed run: a
+// component nothing mutated is absent from the counts, and zeros there would
+// read as a suite that killed every mutant.
+func TestARecordingThatReadNoCountsRecordsNoMutation(t *testing.T) {
+	doc := measurementsDoc{
+		Components: map[string]componentMeasurement{"measured": {Entry: producing(3, 4, "go 1.26")}},
+		Tests:      map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
+	}
+	for name, c := range historyComponents(doc, nil, nil) {
+		if c.Mutation != nil {
+			t.Errorf("%s = %+v, want no mutation from a recording that read none", name, c.Mutation)
+		}
+	}
+}
+
+// The whole path, through the command: a run's counts sit beside its
+// measurements, and the record the branch holds carries the six numbers.
+func TestARecordedEntryCarriesTheMutantCounts(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	if err := writeMutants(root, mutantsDoc{
+		Tree:       treeOf(t, root),
+		Components: map[string]mutantCounts{"svc": {Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("recording: %v\n%s\n%s", err, out, errOut)
+	}
+	recs := historyOn(t, root)
+	if len(recs) != 1 {
+		t.Fatalf("the branch holds %d records, want the one this recording appended", len(recs))
+	}
+	m := recs[0].Components["svc"].Mutation
+	if m == nil {
+		t.Fatalf("the record carries no mutation: %+v", recs[0].Components["svc"])
+	}
+	want := ledger.Mutation{Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1}
+	if *m != want {
+		t.Errorf("mutation = %+v, want %+v", *m, want)
+	}
+}
+
+// Counts naming another tree are counts this recording does not have, and the
+// measurements that did bind are recorded anyway.
+//
+// The binding is the same one the measurements carry and the answer to failing
+// it is not: a mis-wired workflow would otherwise cost a commit its coverage
+// and test series over a document no recording needs to have read at all.
+func TestCountsNamingAnotherTreeAreDroppedRatherThanFailingTheRecording(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	if err := writeMutants(root, mutantsDoc{
+		Tree:       "0000000000000000000000000000000000000000",
+		Components: map[string]mutantCounts{"svc": {Killed: 7}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runRecordCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("counts naming another tree failed the whole recording: %v\n%s\n%s", err, out, errOut)
+	}
+	recs := historyOn(t, root)
+	if len(recs) != 1 {
+		t.Fatalf("the branch holds %d records, want the one this recording appended", len(recs))
+	}
+	svc := recs[0].Components["svc"]
+	if svc.Coverage == nil {
+		t.Errorf("svc = %+v, want the measurements that did bind", svc)
+	}
+	if svc.Mutation != nil {
+		t.Errorf("svc records %+v, taken on a tree this recording is not filed against", svc.Mutation)
+	}
+}
+
+// A report directory with no counts beside its measurements is what every
+// `lydite test` shard uploads: it records what it always did, and says nothing
+// about a document nothing was expected to write.
+func TestMeasurementsWithNoCountsBesideThemRecordAsTheyAlwaysDid(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMeasurements(root, measurementsDoc{Tree: "deadbeef"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := ui.NewReport("record")
+	read := readReports(rep, []string{reportsDir(root)})
+
+	if len(read.docs) != 1 || len(read.mutants) != 0 {
+		t.Fatalf("read = %d measurements, %d counts; want the measurements alone", len(read.docs), len(read.mutants))
+	}
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context row", rows)
+	}
+	if len(rows[0].Detail) != 0 {
+		t.Errorf("read row detail = %v, want nothing said about counts this job never writes", rows[0].Detail)
+	}
+	if strings.Contains(rows[0].Value, "mutated") {
+		t.Errorf("read row = %q, want it silent about a run that never happened", rows[0].Value)
+	}
+}
+
+// treeOf is the tree the checkout under root points at.
+func treeOf(t *testing.T, root string) string {
+	t.Helper()
+	tree, err := gitstate.TreeSHA(context.Background(), root, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
 }
 
 // The branch a recording is filed under is the caller's to state, and the flag
@@ -454,7 +603,7 @@ func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
 	records, why := historyRecords(context.Background(), t.TempDir(), "main",
 		measurementsDoc{Components: map[string]componentMeasurement{
 			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
-		}}, nil, nil)
+		}}, nil, nil, nil)
 	if records != nil {
 		t.Error("a fold carrying no scalar produced records")
 	}

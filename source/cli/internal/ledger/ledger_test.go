@@ -389,6 +389,34 @@ func TestAnAbsentScalarIsNotAZeroOne(t *testing.T) {
 	}
 }
 
+// A run that killed every mutant records a survived count of nought, and a
+// component nothing mutated records no Mutation at all. Zeros standing in for
+// the absence would write a perfect suite into a permanent history, and the
+// ledger is append-only — after the merge the diff those mutants came from is
+// gone, so nothing later corrects it.
+func TestAnAbsentMutationIsNotAZeroedOne(t *testing.T) {
+	root := t.TempDir()
+	rec := entry("a", "", "main", "2026-03-15T10:00:00Z")
+	rec.Components = map[string]Component{
+		"mutated":   {Mutation: &Mutation{Killed: 4, Survived: 0}},
+		"unmutated": {Tests: &junit.Counts{Total: 4}},
+	}
+	if _, _, err := Append(root, []Record{rec}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got := lines(t, root, "history/v1/2026-03.ndjson")[0]
+	c := got.Components["mutated"]
+	if c.Mutation == nil {
+		t.Fatalf("the mutated component round-tripped to %+v, want the counts its run took", c)
+	}
+	if c.Mutation.Killed != 4 || c.Mutation.Survived != 0 {
+		t.Errorf("the mutated component = %+v, want 4 killed and a measured nought survived", c.Mutation)
+	}
+	if c := got.Components["unmutated"]; c.Mutation != nil {
+		t.Errorf("the unmutated component gained a mutation run of %+v", c.Mutation)
+	}
+}
+
 func write(t *testing.T, root, path, content string) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(path))
