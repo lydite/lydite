@@ -103,6 +103,9 @@ func TestRunQuietIsolatedEnvCarriesNothingButWhatItIsGiven(t *testing.T) {
 	if strings.Contains(r.Output, "A_SECRET_THIS_PROCESS_HOLDS") {
 		t.Errorf("the child's environment carried this process's own variable:\n%s", r.Output)
 	}
+	if r.MaxRSS <= 0 {
+		t.Error("MaxRSS = 0, want the peak of a run that happened")
+	}
 }
 
 // A nil environment must not fall back to os/exec's own default of inheriting

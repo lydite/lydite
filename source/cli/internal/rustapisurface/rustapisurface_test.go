@@ -315,6 +315,26 @@ func TestArgvComparesTwoTreesWithNoPackageSelection(t *testing.T) {
 	}
 }
 
+// refusal keeps exactly reasonLines lines starting at the error, and drops
+// anything past that — proven at the boundary itself, not just well inside or
+// well outside it.
+func TestRefusalHoldsTheBoundaryAtExactlyReasonLines(t *testing.T) {
+	held := []string{"error: could not build"}
+	for i := 1; i < reasonLines; i++ {
+		held = append(held, "progress line "+strconv.Itoa(i))
+	}
+	want := strings.Join(held, "\n")
+
+	if got := refusal(want); got != want {
+		t.Errorf("refusal held at exactly %d lines from the error = %q, want every line kept", reasonLines, got)
+	}
+
+	crossed := strings.Join(append(append([]string{}, held...), "one line too many"), "\n")
+	if got := refusal(crossed); got != want {
+		t.Errorf("refusal(%d lines from the error) = %q, want the first %d kept and the rest dropped", reasonLines+1, got, reasonLines)
+	}
+}
+
 // A command that never ran, or died on a signal, has no ExitError to read a
 // code out of — errors.As fails on it exactly as it does on a plain error —
 // and that answer takes the same "not one of the two known codes" path as an
@@ -367,9 +387,9 @@ func TestMessageWithNoTitleIsTheWitnessAlone(t *testing.T) {
 // BaseDir or HeadDir left empty — and answers that it found nothing rather
 // than matching an empty prefix against every witness.
 func TestLocateWithNoRootFindsNothing(t *testing.T) {
-	_, _, _, ok := locate("probe::Config no longer implements Default", "")
-	if ok {
-		t.Error("locate found a location with no root to recognise it by")
+	prefix, path, line, ok := locate("probe::Config no longer implements Default", "")
+	if ok || prefix != "" || path != "" || line != 0 {
+		t.Errorf("locate(_, %q) = %q, %q, %d, %v, want the zero value and false", "", prefix, path, line, ok)
 	}
 }
 
@@ -377,9 +397,9 @@ func TestLocateWithNoRootFindsNothing(t *testing.T) {
 // could be, so locate must not claim to have found one.
 func TestLocateWithNoLineNumberFindsNothing(t *testing.T) {
 	root := t.TempDir()
-	_, _, _, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs"), root)
-	if ok {
-		t.Error("locate found a location in a witness with no line number")
+	prefix, path, line, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs"), root)
+	if ok || prefix != "" || path != "" || line != 0 {
+		t.Errorf("locate found %q, %q, %d, %v in a witness with no line number, want the zero value and false", prefix, path, line, ok)
 	}
 }
 
@@ -387,9 +407,33 @@ func TestLocateWithNoLineNumberFindsNothing(t *testing.T) {
 // is not a location either: the colon can belong to the tool's own prose.
 func TestLocateWithANonNumericSuffixFindsNothing(t *testing.T) {
 	root := t.TempDir()
-	_, _, _, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs")+":notanumber", root)
-	if ok {
-		t.Error("locate found a location with a non-numeric line")
+	prefix, path, line, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs")+":notanumber", root)
+	if ok || prefix != "" || path != "" || line != 0 {
+		t.Errorf("locate found %q, %q, %d, %v with a non-numeric line, want the zero value and false", prefix, path, line, ok)
+	}
+}
+
+// A witness that names the root at the very start of the text has an empty
+// prefix, which is a real location and not the "not found" the same code path
+// reports for a negative index — the two must not collapse into each other.
+func TestLocateFindsALocationAtTheStartOfTheText(t *testing.T) {
+	root := t.TempDir()
+	text := root + string(os.PathSeparator) + "src/lib.rs:4"
+	prefix, path, line, ok := locate(text, root)
+	if !ok || prefix != "" || path != "src/lib.rs" || line != 4 {
+		t.Errorf("locate(%q, %q) = %q, %q, %d, %v, want \"\", \"src/lib.rs\", 4, true", text, root, prefix, path, line, ok)
+	}
+}
+
+// A witness whose path segment is empty — the root, a separator, then
+// immediately the colon — still carries a real line number at index 0 rather
+// than being read as "no colon found": the two must not collapse either.
+func TestLocateFindsAnEmptyPathAtLineZero(t *testing.T) {
+	root := t.TempDir()
+	text := "in " + root + string(os.PathSeparator) + ":42"
+	prefix, path, line, ok := locate(text, root)
+	if !ok || prefix != "in " || path != "" || line != 42 {
+		t.Errorf("locate(%q, %q) = %q, %q, %d, %v, want \"in \", \"\", 42, true", text, root, prefix, path, line, ok)
 	}
 }
 
@@ -439,6 +483,66 @@ func TestIsolatedEnvCarriesOnlyCheckAndTheAllowedAmbientVars(t *testing.T) {
 	}
 	if !foundHome {
 		t.Error("isolatedEnv dropped HOME")
+	}
+}
+
+// A key the composed environment already declares is not also carried at its
+// ambient value: the two must not both reach the child, where which one a
+// given libc's getenv() prefers is not lydite's to decide.
+func TestIsolatedEnvDoesNotOverrideADeclaredAmbientKey(t *testing.T) {
+	t.Setenv("HOME", "/ambient/home")
+
+	got := isolatedEnv([]string{"PATH=/composed/bin", "HOME=/declared/home"})
+
+	seen := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "HOME=") {
+			seen++
+			if kv != "HOME=/declared/home" {
+				t.Errorf("HOME entry = %q, want the declared value to win", kv)
+			}
+		}
+	}
+	if seen != 1 {
+		t.Errorf("isolatedEnv carried HOME %d times, want exactly the one the composed environment declared", seen)
+	}
+}
+
+// withoutCredentials clears a credential-shaped variable for fn's duration
+// and restores it afterward, whatever fn does.
+func TestWithoutCredentialsClearsAndRestores(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "should-not-be-visible-inside-fn")
+	t.Setenv("SOME_UNRELATED_VAR", "must-survive-untouched")
+
+	var sawInside string
+	sawInsideOK := true
+	withoutCredentials(func() {
+		sawInside, sawInsideOK = os.LookupEnv("GITHUB_TOKEN")
+	})
+
+	if sawInsideOK {
+		t.Errorf("GITHUB_TOKEN was visible inside withoutCredentials: %q", sawInside)
+	}
+	if got := os.Getenv("GITHUB_TOKEN"); got != "should-not-be-visible-inside-fn" {
+		t.Errorf("GITHUB_TOKEN after withoutCredentials = %q, want it restored", got)
+	}
+	if got := os.Getenv("SOME_UNRELATED_VAR"); got != "must-survive-untouched" {
+		t.Errorf("an unrelated variable changed: got %q", got)
+	}
+}
+
+// A panic inside fn must not skip the restore, or one credential-scrubbing
+// call that fails partway leaves every later one running without it.
+func TestWithoutCredentialsRestoresEvenIfFnPanics(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "must-be-restored-after-a-panic")
+
+	func() {
+		defer func() { _ = recover() }()
+		withoutCredentials(func() { panic("boom") })
+	}()
+
+	if got := os.Getenv("GITHUB_TOKEN"); got != "must-be-restored-after-a-panic" {
+		t.Errorf("GITHUB_TOKEN after a panicking fn = %q, want it restored", got)
 	}
 }
 
