@@ -89,6 +89,38 @@ func TestRunQuietKeepsStderrOutOfOutput(t *testing.T) {
 	}
 }
 
+// Every other Run* layers its extra environment onto this process's own.
+// RunQuietIsolatedEnv is the one call that replaces it instead, for a
+// subprocess that runs code the tree under scan controls and must not
+// inherit whatever this process's own environment happens to carry.
+func TestRunQuietIsolatedEnvCarriesNothingButWhatItIsGiven(t *testing.T) {
+	t.Setenv("A_SECRET_THIS_PROCESS_HOLDS", "leaked-if-this-test-fails")
+
+	r := RunQuietIsolatedEnv(context.Background(), t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, "sh", "-c", "env")
+	if !r.Ok() {
+		t.Fatalf("sh: %v", r.Err)
+	}
+	if strings.Contains(r.Output, "A_SECRET_THIS_PROCESS_HOLDS") {
+		t.Errorf("the child's environment carried this process's own variable:\n%s", r.Output)
+	}
+	if r.MaxRSS <= 0 {
+		t.Error("MaxRSS = 0, want the peak of a run that happened")
+	}
+}
+
+// A nil environment must not fall back to os/exec's own default of inheriting
+// this process's environment — that is exactly the leak this function exists
+// to close, and the one case a caller forgetting to build an environment
+// would otherwise trip into silently.
+func TestRunQuietIsolatedEnvWithNilCarriesNothing(t *testing.T) {
+	t.Setenv("A_SECRET_THIS_PROCESS_HOLDS", "leaked-if-this-test-fails")
+
+	r := RunQuietIsolatedEnv(context.Background(), t.TempDir(), nil, "sh", "-c", "env")
+	if strings.Contains(r.Output, "A_SECRET_THIS_PROCESS_HOLDS") {
+		t.Errorf("a nil environment inherited this process's own:\n%s", r.Output)
+	}
+}
+
 // os/exec resolves a bare program name against *this* process's PATH when the
 // command is constructed; cmd.Env is applied afterwards and has no say in it.
 // Without resolving here, a toolchain lydite provisioned and put on the

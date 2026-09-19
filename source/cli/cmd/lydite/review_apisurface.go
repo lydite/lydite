@@ -20,6 +20,9 @@ import (
 	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/rustapisurface"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -99,15 +102,10 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 	defer remove()
 
 	for _, c := range opted {
-		findings, err := apisurface.Compare(
-			filepath.Join(root, filepath.FromSlash(c.Dir)),
-			filepath.Join(dir, filepath.FromSlash(c.Dir)),
-			gateAPISurface, c.Name, envs.For(c.Name).Environ())
+		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
 		switch {
-		case errors.Is(err, apisurface.ErrModulePathChanged):
-			referUncomputable(d, c, "the module path changed between the merge-base and this change")
-		case err != nil:
-			referUncomputable(d, c, err.Error())
+		case uncomputable != "":
+			referUncomputable(d, c, uncomputable)
 		case len(findings) == 0:
 			report.Add(ui.Row{
 				Status: ui.StatusPass,
@@ -135,6 +133,60 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 		}
 	}
 	return nil
+}
+
+// compareSurface compares one component's public API against the merge-base
+// with the comparison its language has, and names what stopped it when the
+// comparison could not be made at all.
+//
+// Both trees are prepared here rather than in either comparison package: the
+// merge-base is materialised with git, and neither internal/apisurface nor
+// internal/rustapisurface does any — each takes two directories and returns
+// findings.
+//
+// The two languages differ only in which tool makes the comparison. What a
+// break means, and what a surface that could not be compared means, is one rule
+// for both: see addAPISurfaceRows.
+func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Component, root, dir string, envs toolchain.Envs) ([]finding.Finding, string) {
+	base := filepath.Join(root, filepath.FromSlash(c.Dir))
+	head := filepath.Join(dir, filepath.FromSlash(c.Dir))
+	tc := envs.For(c.Name)
+	switch langOf(c) {
+	case runner.Go:
+		findings, err := apisurface.Compare(base, head, gateAPISurface, c.Name, tc.Environ())
+		switch {
+		case errors.Is(err, apisurface.ErrModulePathChanged):
+			return nil, "the module path changed between the merge-base and this change"
+		case err != nil:
+			return nil, err.Error()
+		}
+		return findings, ""
+	case runner.Rust:
+		// The two environments every other Rust check runs under, composed the
+		// same way: the component's own toolchain and declaration build the two
+		// trees, and lydite's own provisions the pinned cargo-semver-checks.
+		res := rustapisurface.Compare(ctx, rustapisurface.Request{
+			BaseDir:   base,
+			HeadDir:   head,
+			Gate:      gateAPISurface,
+			Component: c.Name,
+			Env: executil.Env{
+				Check:   childEnv(tc, c, runner.Invocation{}),
+				Install: tc.Environ(),
+			},
+			Progress: cmd.ErrOrStderr(),
+		})
+		if res.Outcome == rustapisurface.Unmeasurable {
+			return nil, res.Reason
+		}
+		return res.Findings, ""
+	default:
+		// component.Load refuses api_surface on every other language, so a
+		// component reaching here has none lydite can compare. Said out loud,
+		// because a comparison that never happened must not render as one that
+		// found nothing.
+		return nil, "no public-API comparison exists for this component's language"
+	}
 }
 
 // refer adds a disqualification and states the verdict that follows from it.
@@ -243,7 +295,9 @@ func pullRequestTitle(warn io.Writer, eventPath string) string {
 // returns the scan root inside it, with the removal the caller must run.
 //
 // A real tree on disk, because `go/packages` loads a module by running the Go
-// tool over one and `git show <base>:<path>` cannot supply that.
+// tool over one and `cargo-semver-checks` takes its baseline as a checked-out
+// source root it builds rustdoc from; `git show <base>:<path>` cannot supply
+// either.
 //
 // The scan root may sit below the repository root, so the worktree is entered
 // at the same prefix --dir sits at. Comparing at the worktree root instead

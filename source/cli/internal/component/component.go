@@ -136,11 +136,14 @@ type Component struct {
 	APISurface *APISurfaceConfig `yaml:"api_surface,omitempty"`
 }
 
-// APISurfaceConfig is the api_surface value. It carries no field yet: Go's
-// own internal/ convention is already the public/private boundary, so
-// nothing needs naming. It is a struct rather than a bool so that a future
-// field — a Rust crate root, a TypeScript entry point — is additive rather
-// than a breaking change to this shape.
+// APISurfaceConfig is the api_surface value. It carries no field: Go's own
+// internal/ convention is already the public/private boundary, and a Rust
+// component's public root is already named by its own Cargo.toml's [lib] —
+// both comparisons resolve the boundary from what cargo or the Go toolchain
+// already reads, not from anything api_surface would have to restate. It is
+// a struct rather than a bool so that a language whose boundary genuinely
+// needs a field named here is additive rather than a breaking change to
+// this shape.
 type APISurfaceConfig struct{}
 
 // MutationEnabled reports whether mutation testing runs for this component.
@@ -421,11 +424,11 @@ func validateInvocation(where string, c Component) error {
 	return nil
 }
 
-// validateAPISurface rejects api_surface on a component whose language is
-// not Go, checked defensively against c.Lang() rather than assumed from
-// validateInvocation having already run: a command-invoked component
-// declares no language either, and Lang() answers "" for it the same way it
-// does for an unknown runner.
+// validateAPISurface rejects api_surface on a component whose language has
+// no comparison built for it yet, checked defensively against c.Lang()
+// rather than assumed from validateInvocation having already run: a
+// command-invoked component declares no language either, and Lang() answers
+// "" for it the same way it does for an unknown runner.
 //
 // Only when this tree is the one being configured, the same reason
 // validateName is gated the same way: a historical tree is being measured
@@ -437,10 +440,12 @@ func validateAPISurface(where string, c Component, strict bool) error {
 	if !strict || c.APISurface == nil {
 		return nil
 	}
-	if c.Lang() != runner.Go {
-		return fmt.Errorf("%s: api_surface is only supported for Go components in this version", where)
+	switch c.Lang() {
+	case runner.Go, runner.Rust:
+		return nil
+	default:
+		return fmt.Errorf("%s: api_surface is only supported for Go and Rust components in this version", where)
 	}
-	return nil
 }
 
 func validateCompose(where string, c Compose) error {

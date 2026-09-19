@@ -17,6 +17,7 @@ func TestPinnedVersionsParse(t *testing.T) {
 	}{
 		{cargoAuditManifest, "cargo-audit"},
 		{cargoDenyManifest, "cargo-deny"},
+		{cargoSemverChecksManifest, "cargo-semver-checks"},
 	} {
 		v, err := cargotool.PinnedVersion(tc.manifest, tc.crate)
 		if err != nil {
@@ -39,5 +40,11 @@ func TestPinManifestsAreSeparate(t *testing.T) {
 	}
 	if _, err := cargotool.PinnedVersion(cargoDenyManifest, "cargo-audit"); err == nil {
 		t.Error("cargo-audit is declared in cargo-deny-pin; the two must not share a resolution graph")
+	}
+	if _, err := cargotool.PinnedVersion(cargoSemverChecksManifest, "cargo-audit"); err == nil {
+		t.Error("cargo-audit is declared in cargo-semver-checks-pin; each cargo tool gets its own manifest")
+	}
+	if _, err := cargotool.PinnedVersion(cargoSemverChecksManifest, "cargo-deny"); err == nil {
+		t.Error("cargo-deny is declared in cargo-semver-checks-pin; each cargo tool gets its own manifest")
 	}
 }

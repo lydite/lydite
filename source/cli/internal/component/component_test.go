@@ -172,14 +172,14 @@ func TestParseRejects(t *testing.T) {
 			want: "cycle",
 		},
 		{
-			name: "api_surface on a non-Go runner",
-			yaml: "components:\n  - {name: a, dir: cli, runner: cargo-nextest, api_surface: {}}\n",
-			want: "api_surface is only supported for Go components in this version",
+			name: "api_surface on a TypeScript runner",
+			yaml: "components:\n  - {name: a, dir: cli, runner: vitest, api_surface: {}}\n",
+			want: "api_surface is only supported for Go and Rust components in this version",
 		},
 		{
 			name: "api_surface on a command component",
 			yaml: "components:\n  - {name: a, dir: cli, command: [make, test], api_surface: {}}\n",
-			want: "api_surface is only supported for Go components in this version",
+			want: "api_surface is only supported for Go and Rust components in this version",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -212,6 +212,25 @@ components:
 	}
 	if f.Components[1].APISurface != nil {
 		t.Error("an omitted api_surface must leave APISurface nil")
+	}
+}
+
+// A Rust component opts in the same way a Go one does: the surface it
+// carries is whatever cargo resolves from the component's own dir, so
+// api_surface itself names nothing language-specific.
+func TestAPISurfaceOptInRust(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: sdk
+    dir: sdk
+    runner: cargo-nextest
+    api_surface: {}
+`), "components.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Components[0].APISurface == nil {
+		t.Error("api_surface: {} must set APISurface on a Rust component")
 	}
 }
 
@@ -436,16 +455,16 @@ func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
 		t.Errorf("components = %+v, want the declaration read as written", lenient.Components)
 	}
 
-	// api_surface on a non-Go component is Load's rejection to make, not
-	// LoadHistorical's: the coverage baseline that calls LoadHistorical never
-	// reads api_surface, and a base tree carrying it — set before the
+	// api_surface on an unsupported component is Load's rejection to make,
+	// not LoadHistorical's: the coverage baseline that calls LoadHistorical
+	// never reads api_surface, and a base tree carrying it — set before the
 	// component's runner changed, or before this repository's own history —
 	// must still be measurable.
-	nonGo := "components:\n  - {name: svc, dir: svc, runner: cargo-nextest, api_surface: {}}\n"
-	if _, err := Load(write(t, nonGo)); err == nil {
-		t.Error("Load accepted api_surface on a non-Go component")
+	unsupported := "components:\n  - {name: svc, dir: svc, runner: vitest, api_surface: {}}\n"
+	if _, err := Load(write(t, unsupported)); err == nil {
+		t.Error("Load accepted api_surface on an unsupported component")
 	}
-	if _, err := LoadHistorical(write(t, nonGo)); err != nil {
+	if _, err := LoadHistorical(write(t, unsupported)); err != nil {
 		t.Errorf("LoadHistorical refused a historical tree over api_surface, which it never reads: %v", err)
 	}
 

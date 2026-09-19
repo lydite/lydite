@@ -234,3 +234,143 @@ is what a referral is for.
 - Rust (`cargo-semver-checks`) and TypeScript are later slices, and the release-time check —
   a tag that is not a major bump whose range contains a declared break — is its own issue,
   unplanned here.
+
+## Amendment (2026-09-19): the Rust comparison is `cargo-semver-checks`, as a pinned subprocess
+
+This discharges the Rust half of the last consequence above. It is an amendment rather than an
+ADR of its own because the rule is not restated: an undeclared break fails, a declared one is
+referred, a declaration with no break is referred, and an author claim may only ever add a
+referral. Five of the decisions above carry to Rust word for word — `review` computes it, the
+declaration is read from the title and from every commit in the range, a component opts in
+through `api_surface:`, there is no calibration period, and a surface that could not be computed
+refers. Only *the comparison* is language-specific, and this names Rust's.
+
+The tool is `cargo-semver-checks`, invoked as a subprocess. It is a Rust crate, so there is no
+library to call from Go and no cgo to reach one with, which makes it a tool pin rather than a
+`go.mod` entry — the opposite of `apidiff` and for the same reason `apidiff` is not one. The
+ritual [`tool-pins.md`](../../agentic/references/tool-pins.md) prescribes therefore applies in
+full: a `cargo-semver-checks-pin/Cargo.toml` colocated with the package that invokes it, a
+`.gt-repo.yaml` entry that renders into `.github/dependabot.yml`, an `src/lib.rs`, and an
+exclude in `.lydite/components.yml` — the shape `internal/rust`'s `cargo-audit-pin` and
+`cargo-deny-pin` already have. `internal/cargotool` installs it, so the version-keyed cache and
+the prebuilt-archive-then-`cargo install` fallback are reused rather than restated.
+
+The comparison lives in `internal/rustapisurface`, beside `internal/apisurface` and with the
+same boundary: two directories in, raw findings out, no git, no components and no verdicts. It
+is not part of `internal/rust`, which is the scan package — it knows about components and runs
+the checks `scan` renders, and a comparison that needs a merge-base tree belongs to `review`.
+
+### It needs two real trees, and builds both
+
+`cargo-semver-checks` derives each side's API from rustdoc JSON it generates itself; there is no
+`cargo doc` step to run first, and no nightly toolchain to provision — the binary drives stable
+rustdoc's JSON output through `RUSTC_BOOTSTRAP`. `--baseline-root <dir>` takes a checked-out
+source tree, so the base worktree `cmd/lydite/coverage.go`'s `measureBaseTree` materialises is
+exactly what it wants, and the Go slice's shape carries over unchanged. Within that tree the
+package is resolved **by name**, not by relative path: pointing `--baseline-root` at a workspace
+root found the member the head manifest names.
+
+`--baseline-version` and `--baseline-rev` were both rejected. A published version answers the
+question `gorelease` answers, and the merge-base has no version and never will. `--baseline-rev`
+would have the tool do its own git checkout, putting a second base commit — computed by
+something other than `internal/gitstate` — beside the one every other gate in the run compares
+against.
+
+Both trees are built, so the base tree must compile and must be writable: a `target/` is written
+into each, including the baseline root. A worktree is discarded with its `target/`, and two
+rustdoc builds per opted-in component per run is the cost of the gate.
+
+### The release type is forced to `minor`, because deriving it is a bypass
+
+Left to itself the tool reads both `Cargo.toml` versions and decides what it is allowed to
+report. Bumping the head's version from `0.1.0` to `1.0.0` — one line, in a file the change
+under review owns — turned a removed public function into `no semver update required` and exit
+0. That is an author-controlled claim removing a gate, which
+[`an-author-claim-may-only-add-a-referral-never-remove-one`](../../agentic/rules/an-author-claim-may-only-add-a-referral-never-remove-one.md)
+forbids outright. `--release-type minor` is passed unconditionally: every `major` lint is
+evaluated and every `minor` one is skipped, whatever the manifests say.
+
+That flag is also the whole compatible-change filter, and it is the tool's own rather than a
+lint allow-list lydite would have to maintain. The catalogue types each of its 254 lints `major`
+or `minor`, and under `--release-type minor` only a `major` lint can fail — the same read as Go's
+`Change.Compatible`, made by the tool instead of by the wrapper.
+
+### A component's surface is whatever cargo selects from its directory
+
+No package flags are passed. `internal/rust` already states that a Rust component is "the unit
+cargo treats as a whole — a workspace root, or a standalone crate", and every check it runs
+inherits cargo's own default selection from the component's `dir`; the surface diff inherits the
+same rule, so an `api_surface:` component's surface is the surface of whatever `clippy` at that
+directory lints. A package manifest yields that package; a virtual workspace root yields every
+default member, each checked separately, with binary-only members skipped and named in the
+summary.
+
+So `api_surface` gains no field. ADR 0040 kept it an object partly against the day a Rust crate's
+public root had to be named, and the day arrived without needing one: `[lib]`'s `path` already
+names it, and cargo already resolves it. The load-time error's scope narrows to the languages
+still unsupported — a TypeScript component setting `api_surface` remains a load error, and Rust
+stops being one.
+
+Features are the tool's default heuristic, applied identically to both trees: every feature
+except ones named `unstable`, `nightly`, `bench`, `no_std`, or prefixed `_`, `unstable_`,
+`unstable-`. This is Rust's analogue of Go's untagged-build gap, and it is a narrower one — a
+single union build rather than a default build — but it is still a gap: a symbol reachable only
+under an `unstable`-named feature is invisible to the comparison, and saying so is better than
+building a combinatorial set of feature powersets.
+
+### There is no machine-readable output, so the exit code and the block structure are the contract
+
+`cargo-semver-checks` 0.50.0 has **no** `--output-format` flag, on the stable CLI or under
+`-Z unstable-options`; the flag is rejected as an unexpected argument. There is nothing shaped
+like clippy's or cargo-audit's JSON lines to decode, and `internal/rust`'s `decodeNDJSON` has
+nothing to do here. What the tool does give is stable enough to read:
+
+- **findings on stdout**, as a block per failing lint opening
+  `--- failure <lint_id>: <title> ---`, then a `Description:` paragraph with `ref:` and `impl:`
+  links, then `Failed in:` and one indented witness line per occurrence;
+- **progress and the verdict on stderr** — the per-crate `Building`/`Parsing`/`Checking` lines,
+  a `Checked … N checks: …` tally, and a `Summary` line. Every one carries a duration, so
+  stderr is not deterministic text;
+- **an exit code**: `0` nothing to report, `100` at least one `major` lint failed, `101` the run
+  could not be made. Anything else is also a run that could not be made — only `0` and `100` are
+  answers.
+
+A finding's message is the lint id, its title and the witness line, in the tool's own words. Its
+location is the `<absolute path>:<line>` every witness line ends in, and the tree that path is
+under is what says whether the symbol is gone: each lint carries its own phrasing — `function
+probe::removed, previously in file …`, `probe::changed now takes 2 parameters instead of 1, in
+…`, `trait method probe::Store::put in file …` — so a path under the base tree is read as a
+removal and given the same "located at its declaration in the merge-base" detail Go's removals
+get, rather than the word `previously` being parsed out of 254 lints' individual prose.
+
+### What the probe measured
+
+`source/cli/internal/rustapisurface/testdata/` holds the probe crates: a `probe` library with one
+base tree and one overlay per shape, and a `probebin` binary-only crate. Each case was run as
+`cargo semver-checks --manifest-path <head>/Cargo.toml --baseline-root <base> --release-type
+minor --color never` against **cargo-semver-checks 0.50.0** under rustc 1.96.0, and both streams
+are recorded verbatim in `<case>.stdout.txt` and `<case>.stderr.txt` with exactly two
+substitutions: the two absolute tree roots become `$BASE` and `$HEAD`, and each `[ 0.000s]`
+duration becomes `[ELAPSED]`. Exit codes are in `exit-codes.txt`. These are the evidence, so a
+change to any of them is a change to what this amendment claims and has to be read rather than
+regenerated.
+
+| Shape | Exit | What `cargo-semver-checks` reported |
+|---|---|---|
+| public function removed | 100 | `function_missing`, located in the base tree |
+| public function signature changed | 100 | `function_parameter_count_changed`, located in the head tree |
+| method added to a public trait | 100 | `trait_method_added`, located in the head tree |
+| public struct field removed | 100 | `struct_pub_field_missing`, located in the base tree |
+| public function added | 0 | nothing — an addition is a `minor` lint, and those are skipped |
+| private module's signature and a `#[cfg(test)]` body changed | 0 | nothing at all |
+| public function removed, and the version bumped to `1.0.0` | 100 | `function_missing` — and **exit 0, nothing reported, without `--release-type minor`** |
+| base tree does not parse | 101 | rustdoc's error, on stderr, naming the base tree |
+| crate has no library target | 101 | `no crates with library targets selected, nothing to semver-check` |
+
+The trait case is the one worth stating explicitly, as it was for Go: adding a required method
+to a public trait breaks every implementer outside the crate while breaking nobody who only
+calls it, and the tool calls it major. The two 101 cases are the ones ADR 0040's
+"a surface that could not be computed refers" already decided: a base tree that does not build
+is not the author's to fix, and a component that opted in with no library target has no API to
+compare. Both get their own row naming the reason and refer the change. Neither is ever silent,
+and neither is ever green.

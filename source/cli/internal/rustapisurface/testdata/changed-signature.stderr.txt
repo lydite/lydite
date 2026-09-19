@@ -1,0 +1,13 @@
+    Building probe v0.1.0 (current)
+       Built [ELAPSED] (current)
+     Parsing probe v0.1.0 (current)
+      Parsed [ELAPSED] (current)
+    Building probe v0.1.0 (baseline)
+       Built [ELAPSED] (baseline)
+     Parsing probe v0.1.0 (baseline)
+      Parsed [ELAPSED] (baseline)
+    Checking probe v0.1.0 -> v0.1.0 (assume minor change)
+     Checked [ELAPSED] 196 checks: 195 pass, 1 fail, 0 warn, 58 skip
+
+     Summary semver requires new major version: 1 major and 0 minor checks failed
+    Finished [ELAPSED] probe

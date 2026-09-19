@@ -16,7 +16,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, baseBranch, eventPath string
+	var dir, base, baseBranch, eventPath, verdictPath string
 	var asJSON, noColor, doPublish bool
 	cmd := &cobra.Command{
 		Use: "review",
@@ -37,8 +37,8 @@ A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
 It runs one check: for each component that declares api_surface, the exported
-API of its Go module is compared against the merge-base. A break this change
-did not declare fails, and a declared one is referred.`,
+API of its Go module or its Rust crate is compared against the merge-base. A
+break this change did not declare fails, and a declared one is referred.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
@@ -85,6 +85,15 @@ did not declare fails, and a declared one is referred.`,
 					return err
 				}
 			}
+			// Written whether or not this run also published: a job with no
+			// write credential can still hand its verdict to review publish,
+			// which runs in a job that has one and never ran the comparison
+			// itself.
+			if verdictPath != "" {
+				if err := writeVerdict(verdictPath, decision, report.Verdict()); err != nil {
+					return err
+				}
+			}
 
 			saveDocument(dir, report)
 
@@ -104,6 +113,8 @@ did not declare fails, and a declared one is referred.`,
 	// by accident nor appear to have posted when it did not.
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
+	cmd.Flags().StringVar(&verdictPath, "write-verdict", "", "write the verdict to this path, for a later 'review publish' in a job that holds the publishing credential this one need not")
+	cmd.AddCommand(newReviewPublishCmd())
 	return cmd
 }
 

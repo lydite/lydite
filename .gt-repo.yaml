@@ -47,6 +47,12 @@ dependabot:
     note: |
       cargo-deny (internal/rust).
   - ecosystem: cargo
+    directory: /source/cli/internal/rust/cargo-semver-checks-pin
+    note: |
+      cargo-semver-checks (internal/rust), the API-break comparison a Rust
+      component's api_surface opt-in runs. Its own manifest, not a shared
+      one, for the reason cargo-audit and cargo-deny already split.
+  - ecosystem: cargo
     directory: /source/cli/internal/runner/cargo-nextest-pin
     note: |
       cargo-nextest (internal/runner), the test runner a component declaring

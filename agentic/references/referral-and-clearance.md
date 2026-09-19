@@ -5,9 +5,10 @@
 `lydite review` decides whether a change may merge unattended. Almost nothing in the referral
 model itself is a failure: exemptions, disqualifiers and the isolation rule below emit pass or
 refer, and a malformed exemptions file or an unresolvable merge-base is an error, exit 1. `review`
-runs one check, a public-API diff for every component that opts in with `api_surface` (see
+runs one check, a public-API diff for every component that opts in with `api_surface` —
+`internal/apisurface` for Go, `internal/rustapisurface` for Rust — (see
 [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
-and [`components.md`](components.md)), and that check *can* fail: an undeclared break is a gate,
+and its amendment, and [`components.md`](components.md)), and that check *can* fail: an undeclared break is a gate,
 because the author clears it by not breaking the API or by declaring the break, and both are work
 they can do. A declared break refers instead, and a surface that could not be compared refers as
 well — see [below](#a-declared-api-break-refers-an-undeclared-one-fails). See
@@ -115,16 +116,20 @@ the one way this command gives a confidently wrong answer.
 ## A declared API break refers, an undeclared one fails
 
 `review`'s `addAPISurfaceRows` (`cmd/lydite/review_apisurface.go`) is the one check in the
-command, and it renders three verdicts for a component that opted in with `api_surface`:
+command, and it renders three verdicts for a component that opted in with `api_surface`,
+whichever language it compares: the comparison itself is `internal/apisurface`'s
+`golang.org/x/exp/apidiff` for Go and `internal/rustapisurface`'s pinned `cargo-semver-checks`
+subprocess for Rust — see the ADR's amendment for that half — but the verdicts `addAPISurfaceRows`
+draws from either one's result are the same three:
 
 - an undeclared incompatible change is `ui.StatusFail` — the author clears it by restoring the
   API or by declaring the break, and both are work they can do;
 - a declared incompatible change is `ui.StatusRefer` (`referral.DisqualificationAPIBreakDeclared`)
   — every breaking change should reach a person, and the disqualification is what makes it one;
-- a surface `apisurface.Compare` could not build or load — the base tree fails to build, the
-  module path moved between the merge-base and this change — is also `ui.StatusRefer`
-  (`referral.DisqualificationAPISurfaceUncomputable`), because `review` genuinely cannot tell a
-  break from no break and neither pass nor fail would be true. See
+- a surface that could not be built or loaded — the base tree fails to build, a Go module path
+  moved between the merge-base and this change, a Rust crate has no library target — is also
+  `ui.StatusRefer` (`referral.DisqualificationAPISurfaceUncomputable`), because `review` genuinely
+  cannot tell a break from no break and neither pass nor fail would be true. See
   [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
   for why the third verdict exists rather than one of the first two standing in for it, and
   [the rule](../rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md) it follows.
@@ -168,6 +173,14 @@ decision; `internal/forge` is the only thing that talks to the platform. See
 `review --publish` records the verdict as the **`lydite/referral` commit status** and as
 the pull request's standing comment. The status is the whole record: a clearance is a
 state change on that context at one commit, and nothing else stores it.
+
+`review publish --verdict <path>` (a subcommand) posts the same status through the same
+`publish`/`stateFor`/`describe` (`cmd/lydite/status.go`), from a document `review
+--write-verdict` wrote rather than from a verdict this invocation computed itself — see
+[ci.md](ci.md)'s `referral`/`referral-publish` split. It carries only what `describe`
+needs (the verdict, the matched exemption's name, whether the change was empty) and
+never recomputes the comparison, so the job posting the status never runs the code that
+comparison had to execute.
 
 Six properties are load-bearing:
 

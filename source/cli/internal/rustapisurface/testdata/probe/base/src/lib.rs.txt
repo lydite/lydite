@@ -1,0 +1,40 @@
+//! A probe crate whose public surface each shape changes in exactly one way.
+
+/// A function a consumer calls.
+pub fn removed(n: i32) -> i32 {
+    n
+}
+
+/// A function whose signature one shape changes.
+pub fn changed(n: i32) -> i32 {
+    n
+}
+
+/// A trait a consumer implements.
+pub trait Store {
+    /// Reads the stored value.
+    fn get(&self) -> i32;
+}
+
+/// A struct a consumer constructs.
+pub struct Config {
+    /// How long to wait.
+    pub timeout: i32,
+    /// What to call it.
+    pub name: String,
+}
+
+mod private {
+    /// Unreachable from outside the crate, whatever its signature.
+    pub fn hidden(n: i32) -> i32 {
+        n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn works() {
+        assert_eq!(super::removed(1), 1);
+    }
+}

@@ -1,0 +1,12 @@
+    Building probe v0.1.0 (current)
+       Built [ELAPSED] (current)
+     Parsing probe v0.1.0 (current)
+      Parsed [ELAPSED] (current)
+    Building probe v0.1.0 (baseline)
+       Built [ELAPSED] (baseline)
+     Parsing probe v0.1.0 (baseline)
+      Parsed [ELAPSED] (baseline)
+    Checking probe v0.1.0 -> v0.1.0 (assume minor change)
+     Checked [ELAPSED] 196 checks: 196 pass, 58 skip
+     Summary no semver update required
+    Finished [ELAPSED] probe
