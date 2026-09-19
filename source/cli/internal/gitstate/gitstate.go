@@ -46,6 +46,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/semver"
+
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/ledger"
@@ -274,6 +276,86 @@ func CommitMessages(ctx context.Context, dir, from, to string) ([]string, error)
 		}
 	}
 	return messages, nil
+}
+
+// TagPattern is the glob every release tag matches, and the only tags lydite
+// reads as versions. A repository's tags may include anything — a vendor's
+// marker, a moved pointer — and a listing that took them all would have to
+// decide what a non-version tag means.
+const TagPattern = "v*"
+
+// Tags lists every tag matching TagPattern, in git's own order.
+//
+// Unordered on purpose: version order is semver's answer and not git's, so a
+// caller that needs it sorts with golang.org/x/mod/semver rather than relying
+// on a listing whose order is lexical.
+//
+// An empty list is not an error. A repository before its first release has no
+// tags, and so does a shallow checkout that fetched none — the two are
+// indistinguishable here, and a caller that cannot proceed without tags is the
+// one able to name the fetch depth as the fix.
+func Tags(ctx context.Context, dir string) ([]string, error) {
+	r := executil.RunQuiet(ctx, dir, "git", "tag", "-l", TagPattern)
+	if !r.Ok() {
+		return nil, fmt.Errorf("git tag -l %s: %w", TagPattern, r.Err)
+	}
+	var tags []string
+	for _, line := range strings.Split(r.Output, "\n") {
+		if tag := strings.TrimSpace(line); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags, nil
+}
+
+// PreviousTag is the release that precedes tag: the semver-highest tag in the
+// repository strictly below it, and false when there is none.
+//
+// Version order and never the commit graph. A tag's git parent says where the
+// work sat — a hotfix cut from an older commit, a tag moved after the fact —
+// while consumers upgrade along the version line, so the range a release
+// actually delivers is the one bounded by its version-highest predecessor.
+//
+// A prerelease is never a predecessor, in either direction. `v0.3.0` compares
+// against `v0.2.0` rather than against its own release candidates, whose ranges
+// it wholly contains, and `v0.3.0-rc.1` compares against `v0.2.0` too — its own
+// version sorts below the stable release it leads to, so excluding prereleases
+// as candidates answers both cases with one rule.
+//
+// tag need not be a tag this repository holds: it is read as a version, which
+// is what lets a release be checked from the commit it is about to be cut at.
+// It must be valid semver, and so must every candidate — a listing carrying a
+// tag lydite cannot order is refused rather than silently narrowed, because the
+// tag it cannot place may be exactly the predecessor, and a range quietly
+// widened past a release is a check reporting a pass it never performed.
+//
+// False with no error is the first release: nothing precedes it, the range is
+// empty by definition, and that is a fact about the repository rather than a
+// failure to look.
+func PreviousTag(ctx context.Context, dir, tag string) (string, bool, error) {
+	if !semver.IsValid(tag) {
+		return "", false, fmt.Errorf("%q is not a valid version — a release tag is vMAJOR.MINOR.PATCH, such as v1.4.0", tag)
+	}
+	tags, err := Tags(ctx, dir)
+	if err != nil {
+		return "", false, err
+	}
+	previous := ""
+	for _, candidate := range tags {
+		if !semver.IsValid(candidate) {
+			return "", false, fmt.Errorf("the tag %q matches %s but is not a valid version, so the release preceding %s cannot be established — delete or rename it", candidate, TagPattern, tag)
+		}
+		if semver.Prerelease(candidate) != "" {
+			continue
+		}
+		if semver.Compare(candidate, tag) >= 0 {
+			continue
+		}
+		if previous == "" || semver.Compare(candidate, previous) > 0 {
+			previous = candidate
+		}
+	}
+	return previous, previous != "", nil
 }
 
 // BaseBranchFlag names the flag every command that resolves a merge-base

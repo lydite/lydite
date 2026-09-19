@@ -1099,6 +1099,182 @@ func TestCommitMessagesReturnsWholeMessagesOldestFirst(t *testing.T) {
 	}
 }
 
+// taggedRepo is a repository whose tags are created in an order deliberately
+// unlike their version order, each on its own commit — so a selection tied to
+// tag-creation order or to the commit graph answers differently from one
+// ordered by semver.
+func taggedRepo(t *testing.T, ctx context.Context, tags ...string) string {
+	t.Helper()
+	run := gitRunner(t, ctx)
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	for _, tag := range tags {
+		if err := os.WriteFile(filepath.Join(repo, "f"), []byte(tag), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(repo, "add", "-A")
+		run(repo, "commit", "-m", "release "+tag)
+		run(repo, "tag", tag)
+	}
+	return repo
+}
+
+// The previous release is the semver-highest tag below this one, whatever order
+// the tags were created in and whatever the commit graph says. A hotfix cut
+// from an older commit, or a tag applied late, has a parent that records where
+// the work sat rather than which release preceded it.
+func TestPreviousTagIsTheSemverHighestBelow(t *testing.T) {
+	ctx := context.Background()
+	// Created newest-version-first and with v0.1.5 tagged after v0.2.0, so
+	// creation order, commit order and version order all disagree.
+	repo := taggedRepo(t, ctx, "v0.2.0", "v0.1.5", "v0.10.0", "v0.1.0")
+
+	for _, c := range []struct {
+		tag  string
+		want string
+	}{
+		{"v0.10.0", "v0.2.0"},
+		{"v0.2.0", "v0.1.5"},
+		{"v0.1.5", "v0.1.0"},
+		// A tag the repository does not hold is still resolvable: the version
+		// is what places it, which is what lets a release be checked from the
+		// commit it is about to be cut at.
+		{"v0.3.0", "v0.2.0"},
+		{"v1.0.0", "v0.10.0"},
+	} {
+		got, ok, err := PreviousTag(ctx, repo, c.tag)
+		if err != nil || !ok {
+			t.Fatalf("PreviousTag(%s) = (%q, ok=%v, %v), want %s", c.tag, got, ok, err, c.want)
+		}
+		if got != c.want {
+			t.Errorf("PreviousTag(%s) = %q, want %q", c.tag, got, c.want)
+		}
+	}
+}
+
+// A prerelease is checked like any other release and is never a predecessor. A
+// stable tag compares against the last stable one rather than against its own
+// release candidates, whose ranges it wholly contains, and a candidate compares
+// against the last stable tag too.
+func TestPreviousTagNeverSelectsAPrerelease(t *testing.T) {
+	ctx := context.Background()
+	repo := taggedRepo(t, ctx, "v0.1.0", "v0.2.0", "v0.3.0-rc.1", "v0.3.0-rc.2", "v0.3.0")
+
+	for _, c := range []struct {
+		tag  string
+		want string
+	}{
+		{"v0.3.0", "v0.2.0"},
+		{"v0.3.0-rc.1", "v0.2.0"},
+		{"v0.3.0-rc.2", "v0.2.0"},
+		{"v0.4.0", "v0.3.0"},
+	} {
+		got, ok, err := PreviousTag(ctx, repo, c.tag)
+		if err != nil || !ok {
+			t.Fatalf("PreviousTag(%s) = (%q, ok=%v, %v), want %s", c.tag, got, ok, err, c.want)
+		}
+		if got != c.want {
+			t.Errorf("PreviousTag(%s) = %q, want %q — a prerelease is never the previous release", c.tag, got, c.want)
+		}
+	}
+}
+
+// The first release has no predecessor. The range is empty by definition, which
+// is a fact about the repository rather than a failure to look — so it is false
+// with no error, and a caller can tell it from a range it could not read.
+func TestPreviousTagReportsTheFirstReleaseHasNone(t *testing.T) {
+	ctx := context.Background()
+
+	got, ok, err := PreviousTag(ctx, taggedRepo(t, ctx, "v0.1.0", "v0.2.0"), "v0.1.0")
+	if err != nil {
+		t.Fatalf("PreviousTag on the first tag: %v", err)
+	}
+	if ok || got != "" {
+		t.Errorf("PreviousTag(v0.1.0) = (%q, ok=%v), want no predecessor", got, ok)
+	}
+
+	// A repository whose only tags are prereleases has none either: every
+	// candidate is excluded, and the answer is still not an error.
+	got, ok, err = PreviousTag(ctx, taggedRepo(t, ctx, "v0.1.0-rc.1"), "v0.1.0")
+	if err != nil {
+		t.Fatalf("PreviousTag over prereleases alone: %v", err)
+	}
+	if ok || got != "" {
+		t.Errorf("PreviousTag(v0.1.0) = (%q, ok=%v), want no predecessor", got, ok)
+	}
+
+	// A repository with no tags at all is the same answer, not an error: the
+	// caller that cannot proceed without tags names the fetch depth as the fix.
+	got, ok, err = PreviousTag(ctx, taggedRepo(t, ctx), "v0.1.0")
+	if err != nil {
+		t.Fatalf("PreviousTag with no tags: %v", err)
+	}
+	if ok || got != "" {
+		t.Errorf("PreviousTag with no tags = (%q, ok=%v), want no predecessor", got, ok)
+	}
+}
+
+// A version lydite cannot order is refused, on either side. The tag it cannot
+// place may be exactly the predecessor, so narrowing the listing silently would
+// widen the range a release is checked over and report a pass over commits it
+// never read.
+func TestPreviousTagRefusesAVersionItCannotOrder(t *testing.T) {
+	ctx := context.Background()
+	repo := taggedRepo(t, ctx, "v0.1.0", "v0.2.0")
+
+	for _, tag := range []string{"v1.2.3.4", "vfoo", "", "0.1.0"} {
+		got, ok, err := PreviousTag(ctx, repo, tag)
+		if err == nil {
+			t.Fatalf("PreviousTag(%q) = (%q, ok=%v), want an error", tag, got, ok)
+		}
+		if got != "" || ok {
+			t.Errorf("PreviousTag(%q) answered (%q, ok=%v) as well as an error", tag, got, ok)
+		}
+	}
+
+	// A stray tag among the candidates is refused the same way, naming it.
+	stray := taggedRepo(t, ctx, "v0.1.0", "v1.2.3.4", "v0.2.0")
+	_, _, err := PreviousTag(ctx, stray, "v0.3.0")
+	if err == nil {
+		t.Fatal("PreviousTag resolved over a tag it cannot order")
+	}
+	if !strings.Contains(err.Error(), "v1.2.3.4") {
+		t.Errorf("error = %q, want it to name the tag that cannot be ordered", err)
+	}
+
+	// A tag matching nothing lydite reads as a version is not a candidate at
+	// all, so it neither refuses the listing nor becomes a predecessor.
+	unmatched := taggedRepo(t, ctx, "v0.1.0", "release-2", "v0.2.0")
+	previous, ok, err := PreviousTag(ctx, unmatched, "v0.3.0")
+	if err != nil || !ok || previous != "v0.2.0" {
+		t.Errorf("PreviousTag = (%q, ok=%v, %v), want v0.2.0 — only %s is read as a version", previous, ok, err, TagPattern)
+	}
+}
+
+// Only the release tags are listed, and the listing itself is not an ordering:
+// version order is semver's answer, so a caller sorts rather than trusting
+// git's lexical output.
+func TestTagsListsOnlyTheReleaseTags(t *testing.T) {
+	ctx := context.Background()
+	repo := taggedRepo(t, ctx, "v0.2.0", "release-2", "v0.10.0")
+
+	got, err := Tags(ctx, repo)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	want := map[string]bool{"v0.2.0": true, "v0.10.0": true}
+	if len(got) != len(want) {
+		t.Fatalf("Tags = %q, want %v", got, want)
+	}
+	for _, tag := range got {
+		if !want[tag] {
+			t.Errorf("Tags returned %q, which does not match %s", tag, TagPattern)
+		}
+	}
+}
+
 // A range naming a revision git cannot resolve is an error, not an empty
 // slice — the two read alike to a caller that only checks length, and one of
 // them means "nothing declared a break" while the other means the range was
