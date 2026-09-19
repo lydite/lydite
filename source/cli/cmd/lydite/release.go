@@ -77,7 +77,7 @@ undeclared break is caught by ` + "`lydite review`" + ` at pull-request time.`,
 const declarationsLabel = "declared breaks"
 
 func runReleaseCheck(ctx context.Context, cmd *cobra.Command, dir, tag string, asJSON, noColor bool) error {
-	streamDiagnostics(asJSON)
+	streamDiagnostics(asJSON) // [lydite:exclude_from_mutation][every command calls this by convention, but release check runs no executil.Run that could stream — nothing here observes whether it ran]
 
 	tag = releaseTag(ctx, dir, tag)
 	if tag == "" {

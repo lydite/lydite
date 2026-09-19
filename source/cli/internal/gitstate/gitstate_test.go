@@ -1236,9 +1236,12 @@ func TestPreviousTagRefusesAVersionItCannotOrder(t *testing.T) {
 
 	// A stray tag among the candidates is refused the same way, naming it.
 	stray := taggedRepo(t, ctx, "v0.1.0", "v1.2.3.4", "v0.2.0")
-	_, _, err := PreviousTag(ctx, stray, "v0.3.0")
+	got, ok, err := PreviousTag(ctx, stray, "v0.3.0")
 	if err == nil {
 		t.Fatal("PreviousTag resolved over a tag it cannot order")
+	}
+	if got != "" || ok {
+		t.Errorf("PreviousTag over a stray candidate answered (%q, ok=%v) as well as an error", got, ok)
 	}
 	if !strings.Contains(err.Error(), "v1.2.3.4") {
 		t.Errorf("error = %q, want it to name the tag that cannot be ordered", err)
@@ -1250,6 +1253,24 @@ func TestPreviousTagRefusesAVersionItCannotOrder(t *testing.T) {
 	previous, ok, err := PreviousTag(ctx, unmatched, "v0.3.0")
 	if err != nil || !ok || previous != "v0.2.0" {
 		t.Errorf("PreviousTag = (%q, ok=%v, %v), want v0.2.0 — only %s is read as a version", previous, ok, err, TagPattern)
+	}
+}
+
+// Two candidates ranking equal under semver — build metadata is not compared —
+// keep the first one encountered rather than the last. `git tag -l` returns
+// its output sorted lexically, so this is deterministic across runs: without
+// it, which of two equally-ranked tags a caller sees would depend on nothing
+// meaningful.
+func TestPreviousTagKeepsTheFirstOfTwoEquallyRankedCandidates(t *testing.T) {
+	ctx := context.Background()
+	repo := taggedRepo(t, ctx, "v0.1.0", "v0.2.0+a", "v0.2.0+b")
+
+	got, ok, err := PreviousTag(ctx, repo, "v0.3.0")
+	if err != nil || !ok {
+		t.Fatalf("PreviousTag(v0.3.0) = (%q, ok=%v, %v)", got, ok, err)
+	}
+	if got != "v0.2.0+a" {
+		t.Errorf("PreviousTag(v0.3.0) = %q, want v0.2.0+a — the lexically first of two equally-ranked tags", got)
 	}
 }
 

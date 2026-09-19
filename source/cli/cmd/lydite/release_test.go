@@ -112,6 +112,7 @@ func TestBumpAdmitsBreakOnlyWhereTheLeftmostNonZeroComponentIncreases(t *testing
 		// the same rule read one position further right.
 		{"v0.0.3", "v0.0.4", true, "in 0.0.x the leftmost non-zero component is the patch"},
 		{"v0.0.3", "v0.1.0", true, "a minor bump out of 0.0.x increases it too"},
+		{"v0.0.3", "v0.0.3", false, "no bump at all admits nothing, even in 0.0.x"},
 	} {
 		if got := bumpAdmitsBreak(c.previous, c.tag); got != c.want {
 			t.Errorf("bumpAdmitsBreak(%q, %q) = %v, want %v — %s", c.previous, c.tag, got, c.want, c.why)
@@ -308,9 +309,13 @@ func TestReleaseCheckNeedsATagItCanName(t *testing.T) {
 // A tag-triggered workflow names the tag in its environment, which is how the
 // release job invokes this with no argument at all.
 func TestReleaseCheckReadsTheTagFromATagTriggeredRun(t *testing.T) {
+	// HEAD itself carries no tag, so the environment is the only source that
+	// can name v0.2.1 here: a git-describe fallback would find nothing and
+	// error before a verdict is even reached, which is what tells this test
+	// apart from one where either source would answer the same.
 	dir := releaseRepo(t,
 		releaseCommit{message: "feat: the first release", tag: "v0.2.0"},
-		releaseCommit{message: "feat!: the verdict is a status", tag: "v0.2.1"},
+		releaseCommit{message: "feat!: the verdict is a status"},
 	)
 	t.Setenv("GITHUB_REF_TYPE", "tag")
 	t.Setenv("GITHUB_REF_NAME", "v0.2.1")
