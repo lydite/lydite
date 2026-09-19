@@ -508,6 +508,46 @@ func TestIsolatedEnvDoesNotOverrideADeclaredAmbientKey(t *testing.T) {
 	}
 }
 
+// A component whose composed environment declares no PATH — an already-
+// satisfied toolchain, or provisioning off — still gets one: falling back to
+// this process's own is what lets the child find cargo and rustc at all.
+func TestIsolatedEnvFallsBackToTheAmbientPathWhenCheckDeclaresNone(t *testing.T) {
+	t.Setenv("PATH", "/ambient/bin")
+
+	got := isolatedEnv(nil)
+
+	seen := 0
+	for _, kv := range got {
+		if kv == "PATH=/ambient/bin" {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("isolatedEnv with no declared PATH carried %d ambient PATH entries, want exactly 1", seen)
+	}
+}
+
+// A subprocess run through isolatedEnv can actually find a binary on the
+// ambient PATH when the composed environment names none — proving the
+// fallback works end to end, not just that isolatedEnv's slice contains the
+// right string.
+func TestIsolatedEnvLetsASubprocessFindABinaryOnTheAmbientPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "probe-tool")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\necho found\n"), 0o700); err != nil { // #nosec G306 -- a script the test is about to execute
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	res := executil.RunQuietIsolatedEnv(context.Background(), t.TempDir(), isolatedEnv(nil), "probe-tool")
+	if !res.Ok() {
+		t.Fatalf("probe-tool: %v (stderr: %s)", res.Err, res.Stderr)
+	}
+	if strings.TrimSpace(res.Output) != "found" {
+		t.Errorf("output = %q, want the script's own output", res.Output)
+	}
+}
+
 // run is one recorded invocation, replayed over the trees it compared.
 type run struct {
 	base, head string

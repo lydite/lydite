@@ -4,7 +4,8 @@ saw:
   - source/cli/internal/executil/executil.go
   - source/cli/internal/rustapisurface/rustapisurface.go
   - source/cli/cmd/lydite/review.go
-  - source/cli/cmd/lydite/review_publish.go
+  - source/cli/cmd/lydite/review_compare.go
+  - source/cli/cmd/lydite/review_apisurface.go
   - .github/workflows/lydite-pr.yml
 ---
 
@@ -39,12 +40,41 @@ separately embeds `github.token` into `.git/config` by default (`persist-credent
 defaults to true), which any process with filesystem access to the checked-out tree
 can read directly with no `/proc` tricks needed at all.
 
-The actual fix is job separation: `.github/workflows/lydite-pr.yml`'s `referral` job
-computes the verdict (running the untrusted comparison) with `persist-credentials:
-false` and no `GITHUB_TOKEN`/`statuses:write` in its own environment at all; a second
-job, `referral-publish`, holds the credential and runs none of the change's own code —
-it downloads `referral`'s verdict artifact and posts via the new `lydite review
-publish --verdict <path>` subcommand, which recomputes nothing. A credential that was
-never in a job's environment or its checkout is the only thing that reliably keeps it
-out of that job's process tree; scrubbing a live process's own environment after the
-fact is not a substitute.
+The actual fix went through two shapes. The first split `referral` into "compute the
+verdict" (no credential) and "publish it" (the credential, no untrusted code) — but a
+follow-up review caught that this still let the job holding no credential decide the
+*whole* verdict, including reading exemptions and rendering the decision, and upload
+that decision as the trusted artifact. A background process a malicious `build.rs`
+left running past the comparison's own call could still overwrite that artifact with a
+forged "pass" before the upload step captured it — the decision computed in the same
+job that ran the untrusted code is not safe to trust just because a *different* job
+posts it.
+
+The shape that closes this splits along a different boundary: **only the raw
+comparison** crosses the job boundary, never a decision. `lydite review compare
+--write-surfaces <path>` (`internal/rustapisurface`'s and Go's `internal/apisurface`'s
+raw findings, keyed by component, with the base they were measured against) is the
+whole of what the credential-less `referral` job produces — it reads no exemptions and
+makes no decision, so there is no verdict in the artifact for a leftover process to
+tamper with. `referral-publish` holds the credential, checks the change out separately
+(`persist-credentials: false` again, and never via a `./`-local action after that
+checkout — see below), reads its exemptions and diff as text, and runs `lydite review
+--surfaces <path> --publish` to decide and post in one step that never re-executes the
+comparison. A credential that was never in a job's environment, its checkout, or its
+artifact is the only thing that reliably keeps it out of that job's process tree;
+scrubbing a live process's own environment after the fact is not a substitute, and
+neither is trusting a decision a job holding no credential made about code it also ran.
+
+**A second, distinct trap the same review found**: a workflow step written as
+`uses: ./.github/actions/<name>` resolves from whatever the *job's own checkout*
+currently holds, not from the workflow file's own trusted source. `referral-publish`
+checks out the pull request's own head (to read its exemptions/diff), so a `./`-local
+action referenced *after* that checkout would run whatever `action.yml` the pull
+request itself wrote — in the one job that holds `statuses: write`. The fix is a
+remote, base-ref-pinned reference instead: `lydite/lydite/.github/actions/<name>@${{
+github.event.pull_request.base.sha }}`, which is fetched independently of the job's own
+checkout and always resolves the base branch's own version of the action, never the
+PR's. Every other job in this workflow also checks out the PR head and then uses a
+local `./` action, but none of them hold a write credential, so the same combination
+does not carry the same risk there — this is specific to a job that both checks out
+untrusted code and can act on its behalf afterward.

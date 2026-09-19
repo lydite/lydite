@@ -201,6 +201,17 @@ func isolatedEnv(check []string) []string {
 		}
 	}
 	env := append([]string{}, check...)
+	// PATH gets its own fallback rather than a place in isolatedAmbientVars:
+	// toolchain.Compose adds no PATH entry at all when there are no
+	// directories to add — an already-satisfied toolchain, or provisioning
+	// off — and a child started with none cannot find cargo or rustc, which
+	// reports every opted-in Rust component uncomputable rather than
+	// comparing any of them.
+	if !declared["PATH"] {
+		if v, ok := os.LookupEnv("PATH"); ok {
+			env = append(env, "PATH="+v)
+		}
+	}
 	for _, k := range isolatedAmbientVars {
 		if declared[k] {
 			continue

@@ -31,9 +31,81 @@ import (
 // rendered under.
 const gateAPISurface = "api surface"
 
-// addAPISurfaceRows decides what this change's effect on the exported API of
-// every component that opted in means, and folds the answer into the report
-// and into the decision.
+// surfaceComparison is one component's comparison, computed and separated
+// from any decision so it can cross a job boundary: see computeAPISurfaces
+// and renderAPISurfaceRows.
+type surfaceComparison struct {
+	Component    string            `json:"component"`
+	Dir          string            `json:"dir"`
+	Findings     []finding.Finding `json:"findings,omitempty"`
+	Uncomputable string            `json:"uncomputable,omitempty"`
+}
+
+// computeAPISurfaces runs the comparison for every component that opted into
+// api_surface, and only that: no report, no decision, no exemptions, no
+// declaration. It is the one function in this file that runs a component's
+// own code — building rustdoc for a Rust component's head tree runs that
+// crate's own build.rs and proc-macros — and nothing past it does, which is
+// why it returns data for a caller to render rather than rendering anything
+// itself: the caller may be a job that must never hold a publishing
+// credential, or one that must never run this comparison again to get it.
+func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string) ([]surfaceComparison, error) {
+	file, err := component.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	var opted []component.Component
+	for _, c := range file.Components {
+		if c.APISurface != nil {
+			opted = append(opted, c)
+		}
+	}
+	// A repository where nothing opted in pays none of what follows, and says
+	// nothing about it. Nothing was asked for, so there is no gate here that
+	// could not run.
+	if len(opted) == 0 {
+		return nil, nil
+	}
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	// The same resolution `scan` and `test` do, for the same reason: the
+	// module is loaded by the `go` its own directory declares, not by
+	// whichever one the PATH leads to.
+	envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(opted))
+	if err != nil {
+		return nil, err
+	}
+
+	root, remove, err := baseWorktree(ctx, dir, base)
+	if err != nil {
+		// No tree, so no component's surface can be compared. Each one that
+		// asked says so under its own name, since a component missing from
+		// the result is indistinguishable from one that was compared and
+		// found clean.
+		results := make([]surfaceComparison, 0, len(opted))
+		for _, c := range opted {
+			results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: err.Error()})
+		}
+		return results, nil
+	}
+	defer remove()
+
+	results := make([]surfaceComparison, 0, len(opted))
+	for _, c := range opted {
+		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
+		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Findings: findings, Uncomputable: uncomputable})
+	}
+	return results, nil
+}
+
+// renderAPISurfaceRows decides what results computeAPISurfaces already made
+// mean, and folds the answer into the report and into the decision. It runs
+// no comparison and executes no component's own code: reading the
+// declaration is the only thing here that touches the change under review,
+// and it reads text — a title, a commit message — never runs any of it.
 //
 // Three verdicts, and which one a break gets is decided by the declaration
 // alone (see docs/adr/0040):
@@ -50,7 +122,7 @@ const gateAPISurface = "api surface"
 // was compared. That is the one-way ratchet the marker is only safe under —
 // the claim can add a referral and can never remove one, so spelling `feat!:`
 // rather than `feat:` never makes anything greener.
-func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, eventPath string) error {
+func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, eventPath string, results []surfaceComparison) {
 	where := breakDeclaration(ctx, cmd.ErrOrStderr(), dir, base, eventPath)
 	if where != "" {
 		refer(d, referral.Disqualification{
@@ -59,54 +131,12 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 		})
 	}
 
-	file, err := component.Load(dir)
-	if err != nil {
-		return err
-	}
-	var opted []component.Component
-	for _, c := range file.Components {
-		if c.APISurface != nil {
-			opted = append(opted, c)
-		}
-	}
-	// A repository where nothing opted in pays none of what follows, and says
-	// nothing about it. Nothing was asked for, so there is no gate here that
-	// could not run.
-	if len(opted) == 0 {
-		return nil
-	}
-
-	cfg, err := config.Load(dir)
-	if err != nil {
-		return err
-	}
-	// The same resolution `scan` and `test` do, for the same reason: the
-	// module is loaded by the `go` its own directory declares, not by
-	// whichever one the PATH leads to.
-	envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(opted))
-	if err != nil {
-		return err
-	}
-
-	root, remove, err := baseWorktree(ctx, dir, base)
-	if err != nil {
-		// No tree, so no component's surface can be compared. Each one that
-		// asked says so under its own name, since a component missing from
-		// the report is indistinguishable from one that was compared and
-		// found clean.
-		for _, c := range opted {
-			referUncomputable(d, c, err.Error())
-		}
-		return nil
-	}
-	defer remove()
-
-	for _, c := range opted {
-		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
+	for _, res := range results {
+		c := component.Component{Name: res.Component, Dir: res.Dir}
 		switch {
-		case uncomputable != "":
-			referUncomputable(d, c, uncomputable)
-		case len(findings) == 0:
+		case res.Uncomputable != "":
+			referUncomputable(d, c, res.Uncomputable)
+		case len(res.Findings) == 0:
 			report.Add(ui.Row{
 				Status: ui.StatusPass,
 				Label:  gateAPISurface + "(" + c.Name + ")",
@@ -119,20 +149,19 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 			report.Add(ui.Row{
 				Status: ui.StatusRefer,
 				Label:  gateAPISurface + "(" + c.Name + ")",
-				Value:  fmt.Sprintf("%s, declared", incompatible(len(findings))),
-				Detail: capped(locate(findings, c.Dir)),
+				Value:  fmt.Sprintf("%s, declared", incompatible(len(res.Findings))),
+				Detail: capped(locate(res.Findings, c.Dir)),
 			})
 		default:
 			report.Add(ui.Row{
 				Status: ui.StatusFail,
 				Label:  gateAPISurface + "(" + c.Name + ")",
-				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(findings))),
-				Detail: append(capped(locate(findings, c.Dir)),
+				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(res.Findings))),
+				Detail: append(capped(locate(res.Findings, c.Dir)),
 					"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer"),
 			})
 		}
 	}
-	return nil
 }
 
 // compareSurface compares one component's public API against the merge-base

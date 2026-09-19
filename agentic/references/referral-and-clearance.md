@@ -174,13 +174,15 @@ decision; `internal/forge` is the only thing that talks to the platform. See
 the pull request's standing comment. The status is the whole record: a clearance is a
 state change on that context at one commit, and nothing else stores it.
 
-`review publish --verdict <path>` (a subcommand) posts the same status through the same
-`publish`/`stateFor`/`describe` (`cmd/lydite/status.go`), from a document `review
---write-verdict` wrote rather than from a verdict this invocation computed itself — see
-[ci.md](ci.md)'s `referral`/`referral-publish` split. It carries only what `describe`
-needs (the verdict, the matched exemption's name, whether the change was empty) and
-never recomputes the comparison, so the job posting the status never runs the code that
-comparison had to execute.
+`review --surfaces <path>` reads a comparison `review compare` already made — the raw
+per-component findings, and the base they were measured against — instead of running it
+again, and decides and publishes from that document through the same `publish`/
+`stateFor`/`describe` (`cmd/lydite/status.go`) as a single, ordinary invocation would.
+See [ci.md](ci.md)'s `referral`/`referral-publish` split: `review compare` is the only
+half of this that runs a component's own code, and it computes no decision at all, so a
+process that outlives it has no verdict in the artifact to tamper with — the decision is
+made afterward, in a job that never ran that code and reads only text (exemptions, the
+diff, a declared breaking change) from its own separate checkout.
 
 Six properties are load-bearing:
 

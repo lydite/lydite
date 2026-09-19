@@ -12,11 +12,14 @@
 #         └─► mutation (matrix) ───► mutation-merge
 #                                  └─► publish   needs all, if: always()
 #
-# referral computes the verdict and holds no credential; referral-publish
-# holds the one that can write a commit status and runs none of the change's
-# own code — an opted-in Rust component's api_surface comparison builds and
-# executes the head tree's own build.rs and proc-macros, which referral, not
-# referral-publish, is the job that does.
+# referral only compares — an opted-in Rust component's api_surface
+# comparison builds and executes the head tree's own build.rs and
+# proc-macros — and holds no credential. referral-publish decides and
+# publishes from referral's raw result and its own separate checkout,
+# holding the one credential that can write a commit status and running
+# none of the change's own code: it never re-derives anything referral
+# already computed, and never trusts anything referral's own process tree
+# could have written after that comparison ran.
 #
 # `plan` groups the declared components into shards — the sets that must run in
 # one process, because they publish a host port in common or are rooted at
@@ -105,13 +108,16 @@ jobs:
           path: ${{ runner.temp }}/lydite
           retention-days: 1
 
-  # Computes the verdict, and nothing else: no token, no statuses:write.
-  #
-  # An opted-in Rust component's api_surface comparison builds and runs the
-  # head tree's own build.rs and proc-macros — code the change under review
-  # controls — so the job that runs it must hold no credential worth
-  # forging a status with. referral-publish, below, holds the one that does
-  # and runs none of the change's own code.
+  # Compares every opted-in component's public API against the merge-base,
+  # and nothing else: no token, no statuses:write, no exemptions read, no
+  # decision made. An opted-in Rust component's comparison builds and runs
+  # the head tree's own build.rs and proc-macros — code the change under
+  # review controls — so the job that runs it must hold no credential worth
+  # forging a status with, and must not be trusted to have decided anything
+  # honestly either: referral-publish, below, holds the one credential and
+  # makes the one decision, from this job's raw result and its own,
+  # separate checkout — never from anything this job could have tampered
+  # with after computing it.
   referral:
     name: referral
     needs: setup
@@ -122,10 +128,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The referral is computed from <merge-base>..HEAD, so the history
+          # The comparison runs against <merge-base>..HEAD, so the history
           # reaching that merge-base has to be present. A shallow checkout
-          # resolves no merge-base and the run fails rather than deciding from
-          # a diff that describes something else.
+          # resolves no merge-base and the run fails rather than comparing
+          # against a tree that describes something else.
           fetch-depth: 0
           # actions/checkout embeds github.token into this tree's own git
           # config by default (an http.extraheader), readable by anything with
@@ -137,49 +143,30 @@ jobs:
 
       - uses: ./.github/actions/lydite-binary
 
-      # Runs from the repository root: --dir locates the exemptions file, and
-      # the diff a referral reads covers the whole repository regardless.
-      #
-      # `review` exits 2 on a referral and 1 on the isolation gate, and both
-      # are answers rather than malfunctions — the verdict is carried by the
-      # artifact this step writes and by the report it wrote, so the step
-      # must not fail the job over one. Anything above 2 is lydite failing to
-      # reach an answer, which must still fail the job — and, because
-      # referral-publish needs this job, a job that failed here is a job
-      # referral-publish never runs after.
-      #
-      # The exit code is captured with `|| verdict=$?` rather than read from
-      # `$?` on the next line, because the runner invokes this with `bash -e`:
-      # a bare command exiting non-zero ends the step before any line after it
-      # runs, and `set +e` here would also disarm the failure this step does
-      # want to report.
-      - name: compute the referral verdict
-        run: |
-          verdict=0
-          lydite review --dir . --write-verdict "${RUNNER_TEMP}/referral-verdict.json" || verdict=$?
-          if [ "$verdict" -gt 2 ]; then
-            exit "$verdict"
-          fi
+      # Runs from the repository root: --dir locates .lydite/components.yml.
+      # review compare makes no decision and reads no exemptions, so unlike
+      # the single `review` invocation this replaces, its own exit code is
+      # always a real failure — there is no verdict here to answer with one.
+      - name: compare every opted-in component's public API
+        run: lydite review compare --dir . --write-surfaces "${RUNNER_TEMP}/referral-surfaces.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: referral-verdict
-          path: ${{ runner.temp }}/referral-verdict.json
+          name: referral-surfaces
+          path: ${{ runner.temp }}/referral-surfaces.json
           retention-days: 1
 
-      - uses: ./.github/actions/lydite-reports
-        if: always()
-        with:
-          name: referral
-
-  # Publishes what referral, above, already decided. It never checks the
-  # change out and runs none of its code, so the one credential this job holds
-  # never reaches it.
+  # Decides from referral's raw result and publishes the verdict. It checks
+  # the change out to read its exemptions, its diff and its declared breaking
+  # changes — text, never executed — but runs no build, no test and no
+  # comparison: referral, above, already made the one comparison that would
+  # run the change's own code, and this job only trusts what that job wrote
+  # to disk before any of that code ran, not after.
   referral-publish:
     name: referral publish
     needs: [setup, referral]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       # The verdict is the record a clearance acts on, and this job publishing
@@ -187,17 +174,60 @@ jobs:
       # a referral while the matrix is still running (ADR 0015).
       statuses: write
     steps:
-      - uses: ./.github/actions/lydite-binary
+      # A local `./` action resolves from whatever this job's own workspace
+      # has checked out, not from the workflow file's own trusted source — so
+      # this cannot be a checkout of the pull request's own head, which is
+      # exactly the tree this job must not trust. Pinned at the base branch's
+      # own SHA rather than the PR's, this fetches the action alone and
+      # checks nothing else out. Fetched before the checkout below for the
+      # same reason: it must never resolve from that checkout's own tree.
+      - uses: lydite/lydite/.github/actions/lydite-binary@${{ github.event.pull_request.base.sha }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # This tree is read, never executed — exemptions, the diff, a
+          # declared breaking change — but it still must not hold a
+          # credential a compromised read (a malicious .lydite/exemptions.yml
+          # is still just YAML, but nothing about this checkout should have
+          # to be the reason that stays true).
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: referral-verdict
+          name: referral-surfaces
           path: ${{ runner.temp }}
 
+      # review exits 2 on a referral and 1 on the isolation gate, and both
+      # are answers rather than malfunctions — the verdict is carried by the
+      # status this step just published and by the report it wrote, so the
+      # step must not fail the job over one. Anything above 2 is lydite
+      # failing to reach an answer, which must still fail the job.
+      #
+      # The exit code is captured with `|| verdict=$?` rather than read from
+      # `$?` on the next line, because the runner invokes this with `bash -e`:
+      # a bare command exiting non-zero ends the step before any line after it
+      # runs, and `set +e` here would also disarm the failure this step does
+      # want to report.
       - name: publish the referral verdict
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: lydite review publish --verdict "${RUNNER_TEMP}/referral-verdict.json"
+        run: |
+          verdict=0
+          lydite review --dir . --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish || verdict=$?
+          if [ "$verdict" -gt 2 ]; then
+            exit "$verdict"
+          fi
+
+      # Pinned at the base branch's own SHA, the same reason lydite-binary is
+      # above: this job checks out the pull request's own head to read its
+      # exemptions and its diff, and a local `./` action used after that
+      # checkout would run whatever action.yml the pull request itself wrote,
+      # in the one job here that holds statuses: write.
+      - uses: lydite/lydite/.github/actions/lydite-reports@${{ github.event.pull_request.base.sha }}
+        if: always()
+        with:
+          name: referral
 
   scan:
     name: scan
@@ -621,7 +651,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [setup, referral, scan, merge, mutation-merge]
+    needs: [setup, referral-publish, scan, merge, mutation-merge]
     # Runs whatever the others did. A comment that only appears when everything
     # passed is a comment nobody needs: the run that failed is the one whose
     # reader wants to know why. The title condition beside always() matches

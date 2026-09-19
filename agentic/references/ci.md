@@ -19,15 +19,23 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
-**`referral` computes the verdict and holds no credential; `referral-publish` posts it and runs
-no code from the change under review.** A component that opts a Rust crate into `api_surface`
-has its public API compared via a real `cargo semver-checks` build, which compiles and runs
-that crate's own `build.rs` and proc-macros — code the pull request controls. The job that
-posts `lydite/referral` carries `statuses: write`, so it must never also be the job that runs
-that code: `referral` checks out with `persist-credentials: false` and no token in its own
-environment, writes its verdict to an artifact via `lydite review --write-verdict`, and
-`referral-publish` (needing only `referral`, not the test matrix) downloads it and posts via
-`lydite review publish --verdict <path>` — which recomputes nothing and checks nothing out.
+**`referral` only compares and holds no credential; `referral-publish` decides, publishes, and
+runs none of the change's own code.** A component that opts a Rust crate into `api_surface` has
+its public API compared via a real `cargo semver-checks` build, which compiles and runs that
+crate's own `build.rs` and proc-macros — code the pull request controls. The job that posts
+`lydite/referral` carries `statuses: write`, so it must never also be the job that runs that
+code, and it must not trust anything that job could have tampered with after running it either:
+`referral` checks out with `persist-credentials: false` and no token in its own environment, and
+writes only the raw comparison to an artifact via `lydite review compare --write-surfaces`
+— no exemptions read, no decision made, so there is nothing about the verdict for a background
+process left running after the comparison to forge. `referral-publish` downloads that artifact,
+checks the change out separately (`persist-credentials: false` again) to read its exemptions,
+its diff and any declared breaking change — text, never executed — and runs
+`lydite review --surfaces <path> --publish`, which decides and posts from that raw result
+without ever re-running the comparison. It also fetches `lydite-binary` and `lydite-reports` by
+a base-ref-pinned remote reference (`owner/repo/.github/actions/<name>@<base sha>`), never the
+local `./` path the other jobs use, because a `./` action resolves from whatever this job's own
+checkout holds and this job's checkout is the pull request's own head.
 Anything that runs a scanned repository's own code and reaches a job holding a write credential
 needs the same separation; see
 [`give-untrusted-build-scripts-no-inherited-environment.md`](../rules/give-untrusted-build-scripts-no-inherited-environment.md).

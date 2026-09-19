@@ -16,7 +16,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, baseBranch, eventPath, verdictPath string
+	var dir, base, baseBranch, eventPath, surfacesPath string
 	var asJSON, noColor, doPublish bool
 	cmd := &cobra.Command{
 		Use: "review",
@@ -38,15 +38,44 @@ referred — including a correct one.
 
 It runs one check: for each component that declares api_surface, the exported
 API of its Go module or its Rust crate is compared against the merge-base. A
-break this change did not declare fails, and a declared one is referred.`,
+break this change did not declare fails, and a declared one is referred.
+
+--surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
+here. A component's own comparison executes its own code — a Rust crate's
+build.rs, a proc-macro — so the job that publishes with a credential should
+not also be the job that ran it: compute in one job with none, decide and
+publish in another that never runs the change's own code.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
 
-			baseSHA, err := resolveReviewBase(ctx, dir, base, baseBranch)
-			if err != nil {
-				return err
+			// --surfaces reads a comparison review compare already made, in a
+			// job that ran the change's own code, rather than running it
+			// again here — which is the one thing this invocation must not
+			// do when it is the one about to publish with a credential that
+			// code must never reach. The base travels with that document
+			// rather than being re-resolved, so the decision below is
+			// answered against the exact commit the comparison ran against.
+			var baseSHA string
+			var surfaces []surfaceComparison
+			if surfacesPath != "" {
+				doc, err := readSurfaces(surfacesPath)
+				if err != nil {
+					return err
+				}
+				baseSHA, surfaces = doc.Base, doc.Results
+			} else {
+				var err error
+				baseSHA, err = resolveReviewBase(ctx, dir, base, baseBranch)
+				if err != nil {
+					return err
+				}
+				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA)
+				if err != nil {
+					return err
+				}
 			}
+
 			file, err := loadExemptionsAt(ctx, dir, baseSHA)
 			if err != nil {
 				return err
@@ -68,9 +97,7 @@ break this change did not declare fails, and a declared one is referred.`,
 			// surface nothing could be compared are both referrals, and they
 			// reach the report through the same disqualification the verdict
 			// line is derived from.
-			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
-				return err
-			}
+			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath, surfaces)
 			addDecisionRows(report, decision, len(file.Exemptions))
 
 			// Published after the rows are added and from the report's own
@@ -82,15 +109,6 @@ break this change did not declare fails, and a declared one is referred.`,
 					return err
 				}
 				if err := publish(ctx, target, decision, report.Verdict()); err != nil {
-					return err
-				}
-			}
-			// Written whether or not this run also published: a job with no
-			// write credential can still hand its verdict to review publish,
-			// which runs in a job that has one and never ran the comparison
-			// itself.
-			if verdictPath != "" {
-				if err := writeVerdict(verdictPath, decision, report.Verdict()); err != nil {
 					return err
 				}
 			}
@@ -113,8 +131,8 @@ break this change did not declare fails, and a declared one is referred.`,
 	// by accident nor appear to have posted when it did not.
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
-	cmd.Flags().StringVar(&verdictPath, "write-verdict", "", "write the verdict to this path, for a later 'review publish' in a job that holds the publishing credential this one need not")
-	cmd.AddCommand(newReviewPublishCmd())
+	cmd.Flags().StringVar(&surfacesPath, "surfaces", "", "read a comparison 'review compare' already made instead of running it here, and decide from that instead")
+	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
 }
 

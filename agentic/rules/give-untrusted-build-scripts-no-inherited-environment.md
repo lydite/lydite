@@ -13,10 +13,14 @@ This closes one path and not the whole exposure: `os.Unsetenv` changes only the 
 process's own live copy of its environment, never `/proc/<pid>/environ`, which is a snapshot
 taken at exec time — a same-user descendant can still read a credential the calling process
 held, however briefly, at its own start. A job that runs untrusted code like this must not
-hold the credential at all: see the `referral` / `referral-publish` split in
-[`.github/workflows/lydite-pr.yml`](../../.github/workflows/lydite-pr.yml), and
-`persist-credentials: false` on that job's own checkout, since `actions/checkout` otherwise
-embeds the token into `.git/config` regardless of anything this rule's isolation does.
+hold the credential at all — see `persist-credentials: false` on the `referral` job's own
+checkout in [`.github/workflows/lydite-pr.yml`](../../.github/workflows/lydite-pr.yml), since
+`actions/checkout` otherwise embeds the token into `.git/config` regardless of anything this
+rule's isolation does — and it must not decide the verdict either: only the raw comparison
+(`lydite review compare --write-surfaces`) crosses into `referral-publish`, which holds the
+credential and computes the decision itself from that raw result and its own separate
+checkout, never from anything `referral`'s own process tree could have written to an
+artifact after the untrusted build ran.
 
 ## Applies to
 

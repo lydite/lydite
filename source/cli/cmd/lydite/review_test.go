@@ -803,6 +803,20 @@ func semverChecksStub(t *testing.T, script string) {
 	}
 }
 
+// removeSemverChecksStub deletes the stub semverChecksStub installed, so a
+// test can prove a later step never runs cargo-semver-checks again: with
+// nothing left to execute, a step that tried would fail outright.
+func removeSemverChecksStub(t *testing.T) {
+	t.Helper()
+	bin, err := (cargotool.Tool{Name: "cargo-semver-checks", Version: rust.CargoSemverChecksVersion}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	if err := os.Remove(bin); err != nil {
+		t.Fatalf("removing the stub: %v", err)
+	}
+}
+
 // An undeclared break is a gate for a Rust component exactly as it is for a Go
 // one: the author clears it by restoring the API or by declaring the break,
 // and both are work they can do.
@@ -926,6 +940,70 @@ func TestReviewComparesNothingForARustComponentThatDidNotOptIn(t *testing.T) {
 	}
 	if strings.Contains(out, gateAPISurface) {
 		t.Errorf("nothing asked for a comparison, so nothing may be reported about one:\n%s", out)
+	}
+}
+
+// review compare and review --surfaces reach the exact verdict a single
+// review invocation would, without --surfaces ever running the comparison
+// again: the stub is removed before that step runs, so a second invocation
+// would fail outright rather than silently repeat the answer.
+func TestReviewCompareAndSurfacesReachTheSameVerdictAsOneInvocation(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	compare := newReviewCompareCmd()
+	var compareOut bytes.Buffer
+	compare.SetOut(&compareOut)
+	compare.SetErr(&compareOut)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, compareOut.String())
+	}
+
+	// Proves --surfaces never re-runs the comparison: the stub that would
+	// answer it is gone, so a second invocation has nothing to execute.
+	removeSemverChecksStub(t)
+
+	out, err := runReview(t, dir, base, "--surfaces", surfacesPath)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must still fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "probe/src/lib.rs") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The document review compare writes names the base it actually compared
+// against, so review --surfaces answers against that commit rather than
+// re-resolving "auto" and risking a different answer if origin's default
+// branch moved between the two invocations.
+func TestReviewCompareRecordsTheBaseItResolved(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\npub fn also() {}\n"})
+
+	compare := newReviewCompareCmd()
+	var compareOut bytes.Buffer
+	compare.SetOut(&compareOut)
+	compare.SetErr(&compareOut)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, compareOut.String())
+	}
+
+	doc, err := readSurfaces(surfacesPath)
+	if err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+	if doc.Base != base {
+		t.Errorf("recorded base = %q, want %q", doc.Base, base)
+	}
+	if len(doc.Results) != 1 || doc.Results[0].Component != "probe" {
+		t.Errorf("results = %+v, want one result for probe", doc.Results)
 	}
 }
 
