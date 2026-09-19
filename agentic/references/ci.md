@@ -154,4 +154,15 @@ longer need to pin `go-version` on lydite's account. Keep the pins here regardle
 mechanism covers them, and the self-scan benefits from the pin holding independently of the feature
 it is dogfooding.
 
+**`release.yml` is release infrastructure, not a third sharded workflow, and shares no
+machinery with `lydite-pr.yml`/`lydite-baseline.yml` above.** It is not a `gt` stage either — it
+triggers on a `v*.*.*` tag push, never a pull request, and has no `plan`/`test`/`merge`
+matrix. Its `goreleaser` job runs `lydite release check --dir ../..` as a step ahead of
+goreleaser itself, reading the tag being released and the commit range back to the previous
+release for a declared break its bump does not admit; a failure there stops the release before
+goreleaser publishes anything. That step runs in `goreleaser` and not `build-test` because only
+`goreleaser`'s checkout already sets `fetch-depth: 0` and fetches the tags a range walk needs.
+See [ADR 0045](../../docs/adr/0045-a-tag-that-is-not-the-breaking-bump-cannot-carry-a-declared-break.md)
+for the rule it enforces.
+
 

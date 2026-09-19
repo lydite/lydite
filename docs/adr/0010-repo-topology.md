@@ -93,3 +93,28 @@ repositories for a long time. That is a presentation problem for the README, and
 genuinely is stable — inherited unchanged from bulwark — and it is the ref consumers type. A `0.x`
 CLI beneath a `v1` action is not an inconsistency; decoupling the two lines is what the repository
 split was for.
+
+## The bump a break costs
+
+Reserving `1.0.0` for the dashboard release only works if a breaking change before then has
+somewhere to land. So the rule for the whole CLI line, both eras in one sentence:
+
+> A breaking change lands on a tag whose **leftmost non-zero version component** increases
+> relative to the previous tag.
+
+In `0.x` the leftmost non-zero component is the minor, so a break costs a minor bump:
+`v0.2.0 → v0.3.0` carries one and `v0.2.0 → v0.2.1` does not. From `1.0.0` onward it is the
+major, and a break costs a major bump. This is the convention semver itself states for initial
+development — "anything may change at any time; the public API should not be considered stable"
+— read as a commitment rather than a licence: the position that moves is the one a consumer
+reads as *this is different now*.
+
+Stated the other way round, `1.0.0` is reached by deciding the dashboard has shipped and the
+storage layout has settled, never by a change that happens to break something. A rule demanding
+a major bump for every break would make the first breaking change after `0.1.0` publish `1.0.0`
+and spend the one marker this repository deliberately kept.
+
+Patch and minor otherwise keep their ordinary meanings — fixes, and backward-compatible
+features — and the bump is chosen by the highest-impact change in the range.
+[ADR 0045](0045-a-tag-that-is-not-the-breaking-bump-cannot-carry-a-declared-break.md) enforces
+the rule above at tag time, against the declarations the range's commits carry.

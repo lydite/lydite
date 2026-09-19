@@ -313,19 +313,25 @@ func failureLines(dir string, row ui.Row) []string {
 // which concern is the problem.
 //
 // Unmeasured is the section's status only when nothing in it was decided at
-// all — no row passed, failed or referred. It is deliberately not promoted by
-// a single unmeasured row among decided ones, because that state is ordinary
-// and expected: `--affected` reports every component it did not select as
-// unmeasured, and `review` reports a dirty working tree the same way. A rule
-// that promoted on any of them would mark a normal run as ungated and put
-// "reported nothing" in the headline of a run that measured everything it was
-// asked to.
+// all — no row passed, failed, referred or was declined. It is deliberately
+// not promoted by a single unmeasured row among decided ones, because that
+// state is ordinary and expected: `--affected` reports every component it did
+// not select as unmeasured, and `review` reports a dirty working tree the
+// same way. A rule that promoted on any of them would mark a normal run as
+// ungated and put "reported nothing" in the headline of a run that measured
+// everything it was asked to.
 //
 // What that rule must not cost is a concern that went ungated reading as one
 // that passed. It does not: a partly measured section says so in the counts on
 // its own summary line, which is visible without opening it, and a concern
 // whose report never arrived has no decided row at all and so lands here as
 // unmeasured.
+//
+// StatusDeclined is promoted the same way StatusPass is — out of
+// StatusUnmeasured and no further — because a section made entirely of
+// declined rows is a decision stated on purpose, not a gap. A real
+// StatusFail or StatusRefer elsewhere in the same section still outranks it,
+// exactly as either outranks StatusPass.
 func worst(rows []ui.Row) ui.Status {
 	status := ui.StatusUnmeasured
 	for _, row := range rows {
@@ -337,6 +343,10 @@ func worst(rows []ui.Row) ui.Status {
 		case ui.StatusPass:
 			if status == ui.StatusUnmeasured {
 				status = ui.StatusPass
+			}
+		case ui.StatusDeclined:
+			if status == ui.StatusUnmeasured {
+				status = ui.StatusDeclined
 			}
 		}
 	}
@@ -364,6 +374,7 @@ func counts(rows []ui.Row) string {
 	}{
 		{ui.StatusFail, "failed"},
 		{ui.StatusRefer, "referred"},
+		{ui.StatusDeclined, "declined"},
 		{ui.StatusUnmeasured, "unmeasured"},
 		{ui.StatusPass, "passed"},
 		{ui.StatusNew, "new"},
@@ -405,6 +416,12 @@ func verdictOf(sections []ui.CommentSection) ui.Verdict {
 // badge, which is directly above it and already says the word. An unmeasured
 // section is called out even when nothing failed: a run that gated less than
 // it was asked to must not read as a clean one.
+//
+// A declined section is not collected here at all. "No verdict came from
+// mutation" is the wardnet#957 sentence for a report that never arrived; a
+// concern the repository chose not to run has nothing missing to report, so
+// it falls through to "every check passed" alongside the sections that
+// genuinely did.
 func headline(sections []ui.CommentSection, verdict ui.Verdict) string {
 	var failed, referred, unmeasured []string
 	for _, s := range sections {

@@ -86,6 +86,7 @@ func TestExitCodeComesFromTheVerdictNotTheGlyph(t *testing.T) {
 		{"unmeasured does not vote", []Status{StatusPass, StatusUnmeasured}, 0},
 		{"dropped does not vote", []Status{StatusPass, StatusDropped}, 0},
 		{"new does not vote", []Status{StatusPass, StatusNew}, 0},
+		{"declined does not vote", []Status{StatusPass, StatusDeclined}, 0},
 		{"a referral is exit 2", []Status{StatusPass, StatusRefer}, 2},
 		{"a failure is exit 1", []Status{StatusPass, StatusFail}, 1},
 		// A failure outranks a referral because it is actionable by the

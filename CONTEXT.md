@@ -154,6 +154,21 @@ _Note_: a gate that could not run must never render as one that passed, and a me
 _Note_: a review thread on a **Finding** is a *soft gate*. It blocks the merge while it is unresolved, and any writer can clear it without touching the code — which is what makes a false positive survivable rather than an argument about whether to switch the gate off. lydite opens and closes its own threads and can never resolve one: resolving needs a permission the **Relay** deliberately does not hold.
 _Avoid_: using "gate" for the whole of lydite's verdict — a referral is not a gate.
 
+**Declined**:
+A concern the repository chose not to run at all, stated by the run itself rather than inferred
+from an absent artifact — the command still writes its report document, carrying one row that
+says the run was declined. It is its own status: distinct from `unmeasured` (an input that went
+missing — no tooling, no report, a path-filtered job) and from a **Gate** that ran and passed. A
+declined section renders as a section saying so, votes on nothing, and does not make the
+**Surface**'s headline claim no verdict came from it.
+_Note_: contrast a per-component opt-out (`mutation: false` in a component's declaration), which
+is a **Gate**'s own row inside a section that still ran for every other component — that stays
+`context`, because the amber a gate that could not run wears is not what a decision the
+repository stated deliberately should cost.
+_Avoid_: "opted-out", "skipped" — both describe the CI job rather than what the report says;
+"unmeasured" — that word is reserved for an input that went missing, not one the repository
+refused on purpose.
+
 **Referral**:
 lydite's decision that a change needs human review before it merges. A referral names no defect and is not an accusation: most referrals mean only that no **Exemption** matched. It makes no demand, so unlike a **Gate** there is no work that satisfies it — the author can still change the change until it matches a declared shape, but nothing they can do to *this* change clears it. It is also the only lydite verdict that is pending rather than terminal: it is resolved by a **Clearance**, which lives outside the repository.
 _Avoid_: "escalation", "block" (a referral asserts nothing is wrong), "warning" (a referral is not advisory — nothing merges past it), "failure" (a **Gate** fails; a referral does not).
