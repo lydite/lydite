@@ -18,6 +18,8 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -935,6 +937,21 @@ func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
 	got := locate([]finding.Finding{{Message: "Removed: removed"}}, "sdk")
 	if len(got) != 1 || got[0] != "Removed: removed" {
 		t.Errorf("locate = %v, want the bare message", got)
+	}
+}
+
+// component.Load refuses api_surface on every language but Go and Rust, so a
+// component reaching compareSurface under a third language is a defensive
+// path rather than one reachable through review — this exercises it directly
+// against a TypeScript runner, which resolves to neither.
+func TestCompareSurfaceHasNoComparisonForAThirdLanguage(t *testing.T) {
+	c := component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}
+	findings, uncomputable := compareSurface(context.Background(), newReviewCmd(), c, t.TempDir(), t.TempDir(), toolchain.Envs(nil))
+	if findings != nil {
+		t.Errorf("findings = %+v, want none", findings)
+	}
+	if uncomputable != "no public-API comparison exists for this component's language" {
+		t.Errorf("uncomputable = %q, want the language named as having no comparison", uncomputable)
 	}
 }
 

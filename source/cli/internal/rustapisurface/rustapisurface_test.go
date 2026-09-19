@@ -1,6 +1,8 @@
 package rustapisurface
 
 import (
+	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 )
 
@@ -309,6 +312,94 @@ func TestArgvComparesTwoTreesWithNoPackageSelection(t *testing.T) {
 		if slices.Contains(got, flag) {
 			t.Errorf("argv = %q, which selects packages or a baseline of its own with %s", got, flag)
 		}
+	}
+}
+
+// A command that never ran, or died on a signal, has no ExitError to read a
+// code out of — errors.As fails on it exactly as it does on a plain error —
+// and that answer takes the same "not one of the two known codes" path as an
+// exit code the tool actually returned.
+func TestExitCodeIsMinusOneForAnErrorWithNoExitCode(t *testing.T) {
+	for _, err := range []error{context.DeadlineExceeded, errors.New("boom")} {
+		if got := exitCode(executil.Result{Err: err}); got != -1 {
+			t.Errorf("exitCode(%v) = %d, want -1", err, got)
+		}
+	}
+}
+
+// A witness is indented under its `Failed in:` header, so a line that is not
+// ends the block: it is the tool's own output resuming, and a later line that
+// looks indented again must not be read as a second witness of the same
+// failure.
+func TestAnUnindentedLineEndsTheWitnessBlock(t *testing.T) {
+	stdout := "--- failure function_missing: pub fn removed or renamed ---\n\nFailed in:\n" +
+		"  function probe::one, previously in file src/lib.rs:4\n" +
+		"done with function_missing\n" +
+		"  function probe::two, previously in file src/other.rs:11\n"
+	got := report(stdout, Request{Gate: testGate, Component: testComponent})
+	if len(got) != 1 {
+		t.Fatalf("got %d findings, want 1: the block ended at the unindented line", len(got))
+	}
+	if !strings.Contains(got[0].Message, "probe::one") {
+		t.Errorf("Message = %q, want the witness before the unindented line", got[0].Message)
+	}
+}
+
+// A block-opening line whose inner text has no `": "` separator yields the
+// whole of it as the lint id and no title, rather than inventing a split that
+// is not there and losing part of the id.
+func TestLintAndTitleWithNoSeparatorIsAllID(t *testing.T) {
+	id, title := lintAndTitle("--- failure something_without_a_colon ---")
+	if id != "something_without_a_colon" || title != "" {
+		t.Errorf("lintAndTitle = %q, %q, want the whole inner text as the id and no title", id, title)
+	}
+}
+
+// A finding whose block carried no title is the tool's own sentence alone,
+// with no leading ": " introducing nothing.
+func TestMessageWithNoTitleIsTheWitnessAlone(t *testing.T) {
+	if got := message("", "probe::Config no longer implements Default"); got != "probe::Config no longer implements Default" {
+		t.Errorf("message = %q, want the witness with no title prefix", got)
+	}
+}
+
+// locate is asked about a tree this comparison was not given a root for —
+// BaseDir or HeadDir left empty — and answers that it found nothing rather
+// than matching an empty prefix against every witness.
+func TestLocateWithNoRootFindsNothing(t *testing.T) {
+	_, _, _, ok := locate("probe::Config no longer implements Default", "")
+	if ok {
+		t.Error("locate found a location with no root to recognise it by")
+	}
+}
+
+// A witness naming the root but no `:<line>` at all has nowhere a line number
+// could be, so locate must not claim to have found one.
+func TestLocateWithNoLineNumberFindsNothing(t *testing.T) {
+	root := t.TempDir()
+	_, _, _, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs"), root)
+	if ok {
+		t.Error("locate found a location in a witness with no line number")
+	}
+}
+
+// A witness naming the root and a trailing colon, but not a number after it,
+// is not a location either: the colon can belong to the tool's own prose.
+func TestLocateWithANonNumericSuffixFindsNothing(t *testing.T) {
+	root := t.TempDir()
+	_, _, _, ok := locate("function probe::one, previously in file "+filepath.Join(root, "src/lib.rs")+":notanumber", root)
+	if ok {
+		t.Error("locate found a location with a non-numeric line")
+	}
+}
+
+// A path EvalSymlinks cannot resolve — one that does not exist — is returned
+// unchanged, since resolved exists to recognise a tree under a second name and
+// not to invent one.
+func TestResolvedFallsBackToTheOriginalPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist")
+	if got := resolved(path); got != path {
+		t.Errorf("resolved(%q) = %q, want the path unchanged", path, got)
 	}
 }
 
