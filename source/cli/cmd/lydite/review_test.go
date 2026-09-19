@@ -1062,6 +1062,71 @@ func TestReviewRefersAVersionBumpWithNoAdvisoryRowForAComponent(t *testing.T) {
 	}
 }
 
+// cliComponent declares one Go component named cli, rooted at the repository
+// root, so a run can be held to needing its licence and advisory rows even
+// where the scan document names it for nothing at all.
+const cliComponent = "components:\n  - name: cli\n    dir: .\n    runner: go-test\n"
+
+// A component switched off in .lydite/config.yml, or a scan that never ran,
+// carries no row of any kind — and that must not read the same as one whose
+// rows all passed.
+func TestReviewRefersAVersionBumpWithADeclaredComponentMissingFromTheScan(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName:  bumpExemption("go.sum"),
+			component.FileName: cliComponent,
+			"go.sum":           goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+	reports := scanReports(t, map[string]ui.Status{})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a declared component absent from the scan must not satisfy the condition:\n%s", out)
+	}
+}
+
+// A declared Go component's advisory row can be missing even where nothing
+// in the document hints at its language at all — no gosec row to infer from
+// — and the declaration is what has to catch it.
+func TestReviewRefersAVersionBumpWithADeclaredGoComponentMissingItsAdvisoryRow(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName:  bumpExemption("go.sum"),
+			component.FileName: cliComponent,
+			"go.sum":           goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+	reports := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusPass})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a declared Go component with a passing licence row and no advisory row must not satisfy the condition:\n%s", out)
+	}
+}
+
+// A components.yml that will not parse is review's to refuse elsewhere, but
+// dependencyGatesPassed must fail its own half closed rather than let a load
+// error read as evidence.
+func TestDependencyGatesPassedFailsClosedOnAnUnreadableComponentsFile(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{
+			component.FileName: "components:\n  - name: cli\n    dir: .\n    runner: go-test\n    not_a_real_key: true\n",
+			"README.md":        "hello",
+		},
+	)
+	var warn bytes.Buffer
+	if dependencyGatesPassed(dir, []string{cleanScan(t)}, &warn) {
+		t.Fatal("an unreadable components.yml must fail the condition, not satisfy it")
+	}
+	if warn.Len() == 0 {
+		t.Error("a load that failed should warn, not fail silently")
+	}
+}
+
 // A change patching one dependency and majoring another is not boring as a
 // whole, whatever the scan says about either.
 func TestReviewRefersAMajorBumpWithPassingRows(t *testing.T) {

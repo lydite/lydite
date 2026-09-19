@@ -156,14 +156,14 @@ var scaGateForLang = map[runner.Lang]string{
 }
 
 // scaGateFor is the same pairing, keyed by a gate the document itself
-// reports rather than by a declaration.
+// reports rather than by a declaration in .lydite/components.yml.
 //
-// review does not otherwise load .lydite/components.yml, and a fixture or a
-// caller that never declares one still has to be held to the same rule: a
-// component the document shows running `gosec` for is a Go component whether
-// or not anything declared it, and one `govulncheck` row missing from beside
-// it is exactly the gap the declared check exists to close for the case
-// where a declaration does exist.
+// A component the document shows running `gosec` for is a Go component
+// whether or not it is declared, and a component with no declaration behind
+// it at all — every fixture in this repository's own tests, and any caller
+// that runs review with no components.yml — still has to hold to the rule:
+// a `govulncheck` row missing from beside a `gosec` one is the gap this
+// closes where scaGateForLang has no declaration to read a language from.
 var scaGateFor = map[string]string{
 	golang.GateGosec: golang.GateGovulncheck,
 	rust.GateClippy:  rust.GateAudit,
