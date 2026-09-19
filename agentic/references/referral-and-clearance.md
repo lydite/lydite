@@ -174,6 +174,14 @@ decision; `internal/forge` is the only thing that talks to the platform. See
 the pull request's standing comment. The status is the whole record: a clearance is a
 state change on that context at one commit, and nothing else stores it.
 
+`review publish --verdict <path>` (a subcommand) posts the same status through the same
+`publish`/`stateFor`/`describe` (`cmd/lydite/status.go`), from a document `review
+--write-verdict` wrote rather than from a verdict this invocation computed itself — see
+[ci.md](ci.md)'s `referral`/`referral-publish` split. It carries only what `describe`
+needs (the verdict, the matched exemption's name, whether the change was empty) and
+never recomputes the comparison, so the job posting the status never runs the code that
+comparison had to execute.
+
 Six properties are load-bearing:
 
 - **A clearance names one commit.** Not the tree, and not the shape of the verdict. Any

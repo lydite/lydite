@@ -15,14 +15,18 @@
 // findings for a caller to finish.
 //
 // Building rustdoc for the head tree runs that crate's own build.rs and
-// proc-macros, which is code the change under review controls. The comparison
-// runs with an isolated environment rather than this process's own — see
-// isolatedEnv — because the caller may be review's own publish step, which
-// carries a credential that code must never reach. isolatedEnv only keeps
-// that credential out of the comparison's own cmd.Env; withoutCredentials
-// also removes it from this process's own environment for the run's
-// duration, because a same-user descendant can otherwise still reach an
-// ancestor's environment through /proc.
+// proc-macros, which is code the change under review controls. The
+// comparison runs with an isolated environment rather than this process's
+// own — see isolatedEnv — so that a component's own declared variables and
+// this process's ambient ones don't collide inside the child. That keeps
+// this process's own environment out of the child's cmd.Env; it is not, by
+// itself, a boundary against a credential this process holds: unsetenv
+// changes only this process's live copy of its environment, never
+// /proc/<pid>/environ, which is a snapshot taken at exec time. The caller
+// that runs this comparison from a job holding a publishing credential must
+// not itself hold that credential — see the referral / referral-publish
+// split in .github/workflows/lydite-pr.yml, and
+// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
 //
 // [ADR 0040]: ../../../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md
 package rustapisurface
@@ -36,7 +40,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/executil"
@@ -166,63 +169,8 @@ func Compare(ctx context.Context, req Request) Result {
 	// --root-installed subcommand is named plainly cargo-semver-checks and is
 	// not on the PATH cargo searches, and it takes the subcommand as its own
 	// first argument.
-	var res executil.Result
-	withoutCredentials(func() {
-		res = executil.RunQuietIsolatedEnv(ctx, req.HeadDir, isolatedEnv(req.Env.Check), bin, argv(req.BaseDir, req.HeadDir)...)
-	})
+	res := executil.RunQuietIsolatedEnv(ctx, req.HeadDir, isolatedEnv(req.Env.Check), bin, argv(req.BaseDir, req.HeadDir)...)
 	return readRun(exitCode(res), res.Output, res.Stderr, req)
-}
-
-// credentialSuffixes name the shape lydite's own CI credentials take —
-// GITHUB_TOKEN, the referral job's own, chief among them — so a future
-// credential following the same naming convention is caught by the rule
-// rather than by an explicit name.
-var credentialSuffixes = []string{"_TOKEN", "_SECRET", "_KEY", "_PASSWORD"}
-
-// scrubMu serialises withoutCredentials against itself: the scrub it performs
-// is a mutation of this process's own environment, which every goroutine
-// shares, so two overlapping windows could restore each other's variable
-// early. Nothing calls Compare concurrently today, but the lock costs nothing
-// and removes the question rather than resting on that.
-var scrubMu sync.Mutex
-
-// withoutCredentials clears every environment variable whose name matches
-// credentialSuffixes from this process's own environment for the duration of
-// fn, restoring each one afterward however fn returns.
-//
-// isolatedEnv already keeps this process's environment out of the
-// comparison's own cmd.Env, but the OS does not isolate one process's memory
-// from a same-user descendant reading /proc/<pid>/environ. As long as this
-// process's own environment carries GITHUB_TOKEN, a build.rs three
-// generations down the comparison's own process tree can still reach it that
-// way; removing it from this process's environment for the window the
-// untrusted tree's build runs closes that path too.
-func withoutCredentials(fn func()) {
-	scrubMu.Lock()
-	defer scrubMu.Unlock()
-
-	type saved struct{ key, value string }
-	var restore []saved
-	for _, kv := range os.Environ() {
-		key, value, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		for _, suffix := range credentialSuffixes {
-			if strings.HasSuffix(key, suffix) {
-				restore = append(restore, saved{key, value})
-				_ = os.Unsetenv(key) // restored unconditionally, below
-				break
-			}
-		}
-	}
-	defer func() {
-		for _, kv := range restore {
-			_ = os.Setenv(kv.key, kv.value) // restoring a value this process itself just read
-		}
-	}()
-
-	fn()
 }
 
 // isolatedAmbientVars are the ambient variables cargo and rustup need to

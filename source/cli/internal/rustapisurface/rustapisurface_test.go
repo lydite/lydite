@@ -508,44 +508,6 @@ func TestIsolatedEnvDoesNotOverrideADeclaredAmbientKey(t *testing.T) {
 	}
 }
 
-// withoutCredentials clears a credential-shaped variable for fn's duration
-// and restores it afterward, whatever fn does.
-func TestWithoutCredentialsClearsAndRestores(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "should-not-be-visible-inside-fn")
-	t.Setenv("SOME_UNRELATED_VAR", "must-survive-untouched")
-
-	var sawInside string
-	sawInsideOK := true
-	withoutCredentials(func() {
-		sawInside, sawInsideOK = os.LookupEnv("GITHUB_TOKEN")
-	})
-
-	if sawInsideOK {
-		t.Errorf("GITHUB_TOKEN was visible inside withoutCredentials: %q", sawInside)
-	}
-	if got := os.Getenv("GITHUB_TOKEN"); got != "should-not-be-visible-inside-fn" {
-		t.Errorf("GITHUB_TOKEN after withoutCredentials = %q, want it restored", got)
-	}
-	if got := os.Getenv("SOME_UNRELATED_VAR"); got != "must-survive-untouched" {
-		t.Errorf("an unrelated variable changed: got %q", got)
-	}
-}
-
-// A panic inside fn must not skip the restore, or one credential-scrubbing
-// call that fails partway leaves every later one running without it.
-func TestWithoutCredentialsRestoresEvenIfFnPanics(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "must-be-restored-after-a-panic")
-
-	func() {
-		defer func() { _ = recover() }()
-		withoutCredentials(func() { panic("boom") })
-	}()
-
-	if got := os.Getenv("GITHUB_TOKEN"); got != "must-be-restored-after-a-panic" {
-		t.Errorf("GITHUB_TOKEN after a panicking fn = %q, want it restored", got)
-	}
-}
-
 // run is one recorded invocation, replayed over the trees it compared.
 type run struct {
 	base, head string

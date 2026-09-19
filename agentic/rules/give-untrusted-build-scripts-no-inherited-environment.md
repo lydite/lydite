@@ -9,6 +9,15 @@ instead, whose child environment is exactly the slice passed in, never this proc
 runs with credentials a `scan` job may not have (the CI `referral` job's `GITHUB_TOKEN`), so
 inheriting there hands an untrusted build script a secret it has no reason to reach.
 
+This closes one path and not the whole exposure: `os.Unsetenv` changes only the calling
+process's own live copy of its environment, never `/proc/<pid>/environ`, which is a snapshot
+taken at exec time — a same-user descendant can still read a credential the calling process
+held, however briefly, at its own start. A job that runs untrusted code like this must not
+hold the credential at all: see the `referral` / `referral-publish` split in
+[`.github/workflows/lydite-pr.yml`](../../.github/workflows/lydite-pr.yml), and
+`persist-credentials: false` on that job's own checkout, since `actions/checkout` otherwise
+embeds the token into `.git/config` regardless of anything this rule's isolation does.
+
 ## Applies to
 
 Any new subprocess invocation, in `internal/rustapisurface` or elsewhere, that compiles or

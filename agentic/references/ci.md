@@ -19,6 +19,19 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
+**`referral` computes the verdict and holds no credential; `referral-publish` posts it and runs
+no code from the change under review.** A component that opts a Rust crate into `api_surface`
+has its public API compared via a real `cargo semver-checks` build, which compiles and runs
+that crate's own `build.rs` and proc-macros — code the pull request controls. The job that
+posts `lydite/referral` carries `statuses: write`, so it must never also be the job that runs
+that code: `referral` checks out with `persist-credentials: false` and no token in its own
+environment, writes its verdict to an artifact via `lydite review --write-verdict`, and
+`referral-publish` (needing only `referral`, not the test matrix) downloads it and posts via
+`lydite review publish --verdict <path>` — which recomputes nothing and checks nothing out.
+Anything that runs a scanned repository's own code and reaches a job holding a write credential
+needs the same separation; see
+[`give-untrusted-build-scripts-no-inherited-environment.md`](../rules/give-untrusted-build-scripts-no-inherited-environment.md).
+
 **A mutant is bounded in time and not in memory, and that is a real limit.** `--timeout` (and the
 derived three-times-baseline default) says how long a mutant's suite may run; nothing says how much
 it may allocate. A mutant that turns a bounded loop into an unbounded one takes the machine down
