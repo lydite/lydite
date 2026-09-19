@@ -768,3 +768,153 @@ func TestBaseWorktreeFailsOnAnUnknownCommit(t *testing.T) {
 		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
 	}
 }
+
+// goSum renders a go.sum pinning each module at the version given, both the
+// module line and the go.mod line git would carry for it.
+func goSum(modules map[string]string) string {
+	var b strings.Builder
+	for name, version := range modules {
+		fmt.Fprintf(&b, "%s %s h1:aaaa=\n%s %s/go.mod h1:bbbb=\n", name, version, name, version)
+	}
+	return b.String()
+}
+
+// dependencyExemption covers the manifest paths outright, so what the run
+// reports about them is this check's verdict and not the absence of a
+// declaration.
+func dependencyExemption(paths ...string) string {
+	return "exemptions:\n  - name: dependency-maintenance\n    reason: lockfile maintenance\n    paths: [\"" +
+		strings.Join(paths, "\", \"") + "\"]\n"
+}
+
+// A package at HEAD the merge-base did not pin refers, and the evidence names
+// it: the gap an advisory database leaves is code nobody has looked at
+// entering the tree, which no clean SCA run says anything about.
+func TestReviewRefersAnAddedDependency(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{
+			"github.com/spf13/cobra":         "v1.10.1",
+			"github.com/google/licensecheck": "v0.3.1",
+		})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("an added dependency must be referred:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("expected the added-dependency veto, got:\n%s", out)
+	}
+	if !strings.Contains(out, "github.com/google/licensecheck") {
+		t.Errorf("the veto must name the package that arrived, got:\n%s", out)
+	}
+}
+
+// A version move on a name both sides pin is not an addition. It may still be
+// referred by other means; what it is never referred for is this.
+func TestReviewDoesNotReferAVersionBumpAsAnAddition(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a bump of a package already pinned adds nothing: %v\n%s", err, out)
+	}
+	if strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("a version move is not an addition, got:\n%s", out)
+	}
+	if !strings.Contains(out, gateDependencies+"(go.sum)") {
+		t.Errorf("a manifest that was compared must say so under its own name, got:\n%s", out)
+	}
+}
+
+// A removal is the opposite of new untrusted code arriving, and carries none
+// of the supply-chain risk the veto exists for.
+func TestReviewDoesNotReferARemovedDependency(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum": goSum(map[string]string{
+				"github.com/spf13/cobra":         "v1.10.1",
+				"github.com/google/licensecheck": "v0.3.1",
+			}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("dropping a dependency must not be referred: %v\n%s", err, out)
+	}
+	if strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("a removal is not an addition, got:\n%s", out)
+	}
+}
+
+// An ecosystem with no reader is a gap the report says out loud. "lydite does
+// not know whether this change added a dependency" must not reach the verdict
+// "it did not".
+func TestReviewRefersAManifestItCannotRead(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("yarn.lock"),
+			"yarn.lock":       "# yarn lockfile v1\nleft-pad@^1.0.0:\n  version \"1.0.0\"\n",
+		},
+		map[string]string{"yarn.lock": "# yarn lockfile v1\nleft-pad@^1.0.0:\n  version \"1.0.1\"\n"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest nothing here parses must be referred:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyDeltaUnmeasured) {
+		t.Errorf("expected the unmeasured-delta veto, got:\n%s", out)
+	}
+	if !strings.Contains(out, "yarn") {
+		t.Errorf("the veto must name the ecosystem that went unread, got:\n%s", out)
+	}
+}
+
+// A manifest the merge-base does not have pins nothing there, so every
+// package in it is arriving with this change.
+func TestReviewRefersEveryPackageInANewManifest(t *testing.T) {
+	cargoLock := "version = 4\n\n[[package]]\nname = \"anstyle\"\nversion = \"1.0.13\"\n"
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("Cargo.lock")},
+		map[string]string{"Cargo.lock": cargoLock},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest with no base-side content adds everything in it:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) || !strings.Contains(out, "anstyle") {
+		t.Errorf("expected every package in the new manifest to be named, got:\n%s", out)
+	}
+}
+
+// A path that is no manifest is compared over by nothing, and the report says
+// nothing about it.
+func TestReviewComparesNoDependenciesForAPathThatIsNoManifest(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("README.md"), "README.md": "hello"},
+		map[string]string{"README.md": "hello again"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("expected an unattended pass, got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, gateDependencies+"(") {
+		t.Errorf("no manifest was touched, so no manifest row belongs in the report:\n%s", out)
+	}
+}

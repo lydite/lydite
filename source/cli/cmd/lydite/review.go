@@ -36,9 +36,12 @@ merge unattended, or it is referred to a person.
 A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
-It runs one check: for each component that declares api_surface, the exported
+It runs two checks. For each component that declares api_surface, the exported
 API of its Go module is compared against the merge-base. A break this change
-did not declare fails, and a declared one is referred.`,
+did not declare fails, and a declared one is referred. For each dependency
+manifest the change touches, the packages pinned at the merge-base and at HEAD
+are compared. A package the merge-base did not pin is referred, and so is a
+manifest whose dependencies could not be read at all.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
@@ -71,6 +74,7 @@ did not declare fails, and a declared one is referred.`,
 			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
 				return err
 			}
+			addDependencyRows(ctx, report, &decision, dir, baseSHA, change.Paths)
 			addDecisionRows(report, decision, len(file.Exemptions))
 
 			// Published after the rows are added and from the report's own
@@ -327,28 +331,44 @@ func resolveReviewBase(ctx context.Context, dir, base, baseBranch string) (strin
 //
 // An absent file is the day-one state and not an error: it declares no
 // exemptions, so everything is referred. A file that exists and cannot be
-// read is a different thing entirely, and the two are asked separately —
-// `cat-file -e` answers "is it there", and only then does `show` read it.
-// Collapsing them would make a broken read indistinguishable from an empty
-// allowlist, which is safe today only because the safe answer happens to
-// coincide; the moment an exemption exists, a silent read failure would
-// change the verdict with nothing said.
+// read is a different thing entirely, and showAtRevision keeps the two apart.
 func loadExemptionsAt(ctx context.Context, dir, base string) (referral.File, error) {
 	prefix, err := referral.RootRelative(ctx, dir)
 	if err != nil {
 		return referral.File{}, err
 	}
 	repoPath := path.Join(prefix, referral.FileName)
-	spec := base + ":" + repoPath
-	if r := executil.RunQuiet(ctx, dir, "git", "cat-file", "-e", spec); !r.Ok() {
+	content, present, err := showAtRevision(ctx, dir, base, repoPath)
+	if err != nil {
+		return referral.File{}, err
+	}
+	if !present {
 		return referral.File{}, nil
+	}
+	return referral.Parse(content, repoPath+" at "+shortSHA(base))
+}
+
+// showAtRevision reads a repository-root-relative path out of a commit,
+// never out of the working tree, and says separately whether the commit has
+// the path at all.
+//
+// The two questions are asked with two commands — `cat-file -e` answers "is
+// it there", and only then does `show` read it. Collapsing them would make a
+// broken read indistinguishable from a path the commit never had, and every
+// caller here treats those differently: an absent exemptions file declares no
+// exemptions, an absent manifest states no dependencies, and a read that
+// failed states nothing at all.
+func showAtRevision(ctx context.Context, dir, rev, repoPath string) ([]byte, bool, error) {
+	spec := rev + ":" + repoPath
+	if r := executil.RunQuiet(ctx, dir, "git", "cat-file", "-e", spec); !r.Ok() {
+		return nil, false, nil
 	}
 	r := executil.RunQuiet(ctx, dir, "git", "show", spec)
 	if !r.Ok() {
-		return referral.File{}, fmt.Errorf("reading %s at %s: %w: %s",
-			repoPath, shortSHA(base), r.Err, strings.TrimSpace(r.Stderr))
+		return nil, true, fmt.Errorf("reading %s at %s: %w: %s",
+			repoPath, shortSHA(rev), r.Err, strings.TrimSpace(r.Stderr))
 	}
-	return referral.Parse([]byte(r.Output), repoPath+" at "+shortSHA(base))
+	return []byte(r.Output), true, nil
 }
 
 func shortSHA(sha string) string {
