@@ -2113,15 +2113,15 @@ func TestDeclaredEnvNamesWhatWasComposed(t *testing.T) {
 		},
 		{
 			name:     "a declared variable is named",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOVULNDB": "https://db.example", "GOFLAGS": "-tags x"}},
-			composed: []string{"GOFLAGS=-tags x", "GOVULNDB=https://db.example"},
-			want:     []string{"GOFLAGS", "GOVULNDB"},
+			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": "true", "CGO_ENABLED": "0"}},
+			composed: []string{"CGO_ENABLED=0", "SQLX_OFFLINE=true"},
+			want:     []string{"CGO_ENABLED", "SQLX_OFFLINE"},
 		},
 		{
 			name:     "an empty value is still a declaration",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAGS": ""}},
-			composed: []string{"GOFLAGS="},
-			want:     []string{"GOFLAGS"},
+			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": ""}},
+			composed: []string{"SQLX_OFFLINE="},
+			want:     []string{"SQLX_OFFLINE"},
 		},
 		{
 			name:     "a declared PATH is the extension it is",
@@ -2134,6 +2134,24 @@ func TestDeclaredEnvNamesWhatWasComposed(t *testing.T) {
 			c:        component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto"}},
 			composed: []string{"GOTOOLCHAIN=auto", "GOTOOLCHAIN=local"},
 			want:     []string{"GOTOOLCHAIN (overridden by the resolved toolchain)"},
+		},
+		{
+			name:     "a known steering variable is marked",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOVULNDB": "https://db.example"}},
+			composed: []string{"GOVULNDB=https://db.example"},
+			want:     []string{"GOVULNDB (steers a check)"},
+		},
+		{
+			name:     "an ordinary variable that merely resembles a steering name is not marked",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAG": "not-a-steering-name"}},
+			composed: []string{"GOFLAG=not-a-steering-name"},
+			want:     []string{"GOFLAG"},
+		},
+		{
+			name:     "a steering variable the toolchain overrides carries both marks",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAGS": "-tags x"}},
+			composed: []string{"GOFLAGS=-tags x", "GOFLAGS=-tags y"},
+			want:     []string{"GOFLAGS (steers a check, overridden by the resolved toolchain)"},
 		},
 	}
 	for _, tc := range cases {

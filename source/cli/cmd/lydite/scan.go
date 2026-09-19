@@ -281,6 +281,27 @@ func warnDeclaredEnv(w io.Writer, c component.Component, composed []string) {
 		c.Name, component.FileName, strings.Join(names, ", "))
 }
 
+// steeringEnv is the variables lydite knows change what a check does — which
+// files it compiles, which vulnerability database it consults, which registry
+// or dependency it resolves against — rather than an ordinary variable a suite
+// merely happens to read. declaredEnvNames marks a declared name found here so
+// a reader scanning a long list finds the two or three worth a second look.
+//
+// This list is best-effort and is not a security boundary. It may rot as
+// scanners gain new variables, and rotting is harmless: a name that falls off
+// it is still reported, just without the mark. Nothing reads this set to
+// decide whether to fail, refuse or gate anything — the mark exists only to
+// help a reader's eye, never to filter.
+var steeringEnv = map[string]bool{
+	"GOFLAGS":            true,
+	"GOVULNDB":           true,
+	"GOPRIVATE":          true,
+	"RUSTFLAGS":          true,
+	"RUSTC_WRAPPER":      true,
+	"CARGO_BUILD_TARGET": true,
+	"NODE_OPTIONS":       true,
+}
+
 // declaredEnvNames is the names of what a component's declaration contributed
 // to composed, in the order env sorts them, with a folded PATH last.
 //
@@ -302,6 +323,10 @@ func warnDeclaredEnv(w io.Writer, c component.Component, composed []string) {
 // the resolved toolchain also sets is cancelled, since the toolchain's
 // variables compose last; naming it plainly would report a steering variable
 // that never reached the check.
+//
+// Every declared name is reported unconditionally; a name also found in
+// steeringEnv carries an additional mark, and the two annotations compose
+// into one parenthetical rather than one clobbering the other.
 func declaredEnvNames(c component.Component, composed []string) []string {
 	dirs, vars := splitPath(env(c))
 	if len(dirs) == 0 && len(vars) == 0 {
@@ -318,8 +343,19 @@ func declaredEnvNames(c component.Component, composed []string) []string {
 	var names []string
 	for _, kv := range vars {
 		k, v, _ := strings.Cut(kv, "=")
+		mark := ""
+		if steeringEnv[k] {
+			mark = "steers a check"
+		}
 		if effective[k] != v {
-			names = append(names, k+" (overridden by the resolved toolchain)")
+			if mark != "" {
+				mark += ", overridden by the resolved toolchain"
+			} else {
+				mark = "overridden by the resolved toolchain"
+			}
+		}
+		if mark != "" {
+			names = append(names, k+" ("+mark+")")
 			continue
 		}
 		names = append(names, k)
