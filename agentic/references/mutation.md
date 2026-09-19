@@ -35,7 +35,17 @@ lands on the `lydite` branch. See [`quality-history.md`](../../agentic/reference
 and [ADR 0043](../../docs/adr/0043-mutation-reaches-the-ledger-from-a-post-merge-run.md).
 
 **Five outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run
-exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. A mutant
+exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. `--no-gate`
+turns off exactly that vote: a completed component's row renders `StatusContext` under the flag,
+whether or not it had survivors — never `StatusPass` for a clean run, since nothing gated it, and
+never `StatusFail` for a run with survivors, since the exit code is not asked to speak for them.
+Recording, `mutants.json` and the findings in `--json` and the document are identical with or
+without the flag; only the row's vote changes. Everything in the "could not run" family — a
+variant that is not runnable, an unresolvable base revision, a baseline that did not pass, a
+component with no headroom under the memory bound, a run interrupted before it finished — fails or
+renders `unmeasured` exactly as it does without the flag, because those rows were never voting on a
+survivor to begin with. See
+[ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md). A mutant
 whose run **hangs** or whose run **allocates without stopping** both count as killed: a runaway is
 a behaviour change something noticed, whether the harness caught it by clock or by peak memory,
 and the two are kept as separate outcomes — `TimedOut` and `OutOfMemory` — rather than folded into
