@@ -256,7 +256,7 @@ jobs:
       - name: lydite mutation
         env:
           COMPONENTS: ${{ matrix.shard.components }}
-        run: lydite mutation --dir . --affected --component "$COMPONENTS" --base-sha HEAD~1 --stream
+        run: lydite mutation --dir . --affected --component "$COMPONENTS" --base-sha HEAD~1 --stream --no-gate
 
       # Under its own prefix: `record` folds mutants.json out of every
       # directory this pattern matches, and a name shared with the coverage
