@@ -11,11 +11,12 @@ same empty answer as an unrecognised runner name, even though the two are differ
 (one has no runner because it opted out of the derived variants entirely; the other is a typo
 or an unsupported runner).
 
-`validateAPISurface` (added alongside the `api_surface` opt-in field) checks `c.Lang() != runner.Go`
-defensively, deliberately not relying on `validateInvocation` having already run first in the
-same validation loop — a `command:`-invoked component setting `api_surface` is correctly
-rejected by the same check, with the same error, as a `cargo-nextest` component would be,
-because both report `Lang() == ""` and neither is Go.
+`validateAPISurface` checks `c.Lang()` in a `switch`, with `case runner.Go, runner.Rust: return
+nil` and every other answer — an unsupported language, an unset runner, or `command:` — falling
+to the same `default` error. It does this deliberately without relying on `validateInvocation`
+having already run first in the same validation loop: a `command:`-invoked component setting
+`api_surface` is rejected by the same `default` branch, with the same error, as a `vitest`
+component would be, because both report `Lang() == ""` or a language the switch does not name.
 
 Any future per-language opt-in field on `Component` should check `Lang()` the same way rather
 than checking `Runner != ""` or assuming a language is always derivable — a `command:` component
