@@ -9,7 +9,7 @@ says why it is that way and what breaks if it changes.
 | `component`, `runner`, `nodedeps`, `cargotool` | [`components.md`](../../../agentic/references/components.md) |
 | `compose`, `scheduler` | [`services-and-scheduling.md`](../../../agentic/references/services-and-scheduling.md) |
 | `orphan`, `affected`, `pathmatch`, `gitdiff` | [`orphan-and-affected.md`](../../../agentic/references/orphan-and-affected.md) |
-| `coverage`, `gitstate` | [`coverage.md`](../../../agentic/references/coverage.md), and [`mutation.md`](../../../agentic/references/mutation.md) for `gitstate`'s `--base-sha` revision resolution |
+| `coverage`, `gitstate` | [`coverage.md`](../../../agentic/references/coverage.md), and [`mutation.md`](../../../agentic/references/mutation.md) for `gitstate`'s `--base-sha` revision resolution; [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) and [`ci.md`](../../../agentic/references/ci.md) for `gitstate`'s `Tags`/`PreviousTag`, which `lydite release check` reads |
 | `crap`, `annotation` | [`crap.md`](../../../agentic/references/crap.md) |
 | `mutation` | [`mutation.md`](../../../agentic/references/mutation.md) |
 | `treesitter` | [`crap.md`](../../../agentic/references/crap.md) and [`mutation.md`](../../../agentic/references/mutation.md) for the shared grammar tables, function spans and test-code classification both gates read; [`coverage.md`](../../../agentic/references/coverage.md) for exclusion resolution |
