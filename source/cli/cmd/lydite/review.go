@@ -72,7 +72,7 @@ every component ran and passed in a scan document under --reports. Without
 			deltas := measureDependencies(ctx, dir, baseSHA, change.Paths)
 			evidence := referral.Evidence{
 				PatchAndMinor: versionsPatchAndMinor(deltas) &&
-					dependencyGatesPassed(reports, cmd.ErrOrStderr()),
+					dependencyGatesPassed(dir, reports, cmd.ErrOrStderr()),
 			}
 
 			decision := referral.Decide(change, file, evidence)

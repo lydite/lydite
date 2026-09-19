@@ -8,11 +8,13 @@ import (
 	"os"
 	"strings"
 
+	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/depdelta"
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
@@ -138,14 +140,30 @@ func versionsPatchAndMinor(deltas []manifestDelta) bool {
 	return true
 }
 
-// scaGateFor names the advisory check a component's language runs, keyed by a
-// gate only that language reports.
+// scaGateForLang names the advisory check a declared component's language
+// runs. A language absent from this map, TypeScript among them, runs no
+// advisory check at all, so its dependency evidence is its licence row
+// alone — requiring one would make the condition unsatisfiable for every
+// repository that has a component in that language.
 //
-// A scan document says what ran, not what a component is, so the gates a
-// component's rows carry are what names its language. TypeScript runs no
-// advisory check at all, so an npm component's dependency evidence is its
-// licence row alone, and requiring an advisory row of it would make the
-// condition unsatisfiable for every repository that has one.
+// Keyed by declaration rather than by a gate in the document, so a component
+// whose language was switched off in .lydite/config.yml — and which therefore
+// carries no row of any kind — is still known to need one: nothing in the
+// document could have told this apart from a component that never existed.
+var scaGateForLang = map[runner.Lang]string{
+	runner.Go:   golang.GateGovulncheck,
+	runner.Rust: rust.GateAudit,
+}
+
+// scaGateFor is the same pairing, keyed by a gate the document itself
+// reports rather than by a declaration.
+//
+// review does not otherwise load .lydite/components.yml, and a fixture or a
+// caller that never declares one still has to be held to the same rule: a
+// component the document shows running `gosec` for is a Go component whether
+// or not anything declared it, and one `govulncheck` row missing from beside
+// it is exactly the gap the declared check exists to close for the case
+// where a declaration does exist.
 var scaGateFor = map[string]string{
 	golang.GateGosec: golang.GateGovulncheck,
 	rust.GateClippy:  rust.GateAudit,
@@ -153,25 +171,34 @@ var scaGateFor = map[string]string{
 
 // dependencyGatesPassed reports whether the scan documents in the given report
 // directories show the licence gate and the advisory check passing for every
-// component they name.
+// declared component.
 //
 // Evidence about advisories is evidence about advisories and nothing else: the
 // bump that introduces a copyleft dependency is precisely a lockfile-only
 // change with a clean SCA run, which is why the licence gate has to have run
 // and passed rather than merely not failed. A component whose licence row is
 // missing, unmeasured, not configured or failing takes the whole condition
-// with it.
+// with it — and so does a component the document carries no row for at all,
+// which is what a language switched off in .lydite/config.yml, or a scan that
+// did not run, looks like. Checking only the components a document happens to
+// name would let either read as clean.
 //
 // No directory, no scan document in the ones given, or a directory that will
 // not be read are all false. The flag can only ever supply evidence, so the
 // absence of evidence is the absence of the exemption, which is the verdict a
 // run without it already reaches.
-func dependencyGatesPassed(dirs []string, warn io.Writer) bool {
+func dependencyGatesPassed(dir string, dirs []string, warn io.Writer) bool {
+	file, err := component.Load(dir)
+	if err != nil {
+		_, _ = fmt.Fprintf(warn, "warning: no licence or SCA evidence: %v\n", err)
+		return false
+	}
+
 	// component -> gate -> status.
 	byComponent := map[string]map[string]ui.Status{}
 	read := false
-	for _, dir := range dirs {
-		doc, err := readDocument(documentPath(dir, "scan"))
+	for _, d := range dirs {
+		doc, err := readDocument(documentPath(d, "scan"))
 		switch {
 		case err == nil:
 		// A directory holding no scan document is an ordinary shape — a job
@@ -181,19 +208,19 @@ func dependencyGatesPassed(dirs []string, warn io.Writer) bool {
 		case errors.Is(err, os.ErrNotExist):
 			continue
 		default:
-			_, _ = fmt.Fprintf(warn, "warning: no licence or SCA evidence came from %s: %v\n", dir, err)
+			_, _ = fmt.Fprintf(warn, "warning: no licence or SCA evidence came from %s: %v\n", d, err)
 			continue
 		}
 		read = true
 		for _, row := range doc.Rows {
-			gate, component, ok := splitGateLabel(row.Label)
+			gate, name, ok := splitGateLabel(row.Label)
 			if !ok {
 				continue
 			}
-			gates := byComponent[component]
+			gates := byComponent[name]
 			if gates == nil {
 				gates = map[string]ui.Status{}
-				byComponent[component] = gates
+				byComponent[name] = gates
 			}
 			// Two documents naming one component keep the worse of the two
 			// answers: a gate that passed in one job and failed in another
@@ -206,8 +233,32 @@ func dependencyGatesPassed(dirs []string, warn io.Writer) bool {
 	if !read {
 		return false
 	}
-	for _, gates := range byComponent {
+
+	// The names to check are the union of what was declared and what the
+	// document named: a declared component absent from the document entirely
+	// — the disabled-language case — has to be checked against a nil gate
+	// map rather than skipped, and a component the document names without
+	// any declaration behind it (every fixture in this repository's own
+	// tests, and any caller that runs review with no .lydite/components.yml
+	// at all) still has to hold to the rule.
+	declaredLang := map[string]runner.Lang{}
+	names := map[string]bool{}
+	for _, c := range file.Components {
+		declaredLang[c.Name] = c.Lang()
+		names[c.Name] = true
+	}
+	for name := range byComponent {
+		names[name] = true
+	}
+	if len(names) == 0 {
+		return false
+	}
+	for name := range names {
+		gates := byComponent[name]
 		if gates[licence.Gate] != ui.StatusPass {
+			return false
+		}
+		if sca, ok := scaGateForLang[declaredLang[name]]; ok && gates[sca] != ui.StatusPass {
 			return false
 		}
 		for gate := range gates {

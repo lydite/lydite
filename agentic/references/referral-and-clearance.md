@@ -241,12 +241,13 @@ inside the package would make an exemption's meaning depend on what that package
 the moment it ran, and would put git, report documents and component loading behind a function
 whose whole value is that it has none of them.
 
-**The CI edge this needs is designed and not wired.** `.github/workflows/lydite-pr.yml` runs
-the scan job and the referral job with no dependency between them; for `review` to read
-`scan.json` the referral job has to need the scan job and download its artifact, which is added
-latency on every pull request and one more artifact dependency to keep correct. ADR 0047 records
-that change as asked about and approved; until it lands, this repository's own referral job
-passes no `--reports` and every version bump in it is referred.
+**The `referral` job needs `scan` and reads its artifact.** `.github/workflows/lydite-pr.yml`'s
+`referral` job depends on `scan` and downloads its `lydite-reports-scan` artifact, passing
+`--reports` to `lydite review` when `scan.json` is actually there — `scan` skipping on a
+title-only edit, or failing outright, still lets `referral` publish a verdict, just without the
+licence and SCA evidence a `versions:` condition needs. This is added latency on every pull
+request (`referral` no longer answers as soon as `setup` does) and one more artifact dependency
+to keep correct, which ADR 0047 records as a cost asked about and approved before it was built.
 
 # Clearance: `/lydite clear`
 
