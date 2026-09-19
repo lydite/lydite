@@ -37,8 +37,8 @@ A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
 It runs one check: for each component that declares api_surface, the exported
-API of its Go module is compared against the merge-base. A break this change
-did not declare fails, and a declared one is referred.`,
+API of its Go module or its Rust crate is compared against the merge-base. A
+break this change did not declare fails, and a declared one is referred.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")

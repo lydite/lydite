@@ -11,11 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/ui"
 )
 
@@ -713,6 +715,215 @@ func TestPullRequestTitleWarnsOnAMalformedEvent(t *testing.T) {
 	}
 	if !strings.Contains(warn.String(), "warning:") {
 		t.Errorf("a malformed event file must be warned about, got %q", warn.String())
+	}
+}
+
+// A Rust crate whose public API the gate compares, the declaration that opts
+// it in, and the config that keeps provisioning out of the run: the comparison
+// is the stub below, so nothing here needs a rustup channel and none is
+// downloaded to find that out.
+const (
+	crateCargoToml = "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+	crateAPI       = "pub fn do_thing(n: i32) -> i32 {\n    n\n}\n"
+	crateOptIn     = "components:\n  - name: probe\n    dir: probe\n    runner: cargo-nextest\n    api_surface: {}\n"
+	cratePlain     = "components:\n  - name: probe\n    dir: probe\n    runner: cargo-nextest\n"
+	noProvisioning = "toolchain:\n  enabled: false\n"
+)
+
+func crateBase(componentsYML string) map[string]string {
+	return map[string]string{
+		"README.md":        "hello",
+		component.FileName: componentsYML,
+		config.FileName:    noProvisioning,
+		"probe/Cargo.toml": crateCargoToml,
+		"probe/src/lib.rs": crateAPI,
+		referral.FileName:  "exemptions:\n  - name: probe-source\n    reason: ordinary source edits\n    paths: [\"probe/**\"]\n",
+	}
+}
+
+// The three answers cargo-semver-checks gives, as the stub that gives them.
+//
+// Each is the exit code and the stdout shape internal/rustapisurface reads,
+// which that package's own tests tie to runs recorded from the real tool. What
+// these stand in for here is the tool, not its output: what is under test is
+// the verdict each answer reaches.
+const (
+	// semverChecksBroken reports one removed function, located in the baseline
+	// tree the invocation names — which is what makes the finding a removal,
+	// and its line the merge-base's.
+	semverChecksBroken = `#!/bin/sh
+base=
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--baseline-root" ]; then base=$2; fi
+  shift
+done
+printf '%s\n' "--- failure function_missing: pub fn removed or renamed ---" "" "Failed in:" "  function probe::do_thing, previously in file $base/src/lib.rs:1"
+exit 100
+`
+	semverChecksUnbroken = "#!/bin/sh\nexit 0\n"
+	// semverChecksRefused is the crate with no library target: exit 101, and
+	// the tool's own account of why on stderr.
+	semverChecksRefused = "#!/bin/sh\necho 'error: no crates with library targets selected, nothing to semver-check' >&2\nexit 101\n"
+)
+
+// semverChecksStub puts a stand-in cargo-semver-checks in the version-keyed
+// tool cache, so the comparison is a real invocation with nothing installed,
+// nothing fetched and no cargo on the machine involved.
+func semverChecksStub(t *testing.T, script string) {
+	t.Helper()
+	// rustup keeps its channels under RUSTUP_HOME, which defaults to a
+	// directory beneath $HOME. Read before the home below replaces it: the
+	// toolchain probe asks rustup which channel the component resolves to, and
+	// pointed at an empty home rustup answers by downloading a whole toolchain.
+	rustupHome := os.Getenv("RUSTUP_HOME")
+	if rustupHome == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			rustupHome = filepath.Join(home, ".rustup")
+		}
+	}
+	home := t.TempDir()
+	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
+	// $HOME/Library/Caches on macOS.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	if rustupHome != "" {
+		t.Setenv("RUSTUP_HOME", rustupHome)
+	}
+	bin, err := (cargotool.Tool{Name: "cargo-semver-checks", Version: rust.CargoSemverChecksVersion}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(bin), 0o750); err != nil {
+		t.Fatalf("creating the cache directory: %v", err)
+	}
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
+		t.Fatalf("writing the stub: %v", err)
+	}
+}
+
+// An undeclared break is a gate for a Rust component exactly as it is for a Go
+// one: the author clears it by restoring the API or by declaring the break,
+// and both are work they can do.
+func TestReviewFailsAnUndeclaredRustAPIBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "probe/src/lib.rs") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The same break, declared, reaches a person instead. The declaration decides
+// which verdict a break gets and never whether it is reported at all: the
+// break is still named, and the run is still not one that may merge unread.
+func TestReviewRefersADeclaredRustAPIBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepoSaying(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"},
+		"feat(probe)!: drop do_thing")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration it read, got:\n%s", out)
+	}
+	if strings.Contains(out, "undeclared") {
+		t.Errorf("a declared break must not also fire the gate:\n%s", out)
+	}
+	// The claim adds a referral and removes nothing: the break itself is still
+	// the row a reader reviews, located at its merge-base declaration. A
+	// declaration that made the break disappear from the report would be the
+	// author clearing a gate by writing a title.
+	if !strings.Contains(out, gateAPISurface+"(probe)") || !strings.Contains(out, ", declared") {
+		t.Errorf("the per-component row naming the declared break is missing, got:\n%s", out)
+	}
+	if !strings.Contains(out, "merge-base probe/src/lib.rs:1") {
+		t.Errorf("a removed symbol must be located at its merge-base declaration, got:\n%s", out)
+	}
+}
+
+// A declaration with no break behind it is not free. It is honoured on its own
+// evidence — the author's — and the component that was compared says what the
+// comparison found, which is nothing.
+func TestReviewRefersARustDeclarationWithNoBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepoSaying(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": crateAPI + "\npub fn also() {}\n"},
+		"feat(probe)!: say it breaks")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declaration with nothing behind it must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// Ordinary growth, undeclared, is the one combination that merges unattended:
+// the comparison ran, and it found nothing.
+func TestReviewPassesAnAdditiveRustAPIChange(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": crateAPI + "\npub fn also() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("an additive change must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// A run the tool would not make is neither pass nor fail. Failing is a gate
+// the author cannot clear, and passing is a comparison that never happened
+// rendering as one that happened and found nothing.
+func TestReviewRefersARustSurfaceItCouldNotCompare(t *testing.T) {
+	semverChecksStub(t, semverChecksRefused)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an uncomputable surface must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing to semver-check") {
+		t.Errorf("the referral must carry the tool's own account, got:\n%s", out)
+	}
+}
+
+// Nil means not measured, for Rust as for Go. A component that did not ask has
+// its API compared by nothing — the stub here would report a break, and is
+// never run.
+func TestReviewComparesNothingForARustComponentThatDidNotOptIn(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(cratePlain),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a component that did not opt in must not be gated, got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, gateAPISurface) {
+		t.Errorf("nothing asked for a comparison, so nothing may be reported about one:\n%s", out)
 	}
 }
 
