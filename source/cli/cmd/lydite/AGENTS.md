@@ -11,7 +11,7 @@ before changing the command.
 | `mutation.go`, `mutation_merge.go` | [`mutation.md`](../../../../agentic/references/mutation.md) |
 | `scan.go` | [`scanning.md`](../../../../agentic/references/scanning.md), [`linters.md`](../../../../agentic/references/linters.md), [`semgrep.md`](../../../../agentic/references/semgrep.md) |
 | `publish.go`, `threads.go` | [`surface.md`](../../../../agentic/references/surface.md), [`findings.md`](../../../../agentic/references/findings.md) |
-| `review.go`, `clearance.go`, `status.go` | [`referral-and-clearance.md`](../../../../agentic/references/referral-and-clearance.md) |
+| `review.go`, `review_apisurface.go`, `clearance.go`, `status.go` | [`referral-and-clearance.md`](../../../../agentic/references/referral-and-clearance.md) |
 | `history.go`, the ledger rows | [`quality-history.md`](../../../../agentic/references/quality-history.md) |
 | anything that adds a row or a status | [`output-grammar.md`](../../../../agentic/references/output-grammar.md) |
 
