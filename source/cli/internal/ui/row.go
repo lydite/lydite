@@ -44,9 +44,15 @@ const (
 	// StatusContext carries a reason, a cause, or a next step. Never a
 	// verdict, so it never votes on the exit code.
 	StatusContext Status = "context"
+	// StatusDeclined is a whole concern the repository chose not to run at
+	// all — distinct from StatusUnmeasured, which is an input that went
+	// missing when it was expected. Non-voting like StatusContext, but
+	// worst() and counts() tell the two apart: a section is either a gap
+	// nobody asked about, or a decision stated on purpose.
+	StatusDeclined Status = "declined"
 )
 
-// glyph is the rendering half of the grammar. Four glyphs cover seven
+// glyph is the rendering half of the grammar. Four glyphs cover eight
 // statuses because several statuses want the same amount of attention while
 // voting differently — see the package doc.
 func (s Status) glyph() string {
