@@ -37,7 +37,7 @@ again, and that file arrives on its own when you read anything in that subtree.
 | [`findings.md`](agentic/references/findings.md) | `internal/finding` — the located claims, their fingerprints and their anchors |
 | [`mutation.md`](agentic/references/mutation.md) | `internal/mutation` or `lydite mutation` |
 | [`output-grammar.md`](agentic/references/output-grammar.md) | `internal/ui`, a row, a status, or the `--json` document |
-| [`referral-and-clearance.md`](agentic/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge`, `internal/apisurface`, `internal/declaration`, or `.lydite/exemptions.yml` |
+| [`referral-and-clearance.md`](agentic/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge`, `internal/apisurface`, `internal/declaration`, `internal/depdelta`, or `.lydite/exemptions.yml` |
 | [`surface.md`](agentic/references/surface.md) | `lydite publish`, the standing comment, `lydite threads`, `internal/threads`, or `source/cloud-services/pr-relay` |
 | [`semgrep.md`](agentic/references/semgrep.md) | `internal/semgrep`, or `--diff-base` |
 | [`actions.md`](agentic/references/actions.md) | `.github/actions/`, or anything that has to land in `lydite/actions` too |
