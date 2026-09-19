@@ -171,6 +171,16 @@ func TestParseRejects(t *testing.T) {
 			yaml: "components:\n  - {name: a, dir: cli, runner: go-test, depends_on: [b]}\n  - {name: b, dir: cli, runner: go-test, depends_on: [a]}\n",
 			want: "cycle",
 		},
+		{
+			name: "api_surface on a non-Go runner",
+			yaml: "components:\n  - {name: a, dir: cli, runner: cargo-nextest, api_surface: {}}\n",
+			want: "api_surface is only supported for Go components in this version",
+		},
+		{
+			name: "api_surface on a command component",
+			yaml: "components:\n  - {name: a, dir: cli, command: [make, test], api_surface: {}}\n",
+			want: "api_surface is only supported for Go components in this version",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse([]byte(tc.yaml), "components.yml")
@@ -178,6 +188,30 @@ func TestParseRejects(t *testing.T) {
 				t.Fatalf("want an error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// api_surface is opt-in: absent, a component is not measured, and presence
+// alone — an empty object — is what opts it in.
+func TestAPISurfaceOptIn(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: sdk
+    dir: sdk
+    runner: go-test
+    api_surface: {}
+  - name: cli
+    dir: cli
+    runner: go-test
+`), "components.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Components[0].APISurface == nil {
+		t.Error("api_surface: {} must set APISurface")
+	}
+	if f.Components[1].APISurface != nil {
+		t.Error("an omitted api_surface must leave APISurface nil")
 	}
 }
 
@@ -400,6 +434,19 @@ func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
 		t.Errorf("LoadHistorical refused a name it cannot ask the author to change: %v", err)
 	} else if len(lenient.Components) != 1 {
 		t.Errorf("components = %+v, want the declaration read as written", lenient.Components)
+	}
+
+	// api_surface on a non-Go component is Load's rejection to make, not
+	// LoadHistorical's: the coverage baseline that calls LoadHistorical never
+	// reads api_surface, and a base tree carrying it — set before the
+	// component's runner changed, or before this repository's own history —
+	// must still be measurable.
+	nonGo := "components:\n  - {name: svc, dir: svc, runner: cargo-nextest, api_surface: {}}\n"
+	if _, err := Load(write(t, nonGo)); err == nil {
+		t.Error("Load accepted api_surface on a non-Go component")
+	}
+	if _, err := LoadHistorical(write(t, nonGo)); err != nil {
+		t.Errorf("LoadHistorical refused a historical tree over api_surface, which it never reads: %v", err)
 	}
 
 	// Everything that makes a declaration runnable is still checked, because

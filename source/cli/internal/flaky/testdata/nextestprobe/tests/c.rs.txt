@@ -1,0 +1,12 @@
+mod async_cases {
+    #[tokio::test]
+    async fn awaits_and_agrees() {
+        assert_eq!(1 + 1, 2);
+    }
+}
+
+#[test]
+#[ignore]
+fn ignored_by_attribute() {
+    unreachable!();
+}

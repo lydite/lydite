@@ -1,0 +1,30 @@
+#[inline]
+pub fn double(n: i32) -> i32 {
+    n * 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// A doc comment between the attribute and the function it marks.
+    fn doubles() {
+        assert_eq!(double(2), 4);
+    }
+
+    #[rstest]
+    #[case(1, 2)]
+    fn doubles_each_case(n: i32, want: i32) {
+        assert_eq!(double(n), want);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn doubles_on_multi_thread() {
+        assert_eq!(double(4), 8);
+    }
+
+    fn helper() -> i32 {
+        1
+    }
+}

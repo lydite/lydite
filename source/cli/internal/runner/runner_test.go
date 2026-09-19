@@ -617,6 +617,232 @@ func TestARerunOfNoTestsIsRefused(t *testing.T) {
 	}
 }
 
+// The Rust and TypeScript suites write no report under --no-coverage either,
+// so the gate has a plain-with-JUnit form of each — the report turned on, and
+// none of the instrumentation.
+func TestThePlainJUnitRunsCarryAReportAndNoInstrumentation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cargo, ok := CargoNextestJUnitPlain([]string{"--workspace"})
+	if !ok {
+		t.Fatal("CargoNextestJUnitPlain supplied no invocation")
+	}
+	cfg, _ := nextestToolConfig()
+	want := "cargo nextest run --tool-config-file lydite:" + cfg + " --workspace"
+	if got := line(cargo); got != want {
+		t.Errorf("CargoNextestJUnitPlain = %q, want %q", got, want)
+	}
+	if cargo.JUnitReport != nextestJUnit {
+		t.Errorf("CargoNextestJUnitPlain writes %q, want run 1's default-profile report", cargo.JUnitReport)
+	}
+	if cargo.CoverageReport != "" || slices.Contains(cargo.Args, "llvm-cov") {
+		t.Errorf("CargoNextestJUnitPlain = %v, and a plain run is not instrumented", cargo.Args)
+	}
+
+	vitest, ok := VitestJUnitPlain([]string{"--project", "app"})
+	if !ok {
+		t.Fatal("VitestJUnitPlain supplied no invocation")
+	}
+	want = "npx vitest run --reporter=default --reporter=junit --outputFile.junit=" + junitReport + " --project app"
+	if got := line(vitest); got != want {
+		t.Errorf("VitestJUnitPlain = %q, want %q", got, want)
+	}
+	if vitest.JUnitReport != junitReport {
+		t.Errorf("VitestJUnitPlain writes %q, want %q", vitest.JUnitReport, junitReport)
+	}
+	for _, a := range vitest.Args {
+		if strings.HasPrefix(a, "--coverage") {
+			t.Errorf("VitestJUnitPlain carries %q, and a plain run measures none", a)
+		}
+	}
+	if vitest.CoverageReport != "" {
+		t.Errorf("VitestJUnitPlain reports coverage at %q", vitest.CoverageReport)
+	}
+}
+
+// Run 2 is one invocation for the whole component, filtered by OR-ed exact
+// predicates and run under the profile whose report lands beside run 1's.
+// --no-fail-fast, or a component with two failing new tests has the second
+// reported as though it never ran.
+func TestRustRerunFiltersByExactNameUnderTheRerunProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	inv, ok := RustRerun([]string{"--workspace"}, []string{"shared_name", "tests::nested::doubles_deeper"})
+	if !ok {
+		t.Fatal("RustRerun supplied no invocation")
+	}
+	cfg, _ := nextestToolConfig()
+	want := "cargo nextest run --tool-config-file lydite:" + cfg + " --workspace --profile rerun --no-fail-fast " +
+		"-E test(=shared_name) or test(=tests::nested::doubles_deeper)"
+	if got := line(inv); got != want {
+		t.Errorf("RustRerun = %q, want %q", got, want)
+	}
+	if inv.JUnitReport != nextestRerunJUnit {
+		t.Errorf("RustRerun writes %q, want %q", inv.JUnitReport, nextestRerunJUnit)
+	}
+	if inv.JUnitReport == nextestJUnit {
+		t.Error("the rerun writes over run 1's report, whose counts the ledger records")
+	}
+	if slices.Contains(inv.Args, "llvm-cov") {
+		t.Errorf("RustRerun = %v, want the plain runner: instrumentation the rerun pays for is read by nothing", inv.Args)
+	}
+}
+
+// The filter is nextest's exact matcher, so a rerun of `doubles` cannot also
+// select `doubles_deeper` — the set the gate reruns has to be the set it
+// decided was new.
+func TestTheNextestFilterMatchesNamesExactly(t *testing.T) {
+	if got := NextestFilter([]string{"a", "b"}); got != "test(=a) or test(=b)" {
+		t.Errorf("NextestFilter = %q", got)
+	}
+	if got := NextestFilter([]string{"only"}); got != "test(=only)" {
+		t.Errorf("NextestFilter over one name = %q", got)
+	}
+}
+
+// Run 2's report is its own file in every language, and both rerun paths differ
+// from the path run 1 wrote.
+func TestEveryRerunWritesItsOwnReport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	rust, _ := RustRerun(nil, []string{"a"})
+	vitest, _ := VitestRerun(nil, []string{"one.test.ts"}, []string{"a"})
+	for name, inv := range map[string]Invocation{"RustRerun": rust, "VitestRerun": vitest} {
+		if inv.JUnitReport == "" {
+			t.Errorf("%s writes no report, so nothing can read its outcomes", name)
+		}
+		if inv.JUnitReport == junitReport || inv.JUnitReport == nextestJUnit {
+			t.Errorf("%s writes %q, which is run 1's own report", name, inv.JUnitReport)
+		}
+	}
+}
+
+// A rerun with nowhere to stage its tool config is refused rather than run
+// blind: there is no rerun profile to select and no report to read, so the
+// component is unmeasured.
+func TestARustRerunWithNoToolConfigIsRefused(t *testing.T) {
+	// A machine with no cache directory at all: os.UserCacheDir composes one
+	// from these and errors when neither says anything.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	if _, ok := nextestToolConfig(); ok {
+		t.Fatal("a machine with no HOME still reports a cache directory")
+	}
+	if _, ok := RustRerun(nil, []string{"a"}); ok {
+		t.Error("RustRerun built an invocation with nowhere for its report to land")
+	}
+}
+
+// Run 2 names every file contributing a new test and carries one pattern over
+// every new test's full name, with the flags it supplies itself dropped from
+// what the component declared.
+func TestVitestRerunNamesItsFilesAndFiltersByTitle(t *testing.T) {
+	inv, ok := VitestRerun(
+		[]string{"--coverage", "--coverage.reporter=lcovonly", "--reporter", "verbose", "--project", "app"},
+		[]string{"libs/probe/src/one.test.ts", "libs/probe/src/two.test.ts"},
+		[]string{"shared title"},
+	)
+	if !ok {
+		t.Fatal("VitestRerun supplied no invocation")
+	}
+	want := "npx vitest run --reporter=default --reporter=junit --outputFile.junit=" + rerunJUnitReport +
+		" --project app libs/probe/src/one.test.ts libs/probe/src/two.test.ts -t ^(shared title)$"
+	if got := line(inv); got != want {
+		t.Errorf("VitestRerun = %q, want %q", got, want)
+	}
+	if inv.CoverageReport != "" {
+		t.Errorf("VitestRerun reports coverage at %q, which would overwrite the measurement the gate reads", inv.CoverageReport)
+	}
+}
+
+// A declared flag whose value is the argument after it takes that value with
+// it: dropping --outputFile.junit and leaving its path behind hands vitest a
+// path where it expects a file filter.
+func TestVitestRerunDropsWhatItSuppliesItself(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"nothing declared", nil, ""},
+		{"an unrelated flag is kept", []string{"--project", "app"}, "--project app"},
+		{"the coverage flags go", []string{"--coverage", "--coverage.clean=false", "--project", "app"}, "--project app"},
+		{"a separate value goes with its flag", []string{"--coverage.reporter", "lcovonly", "--project", "app"}, "--project app"},
+		{"a declared reporter goes", []string{"--reporter=verbose", "--project", "app"}, "--project app"},
+		{"a declared report path goes with its value", []string{"--outputFile.junit", "mine.xml", "--project", "app"}, "--project app"},
+		{"a declared name pattern goes with its value", []string{"-t", "something", "--project", "app"}, "--project app"},
+		{"a file filter is the component's own and stays", []string{"libs/app/src/a.test.ts"}, "libs/app/src/a.test.ts"},
+		{"a value flag with no following argument is not consumed", []string{"--project", "app", "-t"}, "--project app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(vitestFlags(tc.args), " "); got != tc.want {
+				t.Errorf("vitestFlags(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// A title is prose, and -t is a regular expression. An alternation built
+// verbatim from `matches ^a (b) [c] + d$` does not match the title it was built
+// from, and vitest reports that test skipped — a deterministic test reported as
+// flaky by lydite's own filter. The expected pattern is the one ADR 0041
+// captured.
+func TestTheTitlePatternEscapesEveryMetacharacter(t *testing.T) {
+	names := []string{"matches ^a (b) [c] + d$", "shared title", "outer > inner > holds a title two describes deep"}
+	want := `^(matches \^a \(b\) \[c\] \+ d\$|shared title|outer > inner > holds a title two describes deep)$`
+	got := TitlePattern(names)
+	if got != want {
+		t.Errorf("TitlePattern = %q, want %q", got, want)
+	}
+	re, err := regexp.Compile(got)
+	if err != nil {
+		t.Fatalf("TitlePattern is not a regexp: %v", err)
+	}
+	for _, n := range names {
+		if !re.MatchString(n) {
+			t.Errorf("the pattern built from %q does not match it", n)
+		}
+	}
+	if re.MatchString("shared title and more") {
+		t.Error("the pattern is not anchored: it selects a title the gate did not decide was new")
+	}
+}
+
+// A rerun of no tests is refused in every language, for the reason Go's is: an
+// invocation built for an empty set reports a pass for a filter that ran
+// nothing at all.
+func TestARerunOfNoTestsIsRefusedInEveryLanguage(t *testing.T) {
+	if _, ok := RustRerun([]string{"--workspace"}, nil); ok {
+		t.Error("RustRerun built an invocation for no tests")
+	}
+	if _, ok := VitestRerun(nil, []string{"one.test.ts"}, nil); ok {
+		t.Error("VitestRerun built an invocation for no tests")
+	}
+}
+
+// Both profiles are declared, and they write to different files: a rerun
+// landing on run 1's report would put its own count in the quality history of
+// a component that ran hundreds.
+func TestTheToolConfigDeclaresBothProfiles(t *testing.T) {
+	for _, stanza := range []string{"[profile.default.junit]", "[profile.rerun.junit]"} {
+		if !strings.Contains(nextestToolConfigBody, stanza) {
+			t.Errorf("the tool config declares no %s:\n%s", stanza, nextestToolConfigBody)
+		}
+	}
+	for _, p := range []string{`path = "junit.xml"`, `path = "junit-rerun.xml"`} {
+		if !strings.Contains(nextestToolConfigBody, p) {
+			t.Errorf("the tool config sets no %s:\n%s", p, nextestToolConfigBody)
+		}
+	}
+	// The paths lydite then reads are nextest's own composition of the
+	// profile's directory and the name this config gives, so the two have to
+	// agree with the body.
+	if path.Base(nextestJUnit) != "junit.xml" || path.Base(nextestRerunJUnit) != "junit-rerun.xml" {
+		t.Errorf("the report paths %q and %q do not name what the config asks for", nextestJUnit, nextestRerunJUnit)
+	}
+	if path.Dir(nextestRerunJUnit) == path.Dir(nextestJUnit) {
+		t.Error("both profiles write into one directory, where the rerun overwrites run 1's report")
+	}
+}
+
 // The pattern is anchored at both ends, so a rerun of TestFoo cannot also
 // select TestFooBar — the set the gate reruns has to be the set it decided was
 // new.

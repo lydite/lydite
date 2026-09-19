@@ -67,7 +67,7 @@ line-keyed identity reports the same finding as new on every push. `site` is con
 | `crap` | the function's name with its receiver, which `crap.Function.Name` already carries |
 | `mutation` | the operator with the text it replaced and the text replacing it |
 | `patch` | the stretch's two ends. Its length is deliberately not an ingredient, or adding one untested line to an untested block would orphan the claim already made about it |
-| `flaky` | the package directory and the test's name — identifies the claim if the file is reformatted above it. `ordinal` is always zero, since a name is unique within a package by the compiler's own rule |
+| `flaky` | the scope, the classname where a name alone is not one, and the test's name — identifies the claim if the file is reformatted above it. `ordinal` is always zero: a name is unique in a Go package by the compiler's own rule, and elsewhere the classname is what tells two same-named tests apart |
 
 **`ordinal` is the disambiguator that is not a line number.** Two identical comparisons on two
 lines produce two mutants alike in everything a fingerprint reads; without it they are one claim

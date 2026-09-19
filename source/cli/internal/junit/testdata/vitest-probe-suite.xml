@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="8" failures="0" errors="0" time="0.003766083">
+    <testsuite name="libs/probe/src/one.test.ts" timestamp="2026-09-17T05:14:09.780Z" hostname="PT-340357-MBP32M1P" tests="7" failures="0" errors="0" skipped="0" time="0.002200125">
+        <testcase classname="libs/probe/src/one.test.ts" name="outer &gt; inner &gt; holds a title two describes deep" time="0.0008605">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="outer &gt; holds a title one describe deep" time="0.000091">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="shared title" time="0.00007475">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="matches ^a (b) [c] + d$" time="0.000072">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="a title built from a computed expression" time="0.000067">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="doubles 1 into 2" time="0.000066875">
+        </testcase>
+        <testcase classname="libs/probe/src/one.test.ts" name="doubles 2 into 4" time="0.000057084">
+        </testcase>
+    </testsuite>
+    <testsuite name="libs/probe/src/two.test.ts" timestamp="2026-09-17T05:14:09.781Z" hostname="PT-340357-MBP32M1P" tests="1" failures="0" errors="0" skipped="0" time="0.001565958">
+        <testcase classname="libs/probe/src/two.test.ts" name="shared title" time="0.000867709">
+        </testcase>
+    </testsuite>
+</testsuites>

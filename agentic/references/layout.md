@@ -10,6 +10,8 @@ source/cli/internal/ui/           # the output grammar every command renders thr
                                   #   and the standing PR comment (see surface.md)
 source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see referral-and-clearance.md)
 source/cli/internal/clearance/    # the comment surface and the clearance decision (see referral-and-clearance.md)
+source/cli/internal/apisurface/   # a Go module's exported API, compared between two trees (see referral-and-clearance.md)
+source/cli/internal/declaration/  # the breaking-change claim, read from a commit message or PR title (see referral-and-clearance.md)
 source/cli/internal/threads/      # the review threads a located finding becomes: the marker, the
                                   #   delta, and the operations document two transports apply
                                   #   (see surface.md)
@@ -39,6 +41,10 @@ source/cli/internal/coverage/     # reads a component's coverage report (see cov
 source/cli/internal/crap/         # the CRAP index per function, Go, Rust and TypeScript alike (see crap.md)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
                                   #   (see mutation.md)
+source/cli/internal/treesitter/   # the shared grammar tables crap and mutation both read: function
+                                  #   spans, test-code classification, and which tests a file
+                                  #   declares (see crap.md and mutation.md; coverage.md for
+                                  #   exclusion resolution)
 source/cli/internal/finding/      # the located claims a gate makes, as data: the fingerprint
                                   #   that identifies one and how precisely it reaches the
                                   #   change (see findings.md). A leaf, so the report
@@ -50,6 +56,8 @@ source/cli/internal/gitstate/     # the base branch, and lydite branch read/writ
 source/cli/internal/ledger/       # the quality history: append-only NDJSON and the daily
                                   #   projection the dashboard reads (see quality-history.md)
 source/cli/internal/junit/        # the test counts every runner's JUnit report holds
+source/cli/internal/flaky/        # which tests a change declares as new, and what two JUnit
+                                  #   runs of them establish about each (see components.md)
 source/cli/internal/gotool/       # the version-keyed `go install` internal/golang and
                                   #   internal/runner both provision through
 source/cli/internal/executil/     # shared external-command runner every scanner package uses

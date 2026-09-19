@@ -1,0 +1,4 @@
+#[test]
+fn shared_name() {
+    assert!(true);
+}

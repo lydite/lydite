@@ -130,7 +130,18 @@ type Component struct {
 	// so an omitted key is distinguishable from an explicit false, and
 	// defaults to true — mutation is opt-out.
 	Mutation *bool `yaml:"mutation,omitempty"`
+	// APISurface opts the component into a public-API diff against the
+	// merge-base. Nil means not measured — most components here are binaries
+	// and services nobody imports, and an API diff over one is pure noise.
+	APISurface *APISurfaceConfig `yaml:"api_surface,omitempty"`
 }
+
+// APISurfaceConfig is the api_surface value. It carries no field yet: Go's
+// own internal/ convention is already the public/private boundary, so
+// nothing needs naming. It is a struct rather than a bool so that a future
+// field — a Rust crate root, a TypeScript entry point — is additive rather
+// than a breaking change to this shape.
+type APISurfaceConfig struct{}
 
 // MutationEnabled reports whether mutation testing runs for this component.
 func (c Component) MutationEnabled() bool { return c.Mutation == nil || *c.Mutation }
@@ -283,6 +294,9 @@ func (f File) validate(source string, strict bool) error {
 		if err := validateWatch(where, c.Watch); err != nil {
 			return err
 		}
+		if err := validateAPISurface(where, c, strict); err != nil {
+			return err
+		}
 	}
 	if err := f.validateExcludes(source); err != nil {
 		return err
@@ -403,6 +417,28 @@ func validateInvocation(where string, c Component) error {
 		}
 	case len(c.Args) > 0:
 		return fmt.Errorf("%s: args applies to a runner; a command carries its own arguments", where)
+	}
+	return nil
+}
+
+// validateAPISurface rejects api_surface on a component whose language is
+// not Go, checked defensively against c.Lang() rather than assumed from
+// validateInvocation having already run: a command-invoked component
+// declares no language either, and Lang() answers "" for it the same way it
+// does for an unknown runner.
+//
+// Only when this tree is the one being configured, the same reason
+// validateName is gated the same way: a historical tree is being measured
+// rather than distributed, and LoadHistorical's only caller — the coverage
+// baseline — never reads api_surface. Enforcing it there would abort a
+// baseline measurement over a key that tree's author cannot act on, which is
+// exactly the migration failure LoadHistorical exists to refuse.
+func validateAPISurface(where string, c Component, strict bool) error {
+	if !strict || c.APISurface == nil {
+		return nil
+	}
+	if c.Lang() != runner.Go {
+		return fmt.Errorf("%s: api_surface is only supported for Go components in this version", where)
 	}
 	return nil
 }

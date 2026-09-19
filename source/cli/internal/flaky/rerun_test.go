@@ -20,9 +20,9 @@ import (
 // TestTheProbeAtTwoRevisions asserts against the two revisions. Restated here
 // so the rerun can be exercised without a git repository standing behind it.
 var probeTests = []Test{
-	{Package: ".", Name: "TestDeterministicNew", Path: "probe_test.go", Line: 23},
-	{Package: ".", Name: "TestFlakyNew", Path: "probe_test.go", Line: 32},
-	{Package: ".", Name: "TestNewSubtests", Path: "probe_test.go", Line: 44},
+	{Scope: ".", Name: "TestDeterministicNew", Path: "probe_test.go", Line: 23},
+	{Scope: ".", Name: "TestFlakyNew", Path: "probe_test.go", Line: 32},
+	{Scope: ".", Name: "TestNewSubtests", Path: "probe_test.go", Line: 44},
 }
 
 // TestTwoRunsOfTheProbeDisagreeAboutOneTest is the gate end to end over the
@@ -42,7 +42,7 @@ func TestTwoRunsOfTheProbeDisagreeAboutOneTest(t *testing.T) {
 
 	var log bytes.Buffer
 	got, err := Rerun(t.Context(), probeTests, Options{
-		Root: dir, Dir: ".", Run1: run1, Env: env, Log: &log,
+		Root: dir, Dir: ".", Run1: run1, Env: env, Log: &log, Build: goRerun(nil),
 	})
 	if err != nil {
 		t.Fatalf("Rerun: %v", err)
@@ -96,7 +96,7 @@ func TestATestThatIsNotNewIsNeverConsidered(t *testing.T) {
 	if _, ok := run1["TestPreExistingStable"]; !ok {
 		t.Fatal("run 1's report does not record TestPreExistingStable, so this test proves nothing")
 	}
-	got, err := Rerun(t.Context(), probeTests, Options{Root: dir, Dir: ".", Run1: run1, Env: env})
+	got, err := Rerun(t.Context(), probeTests, Options{Root: dir, Dir: ".", Run1: run1, Env: env, Build: goRerun(nil)})
 	if err != nil {
 		t.Fatalf("Rerun: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestTheRerunDefeatsTheTestCache(t *testing.T) {
 func TestATestAbsentFromRunOneIsUnmeasured(t *testing.T) {
 	dir, env := probe(t)
 	got, err := Rerun(t.Context(), probeTests, Options{
-		Root: dir, Dir: ".", Env: env,
+		Root: dir, Dir: ".", Env: env, Build: goRerun(nil),
 		Run1: map[string]junit.Outcome{"TestDeterministicNew": junit.Pass},
 	})
 	if err != nil {
@@ -177,9 +177,9 @@ func TestATestAbsentFromRunOneIsUnmeasured(t *testing.T) {
 // that ran nothing is exactly the shape that would otherwise read as a pass.
 func TestATestAbsentFromTheRerunIsUnmeasured(t *testing.T) {
 	dir, env := probe(t)
-	absent := []Test{{Package: ".", Name: "TestNotThere", Path: "probe_test.go", Line: 1}}
+	absent := []Test{{Scope: ".", Name: "TestNotThere", Path: "probe_test.go", Line: 1}}
 	got, err := Rerun(t.Context(), absent, Options{
-		Root: dir, Dir: ".", Env: env,
+		Root: dir, Dir: ".", Env: env, Build: goRerun(nil),
 		Run1: map[string]junit.Outcome{"TestNotThere": junit.Pass},
 	})
 	if err != nil {
@@ -196,7 +196,7 @@ func TestATestAbsentFromTheRerunIsUnmeasured(t *testing.T) {
 func TestARerunThatWroteNoReportIsUnmeasured(t *testing.T) {
 	dir := t.TempDir()
 	got, err := Rerun(t.Context(), probeTests, Options{
-		Root: dir, Dir: ".",
+		Root: dir, Dir: ".", Build: goRerun(nil),
 		Run1: map[string]junit.Outcome{"TestFlakyNew": junit.Pass},
 	})
 	if err != nil {
@@ -241,9 +241,9 @@ func TestWhatTwoOutcomesEstablish(t *testing.T) {
 		{"both skipped", junit.Skip, junit.Skip, Skipped},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			test := Test{Package: ".", Name: "TestX"}
+			test := Test{Scope: ".", Name: "TestX"}
 			got := compare(test,
-				map[string]junit.Outcome{"TestX": tc.one},
+				Options{Run1: map[string]junit.Outcome{"TestX": tc.one}},
 				map[string]junit.Outcome{"TestX": tc.two},
 				"", "gotestsum ...")
 			if got.Verdict != tc.want {
@@ -262,46 +262,44 @@ func TestWhatTwoOutcomesEstablish(t *testing.T) {
 // first is one defect reported twice.
 func TestATestThatFailedTwiceAgrees(t *testing.T) {
 	got := compare(Test{Name: "TestX"},
-		map[string]junit.Outcome{"TestX": junit.Fail},
+		Options{Run1: map[string]junit.Outcome{"TestX": junit.Fail}},
 		map[string]junit.Outcome{"TestX": junit.Fail}, "", "")
 	if got.Verdict != Agreed {
 		t.Errorf("two failures = %s, want %s", got.Verdict, Agreed)
 	}
 }
 
-// A package below the component directory is addressed relative to it, since
-// that is where the rerun runs and what `go test` takes there.
-func TestAPackageIsAddressedRelativeToTheComponent(t *testing.T) {
-	for _, tc := range []struct{ dir, pkg, want string }{
-		{".", ".", "."},
-		{".", "pkg", "./pkg"},
-		{"source/cli", "source/cli", "."},
-		{"source/cli", "source/cli/internal/flaky", "./internal/flaky"},
-		{"", "pkg/sub", "./pkg/sub"},
-	} {
-		got, err := relPackage(tc.dir, tc.pkg)
-		if err != nil {
-			t.Fatalf("relPackage(%q, %q): %v", tc.dir, tc.pkg, err)
-		}
-		if got != tc.want {
-			t.Errorf("relPackage(%q, %q) = %q, want %q", tc.dir, tc.pkg, got, tc.want)
-		}
+// One invocation per scope holding a new test — not one per test, and not one
+// for the whole component where the language groups more finely than that.
+func TestOneScopeIsRerunOnce(t *testing.T) {
+	got := scopes([]Test{
+		{Scope: "a", Name: "TestOne"},
+		{Scope: "a", Name: "TestTwo"},
+		{Scope: "b", Name: "TestThree"},
+	})
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("scopes = %v, want [a b]", got)
+	}
+	names := runnableIn([]Test{{Scope: "a", Name: "TestOne"}, {Scope: "b", Name: "TestTwo"}}, "a", Options{})
+	if len(names) != 1 || names[0].Name != "TestOne" {
+		t.Errorf("runnableIn = %+v, want TestOne alone", names)
 	}
 }
 
-// One invocation per package holding a new test — not one per test, and not
-// one for the whole component.
-func TestOnePackageIsRerunOnce(t *testing.T) {
-	got := packages([]Test{
-		{Package: "a", Name: "TestOne"},
-		{Package: "a", Name: "TestTwo"},
-		{Package: "b", Name: "TestThree"},
-	})
-	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Errorf("packages = %v, want [a b]", got)
-	}
-	if names := namesIn([]Test{{Package: "a", Name: "TestOne"}, {Package: "b", Name: "TestTwo"}}, "a"); len(names) != 1 {
-		t.Errorf("namesIn = %v, want TestOne alone", names)
+// goRerun is the Build closure a Go component's gate supplies, over the
+// component directories these tests use: the scope's own pattern, spelled the
+// way cmd/go requires, and the names the scope contributes.
+func goRerun(args []string) func(string, []Test) (runner.Invocation, bool) {
+	return func(scope string, tests []Test) (runner.Invocation, bool) {
+		pattern := "./" + scope
+		if scope == "." {
+			pattern = "."
+		}
+		names := make([]string, 0, len(tests))
+		for _, t := range tests {
+			names = append(names, t.Name)
+		}
+		return runner.GoRerun(args, pattern, names)
 	}
 }
 
@@ -395,9 +393,9 @@ func without(args []string, drop string) []string {
 func TestATestNeitherReportRecordsIsUnmeasured(t *testing.T) {
 	dir, env := probe(t)
 	ghost := append(append([]Test{}, probeTests...),
-		Test{Package: ".", Name: "TestGhost", Path: "probe_test.go", Line: 1})
+		Test{Scope: ".", Name: "TestGhost", Path: "probe_test.go", Line: 1})
 	got, err := Rerun(t.Context(), ghost, Options{
-		Root: dir, Dir: ".", Env: env,
+		Root: dir, Dir: ".", Env: env, Build: goRerun(nil),
 		Run1: map[string]junit.Outcome{"TestDeterministicNew": junit.Pass, "TestNewSubtests": junit.Pass},
 	})
 	if err != nil {
@@ -412,29 +410,18 @@ func TestATestNeitherReportRecordsIsUnmeasured(t *testing.T) {
 	}
 }
 
-// relPackage is asked for a pattern only when a package directory is a real
-// scan-root-relative path, but the check exists because nothing upstream of
-// it enforces that: an absolute one cannot be made relative to the
-// component's own relative directory, and filepath.Rel says so rather than
-// producing a pattern go test would misread.
-func TestRelPackageNamesAPathItCannotRelate(t *testing.T) {
-	pattern, err := relPackage(".", "/etc/passwd")
+// A scope the caller's own builder refuses is an error and never a run: the
+// builder is what knows whether a scope can be addressed at all — a package
+// outside the component, a nextest invocation with nowhere to stage its tool
+// config — and running an invocation it declined to build would filter for
+// nothing and report a pass.
+func TestRerunRefusesAScopeTheBuilderWillNotAddress(t *testing.T) {
+	_, err := Rerun(t.Context(), []Test{{Scope: "/etc", Name: "TestX", Path: "x_test.go", Line: 1}},
+		Options{Root: t.TempDir(), Dir: ".", Build: func(string, []Test) (runner.Invocation, bool) {
+			return runner.Invocation{}, false
+		}})
 	if err == nil {
-		t.Fatal("relPackage accepted a package an absolute path could not be made relative to a relative directory")
-	}
-	if pattern != "" {
-		t.Errorf("pattern = %q, want none: an error carries no pattern to be misread as one", pattern)
-	}
-}
-
-// Rerun asks relPackage the same question for real, and refuses to build an
-// invocation over a package it could not locate rather than guessing a
-// pattern from the raw directory.
-func TestRerunRefusesAPackageItCannotLocate(t *testing.T) {
-	_, err := Rerun(t.Context(), []Test{{Package: "/etc", Name: "TestX", Path: "x_test.go", Line: 1}},
-		Options{Root: t.TempDir(), Dir: "."})
-	if err == nil {
-		t.Fatal("Rerun accepted a package it could not locate inside the component")
+		t.Fatal("Rerun ran a scope its builder supplied no invocation for")
 	}
 }
 
@@ -451,8 +438,264 @@ func TestARerunPackageWhoseReportPathIsAnOccupiedDirectoryIsUnmeasured(t *testin
 	if err := os.WriteFile(filepath.Join(report, "occupied"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, why := rerunPackage(context.Background(), dir, runner.Invocation{JUnitReport: "junit.xml"}, Options{})
+	_, why := rerunScope(context.Background(), dir, runner.Invocation{JUnitReport: "junit.xml"}, Options{})
 	if !strings.Contains(why, "could not be removed") {
 		t.Errorf("why = %q, want the leftover report named as the cause", why)
 	}
+}
+
+// A name new in two nextest binaries is two new tests, examined
+// independently: the identity is the classname and the name together, read
+// back out of run 1's own report rather than computed from the crate's layout.
+//
+// Over ADR 0041's captures, `shared_name` runs in `nextestprobe::a` and
+// `nextestprobe::b`. One of them disagrees here and the other does not, and
+// neither answer is allowed to stand for both — a name-keyed map merges them
+// and a flake in one binary is masked by a pass in the other.
+func TestANameInTwoNextestBinariesIsTwoTests(t *testing.T) {
+	run1 := captured(t, "nextest-suite.xml")
+	run2 := failed(t, capture(t, "nextest-rerun.xml"), "nextestprobe::b", "shared_name")
+	dir := t.TempDir()
+
+	var filtered []string
+	got, err := Rerun(t.Context(), []Test{
+		{Scope: ".", Name: "shared_name", Path: "tests/a.rs", Line: 2},
+		{Scope: ".", Name: "shared_name", Path: "tests/b.rs", Line: 2},
+		{Scope: ".", Name: "tests::nested::doubles_deeper", Path: "src/lib.rs", Line: 18},
+	}, Options{
+		Root: dir, Dir: ".", Identity: ByClassAndName, Run1: run1,
+		Build: staged(t, run2, &filtered),
+	})
+	if err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+
+	want := map[string]Verdict{
+		"nextestprobe::a shared_name":                Agreed,
+		"nextestprobe::b shared_name":                Disagreed,
+		"nextestprobe tests::nested::doubles_deeper": Agreed,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Rerun returned %d results, want %d: %+v", len(got), len(want), got)
+	}
+	for _, r := range got {
+		name := r.Test.Classname + " " + r.Test.Name
+		if r.Verdict != want[name] {
+			t.Errorf("%s: %s, want %s (run 1 %s, run 2 %s, %s)",
+				name, r.Verdict, want[name], show(r.Run1), show(r.Run2), r.Why)
+		}
+	}
+
+	// One declaration per name reached the filter, and the name once: an exact
+	// nextest predicate names a test and not a binary, so `test(=shared_name)`
+	// already selects both.
+	if strings.Join(filtered, ",") != "shared_name,tests::nested::doubles_deeper" {
+		t.Errorf("the rerun filtered for %v, want each new name once", filtered)
+	}
+
+	// Nothing ties a nextest binary to the file a test is declared in, so a
+	// name declared twice anchors both claims to the first declaration rather
+	// than guessing at cargo's target naming.
+	for _, r := range got {
+		if r.Test.Name == "shared_name" && r.Test.Path != "tests/a.rs" {
+			t.Errorf("%s anchors to %s, want the first declaration of the name", r.Test.Classname, r.Test.Path)
+		}
+	}
+}
+
+// A vitest classname is the file's own path relative to the component, so a
+// title declared in two files anchors each claim to the file it was reported
+// in — and the rerun names those files, which is what vitest resolves a
+// positional argument as.
+func TestATitleInTwoVitestFilesAnchorsToEachFile(t *testing.T) {
+	run1 := captured(t, "vitest-probe-suite.xml")
+	run2 := failed(t, capture(t, "vitest-probe-rerun.xml"), "libs/probe/src/two.test.ts", "shared title")
+	dir := t.TempDir()
+
+	var filtered []string
+	got, err := Rerun(t.Context(), []Test{
+		{Scope: ".", Name: "shared title", Path: "libs/probe/src/one.test.ts", Line: 15},
+		{Scope: ".", Name: "shared title", Path: "libs/probe/src/two.test.ts", Line: 3},
+	}, Options{
+		Root: dir, Dir: ".", Identity: ByClassAndName, Run1: run1,
+		Build: staged(t, run2, &filtered),
+	})
+	if err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Rerun returned %d results, want one per file the title ran in: %+v", len(got), got)
+	}
+	for _, r := range got {
+		if r.Test.Classname != r.Test.Path {
+			t.Errorf("%s anchors to %s, want the file it was reported in", r.Test.Classname, r.Test.Path)
+		}
+	}
+	if v := result(t, got, "shared title").Verdict; v != Agreed {
+		t.Errorf("one.test.ts's title = %s, want %s: only the other file's disagreed", v, Agreed)
+	}
+	two := byClassname(t, got, "libs/probe/src/two.test.ts")
+	if two.Verdict != Disagreed {
+		t.Errorf("two.test.ts's title = %s (%s), want %s", two.Verdict, two.Why, Disagreed)
+	}
+}
+
+// A declaration whose name no parser can read is never rerun and never
+// guessed at. It has no name to filter for, so it is counted as a test the
+// gate went unable to examine — which is the whole of what a static parser can
+// say about a `test.each` or an attribute macro.
+func TestAnUnreadableDeclarationIsCountedAndNeverRerun(t *testing.T) {
+	dir := t.TempDir()
+	var filtered []string
+	got, err := Rerun(t.Context(), []Test{
+		{Scope: ".", Path: "libs/probe/src/one.test.ts", Line: 28, Unreadable: true},
+		{Scope: ".", Name: "shared title", Path: "libs/probe/src/two.test.ts", Line: 3},
+	}, Options{
+		Root: dir, Dir: ".", Identity: ByClassAndName,
+		Run1:  captured(t, "vitest-probe-suite.xml"),
+		Build: staged(t, capture(t, "vitest-probe-rerun.xml"), &filtered),
+	})
+	if err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+	r := got[0]
+	if r.Verdict != Unmeasured || !strings.Contains(r.Why, "could not read") {
+		t.Errorf("an unnameable declaration = %s (%q), want %s saying no parser could name it", r.Verdict, r.Why, Unmeasured)
+	}
+	if strings.Join(filtered, ",") != "shared title" {
+		t.Errorf("the rerun filtered for %v, want the named test alone", filtered)
+	}
+}
+
+// A new name run 1's report records under no classname at all is unmeasured
+// and never rerun: there is no key the second report could be read back under,
+// so the run would cost a process to establish the same nothing. An
+// `#[ignore]` test is exactly that — nextest omits it from the report rather
+// than recording it as skipped.
+func TestANameRunOneRecordsUnderNoClassnameIsUnmeasured(t *testing.T) {
+	dir := t.TempDir()
+	var filtered []string
+	got, err := Rerun(t.Context(), []Test{
+		{Scope: ".", Name: "ignored_by_attribute", Path: "tests/c.rs", Line: 10},
+		{Scope: ".", Name: "tests::nested::doubles_deeper", Path: "src/lib.rs", Line: 18},
+	}, Options{
+		Root: dir, Dir: ".", Identity: ByClassAndName,
+		Run1:  captured(t, "nextest-suite.xml"),
+		Build: staged(t, capture(t, "nextest-rerun.xml"), &filtered),
+	})
+	if err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+	r := result(t, got, "ignored_by_attribute")
+	if r.Verdict != Unmeasured || r.Why != "run 1's report does not record it" {
+		t.Errorf("an ignored test = %s (%q), want %s naming run 1's silence", r.Verdict, r.Why, Unmeasured)
+	}
+	if strings.Join(filtered, ",") != "tests::nested::doubles_deeper" {
+		t.Errorf("the rerun filtered for %v, want the test run 1 recorded alone", filtered)
+	}
+}
+
+// scopeRelative treats an empty scope the same as ".": both mean the rerun
+// runs at the component's own root, so a path is already relative to it. The
+// paths here are not ones a real caller would pass — Test.Path never carries
+// a leading "/" or "./" — but the function's own contract has to hold
+// regardless of what any one caller happens to send it, and only a path with
+// something to strip can tell "" and "." apart from a scope that expected a
+// prefix and did not get it.
+func TestScopeRelativeTreatsEmptyAndDotAsTheComponentsOwnRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope, path, want string
+	}{
+		{"an empty scope strips nothing", "", "/abs/path.ts", "/abs/path.ts"},
+		{"a dot scope strips nothing", ".", "./file.ts", "./file.ts"},
+		{"a real scope strips its own prefix", "libs/probe", "libs/probe/src/one.test.ts", "src/one.test.ts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scopeRelative(tc.scope, tc.path); got != tc.want {
+				t.Errorf("scopeRelative(%q, %q) = %q, want %q", tc.scope, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// captured is one of the reports internal/junit holds, read in the key space a
+// language whose names collide is compared in.
+func captured(t *testing.T, name string) map[string]junit.Outcome {
+	t.Helper()
+	out, err := junit.ReadOutcomesByClass(strings.NewReader(capture(t, name)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", name, err)
+	}
+	return out
+}
+
+// capture is one captured report's text.
+func capture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "junit", "testdata", name)) // #nosec G304 -- a captured report this repository holds
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// failed is a captured report with one test marked failed, which is what the
+// same run writes when that test disagrees. Derived from the capture so every
+// other field is still the runner's own.
+func failed(t *testing.T, doc, classname, name string) string {
+	t.Helper()
+	for _, open := range []string{
+		`<testcase name="` + name + `" classname="` + classname + `"`,
+		`<testcase classname="` + classname + `" name="` + escaped(name) + `"`,
+	} {
+		i := strings.Index(doc, open)
+		if i < 0 {
+			continue
+		}
+		j := strings.Index(doc[i:], ">")
+		return doc[:i+j+1] + "<failure/>" + doc[i+j+1:]
+	}
+	t.Fatalf("no testcase for %s %s to fail", classname, name)
+	return ""
+}
+
+// escaped is a name as the report spells it, where a runner XML-escapes what
+// an author wrote.
+func escaped(name string) string {
+	return strings.ReplaceAll(name, ">", "&gt;")
+}
+
+// staged is a Build closure whose invocation writes doc where the rerun's
+// report goes, recording what it was asked to filter for. The runners
+// themselves are internal/runner's to build; what these cases turn on is what
+// the second report holds.
+func staged(t *testing.T, doc string, filtered *[]string) func(string, []Test) (runner.Invocation, bool) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "report.xml")
+	if err := os.WriteFile(src, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func(_ string, tests []Test) (runner.Invocation, bool) {
+		seen := map[string]bool{}
+		for _, test := range tests {
+			if seen[test.Name] {
+				continue
+			}
+			seen[test.Name] = true
+			*filtered = append(*filtered, test.Name)
+		}
+		return runner.Invocation{Name: "cp", Args: []string{src, "rerun.xml"}, JUnitReport: "rerun.xml"}, true
+	}
+}
+
+// byClassname is one result of a name several classnames hold.
+func byClassname(t *testing.T, results []Result, classname string) Result {
+	t.Helper()
+	for _, r := range results {
+		if r.Test.Classname == classname {
+			return r
+		}
+	}
+	t.Fatalf("no result under %s", classname)
+	return Result{}
 }

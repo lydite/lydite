@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="62" failures="0" errors="0" time="0.723179916">
+    <testsuite name="libs/github-app/src/app.test.ts" timestamp="2026-09-17T05:13:42.156Z" hostname="PT-340357-MBP32M1P" tests="6" failures="0" errors="0" skipped="0" time="0.10823325">
+        <testcase classname="libs/github-app/src/app.test.ts" name="appJwt &gt; names the App as the issuer and stays inside GitHub&apos;s ten-minute ceiling" time="0.066316833">
+        </testcase>
+        <testcase classname="libs/github-app/src/app.test.ts" name="appJwt &gt; backdates iat so a clock a second fast is not a rejection" time="0.026327">
+        </testcase>
+        <testcase classname="libs/github-app/src/app.test.ts" name="installationId &gt; answers nothing for a repository the app is not installed on" time="0.012270208">
+        </testcase>
+        <testcase classname="libs/github-app/src/app.test.ts" name="installationId &gt; reads the installation id" time="0.000714916">
+        </testcase>
+        <testcase classname="libs/github-app/src/app.test.ts" name="installationId &gt; fails loudly on any other error, which is not an answer" time="0.000827208">
+        </testcase>
+        <testcase classname="libs/github-app/src/app.test.ts" name="installationToken &gt; asks for one repository and pull-request write and nothing else" time="0.000668166">
+        </testcase>
+    </testsuite>
+    <testsuite name="libs/github-app/src/comment.test.ts" timestamp="2026-09-17T05:13:42.158Z" hostname="PT-340357-MBP32M1P" tests="3" failures="0" errors="0" skipped="0" time="0.023062458">
+        <testcase classname="libs/github-app/src/comment.test.ts" name="upsertComment &gt; edits the comment carrying the marker whoever wrote it" time="0.0215135">
+        </testcase>
+        <testcase classname="libs/github-app/src/comment.test.ts" name="upsertComment &gt; never writes over a comment that merely quotes the marker" time="0.000296291">
+        </testcase>
+        <testcase classname="libs/github-app/src/comment.test.ts" name="upsertComment &gt; creates one when no comment carries the marker" time="0.00023325">
+        </testcase>
+    </testsuite>
+    <testsuite name="libs/github-app/src/oidc.test.ts" timestamp="2026-09-17T05:13:42.158Z" hostname="PT-340357-MBP32M1P" tests="11" failures="0" errors="0" skipped="0" time="0.406834958">
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; accepts a token GitHub Actions signed for this audience" time="0.068264625">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token that is not a JWT" time="0.05477875">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses an expired token, so one captured from an old run cannot be reused" time="0.018136792">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token minted for another audience" time="0.019784458">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token from another issuer" time="0.027835958">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token signed by a key the issuer does not publish" time="0.124442042">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token whose claims were edited after signing" time="0.040861333">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="verifyActionsToken &gt; refuses a token that declares an algorithm other than RS256" time="0.050937167">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="pullRequestFromRef &gt; reads the number a merge run was triggered for" time="0.000187375">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="pullRequestFromRef &gt; reads the number a head run was triggered for" time="0.000155041">
+        </testcase>
+        <testcase classname="libs/github-app/src/oidc.test.ts" name="pullRequestFromRef &gt; yields nothing for a ref that is not a pull request&apos;s" time="0.000119333">
+        </testcase>
+    </testsuite>
+    <testsuite name="libs/github-app/src/pem.test.ts" timestamp="2026-09-17T05:13:42.159Z" hostname="PT-340357-MBP32M1P" tests="3" failures="0" errors="0" skipped="0" time="0.041810083">
+        <testcase classname="libs/github-app/src/pem.test.ts" name="importSigningKey &gt; imports a PKCS#8 key" time="0.038326625">
+        </testcase>
+        <testcase classname="libs/github-app/src/pem.test.ts" name="importSigningKey &gt; refuses a PKCS#1 key and names the command that converts it" time="0.002356583">
+        </testcase>
+        <testcase classname="libs/github-app/src/pem.test.ts" name="importSigningKey &gt; refuses something that is not PEM at all" time="0.000244458">
+        </testcase>
+    </testsuite>
+    <testsuite name="libs/github-app/src/review.test.ts" timestamp="2026-09-17T05:13:42.159Z" hostname="PT-340357-MBP32M1P" tests="16" failures="0" errors="0" skipped="0" time="0.033148125">
+        <testcase classname="libs/github-app/src/review.test.ts" name="the membership set &gt; walks every page of the pull request&apos;s review comments" time="0.020521792">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="the membership set &gt; refuses to guess when the listing fails" time="0.000839125">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; opens line threads in one review and a file thread on its own" time="0.001127708">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; posts no review when every new thread is about a file" time="0.000237708">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; posts no review when there is nothing to open" time="0.000151167">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; deletes before it replies, so a thread is never answered and then removed" time="0.000251542">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; answers for a reply as well as for a delete and a review" time="0.0001725">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; answers a refused delete with the body the document carries" time="0.000269083">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; answers a refused thread once, on the operation carrying the body" time="0.000311959">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; answers a delete refused as not found" time="0.000212458">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; treats a comment that is already gone as deleted" time="0.000114042">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="applying an operations document &gt; raises anything else the platform answers" time="0.000173167">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="what it refuses to guess about &gt; raises a delete the platform answered with something else" time="0.000170542">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="what it refuses to guess about &gt; raises a reply to a thread that is not there" time="0.000185292">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="what it refuses to guess about &gt; raises a reply the platform answered with something else" time="0.000133958">
+        </testcase>
+        <testcase classname="libs/github-app/src/review.test.ts" name="what it refuses to guess about &gt; raises a file thread the platform refused" time="0.007136084">
+        </testcase>
+    </testsuite>
+    <testsuite name="oauth-exchange/src/index.test.ts" timestamp="2026-09-17T05:13:42.161Z" hostname="PT-340357-MBP32M1P" tests="4" failures="0" errors="0" skipped="0" time="0.020231667">
+        <testcase classname="oauth-exchange/src/index.test.ts" name="the dashboard&apos;s token exchange &gt; answers only POST /token" time="0.016739917">
+        </testcase>
+        <testcase classname="oauth-exchange/src/index.test.ts" name="the dashboard&apos;s token exchange &gt; requires a code or a refresh token" time="0.001415166">
+        </testcase>
+        <testcase classname="oauth-exchange/src/index.test.ts" name="the dashboard&apos;s token exchange &gt; accepts a refresh token as well as a code" time="0.000885584">
+        </testcase>
+        <testcase classname="oauth-exchange/src/index.test.ts" name="the dashboard&apos;s token exchange &gt; treats a refused grant as a failure even though GitHub answers 200" time="0.000365875">
+        </testcase>
+    </testsuite>
+    <testsuite name="pr-relay/src/index.test.ts" timestamp="2026-09-17T05:13:42.161Z" hostname="PT-340357-MBP32M1P" tests="19" failures="0" errors="0" skipped="0" time="0.089859375">
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; refuses a request presenting no token" time="0.014500583">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; refuses an expired token" time="0.002624333">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; refuses a token minted for another audience" time="0.0015185">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; takes the repository from the claim, so the body cannot name another" time="0.0050675">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; posts the comment for a verified run" time="0.002979375">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; says the app is not installed, and names the fallback" time="0.002598416">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; refuses a run whose ref is not a pull request&apos;s" time="0.001573292">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; refuses a pull-request number that disagrees with the ref" time="0.001546583">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; requires a marker and a body" time="0.001193125">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; answers only the two endpoints it has" time="0.000225917">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="the relay&apos;s trust boundary &gt; says nothing about which check a rejected token failed" time="0.001167959">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; answers per operation, so a posted review and a refused delete are told apart" time="0.002965875">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; refuses the whole document when an id is not on this pull request" time="0.002336125">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; refuses a document version it does not apply" time="0.001237917">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; takes the pull request from the ref and not from the document" time="0.001018042">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; refuses a run that is not for a pull request" time="0.000953083">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; refuses a request presenting no token" time="0.000137916">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; says the app is not installed rather than failing" time="0.002285959">
+        </testcase>
+        <testcase classname="pr-relay/src/index.test.ts" name="applying a review &gt; says nothing about lydite&apos;s own credentials when a call fails" time="0.002428167">
+        </testcase>
+    </testsuite>
+</testsuites>

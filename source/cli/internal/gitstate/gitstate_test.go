@@ -985,3 +985,80 @@ func TestDescribeCommitAcceptsARootCommit(t *testing.T) {
 		t.Errorf("DescribeCommit = %+v, want a commit, a tree and a date", got)
 	}
 }
+
+// The declaration a change makes about breaking an API can live in a commit
+// footer, so the whole message has to come back — a reader given subjects alone
+// reports a range that declared a break as declaring nothing.
+func TestCommitMessagesReturnsWholeMessagesOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		if r := executil.Run(ctx, dir, "git", args...); !r.Ok() {
+			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
+		}
+	}
+	write := func(dir, name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(dir, "add", "-A")
+	}
+
+	repo := t.TempDir()
+	run(repo, "init", "-b", "main", ".")
+	run(repo, "config", "user.email", "t@t")
+	run(repo, "config", "user.name", "t")
+	write(repo, "base.txt")
+	run(repo, "commit", "-m", "chore: base")
+	base, err := HeadSHA(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	write(repo, "one.txt")
+	run(repo, "commit", "-m", "feat: widen Config\n\nThe timeout is a duration now.\n\nBREAKING CHANGE: Config.Timeout changed from int to int64")
+	write(repo, "two.txt")
+	run(repo, "commit", "-m", "chore: tidy")
+
+	got, err := CommitMessages(ctx, repo, base, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("CommitMessages = %q, want the two commits after the base", got)
+	}
+	if !strings.HasPrefix(got[0], "feat: widen Config") {
+		t.Errorf("CommitMessages[0] = %q, want the oldest commit first", got[0])
+	}
+	if !strings.Contains(got[0], "BREAKING CHANGE: Config.Timeout changed from int to int64") {
+		t.Errorf("CommitMessages[0] = %q, want the footer from the body", got[0])
+	}
+	if !strings.Contains(got[0], "The timeout is a duration now.") {
+		t.Errorf("CommitMessages[0] = %q, want the body a blank line separates from the subject", got[0])
+	}
+	if got[1] != "chore: tidy" {
+		t.Errorf("CommitMessages[1] = %q, want the newest commit last", got[1])
+	}
+
+	// A range with nothing in it is empty, not an error: a branch level with
+	// its base has declared nothing, which is a fact and not a failure.
+	if got, err := CommitMessages(ctx, repo, "HEAD", "HEAD"); err != nil || len(got) != 0 {
+		t.Errorf("CommitMessages over an empty range = %q, %v, want no messages and no error", got, err)
+	}
+}
+
+// A range naming a revision git cannot resolve is an error, not an empty
+// slice — the two read alike to a caller that only checks length, and one of
+// them means "nothing declared a break" while the other means the range was
+// never read at all.
+func TestCommitMessagesErrorsOnAnUnresolvableRange(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if r := executil.Run(ctx, repo, "git", "init", "-b", "main", "."); !r.Ok() {
+		t.Fatalf("git init: %v\n%s", r.Err, r.Output)
+	}
+	if _, err := CommitMessages(ctx, repo, "0000000000000000000000000000000000000000", "HEAD"); err == nil {
+		t.Error("CommitMessages over an unknown revision must error")
+	}
+}

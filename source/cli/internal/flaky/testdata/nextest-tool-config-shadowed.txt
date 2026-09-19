@@ -1,0 +1,25 @@
+$ cat .config/nextest.toml
+[profile.default.junit]
+path = "repo-owned.xml"
+$ cat lydite.toml   # what lydite stages and passes as --tool-config-file lydite:<path>
+[profile.default.junit]
+path = "junit.xml"
+
+[profile.rerun.junit]
+path = "junit-rerun.xml"
+$ cargo nextest run --tool-config-file "lydite:<cache>/lydite.toml"
+        PASS [   0.039s] nextestprobe::a shared_name
+        PASS [   0.050s] nextestprobe tests::nested::doubles_deeper
+────────────
+     Summary [   0.053s] 6 tests run: 6 passed, 1 skipped
+$ find target/nextest -name "*.xml"
+target/nextest/default/repo-owned.xml
+target/nextest/rerun/junit-rerun.xml
+$ cargo nextest run --tool-config-file "lydite:<cache>/lydite.toml" --profile rerun -E "test(=shared_name)"
+        PASS [   0.015s] nextestprobe::a shared_name
+        PASS [   0.015s] nextestprobe::b shared_name
+────────────
+     Summary [   0.016s] 2 tests run: 2 passed, 5 skipped
+$ find target/nextest -name "*.xml"
+target/nextest/default/repo-owned.xml
+target/nextest/rerun/junit-rerun.xml
