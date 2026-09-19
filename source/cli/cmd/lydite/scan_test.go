@@ -751,30 +751,6 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	}
 }
 
-// A TypeScript component still gets a licence row — never a section that
-// quietly disappears — but it renders context, the way a language crapRow
-// has no complexity source for does: nothing about this repository could
-// make the row green, because lydite reads no licence source for TypeScript
-// at all.
-func TestATypeScriptComponentGetsAContextLicenceRow(t *testing.T) {
-	var rep ui.Report
-	recordNoLicenceSource(&rep, component.Component{Name: "web"})
-
-	rows := rep.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("rows = %+v, want exactly one", rows)
-	}
-	if rows[0].Label != "licence(web)" {
-		t.Fatalf("label = %q, want licence(web)", rows[0].Label)
-	}
-	if rows[0].Status != ui.StatusContext {
-		t.Fatalf("status = %q, want %q — a gate that never ran must not render as one that passed", rows[0].Status, ui.StatusContext)
-	}
-	if !strings.Contains(rows[0].Value, "no licence source") {
-		t.Fatalf("value = %q, want it to say lydite reads no licence source for the component", rows[0].Value)
-	}
-}
-
 // A repository may say how its own code builds; it may not say where lydite's
 // scanners come from. `go install`, `cargo install` and `npm ci` read GOPROXY,
 // GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry, so a declared
@@ -1036,7 +1012,7 @@ func TestEachLanguageNamesTheGatesThatReportItsFindings(t *testing.T) {
 	}{
 		{runner.Go, []string{golang.GateGosec, golang.GateGovulncheck}},
 		{runner.Rust, []string{rust.GateClippy, rust.GateAudit, rust.GateDeny}},
-		{runner.TypeScript, []string{typescript.GateBiome}},
+		{runner.TypeScript, []string{typescript.GateBiome, typescript.GateLicence}},
 	} {
 		got := scannerGates(tc.lang)
 		for _, gate := range tc.want {
@@ -1473,6 +1449,213 @@ func TestARustComponentsOwnPolicyCountsEveryCrateItRejected(t *testing.T) {
 				t.Errorf("value = %q, want the document that decided named on it", rows[0].Value)
 			}
 		})
+	}
+}
+
+// tsProbeFiles is a captured TypeScript probe tree, as the files one commit is
+// made of, rooted at prefix.
+func tsProbeFiles(t *testing.T, probe, prefix string) map[string]string {
+	t.Helper()
+	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", probe))
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		t.Fatalf("reading the probe: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(tree, e.Name()))
+		if err != nil {
+			t.Fatalf("reading the probe: %v", err)
+		}
+		out[path.Join(prefix, e.Name())] = string(data)
+	}
+	return out
+}
+
+// The gate's whole shape for a TypeScript component: a lockfile the merge-base
+// did not carry is a set every dependency of which the change introduced, the
+// row fails, and each claim is anchored to what the change touched — without
+// which every claim reaches the review surface at no anchor at all.
+func TestTheTypeScriptLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
+		tsProbeFiles(t, "npmprobe", "web"))
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	// Line 10 of the probe's manifest is the dependency naming lightningcss,
+	// which the stated policy rejects under MPL-2.0.
+	changed := map[string][]int{"web/package.json": {10}}
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), changed)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
+		t.Fatalf("rows = %+v, want one failing licence row", rows)
+	}
+	if rows[0].Label != "licence(web)" || !strings.Contains(rows[0].Value, "introduced") {
+		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
+	}
+	found := rep.Findings()
+	// lightningcss, the two sharp-libvips builds and the entry stating no
+	// licence at all: every dependency of the probe the allow-list rejects.
+	if len(found) != 4 {
+		t.Fatalf("claims = %+v, want one per introduced pair", found)
+	}
+	var direct, transitive int
+	for _, f := range found {
+		if f.Path != "web/package.json" {
+			t.Errorf("claim located at %q, want the component's manifest from the scan root", f.Path)
+		}
+		if f.Line > 0 {
+			direct++
+			if f.Anchor != finding.AnchorLine {
+				t.Errorf("%q anchored %q, want %q — it is on the manifest line the change touched", f.Message, f.Anchor, finding.AnchorLine)
+			}
+			continue
+		}
+		transitive++
+		// A package the manifest names on no line reaches the change nowhere,
+		// however much of that manifest the change edited: an anchor here would
+		// put a transitive dependency's claim on a line whose edit does nothing
+		// about it.
+		if f.Anchor != finding.AnchorNowhere {
+			t.Errorf("%q anchored %q, want %q — it is reached only transitively", f.Message, f.Anchor, finding.AnchorNowhere)
+		}
+	}
+	if direct != 1 || transitive != 3 {
+		t.Fatalf("claims = %d direct and %d transitive, want lightningcss located and the other three not", direct, transitive)
+	}
+}
+
+// A dependency the merge-base already carried is not this change's to answer
+// for, however many of them the allow-list rejects: the row passes and makes no
+// claim at all.
+func TestTheTypeScriptLicenceGatePassesWhereTheBaseCarriedTheSameLockfile(t *testing.T) {
+	files := tsProbeFiles(t, "npmprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
+		t.Fatalf("rows = %+v, want one passing licence row", rows)
+	}
+	if len(rep.Findings()) != 0 {
+		t.Fatalf("claims = %+v, want none: the base carried every pair", rep.Findings())
+	}
+}
+
+// yarn states no dependency licence in its lockfile and scan runs no install to
+// produce one, so a component with no installed tree beside it has had nothing
+// decided about it. Amber naming what was missing, never the green of a gate
+// whose dependencies nothing read.
+func TestTheTypeScriptLicenceRowIsUnmeasuredWhereNoLicenceSourceExists(t *testing.T) {
+	files := tsProbeFiles(t, "yarnprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
+	}
+	if len(rows[0].Detail) == 0 {
+		t.Fatalf("row = %+v, want the reason the component could not be read", rows[0])
+	}
+	if len(rep.Findings()) != 0 {
+		t.Fatalf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
+	}
+}
+
+// A repository that stated no policy gets the row that names the file an edit
+// would go in — not the amber of a manager whose licences could not be read,
+// which is an answer to a question nobody asked here.
+func TestTheTypeScriptLicenceRowIsNotConfiguredWithoutAPolicy(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", "yarnprobe"))
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
+		component.Component{Name: "web", Dir: "."}, dir, config.Default(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context licence row", rows)
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) {
+		t.Fatalf("value = %q, want the file a policy is stated in named on it", rows[0].Value)
+	}
+}
+
+// The base a TypeScript component is compared against is the set its own
+// lockfile resolved at the merge-base, read in the checked-out tree rather than
+// from a stored figure: an entry written by a lydite that computed no licences
+// reads back as the empty set, and the delta on the day of the upgrade is then
+// the absolute set.
+func TestTheTypeScriptLicenceBaseReadsTheLockfileAtTheMergeBase(t *testing.T) {
+	files := tsProbeFiles(t, "npmprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
+	}
+	want := []string{"@img/sharp-libvips-darwin-arm64", "@img/sharp-libvips-linux-x64", "lightningcss", "unlicensed-probe"}
+	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, want) {
+		t.Fatalf("base set = %v, want %v — the probe's rejected dependencies, read under the stated policy", got, want)
+	}
+}
+
+// What has to be at the base for the component to have been there is its
+// manifest, and not the one lockfile that states licences.
+//
+// A yarn component declares no package-lock.json in any tree, so gating on one
+// would make every base read as a component the change adds — a measured empty
+// set, against which every dependency the repository already shipped is
+// introduced, and a red row on a change that touched none of them.
+func TestTheTypeScriptLicenceBaseIsTheManifestAndNotTheNpmLockfile(t *testing.T) {
+	files := tsProbeFiles(t, "yarnprobe", "web")
+	// An installed tree, the only licence source a yarn component has, and one
+	// both sides of the comparison carry.
+	files["web/node_modules/lightningcss/package.json"] = `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
+		t.Fatalf("rows = %+v, want one passing licence row: the base carried the same installed tree", rows)
+	}
+}
+
+// A component with no manifest at the merge-base is one this change adds, which
+// is a measured empty set and never an unmeasured base: nothing failed, there
+// was nothing there.
+func TestTheTypeScriptLicenceBaseIsEmptyWhereTheComponentWasNotThere(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
+		tsProbeFiles(t, "npmprobe", "web"))
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
+	if base.State() != licence.Measured || base.Set().Len() != 0 {
+		t.Fatalf("base = %q holding %d, want a measured empty set for a component the base did not carry", base.State(), base.Set().Len())
 	}
 }
 

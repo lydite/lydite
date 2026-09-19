@@ -198,7 +198,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Rust:
 					recordRustLicence(ctx, rep, licenceTree, c, cdir, env, cfg, changed)
 				case runner.TypeScript:
-					recordNoLicenceSource(rep, c)
+					recordTypeScriptLicence(ctx, rep, licenceTree, c, cdir, cfg, changed)
 				}
 			}
 
@@ -498,16 +498,48 @@ func policySourceSays(s rust.PolicySource) string {
 	return string(s)
 }
 
-// recordNoLicenceSource is the licence row for a component in a language
-// lydite reads no dependency set for: context and never amber, the same
-// reason a language crapRow has no complexity source for renders the same
-// way — nothing about this repository could make the row green, and a
-// component silently absent from the report would read as one that scored
-// clean.
-func recordNoLicenceSource(rep *ui.Report, c component.Component) {
+// recordTypeScriptLicence is the licence gate for one TypeScript component: the
+// dependencies its lockfile resolved, against the same set recomputed at the
+// merge-base.
+//
+// No install is run on either side, for any package manager. npm's lockfile
+// states every dependency's licence outright; yarn's and pnpm's state none, and
+// a tree no earlier step installed is the row saying so. See docs/adr/0042.
+func recordTypeScriptLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTree, c component.Component, cdir string, cfg config.Config, changed map[string][]int) {
+	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	label := licence.Gate + "(" + c.Name + ")"
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: label,
-		Value: "not measured — lydite reads no licence source for " + c.Name + ", a " + string(runner.TypeScript) + " component"})
+	if !policy.Configured() {
+		// Nothing is read for a repository that stated no policy. A manager
+		// that states no licence answers unmeasured, and reporting that where
+		// the row's answer is already known asks its author for an install to
+		// settle a question nobody put.
+		rep.Add(licenceRow(label, licence.Comparison{Verdict: licence.VerdictNotConfigured}))
+		return
+	}
+	base := typescriptLicenceBase(ctx, tree, c.Dir, policy)
+	current, err := typescript.LicenceSet(ctx, cdir, policy)
+	if err != nil {
+		// Unmeasured and never fail: a component whose own dependencies could
+		// not be enumerated has had nothing decided about it, and a red row
+		// here would ask its author to answer for a claim the gate never made.
+		rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: label,
+			Value: "the component's dependencies could not be read", Detail: []string{err.Error()}})
+		return
+	}
+	comparison := licence.Compare(policy, current, base)
+	rep.Add(licenceRow(label, comparison))
+	if comparison.Verdict != licence.VerdictFail {
+		// A claim per pair only where the gate failed on them. Every other
+		// verdict gates nothing, and a located claim under one would reach the
+		// review surface as a thread about a dependency nothing is blocking on.
+		return
+	}
+	// Through labelled and findingsOf, so a licence claim's component, its path
+	// from the scan root and its row label are derived exactly where every other
+	// scanner's are.
+	claims := findingsOf(labelled([]executil.Result{{Name: licence.Gate, Findings: typescript.LicenceFindings(cdir, comparison.Pairs)}}, c.Name, c.Dir))
+	finding.Anchored(claims, changed)
+	rep.AddFindings(claims...)
 }
 
 // licenceRow renders one component's comparison.
@@ -577,6 +609,21 @@ func rustLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir st
 	return tree.set(ctx, componentDir, "Cargo.lock", func(dir string) (licence.Set, error) {
 		set, _, err := rust.LicenceSet(ctx, dir, env, policy)
 		return set, err
+	})
+}
+
+// typescriptLicenceBase is the TypeScript component's non-conforming set
+// recomputed at the merge-base.
+//
+// The manifest is what has to be there, rather than a lockfile: a component
+// declares one whichever package manager it uses, while the lockfile that
+// answers its licences is npm's alone. A component with no package.json at the
+// base is one this change adds, and a base missing only the lockfile is a set
+// that could not be read — which is unmeasured, never the empty set that would
+// make every dependency it already had read as introduced here.
+func typescriptLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir string, policy licence.Policy) licence.Base {
+	return tree.set(ctx, componentDir, "package.json", func(dir string) (licence.Set, error) {
+		return typescript.LicenceSet(ctx, dir, policy)
 	})
 }
 

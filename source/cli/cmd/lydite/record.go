@@ -810,13 +810,13 @@ func findingCounts(dir string, decl component.File, cfg config.Config, found []f
 // cdir, which is what decides whether its nought is seeded.
 //
 // The same condition each language's scan gates on, asked from the tree rather
-// than from the scan's rows: Go runs the gate only under the repository's own
-// policy, and Rust runs it under that policy or under the component's own
-// deny.toml, which is rust.PolicyFor's answer. Every other language declares no
-// licence gate, so none applies.
+// than from the scan's rows: Go and TypeScript run the gate only under the
+// repository's own policy, and Rust runs it under that policy or under the
+// component's own deny.toml, which is rust.PolicyFor's answer. Every other
+// language declares no licence gate, so none applies.
 func licenceGated(cdir string, lang runner.Lang, policy licence.Policy) bool {
 	switch lang {
-	case runner.Go:
+	case runner.Go, runner.TypeScript:
 		return policy.Configured()
 	case runner.Rust:
 		return rust.PolicyFor(cdir, policy) != rust.PolicyFromNone

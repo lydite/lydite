@@ -1,0 +1,10 @@
+{
+  "name": "yarnprobe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "yarn@4.5.0",
+  "dependencies": {
+    "lightningcss": "1.33.0"
+  }
+}
