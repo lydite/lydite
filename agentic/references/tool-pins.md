@@ -15,6 +15,7 @@ Dependabot watches, colocated with the package that uses it:
 | cargo-nextest | `internal/runner/cargo-nextest-pin/Cargo.toml` | parsed by `internal/runner/pins.go` |
 | gotestsum | `internal/runner/gotestsum-pin/go.mod` | **a Go constant** in `internal/runner/pins.go` — see below |
 | cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
+| cargo-semver-checks | `internal/rust/cargo-semver-checks-pin/Cargo.toml` | parsed by `internal/rust/pins.go`, exported as `rust.CargoSemverChecksVersion` |
 | semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
 | gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |
 | gitleaks | `internal/secrets/gitleaks-pin/go.mod` | **still a Go constant** — see below |

@@ -1,0 +1,23 @@
+# Version pin for cargo-semver-checks, the tool lydite installs with `cargo install`.
+#
+# This crate is never built, published, or depended on: it exists so Dependabot's
+# `cargo` ecosystem can see the version and open bump PRs, and it is parsed at
+# runtime by internal/rust/pins.go so the version has exactly one home.
+#
+# Every cargo tool lydite pins gets its own manifest, not a shared one — the same
+# rule that already splits cargo-audit from cargo-deny. A manifest that cannot
+# resolve is one Dependabot silently errors on, which is the exact "pin nothing
+# ages out" failure this whole arrangement exists to prevent. `cargo install`
+# never shares a graph between two tools, so a conflict is invisible in normal use.
+#
+# The empty [workspace] table stops cargo absorbing this into a workspace above it.
+[workspace]
+
+[package]
+name = "lydite-cargo-semver-checks-pin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cargo-semver-checks = "=0.50.0"
