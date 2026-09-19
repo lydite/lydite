@@ -179,10 +179,14 @@ per-component findings, and the base they were measured against — instead of r
 again, and decides and publishes from that document through the same `publish`/
 `stateFor`/`describe` (`cmd/lydite/status.go`) as a single, ordinary invocation would.
 See [ci.md](ci.md)'s `referral`/`referral-publish` split: `review compare` is the only
-half of this that runs a component's own code, and it computes no decision at all, so a
-process that outlives it has no verdict in the artifact to tamper with — the decision is
-made afterward, in a job that never ran that code and reads only text (exemptions, the
-diff, a declared breaking change) from its own separate checkout.
+half of this that runs a component's own code, and it computes no exemption match, no
+declaration and no verdict — the decision is made afterward, in a job that never ran
+that code and reads only text (exemptions, the diff, a declared breaking change) from
+its own separate checkout. `reconcileSurfaces` refuses a document whose claimed base
+does not match what that job resolves itself, and requires a result named for every
+component the tree says opted in — but a claimed-clean result's own content is not
+independently verified, so a process left running past the comparison's own subprocess
+call could still forge one. See ci.md for what this leaves open.
 
 Six properties are load-bearing:
 

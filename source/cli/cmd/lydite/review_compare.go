@@ -75,7 +75,9 @@ need not, and never re-runs this comparison to reach it.`,
 			if err != nil {
 				return err
 			}
-			results, err := computeAPISurfaces(ctx, cmd, dir, baseSHA)
+			// Never guarded: review compare never publishes, so there is no
+			// credential in this process for a Rust comparison to reach.
+			results, err := computeAPISurfaces(ctx, cmd, dir, baseSHA, false)
 			if err != nil {
 				return err
 			}

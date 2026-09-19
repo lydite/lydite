@@ -50,31 +50,58 @@ forged "pass" before the upload step captured it — the decision computed in th
 job that ran the untrusted code is not safe to trust just because a *different* job
 posts it.
 
-The shape that closes this splits along a different boundary: **only the raw
+The shape that gets closer splits along a different boundary: **only the raw
 comparison** crosses the job boundary, never a decision. `lydite review compare
 --write-surfaces <path>` (`internal/rustapisurface`'s and Go's `internal/apisurface`'s
 raw findings, keyed by component, with the base they were measured against) is the
 whole of what the credential-less `referral` job produces — it reads no exemptions and
-makes no decision, so there is no verdict in the artifact for a leftover process to
-tamper with. `referral-publish` holds the credential, checks the change out separately
-(`persist-credentials: false` again, and never via a `./`-local action after that
-checkout — see below), reads its exemptions and diff as text, and runs `lydite review
---surfaces <path> --publish` to decide and post in one step that never re-executes the
-comparison. A credential that was never in a job's environment, its checkout, or its
-artifact is the only thing that reliably keeps it out of that job's process tree;
-scrubbing a live process's own environment after the fact is not a substitute, and
-neither is trusting a decision a job holding no credential made about code it also ran.
+makes no decision. `referral-publish` holds the credential, checks the change out
+separately, reads its exemptions and diff as text, and runs `lydite review --surfaces
+<path> --publish` to decide and post in one step that never re-executes the comparison.
+`reconcileSurfaces` (`review_apisurface.go`) refuses the document if its claimed base
+does not match what `referral-publish` resolves *itself*, and requires a result named
+for every component this tree's own `components.yml` says opted in.
 
-**A second, distinct trap the same review found**: a workflow step written as
-`uses: ./.github/actions/<name>` resolves from whatever the *job's own checkout*
-currently holds, not from the workflow file's own trusted source. `referral-publish`
-checks out the pull request's own head (to read its exemptions/diff), so a `./`-local
-action referenced *after* that checkout would run whatever `action.yml` the pull
-request itself wrote — in the one job that holds `statuses: write`. The fix is a
-remote, base-ref-pinned reference instead: `lydite/lydite/.github/actions/<name>@${{
-github.event.pull_request.base.sha }}`, which is fetched independently of the job's own
-checkout and always resolves the base branch's own version of the action, never the
-PR's. Every other job in this workflow also checks out the PR head and then uses a
-local `./` action, but none of them hold a write credential, so the same combination
-does not carry the same risk there — this is specific to a job that both checks out
-untrusted code and can act on its behalf afterward.
+**This still does not close the exposure — a fourth review pass caught that too.**
+"No verdict in the artifact to tamper with" was the wrong claim: a per-component clean
+result (empty findings) *is* the api-surface verdict for that component, and
+`reconcileSurfaces` never verifies a result's *content*, only its shape (right base,
+one entry per opted-in component). A process a malicious `build.rs` leaves running past
+its own subprocess call can still overwrite the artifact with a well-formed document —
+correct base (derivable from the full-history checkout `referral` already has), an
+entry for every component (derivable from `components.yml`, which the same checkout
+holds), each with no findings — before the upload step captures it. `referral-publish`
+has no way to tell that apart from a real clean comparison without re-running it, which
+would put the credential back in the same process as the untrusted code. **This gap is
+open, tracked in ci.md's `referral`/`referral-publish` paragraph, and not something this
+branch closes** — closing it needs either a sandbox that can't write the output path
+after the comparison exits, or treating every document-supplied clean Rust result as
+unverifiable and referring it (which would mean an opted-in Rust component can never
+auto-pass through this path, only fail-or-refer).
+
+**A second trap the same review found, syntactic rather than architectural**: a
+workflow step written as `uses: ./.github/actions/<name>` resolves from whatever the
+*job's own checkout* currently holds, not from the workflow file's own trusted source —
+so `referral-publish` (which checks out the pull request's own head to read its
+exemptions/diff) cannot use a `./`-local action after that checkout without running
+whatever `action.yml` the pull request itself wrote. The first attempted fix,
+`uses: owner/repo/path@${{ github.event.pull_request.base.sha }}`, does not work at
+all: **Actions does not evaluate `${{ }}` expressions in a step's `uses:` value** —
+this is a hard parser limitation, not a permissions or resolution issue, and a fifth
+review pass caught that the whole job would fail to run. The fix that actually works:
+check out the base commit into its own path (`actions/checkout` with `ref:
+${{ github.event.pull_request.base.sha }}` and `path: base`) and reference the local
+action from there (`uses: ./base/.github/actions/<name>`) — a literal relative path,
+no expression needed, because the *checkout* (not the `uses:` line) is what varies by
+ref.
+
+**A third, related trap**: even a correctly-pinned action reference only protects the
+composite action's own YAML, not the actual `lydite` binary those actions install —
+`setup`'s `lydite-binary` artifact is built from the pull request's own checkout, so a
+pull request editing `cmd/lydite/status.go`'s `publish` function to always report
+success is exactly as available as editing a `build.rs`. `referral-publish` closes this
+by building its own `lydite` from the same `base/` checkout it uses for the action
+reference, rather than downloading `setup`'s artifact at all. Every *other* job in this
+workflow intentionally dogfoods the pull request's own build (stated in the workflow's
+own top comment) — this is the one job where that tradeoff does not hold, because it is
+the one job holding a write credential.

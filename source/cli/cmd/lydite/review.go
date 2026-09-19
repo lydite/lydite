@@ -88,7 +88,11 @@ publish in another that never runs the change's own code.`,
 					}
 				}
 			} else {
-				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA)
+				// Guarded exactly when this invocation will also publish:
+				// that is the one combination where a Rust comparison would
+				// run inside the process about to use a publishing
+				// credential.
+				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA, doPublish)
 				if err != nil {
 					return err
 				}

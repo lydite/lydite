@@ -160,11 +160,20 @@ jobs:
   # the change out to read its exemptions, its diff and its declared breaking
   # changes — text, never executed — but runs no build, no test and no
   # comparison: referral, above, already made the one comparison that would
-  # run the change's own code, and this job only trusts what that job wrote
-  # to disk before any of that code ran, not after.
+  # run the change's own code.
+  #
+  # It also runs no binary the change under review could have influenced.
+  # `uses:` does not evaluate `${{ }}` expressions, so a remote reference
+  # pinned at a computed SHA is not something Actions accepts at all — and
+  # even a working version of that idea would only have protected the
+  # composite actions' own YAML, not the actual `lydite` binary, which
+  # `setup`'s artifact builds from the pull request's own checkout. Both are
+  # closed the same way: a separate checkout of the base commit, built here,
+  # is this job's only source for anything it executes or reads a local
+  # action from.
   referral-publish:
     name: referral publish
-    needs: [setup, referral]
+    needs: referral
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -174,14 +183,29 @@ jobs:
       # a referral while the matrix is still running (ADR 0015).
       statuses: write
     steps:
-      # A local `./` action resolves from whatever this job's own workspace
-      # has checked out, not from the workflow file's own trusted source — so
-      # this cannot be a checkout of the pull request's own head, which is
-      # exactly the tree this job must not trust. Pinned at the base branch's
-      # own SHA rather than the PR's, this fetches the action alone and
-      # checks nothing else out. Fetched before the checkout below for the
-      # same reason: it must never resolve from that checkout's own tree.
-      - uses: lydite/lydite/.github/actions/lydite-binary@${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: base/source/cli/go.mod
+          cache: true
+          cache-dependency-path: base/source/cli/go.sum
+
+      # The same tags `.goreleaser.yml` builds a release with, matching
+      # `setup`'s own build step — the binary this job runs is the base
+      # commit's, not the pull request's.
+      - name: build lydite from the base commit
+        working-directory: base/source/cli
+        env:
+          LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+        run: |
+          mkdir -p "${RUNNER_TEMP}/lydite-bin"
+          go build -tags "$LYDITE_BUILD_TAGS" -o "${RUNNER_TEMP}/lydite-bin/lydite" ./cmd/lydite
+          echo "${RUNNER_TEMP}/lydite-bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -219,12 +243,11 @@ jobs:
             exit "$verdict"
           fi
 
-      # Pinned at the base branch's own SHA, the same reason lydite-binary is
-      # above: this job checks out the pull request's own head to read its
-      # exemptions and its diff, and a local `./` action used after that
-      # checkout would run whatever action.yml the pull request itself wrote,
-      # in the one job here that holds statuses: write.
-      - uses: lydite/lydite/.github/actions/lydite-reports@${{ github.event.pull_request.base.sha }}
+      # From the base checkout above, the same reason the binary this job
+      # runs is: a `./` action resolves from whatever this job's own
+      # workspace holds, and the default checkout above is the pull
+      # request's own head.
+      - uses: ./base/.github/actions/lydite-reports
         if: always()
         with:
           name: referral

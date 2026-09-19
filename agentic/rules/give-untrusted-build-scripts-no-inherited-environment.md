@@ -16,11 +16,31 @@ held, however briefly, at its own start. A job that runs untrusted code like thi
 hold the credential at all — see `persist-credentials: false` on the `referral` job's own
 checkout in [`.github/workflows/lydite-pr.yml`](../../.github/workflows/lydite-pr.yml), since
 `actions/checkout` otherwise embeds the token into `.git/config` regardless of anything this
-rule's isolation does — and it must not decide the verdict either: only the raw comparison
-(`lydite review compare --write-surfaces`) crosses into `referral-publish`, which holds the
-credential and computes the decision itself from that raw result and its own separate
-checkout, never from anything `referral`'s own process tree could have written to an
-artifact after the untrusted build ran.
+rule's isolation does. `lydite review --publish` also refuses to run a Rust comparison in its
+own process at all when `--surfaces` is absent, for any caller of the single-invocation form,
+not only this workflow.
+
+The credential is only half of what a job running untrusted code must not be trusted with.
+`referral` writes the raw comparison to an artifact (`lydite review compare
+--write-surfaces`) rather than a decision, and `referral-publish` (never re-running the
+comparison) checks the document's base and the set of components it names against what it
+resolves and reads itself — but a **claimed-clean result's own content is not independently
+verified**. A process a malicious build script leaves running past its own subprocess call
+could still overwrite the artifact with a well-formed document before the upload step
+captures it, naming the right base and every opted-in component with no findings. Splitting
+by credential and by artifact ownership narrows this from "any status, described however the
+untrusted code likes" to "a clean api-surface result specifically", but does not close it —
+see ci.md's `referral`/`referral-publish` paragraph for what remains open.
+
+The credential and the binary are two separate things to keep out of untrusted hands, and
+closing one does not close the other: `referral-publish` also builds its own `lydite` from a
+checkout of the base commit rather than running `setup`'s artifact, which is built from the
+pull request's own tree — a modified `publish` function reporting success regardless of the
+verdict it was given is exactly as available to the pull request as a modified `build.rs`.
+The same reasoning rules out a `uses: owner/repo/path@${{ expression }}` reference to fetch a
+trusted action version at all: Actions does not evaluate expressions in `uses:`, so the only
+way to reach the base commit's own copy of a local action is to check it out (as its own,
+separately pathed checkout) and reference it from there.
 
 ## Applies to
 

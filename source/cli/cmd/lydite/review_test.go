@@ -1129,6 +1129,51 @@ func TestReviewCompareNeedsAWriteSurfacesFlag(t *testing.T) {
 	}
 }
 
+// --publish with no --surfaces computes and publishes in the same process, so
+// a Rust component's comparison must not run there at all: RunQuietIsolatedEnv
+// keeps a credential out of the comparison's own child environment, not out
+// of this process's, and a same-user descendant can still reach the latter.
+// The stub that would answer the comparison is removed before this runs, so
+// an invocation that tried would fail outright rather than silently succeed.
+func TestReviewPublishWithoutSurfacesRefusesToRunARustComparison(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+	removeSemverChecksStub(t)
+
+	forge := &fakeForge{}
+	forge.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+	payload := map[string]any{
+		"number":       40,
+		"pull_request": map[string]any{"title": "docs: nothing breaking", "head": map[string]any{"sha": head}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(event, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a Rust comparison refused under --publish must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "must not happen in the same process") {
+		t.Errorf("the referral must say why the comparison did not run, got:\n%s", out)
+	}
+	if len(forge.published) != 1 {
+		t.Fatalf("published %d statuses, want 1", len(forge.published))
+	}
+}
+
 // A finding the loader could not place carries no path, and locate must
 // report its message on its own rather than joining an empty path onto the
 // component's directory, which would point at the directory as though it

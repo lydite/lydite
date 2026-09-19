@@ -49,7 +49,16 @@ type surfaceComparison struct {
 // why it returns data for a caller to render rather than rendering anything
 // itself: the caller may be a job that must never hold a publishing
 // credential, or one that must never run this comparison again to get it.
-func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string) ([]surfaceComparison, error) {
+//
+// guardCredential refuses to run a Rust component's comparison at all,
+// reporting it uncomputable instead: it is set exactly when this same
+// process is about to publish with a credential, because
+// executil.RunQuietIsolatedEnv keeps that credential out of the comparison's
+// own child environment but not out of this process's — a same-user
+// descendant can still reach it another way (see
+// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md).
+// review compare, which never publishes, always passes false.
+func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string, guardCredential bool) ([]surfaceComparison, error) {
 	opted, err := optedInComponents(dir)
 	if err != nil {
 		return nil, err
@@ -89,6 +98,13 @@ func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base strin
 
 	results := make([]surfaceComparison, 0, len(opted))
 	for _, c := range opted {
+		if guardCredential && langOf(c) == runner.Rust {
+			results = append(results, surfaceComparison{
+				Component: c.Name, Dir: c.Dir,
+				Uncomputable: "a Rust component's comparison runs the head tree's own build.rs and proc-macros, which must not happen in the same process that is about to publish with a credential — run `review compare` and `review --surfaces` as two separate invocations instead",
+			})
+			continue
+		}
 		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
 		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Findings: findings, Uncomputable: uncomputable})
 	}
@@ -251,7 +267,7 @@ func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Re
 //
 // The two languages differ only in which tool makes the comparison. What a
 // break means, and what a surface that could not be compared means, is one rule
-// for both: see addAPISurfaceRows.
+// for both: see renderAPISurfaceRows.
 func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Component, root, dir string, envs toolchain.Envs) ([]finding.Finding, string) {
 	base := filepath.Join(root, filepath.FromSlash(c.Dir))
 	head := filepath.Join(dir, filepath.FromSlash(c.Dir))
