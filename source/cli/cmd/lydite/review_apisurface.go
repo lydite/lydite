@@ -181,13 +181,13 @@ func reconcileSurfaces(dir, base string, doc surfaceDocument) ([]surfaceComparis
 	for _, c := range opted {
 		r, ok := byName[c.Name]
 		if !ok {
-			results = append(results, surfaceComparison{
-				Component:    c.Name,
-				Dir:          c.Dir,
-				Uncomputable: "the comparison document carries no result for this component",
-			})
-			continue
+			r = surfaceComparison{Uncomputable: "the comparison document carries no result for this component"}
 		}
+		// Component and Dir come from this tree's own component list, never
+		// from the document: they name where a finding's path is rebased
+		// and rendered, and the document is exactly what a malicious build
+		// script could have written.
+		r.Component, r.Dir = c.Name, c.Dir
 		results = append(results, r)
 	}
 	return results, nil

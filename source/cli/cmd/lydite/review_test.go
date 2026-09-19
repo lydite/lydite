@@ -1085,6 +1085,29 @@ func TestReviewRefersAMissingResultInTheSurfacesDocument(t *testing.T) {
 	}
 }
 
+// A result's Dir is this tree's own component directory, never whatever the
+// document claims for it: Dir decides where a finding's path is rebased and
+// rendered, and the document is exactly what a malicious build script could
+// have written.
+func TestReconcileSurfacesTakesDirFromTheTreeNotTheDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"README.md": "hello again"})
+
+	doc := surfaceDocument{
+		Base: base,
+		Results: []surfaceComparison{
+			{Component: "probe", Dir: "somewhere/else/entirely"},
+		},
+	}
+	got, err := reconcileSurfaces(dir, base, doc)
+	if err != nil {
+		t.Fatalf("reconcileSurfaces: %v", err)
+	}
+	if len(got) != 1 || got[0].Dir != "probe" {
+		t.Errorf("reconcileSurfaces = %+v, want Dir %q from the tree's own component", got, "probe")
+	}
+}
+
 // A document that opens fine but decodes into nothing readable, or names no
 // base commit, is exactly as unreadable as a missing file: readSurfaces
 // refuses both rather than handing review a document with nothing in it.
