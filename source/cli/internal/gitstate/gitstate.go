@@ -37,6 +37,7 @@ package gitstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -280,6 +281,10 @@ func CommitMessages(ctx context.Context, dir, from, to string) ([]string, error)
 // restating it.
 const BaseBranchFlag = "--base-branch"
 
+// BaseSHAFlag names the flag that supplies a revision to ResolveRevision, for
+// the same reason BaseBranchFlag names its own.
+const BaseSHAFlag = "--base-sha"
+
 // remote is the remote every base ref is resolved against.
 //
 // Hardcoded, deliberately. A repository with two remotes is a real thing and
@@ -423,6 +428,30 @@ func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
 		return "", err
 	}
 	return BaseSHA(ctx, dir, branch)
+}
+
+// ResolveRevision resolves a revision the caller named to the commit it
+// stands for, for a caller asserting which commit the base is rather than
+// asking where a branch diverged.
+//
+// It fetches nothing and computes no merge-base: whatever
+// `git rev-parse --verify <revision>^{commit}` answers in the checkout as it
+// stands is the base. That is the whole difference from BaseSHA, which reads
+// its argument as a branch on the remote — so this takes anything git itself
+// resolves, a full or abbreviated SHA or a relative ref such as HEAD~1, and
+// takes no branch name.
+func ResolveRevision(ctx context.Context, dir, revision string) (string, error) {
+	if revision == "" {
+		return "", errors.New("no revision to resolve — name one with " + BaseSHAFlag)
+	}
+	rev := revision + "^{commit}"
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--verify", rev)
+	if !r.Ok() {
+		return "", fmt.Errorf("git rev-parse --verify %s: %w"+
+			"\n       %s names no commit in this checkout — a shallow checkout that truncated the history is"+
+			" the usual cause for a relative ref, so fetch with depth 0", rev, r.Err, revision)
+	}
+	return strings.TrimSpace(r.Output), nil
 }
 
 // Entry is one component's measurement: its line counts, and what produced

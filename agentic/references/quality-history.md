@@ -107,12 +107,17 @@ rather than by expectation. The last record and not a mean, which is a number no
 had. There is no index file: the directory listing is the index, and an index is state that
 can disagree with the files it names.
 
-**Coverage, CRAP, test counts and finding counts are in; mutation is not.** Mutation is
-structural: mutants come only from lines the change touched, and on the default branch HEAD is its
-own merge-base, so the one job holding a token that can push mutates nothing. Its results exist only
-on pull requests, in jobs deliberately holding no writable token
-([#112](https://github.com/lydite/lydite/issues/112), and [#49](https://github.com/lydite/lydite/issues/49)
-behind it).
+**Mutation is one struct, not six independent scalars, and it comes from `mutants.json`.** A
+mutation run's killed, timed-out, out-of-memory, survived, unviable and acknowledged counts always
+arrive together out of one `mutation.Summary`, so `Component.Mutation` is a single pointer rather
+than six optional fields — a record with three of six present is a question nothing produced.
+It is absent for a component the recorded commit's own diff did not touch, for one declared
+`mutation: false`, and for one whose run did not complete, and present with a measured zero
+wherever a component ran and killed every mutant — the same rule every other metric here follows,
+applied to a run that only exists because the recording commit is the post-merge run's own diff to
+mutate. See [ADR 0043](../../docs/adr/0043-mutation-reaches-the-ledger-from-a-post-merge-run.md),
+resolving [#112](https://github.com/lydite/lydite/issues/112) and the shape [#49](https://github.com/lydite/lydite/issues/49)
+settled for it.
 
 **A finding count is per gate, and that is not a refinement of "per component" — it is the only
 shape that can say what there is to say.** A gate has a third state the other scalars do not: it can

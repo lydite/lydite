@@ -1867,6 +1867,17 @@ func selectAffected(ctx context.Context, dir string, file component.File, baseBr
 		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the base branch, and it could not be resolved: %w"+
 			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
 	}
+	return affectedFrom(ctx, dir, file, base)
+}
+
+// affectedFrom narrows the run to the components the change against a base
+// already resolved could have broken.
+//
+// Separate from selectAffected so a caller that resolved the base some other
+// way — `lydite mutation`, pointed at an explicit revision — selects from the
+// same commit its own work is scoped to. Resolving it a second time here would
+// be a second fetch, and under a different flag a different range.
+func affectedFrom(ctx context.Context, dir string, file component.File, base string) (affected.Result, error) {
 	// On the default branch the merge-base is HEAD itself, so there is no
 	// change to select by and a computed selection narrows to nothing. ADR
 	// 0016 requires that run to be complete — a forgotten depends_on edge

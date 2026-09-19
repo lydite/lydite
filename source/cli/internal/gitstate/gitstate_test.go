@@ -116,6 +116,57 @@ func seedStateBranch(t *testing.T, ctx context.Context, files map[string]string)
 	return origin
 }
 
+// A revision the caller states is resolved in the checkout as it stands: no
+// remote is configured here, so a resolution that fetched anything would fail
+// rather than answer.
+func TestAnExplicitRevisionIsResolvedWithoutAnyRemote(t *testing.T) {
+	ctx := context.Background()
+	run := gitRunner(t, ctx)
+	dir := t.TempDir()
+	run(dir, "init", "-b", "main", ".")
+	run(dir, "config", "user.email", "t@t")
+	run(dir, "config", "user.name", "t")
+	for _, message := range []string{"first", "second"} {
+		if err := os.WriteFile(filepath.Join(dir, message), []byte(message), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(dir, "add", "-A")
+		run(dir, "commit", "-m", message)
+	}
+
+	want, err := ResolveRevision(ctx, dir, "HEAD~1")
+	if err != nil {
+		t.Fatalf("a relative ref did not resolve: %v", err)
+	}
+	for _, revision := range []string{want, want[:8], "main~1"} {
+		got, err := ResolveRevision(ctx, dir, revision)
+		if err != nil {
+			t.Fatalf("%s did not resolve: %v", revision, err)
+		}
+		if got != want {
+			t.Errorf("%s resolved to %s, want %s", revision, got, want)
+		}
+	}
+
+	// A revision this checkout does not hold is an error naming it and the
+	// fix, never the empty string a caller would then mutate nothing against.
+	for _, revision := range []string{"HEAD~9", "0000000000000000000000000000000000000000"} {
+		got, err := ResolveRevision(ctx, dir, revision)
+		if err == nil {
+			t.Fatalf("%s resolved to %q", revision, got)
+		}
+		if got != "" {
+			t.Errorf("a failed resolution answered %q as well as an error", got)
+		}
+		if !strings.Contains(err.Error(), revision) || !strings.Contains(err.Error(), "depth 0") {
+			t.Errorf("error = %q, want it to name %s and the fix", err, revision)
+		}
+	}
+	if _, err := ResolveRevision(ctx, dir, ""); err == nil || !strings.Contains(err.Error(), BaseSHAFlag) {
+		t.Errorf("an empty revision gave %v, want an error naming %s", err, BaseSHAFlag)
+	}
+}
+
 func TestWritePushesOverAStaleTrackingRef(t *testing.T) {
 	ctx := context.Background()
 	run := gitRunner(t, ctx)

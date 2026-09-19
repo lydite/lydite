@@ -64,7 +64,12 @@ nothing else in that workflow produces one. It passes **no** `--diff-base`, beca
 branch there is no change to scope to — so it covers the whole repository, every claim lands
 unanchorable, and the count is the standing total rather than what one change introduced. That is
 also why it is the one lydite job needing no `fetch-depth: 0`: since ADR 0032 a base is resolved
-whenever `--diff-base` is given, and this job gives none.
+whenever `--diff-base` is given, and this job gives none. A `mutate` matrix job runs beside
+`measure` too, `contents: read`, scoped with `--base-sha HEAD~1` rather than a merge-base —
+the merge commit is its own merge-base against the default branch, which is why `measure`'s
+unconditional, unaffected run has no equivalent scoping need and `mutate`'s explicit one does —
+and `record` folds its `mutants.json` documents into the ledger alongside `measure`'s
+measurements and `scan`'s findings.
 
 Each shard uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`:
 `publish` reads the latter, and a shard's document rendered as a `test` section of its own would put

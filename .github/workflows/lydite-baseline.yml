@@ -27,6 +27,15 @@
 # shard and uploads its reports under its own prefix; `record` downloads both
 # and folds them together.
 #
+# A mutate matrix runs beside it for the same reason mutation was absent from
+# the history until now (docs/adr/0043): a mutant exists only on a line the
+# change touched, and on the default branch HEAD is its own merge-base, so the
+# only job that can mutate anything is one scoped explicitly to the merge
+# commit's own diff rather than to a merge-base it does not have. `--base-sha
+# HEAD~1` names that diff outright. `record` folds its mutants.json documents
+# the same way it folds measurements and scan, and records nothing for a
+# component absent from them.
+#
 # It shards the way `lydite-pr.yml` does — `plan` groups the components,
 # a matrix runs them, and one `record` folds every shard's measurements. No
 # shard can record: each measured part of the tree, and a partial baseline
@@ -183,6 +192,82 @@ jobs:
           name: ${{ matrix.shard.name }}
           prefix: lydite-shard
 
+  # A mutant exists only on a line the change touched, and on the default
+  # branch HEAD is its own merge-base — so the merge commit's own diff, against
+  # its first parent, is the one range this job has to mutate. --base-sha
+  # HEAD~1 names that commit outright: no fetch, no merge-base, and correct
+  # whether the merge landed as a squash or as a true two-parent merge commit,
+  # since a first-parent diff carries the same contribution either way. See
+  # docs/adr/0043.
+  #
+  # --affected still narrows to what that range touched, exactly as it does on
+  # a pull request: there is no reason to mutate a component the merge did not
+  # touch merely because the run is now on the default branch. `record` reads
+  # what this job wrote and records nothing for a component absent from it —
+  # untouched, declared `mutation: false`, or a shard this job's own timeout
+  # cut short.
+  mutate:
+    name: mutate (${{ matrix.shard.name }})
+    needs: [setup, plan]
+    runs-on: ubuntu-latest
+    # The same ceiling the pull-request mutation matrix runs under: the same
+    # command over a comparable diff is the same expected cost, and inventing a
+    # second number here would assert something nothing has measured. A run
+    # that exceeds it dies here, uploads no document, and `record` records
+    # nothing for the components it never reached rather than reading a
+    # timeout as a suite that killed everything.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    # Read-only. This job runs the merged tree's own suites, once per mutant,
+    # and the tree has already passed review and every gate — but the token
+    # that can write to the lydite branch belongs to `record` alone, which
+    # executes none of it.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # --base-sha HEAD~1 still needs the parent commit in history to
+          # resolve, which a shallow checkout does not hold.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/lydite-binary
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lydite
+          key: lydite-${{ runner.os }}-${{ hashFiles('.lydite/components.yml', 'source/cli/internal/**/*-pin/**', 'source/cli/internal/semgrep/requirements.txt', 'source/cloud-services/package-lock.json') }}
+          restore-keys: lydite-${{ runner.os }}-
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('source/cli/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      # --stream, as the pull-request mutation matrix does and the test matrix
+      # does not: a mutation run prints nothing for as long as it takes, and a
+      # job this job's own timeout kills never reaches the upload below, so the
+      # log reaching a reader at all depends on every line landing in the
+      # component's log as it runs rather than at the end.
+      - name: lydite mutation
+        env:
+          COMPONENTS: ${{ matrix.shard.components }}
+        run: lydite mutation --dir . --affected --component "$COMPONENTS" --base-sha HEAD~1 --stream
+
+      # Under its own prefix: `record` folds mutants.json out of every
+      # directory this pattern matches, and a name shared with the coverage
+      # shards would have it fold two different documents out of one
+      # directory rather than one each out of two.
+      - uses: ./.github/actions/lydite-reports
+        if: always()
+        with:
+          name: ${{ matrix.shard.name }}
+          prefix: lydite-mutation-shard
+
   # What the repository's standing findings are, so the quality history holds a
   # finding count beside the coverage, CRAP and test counts. `record` reads the
   # scan document out of this job's report directory.
@@ -222,13 +307,17 @@ jobs:
 
   record:
     name: record coverage baseline
-    needs: [setup, plan, measure, scan]
-    # It runs even when a shard failed, and even when the scan went red. A gate
-    # that says nothing about coverage — orphans, watch, schedule — would
-    # otherwise discard a complete set of measurements, and no later run records
-    # this tree, because the next push carries a different one. A red scan on
-    # the default branch is the most interesting thing a finding history can
-    # hold, for exactly the same reason: the hole it would leave is permanent.
+    needs: [setup, plan, measure, scan, mutate]
+    # It runs even when a shard failed, even when the scan went red, and even
+    # when a mutation shard timed out. A gate that says nothing about coverage
+    # — orphans, watch, schedule — would otherwise discard a complete set of
+    # measurements, and no later run records this tree, because the next push
+    # carries a different one. A red scan on the default branch is the most
+    # interesting thing a finding history can hold, for exactly the same
+    # reason: the hole it would leave is permanent. A mutation shard that ran
+    # out of time costs that shard's components no mutation entry — `record`
+    # reads whatever mutants.json documents exist and binds them to the tree,
+    # never failing the coverage and test series over an optional one.
     # `record` refuses a fold that is partial, names another tree, or was never
     # written, so the worst an unconditional run does is say so.
     if: ${{ !cancelled() }}
@@ -260,6 +349,15 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: lydite-scan-*
+          path: shards
+
+      # Also into the same directory. A shard that opted no component into
+      # mutation, or whose diff touched none, still uploads a document naming
+      # its tree and holding nothing — which is what tells `record` a shard
+      # measured nothing from a shard whose job never ran at all.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: lydite-mutation-shard-*
           path: shards
 
       # One write after the fold, never one per shard: N pushes racing one
@@ -298,7 +396,7 @@ jobs:
             args+=(--reports "$dir")
             dirs+=("$dir")
           done < <(find shards -maxdepth 2 \
-                     \( -name measurements.json -o -name scan.json \) \
+                     \( -name measurements.json -o -name scan.json -o -name mutants.json \) \
                      -exec dirname {} \; | sort -u)
           if [ "${#dirs[@]}" -eq 0 ]; then
             echo "no shard uploaded a measurements or scan document; there is nothing to record" >&2
