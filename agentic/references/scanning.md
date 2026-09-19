@@ -74,6 +74,24 @@ the tool's version, not where it came from, so one poisoned build would outlive 
 repositories on a shared `~/.cache/lydite`. A repository may say how its own code builds; it may
 not say where lydite's scanners come from.
 
+**The composed environment is named on stderr, per component, before its checks run.**
+`warnDeclaredEnv` in `cmd/lydite/scan.go` prints every variable name a component's declared
+`env:` contributed to `Check`'s composed environment — never a value — in the same shape the
+`.semgrepignore` warning already has (see [Semgrep](semgrep.md)): one line, on
+`cmd.ErrOrStderr()`, before the tool runs, gating nothing. A declared `PATH` is named as the
+path extension it is, appended after lydite's own, because that is what it becomes rather than
+a plain variable; a declared key the resolved toolchain also sets is named as overridden, since
+the toolchain's variables compose last and the declared value never reaches the check. A name
+`steeringEnv` recognises as changing what a check does — `GOFLAGS`, `GOVULNDB`, `GOPRIVATE`,
+`RUSTFLAGS`, `RUSTC_WRAPPER`, `CARGO_BUILD_TARGET`, `NODE_OPTIONS` — carries an additional mark;
+the list is best-effort and not a security boundary, and nothing reads it to decide anything. It
+is scoped to the per-component language checks, which is the whole of the exposure: Semgrep and
+the secret scan are root-scoped and run with no declared environment at all, so there is nothing
+to name for them. Nothing is refused — editing `.lydite/components.yml` is already a referral
+disqualifier, so a repository steering a check through its declaration cannot merge that change
+unattended. See
+[ADR 0046](../../docs/adr/0046-a-components-declared-environment-is-named-in-the-scan.md).
+
 **The same split runs through `lydite test`'s `Prepare`,** where the distinction is whose software
 is being fetched. `installNodeDeps` installs the *repository's* dependencies and gets the declared
 environment — a workspace whose install needs a registry or a token said so in its own
