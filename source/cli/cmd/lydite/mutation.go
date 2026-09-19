@@ -50,7 +50,7 @@ import (
 func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected, declined bool
+	var asJSON, noColor, stream, onlyAffected, declined, noGate bool
 	var concurrency, baseBranch, baseSHA, memory string
 	var timeout time.Duration
 	cmd := &cobra.Command{
@@ -195,6 +195,7 @@ a suppression, declaring one refers the change to a human.`,
 				timeout: timeout,
 				memory:  maxMemory,
 				stream:  stream,
+				gate:    !noGate,
 				// A run responsible for part of the declaration emits no
 				// summary row, for the reason it emits no coverage(repo):
 				// the figure counts over the whole repository, and a shard
@@ -243,6 +244,16 @@ a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	cmd.Flags().BoolVar(&declined, "declined", false,
 		"write a report saying this repository declined mutation testing for this run, and do nothing else")
+	// The post-merge run, where a survivor is history rather than a verdict:
+	// the change has landed, the branch is gone, and the remedy a failing row
+	// prints is addressed to a pull request that no longer exists. Only a
+	// completed measurement stops voting — a variant that is not runnable, an
+	// unresolvable base and every error still fail, which is the family a
+	// `continue-on-error` on the step could not tell a survivor from. Spelled
+	// as the negation of a default because mutation gates by default, the way
+	// `lydite test`'s --no-coverage is. See ADR 0048.
+	cmd.Flags().BoolVar(&noGate, "no-gate", false,
+		"measure and record every mutant as usual, and let no survivor fail the command")
 	return cmd
 }
 
@@ -304,8 +315,12 @@ type mutationOptions struct {
 	timeout time.Duration
 	// memory overrides the ceiling derived from each component's own baseline,
 	// in bytes, and zero asks for the derivation.
-	memory  int64
-	stream  bool
+	memory int64
+	stream bool
+	// gate is whether a completed component's outcome votes on the exit code.
+	// False under --no-gate, where the mutants still run, the findings are
+	// still emitted and mutants.json is still written.
+	gate    bool
 	summary bool
 }
 
@@ -605,7 +620,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	defer stop()
 	defer func() {
 		failed, ok := runCommands(context.WithoutCancel(ctx), dir, label, c, tc, "teardown", c.Teardown, log)
-		if !ok && row.Status == ui.StatusPass {
+		if !ok && teardownFailureReplaces(row.Status) {
 			row = failed
 		}
 	}()
@@ -679,7 +694,46 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	out = componentMutation{summary: s, elapsed: time.Since(baselineStarted), ran: true}
 	row, findings := mutationRow(label, c.Name, c.Dir, log, s, results, scoped, out.elapsed)
 	out.findings = findings
-	return row, out
+	return completedRow(row, opts.gate), out
+}
+
+// completedRow is what a component whose mutants ran is worth to the exit code.
+//
+// Under --no-gate it is worth nothing, and the row says so as StatusContext —
+// whether or not it had survivors. A component that killed every mutant renders
+// the same glyph as one that did not, because a ✓ is the claim that a gate
+// examined this component and cleared it, and no gate examined anything. The
+// value and the detail are untouched: the numbers and the surviving mutants are
+// the whole point of the run.
+//
+// Only a pass and a survivor are converted. A row that reached here already
+// non-voting — a denominator of zero — was never a measurement this flag has
+// anything to say about, and every way a component could not run at all is a
+// row mutateComponent returned before this.
+func completedRow(row ui.Row, gate bool) ui.Row {
+	if gate {
+		return row
+	}
+	if row.Status == ui.StatusPass || row.Status == ui.StatusFail {
+		row.Status = ui.StatusContext
+	}
+	return row
+}
+
+// teardownFailureReplaces says whether a component's teardown failing takes
+// over its row.
+//
+// It does where the row is the component's own completed measurement: the
+// mutants said what they had to say, and a stack the teardown left running is
+// then the only thing left to report. StatusContext is that same measurement
+// under --no-gate, and a teardown failure is a command that did not run rather
+// than a measurement, so the flag does not excuse it.
+//
+// A row that already names why the component could not be measured keeps that
+// reason, and so does a survivor a gating run is failing on: both are upstream
+// of the teardown, and the cause a reader acts on is the one they name.
+func teardownFailureReplaces(status ui.Status) bool {
+	return status == ui.StatusPass || status == ui.StatusContext
 }
 
 // backendFor is the isolation strategy one language's mutants are run under.
