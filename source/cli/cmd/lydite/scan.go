@@ -181,6 +181,7 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				scanned[key] = c.Name
+				warnDeclaredEnv(cmd.ErrOrStderr(), c, env.Check)
 
 				var results []executil.Result
 				switch lang {
@@ -258,6 +259,75 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&diffBase, "diff-base", "", `only report findings introduced since this commit ("auto" resolves the merge-base with the base branch); empty scans everything`)
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	return cmd
+}
+
+// warnDeclaredEnv names the environment a component's checks are composed
+// with, on the writer the caller reserves for what the scan ran under. A
+// component that composed nothing says nothing.
+//
+// A warning and not a row: a declaration is the repository's own configuration
+// of its own scan, which ADR 0020 records as legitimate influence, and no
+// status fits it — a `pass` asserts something nobody measured, a `fail` turns a
+// declaration the repository is entitled to make into a gate, and an
+// `unmeasured` spends the tag that exists to be noticed on a component that
+// scanned perfectly well. Naming it is the whole of what lydite owes here, and
+// editing the file is already a referral disqualifier.
+func warnDeclaredEnv(w io.Writer, c component.Component, composed []string) {
+	names := declaredEnvNames(c, composed)
+	if len(names) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "warning: %s's checks are composed with the environment %s declares: %s — names only, because a declared value can carry a credential\n",
+		c.Name, component.FileName, strings.Join(names, ", "))
+}
+
+// declaredEnvNames is the names of what a component's declaration contributed
+// to composed, in the order env sorts them, with a folded PATH last.
+//
+// Names, never values, and no future refinement of this prints a value. A
+// declared value is arbitrary text the repository controls, and the places a
+// repository puts a token are exactly the places that look like configuration:
+// a registry URL with credentials in it, a `*_TOKEN` a suite needs, a DSN. This
+// line reaches a CI log, which on a public repository is world-readable.
+// Redacting rather than omitting is the same object as an allowlist — a pattern
+// list that has to be complete to be safe, which publishes the secret it did
+// not recognise while reading as though it had checked. What a reader needs is
+// that the name was set for this component, and the value is in the file under
+// review.
+//
+// It reads the composed environment and not the declaration, because the two
+// differ in ways that matter. A declared PATH is not a variable of the child at
+// all — childEnv folds it into the single composed PATH entry, behind the
+// inherited one — so it is named as the path extension it is. A declared key
+// the resolved toolchain also sets is cancelled, since the toolchain's
+// variables compose last; naming it plainly would report a steering variable
+// that never reached the check.
+func declaredEnvNames(c component.Component, composed []string) []string {
+	dirs, vars := splitPath(env(c))
+	if len(dirs) == 0 && len(vars) == 0 {
+		return nil
+	}
+	// The last occurrence of a key is the one the child reads, which is how
+	// the toolchain's variables win.
+	effective := map[string]string{}
+	for _, kv := range composed {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			effective[k] = v
+		}
+	}
+	var names []string
+	for _, kv := range vars {
+		k, v, _ := strings.Cut(kv, "=")
+		if effective[k] != v {
+			names = append(names, k+" (overridden by the resolved toolchain)")
+			continue
+		}
+		names = append(names, k)
+	}
+	if len(dirs) > 0 {
+		names = append(names, "PATH (appended after lydite's own)")
+	}
+	return names
 }
 
 // scanUnits is what each declared component needs a toolchain for, in

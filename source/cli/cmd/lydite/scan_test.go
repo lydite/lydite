@@ -2087,3 +2087,131 @@ func TestABaseThatWillNotCheckOutIsUnmeasuredForEveryComponent(t *testing.T) {
 		t.Fatalf("worktrees = %d, want no registered base after a checkout that failed", got)
 	}
 }
+
+// The names reported are the ones the child actually reads, so the two cases
+// where the composition disagrees with the declaration are pinned here: a
+// declared PATH is folded into lydite's own entry rather than set, and a key
+// the resolved toolchain also sets is cancelled by composing last. A component
+// that composed nothing says nothing at all — a warning for every component is
+// a warning nobody reads.
+func TestDeclaredEnvNamesWhatWasComposed(t *testing.T) {
+	cases := []struct {
+		name     string
+		c        component.Component
+		composed []string
+		want     []string
+	}{
+		{
+			name:     "no declaration at all",
+			c:        component.Component{Name: "cli"},
+			composed: []string{"PATH=/usr/bin"},
+		},
+		{
+			name:     "an empty declaration is no declaration",
+			c:        component.Component{Name: "cli", Env: map[string]string{}},
+			composed: []string{"PATH=/usr/bin"},
+		},
+		{
+			name:     "a declared variable is named",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOVULNDB": "https://db.example", "GOFLAGS": "-tags x"}},
+			composed: []string{"GOFLAGS=-tags x", "GOVULNDB=https://db.example"},
+			want:     []string{"GOFLAGS", "GOVULNDB"},
+		},
+		{
+			name:     "an empty value is still a declaration",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAGS": ""}},
+			composed: []string{"GOFLAGS="},
+			want:     []string{"GOFLAGS"},
+		},
+		{
+			name:     "a declared PATH is the extension it is",
+			c:        component.Component{Name: "cli", Env: map[string]string{"PATH": "ci-bin"}},
+			composed: []string{"PATH=/usr/bin" + string(os.PathListSeparator) + "ci-bin"},
+			want:     []string{"PATH (appended after lydite's own)"},
+		},
+		{
+			name:     "a key the toolchain composes last never reached the check",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto"}},
+			composed: []string{"GOTOOLCHAIN=auto", "GOTOOLCHAIN=local"},
+			want:     []string{"GOTOOLCHAIN (overridden by the resolved toolchain)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declaredEnvNames(tc.c, tc.composed); !slices.Equal(got, tc.want) {
+				t.Errorf("declaredEnvNames = %q, want %q", got, tc.want)
+			}
+			var buf bytes.Buffer
+			warnDeclaredEnv(&buf, tc.c, tc.composed)
+			if (buf.Len() == 0) != (len(tc.want) == 0) {
+				t.Errorf("warnDeclaredEnv wrote %q for %d composed name(s)", buf.String(), len(tc.want))
+			}
+		})
+	}
+}
+
+// The composition the warning describes is childEnv's, so it is childEnv that
+// produces the environment here rather than a hand-written slice: a reordering
+// that let a declared GOTOOLCHAIN win would otherwise still be reported as
+// cancelled.
+func TestDeclaredEnvReadsTheEnvironmentChildEnvComposed(t *testing.T) {
+	c := component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto", "SQLX_OFFLINE": "true", "PATH": "ci-bin"}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+	got := declaredEnvNames(c, childEnv(tc, c, runner.Invocation{}))
+	want := []string{"GOTOOLCHAIN (overridden by the resolved toolchain)", "SQLX_OFFLINE", "PATH (appended after lydite's own)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("declaredEnvNames = %q, want %q", got, want)
+	}
+}
+
+// Names, never values. A declared value is arbitrary text the repository
+// controls, and this line goes to a CI log that is world-readable on a public
+// repository — so the value of a variable, and the directories of a declared
+// PATH, must never appear however the names are assembled.
+func TestDeclaredEnvValuesNeverReachTheWarning(t *testing.T) {
+	const secret = "ghp_examplesecretvaluenobodyshouldsee"
+	c := component.Component{Name: "cli", Env: map[string]string{
+		"NPM_TOKEN":    secret,
+		"DATABASE_URL": "postgres://user:" + secret + "@db/app",
+		"PATH":         "/opt/" + secret + "/bin",
+	}}
+	var buf bytes.Buffer
+	warnDeclaredEnv(&buf, c, childEnv(&toolchain.Env{}, c, runner.Invocation{}))
+	if strings.Contains(buf.String(), secret) {
+		t.Fatalf("a declared value reached the warning:\n%s", buf.String())
+	}
+	for _, want := range []string{"NPM_TOKEN", "DATABASE_URL", "PATH (appended after lydite's own)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("warning is missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+// warnDeclaredEnv is only useful if the scan calls it with the stream it
+// reserves for warnings and with the environment it actually composed — a unit
+// test over the function proves neither. The PATH is stripped and the
+// toolchain disabled so no tool is found and every check fails at once, which
+// is after the warning either way.
+func TestScanWarnsAboutADeclaredEnvironmentOnItsStderr(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n    env:\n      GOFLAGS: \"-tags secretvalue\"\n")
+	writeLydite(t, dir, config.FileName,
+		"toolchain:\n  enabled: false\nsemgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+
+	var out, errOut bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	if !strings.Contains(errOut.String(), "GOFLAGS") {
+		t.Fatalf("stderr = %q, want the declared environment named on the stream warnings go to", errOut.String())
+	}
+	if strings.Contains(errOut.String()+out.String(), "secretvalue") {
+		t.Fatalf("a declared value reached the scan's output:\nstderr: %s\nstdout: %s", errOut.String(), out.String())
+	}
+}
