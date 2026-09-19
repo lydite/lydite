@@ -1,0 +1,10 @@
+
+--- failure function_parameter_count_changed: pub fn parameter count changed ---
+
+Description:
+A publicly-visible function now takes a different number of parameters.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#fn-change-arity
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_parameter_count_changed.ron
+
+Failed in:
+  probe::changed now takes 2 parameters instead of 1, in $HEAD/src/lib.rs:9
