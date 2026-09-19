@@ -127,11 +127,15 @@ string, a wildcard: lydite cannot say how far the version moved, so it does not 
 little. Same direction of failure as an unreadable manifest, for the same reason.
 
 A cargo pin-manifest requirement edit — `=0.9.0` becoming `=0.9.1` in a `*-pin/Cargo.toml` —
-classifies by parsing the pin's own version string like any other dependency edit. There is no
-special case for it. The tool-pin manifests are ordinary manifests
-([ADR 0006](0006-tool-pins-as-dependabot-manifests.md) exists so that Dependabot treats them as
-such), and a rule that treated lydite's own pins differently from a consumer's would be a rule
-tested nowhere but here.
+classifies through the `Cargo.lock` stanza that edit moves, like any other dependency edit.
+There is no special case for it, and no reader for `Cargo.toml` itself: the tool-pin manifests
+are ordinary manifests ([ADR 0006](0006-tool-pins-as-dependabot-manifests.md) exists so that
+Dependabot treats them as such), and a rule that treated lydite's own pins differently from a
+consumer's would be a rule tested nowhere but here. **A `*-pin/Cargo.toml` edit with no
+accompanying `Cargo.lock` change is invisible to this delta** — the same accepted gap as yarn,
+pnpm and pip, just for a manifest this ADR otherwise covers: every `*-pin/` directory in this
+repository commits a lockfile beside its pin, so a Dependabot bump always moves both, but a
+consumer whose pin manifest carries no lockfile is not measured at all rather than referred.
 
 ### A `0.x` version is not boring the way a `1.x` one is
 

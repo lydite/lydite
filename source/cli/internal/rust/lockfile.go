@@ -27,6 +27,10 @@ type cargoLock struct {
 	// lines maps a crate's name and version to the one-based line its stanza
 	// names it on.
 	lines map[[2]string]int
+	// sources maps a crate's name and version to the stanza's `source` field
+	// — a registry, a git remote, or empty for a workspace member, which the
+	// format leaves the key out of entirely.
+	sources map[[2]string]string
 }
 
 // readCargoLock reads dir's lockfile, answering an empty one when it cannot.
@@ -38,7 +42,7 @@ type cargoLock struct {
 func readCargoLock(dir string) *cargoLock {
 	data, err := os.ReadFile(filepath.Join(dir, cargoLockFile)) // #nosec G304 -- dir is a declared component's directory
 	if err != nil {
-		return &cargoLock{lines: map[[2]string]int{}}
+		return &cargoLock{lines: map[[2]string]int{}, sources: map[[2]string]string{}}
 	}
 	return parseCargoLock(data)
 }
@@ -46,28 +50,43 @@ func readCargoLock(dir string) *cargoLock {
 // parseCargoLock reads a lockfile's content, whichever tree it came from. The
 // base side of a comparison is `git show`n rather than checked out, so the
 // parser takes bytes and never a path.
+//
+// A stanza is committed on the marker that starts the next one, or at end of
+// input, rather than as soon as its version line is seen: `source` follows
+// `version` in cargo's own field order, and reading it needs the name and
+// version this stanza already named to still be in hand.
 func parseCargoLock(data []byte) *cargoLock {
-	l := &cargoLock{lines: map[[2]string]int{}}
-	var name string
+	l := &cargoLock{lines: map[[2]string]int{}, sources: map[[2]string]string{}}
+	var name, version, source string
 	var nameLine int
+	commit := func() {
+		if name == "" || version == "" {
+			return
+		}
+		key := [2]string{name, version}
+		if _, seen := l.lines[key]; !seen {
+			l.lines[key] = nameLine
+			l.sources[key] = source
+		}
+	}
 	for n, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		switch {
 		case line == "[[package]]":
-			name, nameLine = "", 0
+			commit()
+			name, version, source, nameLine = "", "", "", 0
 		case strings.HasPrefix(line, "name = "):
-			name, nameLine = tomlString(line), n+1
-		case strings.HasPrefix(line, "version = ") && name != "":
 			// The name's line and not the version's: it is the line a reader
 			// recognises the crate on, and the one a diff against a bump
 			// shows the stanza changing at.
-			key := [2]string{name, tomlString(line)}
-			if _, seen := l.lines[key]; !seen {
-				l.lines[key] = nameLine
-			}
-			name, nameLine = "", 0
+			name, nameLine = tomlString(line), n+1
+		case strings.HasPrefix(line, "version = ") && name != "":
+			version = tomlString(line)
+		case strings.HasPrefix(line, "source = ") && name != "":
+			source = tomlString(line)
 		}
 	}
+	commit()
 	return l
 }
 
@@ -105,19 +124,25 @@ func tomlString(line string) string {
 func (l *cargoLock) Line(name, version string) int { return l.lines[[2]string{name, version}] }
 
 // LockDependencies is every crate a `Cargo.lock`'s content pins, mapped to the
-// versions pinned for it.
+// versions pinned for it, and the `source` field recorded for each (name,
+// version) pin.
 //
 // The versions are a list because a lockfile legitimately pins two of one
 // crate — a graph resolving `rand` at both 0.8 and 0.9 writes two stanzas —
 // and collapsing them to one would report a version pair that moved where
-// nothing did.
-func LockDependencies(content []byte) map[string][]string {
+// nothing did. The source is returned alongside rather than folded into the
+// version, because a stanza keeping its name and version while its `source`
+// moves to a different registry or git remote is a different crate wearing
+// the same label — a comparison keyed on name and version alone would call
+// that no change at all.
+func LockDependencies(content []byte) (map[string][]string, map[[2]string]string) {
+	l := parseCargoLock(content)
 	out := map[string][]string{}
-	for key := range parseCargoLock(content).lines {
+	for key := range l.lines {
 		name, version := key[0], key[1]
 		if !slices.Contains(out[name], version) {
 			out[name] = append(out[name], version)
 		}
 	}
-	return out
+	return out, l.sources
 }

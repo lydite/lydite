@@ -54,6 +54,9 @@ type npmPackage struct {
 	// skipped the way internal/golang skips the main module: a repository's own
 	// licence is not a dependency's, and is not this gate's to judge.
 	Link bool `json:"link"`
+	// Resolved is the tarball URL or git reference npm fetched this entry
+	// from — the origin that names the pin, alongside its name and version.
+	Resolved string `json:"resolved"`
 }
 
 // licenceOf is the SPDX expression an entry states, or Unknown when it states
@@ -143,22 +146,27 @@ func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 }
 
 // LockDependencies is every package a `package-lock.json`'s content resolved,
-// mapped to the versions resolved for it.
+// mapped to the versions resolved for it, and the tarball or git origin each
+// (name, version) pin was fetched from.
 //
 // It skips exactly what lockfileDependencies skips, and for the same reason:
 // the root entry and a workspace member are the repository's own code rather
 // than a dependency, and a package the repository itself contains is not one a
 // change can be said to have added. The versions are a list because a nested
-// duplicate resolves one name at two versions.
+// duplicate resolves one name at two versions. The origin travels alongside
+// rather than inside the version, because a pin keeping its name and version
+// while `resolved` points somewhere else is a different install of the same
+// label, not the same dependency it was.
 //
 // The base side of a comparison is `git show`n rather than checked out, so this
 // takes bytes and never a directory.
-func LockDependencies(content []byte) (map[string][]string, error) {
+func LockDependencies(content []byte) (map[string][]string, map[[2]string]string, error) {
 	var lock npmLockfile
 	if err := json.Unmarshal(content, &lock); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", npmLockFile, err)
+		return nil, nil, fmt.Errorf("parsing %s: %w", npmLockFile, err)
 	}
 	out := map[string][]string{}
+	origins := map[[2]string]string{}
 	for path, p := range lock.Packages {
 		name, ok := packageName(path)
 		if !ok || p.Link {
@@ -167,8 +175,9 @@ func LockDependencies(content []byte) (map[string][]string, error) {
 		if !slices.Contains(out[name], p.Version) {
 			out[name] = append(out[name], p.Version)
 		}
+		origins[[2]string{name, p.Version}] = p.Resolved
 	}
-	return out, nil
+	return out, origins, nil
 }
 
 // packageName is the package an entry's install path names, and false when the

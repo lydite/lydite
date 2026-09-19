@@ -251,3 +251,62 @@ func TestASetSortsAndDeduplicatesEveryPackagesVersions(t *testing.T) {
 		t.Fatalf("rand = %v, want %v", got, want)
 	}
 }
+
+// A package keeping its name and version while its origin moves to a
+// different registry, git remote or tarball is not a version move at all —
+// it is new code wearing an old label, and treating it as boring is exactly
+// what a lockfile edit that swaps a dependency's source depends on.
+func TestASameVersionOriginSwapIsNotEligible(t *testing.T) {
+	base := NewSetWithOrigins(
+		map[string][]string{"left-pad": {"1.3.0"}},
+		map[[2]string]string{{"left-pad", "1.3.0"}: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
+	)
+	head := NewSetWithOrigins(
+		map[string][]string{"left-pad": {"1.3.0"}},
+		map[[2]string]string{{"left-pad", "1.3.0"}: "https://evil.example.com/left-pad-1.3.0.tgz"},
+	)
+	d := Compare(base, head)
+	if len(d.Added) != 0 || len(d.Removed) != 0 {
+		t.Fatalf("added = %v, removed = %v, want neither: the name and version did not move", d.Added, d.Removed)
+	}
+	if len(d.Changed) != 1 {
+		t.Fatalf("changed = %v, want one entry: an origin swap at an unchanged version is a change", d.Changed)
+	}
+	if d.PatchOrMinorEligible() {
+		t.Error("a same-version origin swap is eligible")
+	}
+}
+
+// A real Cargo.lock keeping a crate's name and version while its `source`
+// moves from the registry to a git remote reads as a change, through the
+// same reader an ordinary version bump uses.
+func TestACargoSourceSwapAtTheSameVersionIsNotEligible(t *testing.T) {
+	d := compare(t, "cargo-swap", "Cargo.lock")
+	if len(d.Added) != 0 || len(d.Removed) != 0 {
+		t.Fatalf("added = %v, removed = %v, want neither: the name and version did not move", d.Added, d.Removed)
+	}
+	if len(d.Changed) != 1 || d.Changed[0].Name != "anstyle" {
+		t.Fatalf("changed = %v, want one entry for anstyle", d.Changed)
+	}
+	if d.PatchOrMinorEligible() {
+		t.Error("a same-version source swap from registry to git is eligible")
+	}
+}
+
+// An ordinary version bump legitimately changes npm's `resolved` URL, which
+// names the tarball for that version — that is not evidence of anything, and
+// must not make a routine bump ineligible.
+func TestAnOriginThatMovesWithTheVersionIsNotASwap(t *testing.T) {
+	base := NewSetWithOrigins(
+		map[string][]string{"left-pad": {"1.3.0"}},
+		map[[2]string]string{{"left-pad", "1.3.0"}: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
+	)
+	head := NewSetWithOrigins(
+		map[string][]string{"left-pad": {"1.3.1"}},
+		map[[2]string]string{{"left-pad", "1.3.1"}: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.1.tgz"},
+	)
+	d := Compare(base, head)
+	if !d.PatchOrMinorEligible() {
+		t.Error("a patch bump whose resolved URL moved with it is not eligible")
+	}
+}

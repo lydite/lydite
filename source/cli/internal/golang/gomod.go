@@ -185,32 +185,46 @@ func GoModDependencies(content []byte) map[string][]string {
 }
 
 // GoSumDependencies is every module a `go.sum`'s content pins, mapped to the
-// versions pinned for it.
+// versions pinned for it, and the content hash recorded for each (module,
+// version) pair.
 //
 // go.sum is the fuller of the two sources: it enumerates every module version
 // the build resolves, transitives included, where a manifest names only what
 // its own module requires. A module appears on two lines per version — the
 // module zip's hash and its `go.mod`'s — and the `/go.mod` suffix is trimmed
-// so both read as the one version they are.
+// so both read as the one version they are; the zip's hash is what a pin's
+// origin is reported as, since that is the line whose hash changes when a
+// module keeps its path and version but the content behind them does not.
 //
 // A line that is neither blank nor a `module version hash` triple is an error
 // rather than a skip: a file this cannot read whole yields a dependency set
 // that is short by however much it did not understand, and a short set reports
 // no addition from exactly the manifest that was unusual.
-func GoSumDependencies(content []byte) (map[string][]string, error) {
+func GoSumDependencies(content []byte) (map[string][]string, map[[2]string]string, error) {
 	out := map[string][]string{}
+	origins := map[[2]string]string{}
 	for n, raw := range strings.Split(string(content), "\n") {
 		fields := strings.Fields(raw)
 		if len(fields) == 0 {
 			continue
 		}
 		if len(fields) != 3 {
-			return nil, fmt.Errorf("%s line %d: expected a module, a version and a hash", goSumFile, n+1)
+			return nil, nil, fmt.Errorf("%s line %d: expected a module, a version and a hash", goSumFile, n+1)
 		}
-		path, version := fields[0], strings.TrimSuffix(fields[1], "/"+goModFile)
+		isGoModLine := strings.HasSuffix(fields[1], "/"+goModFile)
+		path, version, hash := fields[0], strings.TrimSuffix(fields[1], "/"+goModFile), fields[2]
 		if !slices.Contains(out[path], version) {
 			out[path] = append(out[path], version)
 		}
+		// The module-zip line names the content this pins the package to; the
+		// go.mod line's own hash is kept only as a fallback for a module that
+		// somehow carries one line and not the other, since the zip's hash is
+		// what changes when a package keeps its name and version but the
+		// content behind them does not.
+		key := [2]string{path, version}
+		if !isGoModLine || origins[key] == "" {
+			origins[key] = hash
+		}
 	}
-	return out, nil
+	return out, origins, nil
 }

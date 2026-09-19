@@ -33,7 +33,9 @@ import (
 	"lydite/lydite/internal/typescript"
 )
 
-// Set is the packages one manifest pins, each with the versions pinned for it.
+// Set is the packages one manifest pins, each with the versions pinned for
+// it, and the origin recorded for each (name, version) pin where the
+// ecosystem names one.
 //
 // A name carries a list rather than a version because a manifest legitimately
 // pins two of one package — a cargo graph resolving `rand` at 0.8 and 0.9, an
@@ -41,17 +43,34 @@ import (
 // zero value is the empty set.
 type Set struct {
 	versions map[string][]string
+	origins  map[[2]string]string
 }
 
-// NewSet is the set holding the versions each named package is pinned at. Each
-// name's versions are sorted and deduplicated, so two readings of one manifest
-// can never differ by the order a map happened to be ranged in.
+// NewSet is the set holding the versions each named package is pinned at,
+// with no origin recorded for any of them — the shape a manifest with no
+// origin signal of its own produces (`go.mod`, which pins no content hash).
+// Each name's versions are sorted and deduplicated, so two readings of one
+// manifest can never differ by the order a map happened to be ranged in.
 func NewSet(versions map[string][]string) Set {
-	s := Set{versions: make(map[string][]string, len(versions))}
+	return NewSetWithOrigins(versions, nil)
+}
+
+// NewSetWithOrigins is NewSet, additionally recording the origin — Cargo's
+// `source`, npm's `resolved`, a go.sum content hash — each (name, version)
+// pin names. A pair origins has nothing for is the empty string, the same
+// answer NewSet gives every pair.
+func NewSetWithOrigins(versions map[string][]string, origins map[[2]string]string) Set {
+	s := Set{versions: make(map[string][]string, len(versions)), origins: map[[2]string]string{}}
 	for name, vs := range versions {
 		sorted := slices.Clone(vs)
 		slices.Sort(sorted)
-		s.versions[name] = slices.Compact(sorted)
+		sorted = slices.Compact(sorted)
+		s.versions[name] = sorted
+		for _, v := range sorted {
+			if o := origins[[2]string{name, v}]; o != "" {
+				s.origins[[2]string{name, v}] = o
+			}
+		}
 	}
 	return s
 }
@@ -79,6 +98,11 @@ func (s Set) Has(name string) bool {
 // when it does not pin it.
 func (s Set) Versions(name string) []string { return slices.Clone(s.versions[name]) }
 
+// Origin is the origin recorded for one (name, version) pin — Cargo's
+// `source`, npm's `resolved`, a go.sum content hash — and empty when the
+// ecosystem names none, or when the set does not pin that pair at all.
+func (s Set) Origin(name, version string) string { return s.origins[[2]string{name, version}] }
+
 // Extract is the dependency set a manifest's content states.
 //
 // A manifest with no reader is an error rather than an empty set, and so is one
@@ -94,19 +118,20 @@ func Extract(m Manifest, content []byte, source string) (Set, error) {
 	case ManifestGoMod:
 		return NewSet(golang.GoModDependencies(content)), nil
 	case ManifestGoSum:
-		versions, err := golang.GoSumDependencies(content)
+		versions, origins, err := golang.GoSumDependencies(content)
 		if err != nil {
 			return Set{}, fmt.Errorf("%s: %w", source, err)
 		}
-		return NewSet(versions), nil
+		return NewSetWithOrigins(versions, origins), nil
 	case ManifestCargoLock:
-		return NewSet(rust.LockDependencies(content)), nil
+		versions, origins := rust.LockDependencies(content)
+		return NewSetWithOrigins(versions, origins), nil
 	case ManifestNPMLock:
-		versions, err := typescript.LockDependencies(content)
+		versions, origins, err := typescript.LockDependencies(content)
 		if err != nil {
 			return Set{}, fmt.Errorf("%s: %w", source, err)
 		}
-		return NewSet(versions), nil
+		return NewSetWithOrigins(versions, origins), nil
 	}
 	if m == ManifestNone {
 		return Set{}, fmt.Errorf("%s: names no dependency manifest", source)
