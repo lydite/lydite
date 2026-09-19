@@ -1007,6 +1007,73 @@ func TestReviewCompareRecordsTheBaseItResolved(t *testing.T) {
 	}
 }
 
+// A --surfaces document that cannot be read at all — missing, or the job
+// that would have written it never ran — must still be referred, not answer
+// with a bare error: main.go maps any error that is not a ui.ExitError to
+// exit 1, indistinguishable from a gate the author can clear, and a workflow
+// step that only re-fails a job past exit 2 would then let this pass with
+// referral-publish's own credential having posted nothing at all.
+func TestReviewWithAnUnreadableSurfacesDocumentRefers(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base, "--surfaces", filepath.Join(t.TempDir(), "does-not-exist.json"))
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an unreadable surfaces document must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "the comparison document could not be read") {
+		t.Errorf("the referral must say why, got:\n%s", out)
+	}
+}
+
+// A document that opens fine but decodes into nothing readable, or names no
+// base commit, is exactly as unreadable as a missing file: readSurfaces
+// refuses both rather than handing review a document with nothing in it.
+func TestReadSurfacesRejectsAMalformedDocument(t *testing.T) {
+	for name, raw := range map[string]string{
+		"invalid json": `{not json`,
+		"no base":      `{"results":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "surfaces.json")
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readSurfaces(path); err == nil {
+				t.Errorf("readSurfaces(%s) was accepted, want it refused", raw)
+			}
+		})
+	}
+}
+
+// writeSurfaces reports the underlying failure rather than losing it: a path
+// under a directory that does not exist cannot be created, and the caller
+// needs that reason, not a silent success.
+func TestWriteSurfacesReportsAnUnwritablePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist", "surfaces.json")
+	if err := writeSurfaces(path, "deadbeef", nil); err == nil {
+		t.Error("writeSurfaces under a missing directory was accepted")
+	}
+}
+
+// review compare with no destination has nowhere to put what it computed,
+// so it refuses before running any comparison rather than doing the work
+// and discarding the result.
+func TestReviewCompareNeedsAWriteSurfacesFlag(t *testing.T) {
+	cmd := newReviewCompareCmd()
+	cmd.SetArgs([]string{"--dir", t.TempDir()})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.Execute(); err == nil {
+		t.Error("review compare with no --write-surfaces was accepted")
+	}
+}
+
 // A finding the loader could not place carries no path, and locate must
 // report its message on its own rather than joining an empty path onto the
 // component's directory, which would point at the directory as though it

@@ -101,6 +101,29 @@ func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base strin
 	return results, nil
 }
 
+// uncomputableSurfaces reports every component that opted into api_surface as
+// uncomputable for the given reason, without running any comparison.
+//
+// Used when the document review compare wrote could not be read at all: a
+// missing or corrupted artifact is not evidence the change is clean, and
+// returning early with a plain error here would exit 1 before any
+// disqualification is added — a workflow step that treats exit codes at or
+// under 2 as an answer rather than a malfunction would then publish nothing
+// at all, which is worse than a referral it can at least act on.
+func uncomputableSurfaces(dir, reason string) ([]surfaceComparison, error) {
+	file, err := component.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	var results []surfaceComparison
+	for _, c := range file.Components {
+		if c.APISurface != nil {
+			results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: reason})
+		}
+	}
+	return results, nil
+}
+
 // renderAPISurfaceRows decides what results computeAPISurfaces already made
 // mean, and folds the answer into the report and into the decision. It runs
 // no comparison and executes no component's own code: reading the

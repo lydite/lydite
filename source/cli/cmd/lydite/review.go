@@ -59,11 +59,28 @@ publish in another that never runs the change's own code.`,
 			var baseSHA string
 			var surfaces []surfaceComparison
 			if surfacesPath != "" {
-				doc, err := readSurfaces(surfacesPath)
-				if err != nil {
-					return err
+				doc, readErr := readSurfaces(surfacesPath)
+				switch readErr {
+				case nil:
+					baseSHA, surfaces = doc.Base, doc.Results
+				default:
+					// Unreadable, not absent: a run that could not read what
+					// review compare wrote still has to reach a base to
+					// decide anything else against, and it must still refer
+					// rather than exit quietly under 2 and publish nothing —
+					// exit 1 here would read to the caller as "an answer",
+					// and the workflow step that only re-fails a job past 2
+					// would let this pass with no status posted at all.
+					var err error
+					baseSHA, err = resolveReviewBase(ctx, dir, base, baseBranch)
+					if err != nil {
+						return err
+					}
+					surfaces, err = uncomputableSurfaces(dir, "the comparison document could not be read: "+readErr.Error())
+					if err != nil {
+						return err
+					}
 				}
-				baseSHA, surfaces = doc.Base, doc.Results
 			} else {
 				var err error
 				baseSHA, err = resolveReviewBase(ctx, dir, base, baseBranch)
