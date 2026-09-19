@@ -16,6 +16,15 @@ what lets an unmeasured gate be visibly distinct from a passing one — the ward
 failure — without a path-filtered coverage job starting to fail builds. `ui.Report.ExitCode`
 is the single place that mapping lives: `✗` anywhere is 1, else a referral is 2, else 0.
 
+**`StatusDeclined` shares the default glyph with `StatusNew` and `StatusContext`, not the amber
+`!`.** A concern the repository chose not to run at all is a decision stated on purpose, not a
+gate that failed to run, so it does not wear the same attention `StatusUnmeasured` does. Telling
+the two apart in a fold — a gap nobody asked about versus one the repository declared — is
+`cmd/lydite/publish.go`'s `worst()`, `counts()` and `headline()`, not a second glyph here; see
+[`surface.md`](surface.md) for the section-level rule and [ADR
+0044](../../docs/adr/0044-a-declined-concern-renders-as-declined.md) for why it is its own
+status rather than a use of `StatusContext`.
+
 **Anything automated reads `--json`, never the text.** The document carries the same rows as
 the terminal, so the two cannot disagree, and statuses travel as their own names rather than
 as glyphs. `TestJSONKeysArePartOfTheContract` pins the keys; `ui.jsonRow` stays a separate
