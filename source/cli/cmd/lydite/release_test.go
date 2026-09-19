@@ -192,6 +192,42 @@ func TestReleaseCheckReportsTheFirstReleasesRangeAsEmpty(t *testing.T) {
 	}
 }
 
+// A shallow checkout that never fetched the tags below the one being released
+// reads exactly like a genuine first release: PreviousTag finds no candidate
+// either way. Reporting it as a pass would be a gate that could not run
+// rendering as one that did — the shallow checkout must be told apart from
+// the first release and refused, not silently accepted.
+func TestReleaseCheckRefusesAFirstLookingRangeInAShallowCheckout(t *testing.T) {
+	origin := releaseRepo(t,
+		releaseCommit{message: "feat: the first release", tag: "v0.1.0"},
+		releaseCommit{message: "fix: a leader dot"},
+		releaseCommit{message: "feat: the second release", tag: "v0.2.0"},
+	)
+	ctx := context.Background()
+	dir := t.TempDir()
+	if r := executil.RunQuiet(ctx, origin, "git", "clone", "--depth", "1", "file://"+origin, dir); !r.Ok() {
+		t.Fatalf("git clone --depth 1: %v\n%s", r.Err, r.Output)
+	}
+	// The clone's own tag listing must actually miss v0.1.0 for this to test
+	// what it claims to: a shallow clone fetches a tag pointing at the one
+	// commit it holds, but not one further back than its depth.
+	if r := executil.RunQuiet(ctx, dir, "git", "tag", "-l", "v*"); !r.Ok() || strings.Contains(r.Output, "v0.1.0") {
+		t.Fatalf("fixture is not shallow enough: tags are %q (err %v)", r.Output, r.Err)
+	}
+
+	out, err := runReleaseCheckCmd(t, dir, "--tag", "v0.2.0")
+	if err == nil {
+		t.Fatalf("a shallow checkout with no lower tag must not pass as a first release:\n%s", out)
+	}
+	var exit ui.ExitError
+	if errors.As(err, &exit) {
+		t.Fatalf("an unresolvable range is an error, not a verdict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "fetch-depth: 0") {
+		t.Errorf("the error names the fix: %v", err)
+	}
+}
+
 // A tag that is not a version leaves the range unresolvable, and an
 // unresolvable range is an error naming the fix — never a pass.
 func TestReleaseCheckRefusesATagThatIsNotAVersion(t *testing.T) {

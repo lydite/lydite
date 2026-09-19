@@ -94,6 +94,17 @@ func runReleaseCheck(ctx context.Context, cmd *cobra.Command, dir, tag string, a
 		return err
 	}
 	if !ok {
+		// A shallow checkout with no tags below the target reads exactly like a
+		// genuine first release — both have no candidate to find. Only a
+		// shallow repository is asked here, because a full-history checkout
+		// with no lower tag really is the first release, and reporting that
+		// as an error would refuse a case ADR 0045 states must pass.
+		if shallow, err := isShallow(ctx, dir); err != nil {
+			return err
+		} else if shallow {
+			return fmt.Errorf("%s has no tag below it in a shallow checkout, so a real predecessor cannot be told from none at all: "+
+				"check out with `fetch-depth: 0` and the repository's tags fetched", tag)
+		}
 		return writeReleaseReport(cmd, rep, asJSON, noColor, ui.Row{
 			Status: ui.StatusPass,
 			Label:  declarationsLabel,
@@ -171,6 +182,18 @@ func releaseTag(ctx context.Context, dir, tag string) string {
 		return strings.TrimSpace(r.Output)
 	}
 	return ""
+}
+
+// isShallow reports whether dir is a shallow checkout — one that may hold
+// commits without holding the tags that decorate its own history, which is
+// exactly the shape that makes "no previous tag" ambiguous between a genuine
+// first release and one the checkout never fetched.
+func isShallow(ctx context.Context, dir string) (bool, error) {
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--is-shallow-repository")
+	if !r.Ok() {
+		return false, fmt.Errorf("git rev-parse --is-shallow-repository: %w", r.Err)
+	}
+	return strings.TrimSpace(r.Output) == "true", nil
 }
 
 // subject is a commit's first line, which is what identifies it to a person

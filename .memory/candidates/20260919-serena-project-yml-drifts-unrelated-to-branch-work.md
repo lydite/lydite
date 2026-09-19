@@ -15,7 +15,6 @@ twice, in between commits that never touched it — each time with the same shap
 a couple of comment lines under "Special requirements"). Neither modification was made by
 any task in that session's own work.
 
-Before committing anything from a session that touches this repository, check `git diff
-.serena/project.yml`: if the diff is only this kind of comment/list churn with no relation
-to the task at hand, it is safe to `git checkout -- .serena/project.yml` and continue — it
-is not a change any of this repository's branches should carry.
+Look at `git diff .serena/project.yml` before attributing a change there to anything a
+session did: this shape — comment/list churn unrelated to the task at hand — is not a
+change any of this repository's branches should carry.
