@@ -800,6 +800,58 @@ func TestARepositoryDeclaringNoComponentIsReported(t *testing.T) {
 	}
 }
 
+// `--declined` writes the one-row document ADR 0044 describes and returns
+// before any component is loaded: a declaration `component.Load` would refuse
+// is left untouched, and the run still succeeds.
+func TestADeclinedRunWritesOneRowAndTouchesNoComponent(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n  - name: app\n    dir: nowhere\n    runner: go-test\n")
+	doc, _, err := runMutationCmd(t, "--dir", root, "--declined")
+	if err != nil {
+		t.Fatalf("a declined run failed: %v", err)
+	}
+	if len(doc.Rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly one", doc.Rows)
+	}
+	row := doc.Rows[0]
+	if row.Status != ui.StatusDeclined || row.Label != "mutation" || row.Value != "declined for this run" {
+		t.Errorf("row = %+v, want the declined row ADR 0044 describes", row)
+	}
+	if doc.Verdict != ui.VerdictPass {
+		t.Errorf("verdict is %q; a declined run is not a failure", doc.Verdict)
+	}
+
+	// The document a real run would have written is where publish looks for
+	// it, holding the same one row.
+	written, err := readDocument(documentPath(reportsDir(root), "mutation"))
+	if err != nil {
+		t.Fatalf("no document was written to the report directory: %v", err)
+	}
+	if len(written.Rows) != 1 || written.Rows[0].Status != ui.StatusDeclined {
+		t.Errorf("written document rows = %+v, want the one declined row", written.Rows)
+	}
+}
+
+// The document `lydite mutation --declined` writes renders as a declined
+// section once `lydite publish` reads it back — the round-trip ADR 0044
+// exists to guarantee: a repository that declined the concern sees that
+// stated, not a silently absent section.
+func TestADeclinedMutationDocumentRendersAsADeclinedSection(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components: []\n")
+	if _, _, err := runMutationCmd(t, "--dir", root, "--declined"); err != nil {
+		t.Fatalf("a declined run failed: %v", err)
+	}
+	comment := buildComment([]string{reportsDir(root)}, "")
+	if len(comment.Sections) != 1 {
+		t.Fatalf("sections = %+v, want exactly the mutation section", comment.Sections)
+	}
+	if got := comment.Sections[0].Status; got != ui.StatusDeclined {
+		t.Errorf("section status = %q, want declined", got)
+	}
+}
+
 // A typo in a flag must not pay for a git walk first, and must not discard a
 // report the run had already computed.
 func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {

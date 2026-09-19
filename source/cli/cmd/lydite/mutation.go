@@ -50,7 +50,7 @@ import (
 func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected bool
+	var asJSON, noColor, stream, onlyAffected, declined bool
 	var concurrency, baseBranch, baseSHA, memory string
 	var timeout time.Duration
 	cmd := &cobra.Command{
@@ -79,6 +79,16 @@ a suppression, declaring one refers the change to a human.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("mutation")
+
+			// Checked before anything else in this RunE, and answered with
+			// no component loaded, planned, scheduled or built: a repository
+			// that told CI not to run mutation this run has nothing here to
+			// measure, and the row says so rather than the section going
+			// missing the way an unrun job would leave it. See ADR 0044.
+			if declined {
+				rep.Add(ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"})
+				return renderReport(cmd, rep, dir, asJSON, noColor)
+			}
 
 			// The same interrupt handling `lydite test` installs, and for the
 			// same reason: this command starts a component's compose stack
@@ -231,6 +241,8 @@ a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().StringVar(&memory, "memory", "",
 		"how much memory one mutant's suite may hold before it counts as killed, e.g. 4GiB; derived from the component's own baseline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
+	cmd.Flags().BoolVar(&declined, "declined", false,
+		"write a report saying this repository declined mutation testing for this run, and do nothing else")
 	return cmd
 }
 

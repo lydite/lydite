@@ -3,34 +3,34 @@
 > **The reference for `.github/actions/` and the `lydite/actions` repository.**
 
 The actions a consumer runs live in [`lydite/actions`](https://github.com/lydite/actions), not
-here (ADR 0010). It ships `setup`, `review`, `scan`, `test` and `publish`, plus a reusable
-`.github/workflows/lydite.yml` that runs the referral, the scan and the gated suites in parallel
-and renders one comment from all of them. Consumers pin the floating major, `@v1`, which a
-release moves.
+here (ADR 0010). It ships ten actions — `setup`, `review`, `scan`, `test`, `plan`, `merge`,
+`mutation`, `mutation-merge`, `record`, `publish` — plus two reusable workflows. `lydite.yml`
+runs the referral and the scan with no `needs`, `plan` groups the declared components into
+shards, a test matrix and a mutation matrix each consume that grouping in parallel, `merge` and
+`mutation-merge` each fold their matrix's shards, and `publish` (`if: always()`) renders one
+comment from every job's report and computes the review-thread delta through `lydite threads`,
+opening, answering and closing threads on the reports call for. `lydite-baseline.yml` is the
+separate workflow that records a coverage baseline after a change has merged: its own `plan` and
+`scan` jobs, a `measure` matrix, and one `record` job that folds every shard and pushes with
+`--branch`. Consumers pin the floating major, `@v1`, which a release moves.
+
+**There is no input to decline mutation.** A comment with no mutation section reads as a
+repository whose mutants all died rather than one that chose not to run them — the gap
+[lydite/actions#9](https://github.com/lydite/actions/issues/9) tracks, and the CLI half of it is
+[`surface.md`](surface.md)'s `StatusDeclined`.
 
 **What is here is the dogfood, and the two are deliberately the same shape.**
-`.github/workflows/lydite-pr.yml` runs those four concerns through the local composites in
-`.github/actions/` — `lydite-binary`, `lydite-reports`, `lydite-comment` and `lydite-threads`.
-The one difference is that `lydite-binary` uses the binary the pull request built, because a dogfood against the last
-release tests the last release. When the shape here changes, that repository is where the change
-has to land as well; nothing enforces it.
+`.github/workflows/lydite-pr.yml` runs the same concerns through the local composites in
+`.github/actions/`. The one difference is that the binary composite here uses the binary the
+pull request built, because a dogfood against the last release tests the last release. When the
+shape here changes, that repository is where the change has to land as well; nothing enforces
+it.
 
-**Two such changes are outstanding.** `lydite-pr.yml`'s `merge`, `mutation-merge` and `publish`
-jobs now find each shard's report by the document it wrote rather than by globbing a fixed
-directory depth — `actions/download-artifact` only nests a matched artifact when the pattern
-matched more than one, and a single-component repository's lone shard was falling through every
-one of those globs. `lydite/actions`'s reusable workflow folds the same way and has the same
-bug; it is tracked there as lydite/actions#4, not fixed in this repository. See
-[`ci.md`](ci.md) for the discovery pattern and [`find-a-folds-inputs-by-document-not-by-directory-depth.md`](../rules/find-a-folds-inputs-by-document-not-by-directory-depth.md)
-for the rule.
-
-`lydite-comment` and `lydite-threads` also now sort the relay's response into three buckets —
-fall back silently, fall back under a `::warning::`, or fail the step with no fallback — instead
-of treating any non-`200` as one undifferentiated fallback. `lydite/actions`'s composites carry
-the copy consumers actually run and still implement the old binary check; nothing enforces the
-same classification landing there. See
-[ADR 0037](../../docs/adr/0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md)
-for the classification and [`surface.md`](surface.md) for the summary.
+**A fold is a shared script, not a copy per action.** `merge` and `mutation-merge` both reach
+`.github/actions/fold/fold.sh` through `github.action_path`, resolved relative to the calling
+action rather than duplicated into each. Two folds computing the same completeness question —
+every declared component takes exactly one row, and a missing or doubled row fails the job —
+share one implementation of it.
 
 **A consumer's comment is rendered by `lydite publish` and nothing else, and its review threads
 are computed by `lydite threads` and nothing else.** The posting step takes a file and a marker

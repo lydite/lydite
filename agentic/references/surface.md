@@ -44,6 +44,14 @@ component as unmeasured, and `review` reports a dirty working tree the same way.
 measured section says so in the counts on its own summary line, which is visible without
 opening it.
 
+**A concern the repository declined to run is its own status, `StatusDeclined`, not
+`unmeasured`.** A command asked to skip itself — `lydite mutation --declined` — still writes its
+report document, carrying one row that says so, so the section renders rather than disappearing.
+Left as `unmeasured` it would trigger the same "no verdict came from" headline a genuinely
+missing input does, which is the one distinction this status exists to draw: a gap nobody asked
+about reads differently from a decision the repository stated on purpose. See
+[ADR 0044](../../docs/adr/0044-a-declined-concern-renders-as-declined.md).
+
 **`scan` writes a log per check**, under `.lydite-reports/scan/<slug>.log`, and sets `Row.Log`.
 `test` has written one per component since it had rows; a scan check that failed left its
 findings only in a job log, which is unreachable from a comment. The output is already captured
