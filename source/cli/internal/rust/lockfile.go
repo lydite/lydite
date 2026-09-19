@@ -3,6 +3,7 @@ package rust
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -35,11 +36,18 @@ type cargoLock struct {
 // found what it found, and a claim with no line belongs in the standing
 // comment rather than nowhere.
 func readCargoLock(dir string) *cargoLock {
-	l := &cargoLock{lines: map[[2]string]int{}}
 	data, err := os.ReadFile(filepath.Join(dir, cargoLockFile)) // #nosec G304 -- dir is a declared component's directory
 	if err != nil {
-		return l
+		return &cargoLock{lines: map[[2]string]int{}}
 	}
+	return parseCargoLock(data)
+}
+
+// parseCargoLock reads a lockfile's content, whichever tree it came from. The
+// base side of a comparison is `git show`n rather than checked out, so the
+// parser takes bytes and never a path.
+func parseCargoLock(data []byte) *cargoLock {
+	l := &cargoLock{lines: map[[2]string]int{}}
 	var name string
 	var nameLine int
 	for n, raw := range strings.Split(string(data), "\n") {
@@ -95,3 +103,21 @@ func tomlString(line string) string {
 // review thread, a guessed line is a thread on code that has nothing to do
 // with the advisory, on a pull request whose author cannot act on it.
 func (l *cargoLock) Line(name, version string) int { return l.lines[[2]string{name, version}] }
+
+// LockDependencies is every crate a `Cargo.lock`'s content pins, mapped to the
+// versions pinned for it.
+//
+// The versions are a list because a lockfile legitimately pins two of one
+// crate — a graph resolving `rand` at both 0.8 and 0.9 writes two stanzas —
+// and collapsing them to one would report a version pair that moved where
+// nothing did.
+func LockDependencies(content []byte) map[string][]string {
+	out := map[string][]string{}
+	for key := range parseCargoLock(content).lines {
+		name, version := key[0], key[1]
+		if !slices.Contains(out[name], version) {
+			out[name] = append(out[name], version)
+		}
+	}
+	return out
+}

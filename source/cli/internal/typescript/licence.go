@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -137,6 +138,35 @@ func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 			continue
 		}
 		out = append(out, licence.Dependency{Package: name, Version: p.Version, Licence: licenceOf(p)})
+	}
+	return out, nil
+}
+
+// LockDependencies is every package a `package-lock.json`'s content resolved,
+// mapped to the versions resolved for it.
+//
+// It skips exactly what lockfileDependencies skips, and for the same reason:
+// the root entry and a workspace member are the repository's own code rather
+// than a dependency, and a package the repository itself contains is not one a
+// change can be said to have added. The versions are a list because a nested
+// duplicate resolves one name at two versions.
+//
+// The base side of a comparison is `git show`n rather than checked out, so this
+// takes bytes and never a directory.
+func LockDependencies(content []byte) (map[string][]string, error) {
+	var lock npmLockfile
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", npmLockFile, err)
+	}
+	out := map[string][]string{}
+	for path, p := range lock.Packages {
+		name, ok := packageName(path)
+		if !ok || p.Link {
+			continue
+		}
+		if !slices.Contains(out[name], p.Version) {
+			out[name] = append(out[name], p.Version)
+		}
 	}
 	return out, nil
 }
