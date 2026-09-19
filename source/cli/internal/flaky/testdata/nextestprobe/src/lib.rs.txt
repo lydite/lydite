@@ -1,0 +1,22 @@
+pub fn double(n: i32) -> i32 {
+    n * 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doubles() {
+        assert_eq!(double(2), 4);
+    }
+
+    mod nested {
+        use super::super::double;
+
+        #[test]
+        fn doubles_deeper() {
+            assert_eq!(double(3), 6);
+        }
+    }
+}

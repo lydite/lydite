@@ -84,6 +84,8 @@ func gotestsumBinDir() string {
 // hidden: a repository that sets its own `[profile.default.junit] path` wins,
 // and the report lands somewhere lydite does not look — so that component
 // contributes no test counts, which is reported rather than guessed at.
+// Priority is per profile, so a repository that shadows one of the two profiles
+// this config declares leaves the other one lydite's.
 func nextestToolConfig() (string, bool) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
@@ -92,9 +94,22 @@ func nextestToolConfig() (string, bool) {
 	return filepath.Join(cache, "lydite", "nextest-tool-config", "lydite.toml"), true
 }
 
-// nextestToolConfigBody turns the JUnit report on for the default profile, and
-// says nothing else. Every other setting is the repository's.
-const nextestToolConfigBody = "[profile.default.junit]\npath = \"junit.xml\"\n"
+// nextestToolConfigBody turns the JUnit report on for the two profiles lydite
+// runs, and says nothing else. Every other setting is the repository's.
+//
+// The default profile is run 1, the suite itself. The rerun profile is the
+// flaky gate's second run, which nextest writes under target/nextest/rerun/
+// rather than over run 1's report — the ledger records run 1's counts, and a
+// rerun of four tests overwriting them would put "4 tests" in the quality
+// history of a component that ran six hundred (ADR 0041). The distinct filename
+// keeps the two apart even where a repository points both profiles at one
+// directory.
+//
+// One fixed string for every component and every install, because concurrently
+// running components all point at the single staged file: a body that varied
+// per component would turn a shared path into a race.
+const nextestToolConfigBody = "[profile.default.junit]\npath = \"junit.xml\"\n\n" +
+	"[profile.rerun.junit]\npath = \"junit-rerun.xml\"\n"
 
 // cargoNextestManifest is the pin Dependabot watches. The version is read from
 // it rather than written here so there is only one place it can be wrong — see

@@ -1,0 +1,9 @@
+// Package store sits behind Go's own public/private boundary: no module
+// outside this one can import it, whatever it exports.
+package store
+
+// Get is reached from the public surface.
+func Get(key string) string { return key }
+
+// Purge is removed by the excluded-packages shape.
+func Purge() {}

@@ -135,12 +135,68 @@ func ReadOutcomesFile(path string) (map[string]Outcome, error) {
 // A parent's own record already aggregates its children, so a caller keyed on
 // top-level names reads the aggregate and never has to roll one up.
 func ReadOutcomes(r io.Reader) (map[string]Outcome, error) {
+	return readOutcomes(r, func(_, name string) string { return name })
+}
+
+// ClassKey is the key ReadOutcomesByClass records a test under: the classname
+// and the name with a NUL between them, which no producer can write into
+// either half, so no pair of parts can spell another pair's key.
+func ClassKey(classname, name string) string { return classname + "\x00" + name }
+
+// ReadOutcomesByClassFile reads one JUnit report's per-test outcomes, keyed by
+// classname and name together.
+func ReadOutcomesByClassFile(path string) (map[string]Outcome, error) {
+	f, err := os.Open(path) // #nosec G304 -- the path is one a runner declared it writes to
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	out, err := ReadOutcomesByClass(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
+}
+
+// ReadOutcomesByClass maps each test the report holds to what became of it,
+// under ClassKey of the classname and name the producer recorded.
+//
+// A caller reaches for this rather than ReadOutcomes when a name alone is not
+// an identity in the language the report came from. One `go test` process is
+// scoped to one package where the compiler forbids two functions with a name,
+// so ReadOutcomes cannot collide there; cargo nextest runs every binary in a
+// crate in one invocation and vitest every file in a component, and both write
+// one report over the lot. nextest-suite.xml records `shared_name` under both
+// `nextestprobe::a` and `nextestprobe::b` — two tests in two binaries, which a
+// name-keyed map merges into one entry holding the worse of the two. For the
+// ledger's totals that merge is harmless, but a gate comparing two runs of a
+// named test reads it as one test that disagreed with itself, or worse, lets a
+// pass in one binary mask a flake in another.
+//
+// A classname and name recorded twice resolve the way ReadOutcomes resolves a
+// repeated name, and for the same reason: the worse outcome, Fail over Skip
+// over Pass. A testcase missing either half is not addressable by a caller
+// holding both, and is recorded under neither.
+func ReadOutcomesByClass(r io.Reader) (map[string]Outcome, error) {
+	return readOutcomes(r, func(classname, name string) string {
+		if classname == "" || name == "" {
+			return ""
+		}
+		return ClassKey(classname, name)
+	})
+}
+
+// readOutcomes walks the <testcase> elements and records each under the key
+// keyOf gives it, empty meaning a case no caller can address. The two readers
+// differ only in that key: one document, one bound on what counts as a test's
+// outcome, so a fix to either is a fix to both.
+func readOutcomes(r io.Reader, keyOf func(classname, name string) string) (map[string]Outcome, error) {
 	dec := xml.NewDecoder(r)
 	out := map[string]Outcome{}
-	// The name of the <testcase> currently open, empty outside one, so that an
+	// The key of the <testcase> currently open, empty outside one, so that an
 	// element named `failure` elsewhere in the document cannot be read as some
 	// test's outcome — the bound Read already keeps.
-	name := ""
+	key := ""
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -153,36 +209,36 @@ func ReadOutcomes(r io.Reader) (map[string]Outcome, error) {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "testcase":
-				name = attr(t, "name")
-				if name != "" {
-					record(out, name, Pass)
+				key = keyOf(attr(t, "classname"), attr(t, "name"))
+				if key != "" {
+					record(out, key, Pass)
 				}
 			case "failure", "error":
-				if name != "" {
-					record(out, name, Fail)
+				if key != "" {
+					record(out, key, Fail)
 				}
 			case "skipped":
-				if name != "" {
-					record(out, name, Skip)
+				if key != "" {
+					record(out, key, Skip)
 				}
 			}
 		case xml.EndElement:
 			if t.Name.Local == "testcase" {
-				name = ""
+				key = ""
 			}
 		}
 	}
 	return out, nil
 }
 
-// record keeps the worse of what is already known about a name and what has
+// record keeps the worse of what is already known about a key and what has
 // just been read. A testcase carrying both a failure and a skipped child, and
 // two packages recording one name, resolve the same way.
-func record(out map[string]Outcome, name string, o Outcome) {
-	if prev, ok := out[name]; ok && worse(prev, o) {
+func record(out map[string]Outcome, key string, o Outcome) {
+	if prev, ok := out[key]; ok && worse(prev, o) {
 		return
 	}
-	out[name] = o
+	out[key] = o
 }
 
 // worse orders the outcomes for record: Fail over Skip over Pass.

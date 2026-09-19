@@ -26,6 +26,28 @@ type Disqualification struct {
 	Evidence string
 }
 
+// Kinds a caller supplies rather than this package computing them.
+//
+// Both are read off a public-API diff and the author's own declaration —
+// two trees, a pull request title and the commits in the range, none of
+// which is the line-level diff evidence Disqualifications is given. The
+// caller that has them appends the Disqualification; the names live here so
+// the two sides spell the same label, and so a reader of this file sees
+// every kind a report can carry.
+const (
+	// DisqualificationAPIBreakDeclared is a change whose author declared a
+	// breaking API change. The claim may only ever add a referral, so it is
+	// honoured with no corroboration from the surface diff and has no power
+	// over the undeclared-break gate (see docs/adr/0040).
+	DisqualificationAPIBreakDeclared = "api break declared"
+	// DisqualificationAPISurfaceUncomputable is a component whose exported
+	// API could not be compared at all. Neither pass nor fail is true of it:
+	// failing is a gate the author cannot clear, since the merge-base's tree
+	// is not theirs to fix, and passing is a gate that could not run
+	// rendering as one that ran and found nothing.
+	DisqualificationAPISurfaceUncomputable = "api surface could not be compared"
+)
+
 // suppressionTokens are annotations that turn a finding off.
 //
 // Every one of them is a way of satisfying a check by doing less checking,

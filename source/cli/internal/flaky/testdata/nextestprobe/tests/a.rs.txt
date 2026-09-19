@@ -1,0 +1,11 @@
+#[test]
+fn shared_name() {
+    assert!(true);
+}
+
+mod inner {
+    #[test]
+    fn only_in_a() {
+        assert!(true);
+    }
+}

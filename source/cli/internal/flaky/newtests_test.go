@@ -13,6 +13,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/gitdiff"
+	"lydite/lydite/internal/runner"
 )
 
 // TestTheProbeAtTwoRevisions reads the set difference off the fixture ADR 0039
@@ -30,14 +31,14 @@ func TestTheProbeAtTwoRevisions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitdiff.Changed: %v", err)
 	}
-	got, err := NewTests(t.Context(), r.dir, base, changed.All)
+	got, err := NewTests(t.Context(), r.dir, base, runner.Go, ".", changed.All)
 	if err != nil {
 		t.Fatalf("NewTests: %v", err)
 	}
 	want := []Test{
-		{Package: ".", Name: "TestDeterministicNew", Path: "probe_test.go", Line: 23},
-		{Package: ".", Name: "TestFlakyNew", Path: "probe_test.go", Line: 32},
-		{Package: ".", Name: "TestNewSubtests", Path: "probe_test.go", Line: 44},
+		{Scope: ".", Name: "TestDeterministicNew", Path: "probe_test.go", Line: 23},
+		{Scope: ".", Name: "TestFlakyNew", Path: "probe_test.go", Line: 32},
+		{Scope: ".", Name: "TestNewSubtests", Path: "probe_test.go", Line: 44},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
@@ -70,7 +71,7 @@ func TestRenamedTestIsNew(t *testing.T) {
 	r.commit("head")
 
 	got := mustNewTests(t, r.dir, base, "pkg/a_test.go")
-	want := []Test{{Package: "pkg", Name: "TestNewName", Path: "pkg/a_test.go", Line: 5}}
+	want := []Test{{Scope: "pkg", Name: "TestNewName", Path: "pkg/a_test.go", Line: 5}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -88,7 +89,7 @@ func TestAMovedPackageReportsEveryTestInItNew(t *testing.T) {
 	r.commit("head")
 
 	got := mustNewTests(t, r.dir, base, "old/a_test.go", "new/a_test.go")
-	want := []Test{{Package: "new", Name: "TestStable", Path: "new/a_test.go", Line: 5}}
+	want := []Test{{Scope: "new", Name: "TestStable", Path: "new/a_test.go", Line: 5}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -106,8 +107,8 @@ func TestAnAddedFileContributesEveryTestInIt(t *testing.T) {
 
 	got := mustNewTests(t, r.dir, base, "pkg/added_test.go", "pkg/gone_test.go")
 	want := []Test{
-		{Package: "pkg", Name: "TestOne", Path: "pkg/added_test.go", Line: 5},
-		{Package: "pkg", Name: "TestTwo", Path: "pkg/added_test.go", Line: 8},
+		{Scope: "pkg", Name: "TestOne", Path: "pkg/added_test.go", Line: 5},
+		{Scope: "pkg", Name: "TestTwo", Path: "pkg/added_test.go", Line: 8},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
@@ -149,7 +150,7 @@ func BenchmarkThing(b *testing.B) {}
 	r.commit("head")
 
 	got := mustNewTests(t, r.dir, base, "pkg/a_test.go")
-	want := []Test{{Package: "pkg", Name: "TestReal", Path: "pkg/a_test.go", Line: 7}}
+	want := []Test{{Scope: "pkg", Name: "TestReal", Path: "pkg/a_test.go", Line: 7}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -208,7 +209,7 @@ func TestABuildTaggedFileIsParsed(t *testing.T) {
 	r.commit("head")
 
 	got := mustNewTests(t, r.dir, base, "pkg/a_test.go")
-	want := []Test{{Package: "pkg", Name: "TestTagged", Path: "pkg/a_test.go", Line: 7}}
+	want := []Test{{Scope: "pkg", Name: "TestTagged", Path: "pkg/a_test.go", Line: 7}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -232,7 +233,7 @@ func TestOnlyGoTestFilesAreParsed(t *testing.T) {
 
 	got := mustNewTests(t, r.dir, base,
 		"pkg/lib.go", "tests/thing.rs", "web/a.spec.ts", "pkg/README_test", "pkg/real_test.go")
-	want := []Test{{Package: "pkg", Name: "TestReal", Path: "pkg/real_test.go", Line: 5}}
+	want := []Test{{Scope: "pkg", Name: "TestReal", Path: "pkg/real_test.go", Line: 5}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -250,7 +251,7 @@ func TestTheScanRootMaySitBelowTheRepositoryRoot(t *testing.T) {
 	r.commit("head")
 
 	got := mustNewTests(t, filepath.Join(r.dir, "source"), base, "pkg/a_test.go")
-	want := []Test{{Package: "pkg", Name: "TestAdded", Path: "pkg/a_test.go", Line: 8}}
+	want := []Test{{Scope: "pkg", Name: "TestAdded", Path: "pkg/a_test.go", Line: 8}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
@@ -264,7 +265,7 @@ func TestNoChangedTestFileAsksGitNothing(t *testing.T) {
 	r.write(map[string]string{"pkg/lib.go": "package pkg\n"})
 	r.commit("base")
 
-	got, err := NewTests(t.Context(), r.dir, "nonexistent-revision", []string{"pkg/lib.go"})
+	got, err := NewTests(t.Context(), r.dir, "nonexistent-revision", runner.Go, ".", []string{"pkg/lib.go"})
 	if err != nil || got != nil {
 		t.Errorf("NewTests over no test file = (%+v, %v), want (nil, nil)", got, err)
 	}
@@ -277,7 +278,7 @@ func TestAnUnresolvableMergeBaseIsNamed(t *testing.T) {
 	r.write(map[string]string{"pkg/a_test.go": source("TestReal")})
 	r.commit("head")
 
-	_, err := NewTests(t.Context(), r.dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", []string{"pkg/a_test.go"})
+	_, err := NewTests(t.Context(), r.dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", runner.Go, ".", []string{"pkg/a_test.go"})
 	if !errors.Is(err, ErrNoMergeBase) {
 		t.Errorf("NewTests against an unresolvable base = %v, want ErrNoMergeBase", err)
 	}
@@ -293,7 +294,7 @@ func TestAFileThatDoesNotParseFailsRatherThanDeclaringNothing(t *testing.T) {
 	r.write(map[string]string{"pkg/a_test.go": "package pkg\n\nfunc TestBroken(t *testing.T) {\n"})
 	r.commit("head")
 
-	_, err := NewTests(t.Context(), r.dir, base, []string{"pkg/a_test.go"})
+	_, err := NewTests(t.Context(), r.dir, base, runner.Go, ".", []string{"pkg/a_test.go"})
 	if err == nil || !strings.Contains(err.Error(), "parsing pkg/a_test.go") {
 		t.Errorf("NewTests over an unparseable file = %v, want a parse failure naming the file", err)
 	}
@@ -313,23 +314,23 @@ func TestNewTestsAreSortedByPackageThenName(t *testing.T) {
 
 	got := mustNewTests(t, r.dir, base, "b/x_test.go", "a/x_test.go")
 	want := []Test{
-		{Package: "a", Name: "TestA1", Path: "a/x_test.go", Line: 8},
-		{Package: "a", Name: "TestA2", Path: "a/x_test.go", Line: 5},
-		{Package: "b", Name: "TestB", Path: "b/x_test.go", Line: 5},
+		{Scope: "a", Name: "TestA1", Path: "a/x_test.go", Line: 8},
+		{Scope: "a", Name: "TestA2", Path: "a/x_test.go", Line: 5},
+		{Scope: "b", Name: "TestB", Path: "b/x_test.go", Line: 5},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewTests = %+v, want %+v", got, want)
 	}
 }
 
-// goTestFiles both dedupes and sorts, the way its doc comment promises: a
+// testFiles both dedupes and sorts, the way its doc comment promises: a
 // caller iterating the result gets one entry per path, in a stable order,
 // whatever order the diff listed them in.
 func TestGoTestFilesDedupesAndSorts(t *testing.T) {
-	got := goTestFiles([]string{"b/x_test.go", "a/x_test.go", "b/x_test.go", "a/lib.go"})
+	got := testFiles(languages[runner.Go], []string{"b/x_test.go", "a/x_test.go", "b/x_test.go", "a/lib.go"})
 	want := []string{"a/x_test.go", "b/x_test.go"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("goTestFiles = %v, want %v", got, want)
+		t.Errorf("testFiles = %v, want %v", got, want)
 	}
 }
 
@@ -425,7 +426,7 @@ func TestATestWithAnExplicitEmptyResultListIsStillATest(t *testing.T) {
 // mustNewTests runs the difference over dir, failing the test on an error.
 func mustNewTests(t *testing.T, dir, base string, changed ...string) []Test {
 	t.Helper()
-	got, err := NewTests(t.Context(), dir, base, changed)
+	got, err := NewTests(t.Context(), dir, base, runner.Go, ".", changed)
 	if err != nil {
 		t.Fatalf("NewTests: %v", err)
 	}
@@ -523,4 +524,183 @@ func (r *repo) commit(msg string) string {
 	r.git("add", "-A")
 	r.git("commit", "-q", "-m", msg)
 	return r.git("rev-parse", "HEAD")
+}
+
+// A Rust test module lives inside the file it tests, so the enumeration reads
+// every changed .rs file and not a `tests/` convention: a `#[cfg(test)] mod`
+// gaining a test in an ordinary source file is the commonest shape there is,
+// and a path predicate would miss all of it.
+func TestARustTestAddedInsideAnOrdinarySourceFileIsNew(t *testing.T) {
+	const was = `pub fn double(n: i32) -> i32 {
+    n * 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doubles() {
+        assert_eq!(double(2), 4);
+    }
+}
+`
+	r := newRepo(t)
+	r.write(map[string]string{"src/lib.rs": was})
+	base := r.commit("base")
+	r.copy(fixture.Tree(t, filepath.Join("testdata", "nextestprobe")))
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.Rust, ".", "src/lib.rs")
+	want := []Test{{Scope: ".", Name: "tests::nested::doubles_deeper", Path: "src/lib.rs", Line: 18}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v", got, want)
+	}
+}
+
+// Every test in a Rust component shares one scope, because one `cargo nextest`
+// invocation covers the crate and there is no finer unit lydite should impose.
+// A name declared in two files is two declarations under that one scope, which
+// is the collision the rerun resolves against run 1's report.
+func TestEveryRustTestInAComponentSharesOneScope(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{"Cargo.toml": "[package]\nname = \"nextestprobe\"\n"})
+	base := r.commit("base")
+	r.copy(fixture.Tree(t, filepath.Join("testdata", "nextestprobe")))
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.Rust, ".",
+		"src/lib.rs", "tests/a.rs", "tests/b.rs", "tests/c.rs")
+	want := []Test{
+		{Scope: ".", Name: "async_cases::awaits_and_agrees", Path: "tests/c.rs", Line: 3},
+		{Scope: ".", Name: "ignored_by_attribute", Path: "tests/c.rs", Line: 10},
+		{Scope: ".", Name: "inner::only_in_a", Path: "tests/a.rs", Line: 8},
+		{Scope: ".", Name: "shared_name", Path: "tests/a.rs", Line: 2},
+		{Scope: ".", Name: "shared_name", Path: "tests/b.rs", Line: 2},
+		{Scope: ".", Name: "tests::doubles", Path: "src/lib.rs", Line: 10},
+		{Scope: ".", Name: "tests::nested::doubles_deeper", Path: "src/lib.rs", Line: 18},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v", got, want)
+	}
+}
+
+// A name is not unique across a Rust component's files the way it is within a
+// Go package, so the base-vs-head comparison has to key on the file as well:
+// a scope-wide "was this name declared before" check would let an unrelated
+// file's existing shared_name hide a newly added file's own shared_name test.
+func TestASharedNameInANewFileIsNewEvenWhenAnEditedFileAlreadyDeclaresIt(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{
+		"Cargo.toml": "[package]\nname = \"nextestprobe\"\n",
+		"tests/a.rs": "#[test]\nfn shared_name() {\n    assert!(true);\n}\n",
+	})
+	base := r.commit("base")
+	r.write(map[string]string{
+		// Edited, not merely touched: the assertion body changed, and the
+		// declaration is still named shared_name — the same test, unmoved.
+		"tests/a.rs": "#[test]\nfn shared_name() {\n    assert_eq!(1, 1);\n}\n",
+		"tests/b.rs": "#[test]\nfn shared_name() {\n    assert!(true);\n}\n",
+	})
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.Rust, ".", "tests/a.rs", "tests/b.rs")
+	want := []Test{{Scope: ".", Name: "shared_name", Path: "tests/b.rs", Line: 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v — an edited tests/a.rs must not hide tests/b.rs's own new shared_name", got, want)
+	}
+}
+
+// A vitest title is qualified by every describe around it, joined the way
+// vitest writes it, and the component is the scope for the same reason Rust's
+// is. A title no parser can state is enumerated with its line and no name.
+func TestATypeScriptTitleIsQualifiedAndAnUnnameableOneIsCarried(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{"package.json": `{"name":"probe"}`})
+	base := r.commit("base")
+	r.copy(fixture.Tree(t, filepath.Join("testdata", "vitestprobe")))
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.TypeScript, ".",
+		"src/one.test.ts", "src/two.test.ts")
+	want := []Test{
+		{Scope: ".", Name: "", Path: "src/one.test.ts", Line: 24, Unreadable: true},
+		{Scope: ".", Name: "", Path: "src/one.test.ts", Line: 28, Unreadable: true},
+		{Scope: ".", Name: "matches ^a (b) [c] + d$", Path: "src/one.test.ts", Line: 19},
+		{Scope: ".", Name: "outer > holds a title one describe deep", Path: "src/one.test.ts", Line: 10},
+		{Scope: ".", Name: "outer > inner > holds a title two describes deep", Path: "src/one.test.ts", Line: 5},
+		{Scope: ".", Name: "shared title", Path: "src/one.test.ts", Line: 15},
+		{Scope: ".", Name: "shared title", Path: "src/two.test.ts", Line: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v", got, want)
+	}
+}
+
+// An unreadable declaration is in neither set difference: there is no name to
+// look up in the base tree. It is reported in every changed test file at HEAD,
+// whether or not anything around it is new, because the row's count of what
+// went unexamined is a count of what is there now.
+func TestAnUnreadableDeclarationIsReportedEvenWhereNothingIsNew(t *testing.T) {
+	const src = `import { expect, test } from "vitest";
+
+test.each([[1, 2]])("doubles %i into %i", (n, want) => {
+  expect(n * 2).toBe(want);
+});
+
+test("names itself", () => {
+  expect(1).toBe(1);
+});
+`
+	r := newRepo(t)
+	r.write(map[string]string{"src/a.test.ts": src})
+	base := r.commit("base")
+	r.write(map[string]string{"src/a.test.ts": src + "\n"})
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.TypeScript, ".", "src/a.test.ts")
+	want := []Test{{Scope: ".", Name: "", Path: "src/a.test.ts", Line: 3, Unreadable: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v: the named test is not new and the unnameable one is neither", got, want)
+	}
+}
+
+// A Rust attribute the table does not recognise is a test whose names the
+// macro decides, and it is counted as unmeasurable rather than assumed inert.
+func TestAnUnrecognisedRustAttributeIsUnreadable(t *testing.T) {
+	r := newRepo(t)
+	r.write(map[string]string{"src/lib.rs": "pub fn double(n: i32) -> i32 {\n    n * 2\n}\n"})
+	base := r.commit("base")
+	r.copy(fixture.Tree(t, filepath.Join("..", "treesitter", "testdata", "attributeprobe")))
+	r.commit("head")
+
+	got := mustNewTestsIn(t, r.dir, base, runner.Rust, ".", "src/lib.rs")
+	want := []Test{
+		{Scope: ".", Name: "", Path: "src/lib.rs", Line: 18, Unreadable: true},
+		{Scope: ".", Name: "tests::doubles", Path: "src/lib.rs", Line: 12},
+		{Scope: ".", Name: "tests::doubles_on_multi_thread", Path: "src/lib.rs", Line: 23},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewTests = %+v, want %+v", got, want)
+	}
+}
+
+// A component whose language no parser here enumerates is an error and never
+// an empty answer: no new tests and no way to look is the difference between a
+// gate that passed and one that could not run.
+func TestALanguageWithNoParserIsRefused(t *testing.T) {
+	if _, err := NewTests(t.Context(), t.TempDir(), "HEAD", "cobol", ".", []string{"a_test.go"}); err == nil {
+		t.Error("NewTests answered for a language nothing enumerates")
+	}
+}
+
+// mustNewTestsIn is the difference over one language's declarations, failing
+// the test on an error.
+func mustNewTestsIn(t *testing.T, dir, base string, lang runner.Lang, scope string, changed ...string) []Test {
+	t.Helper()
+	got, err := NewTests(t.Context(), dir, base, lang, scope, changed)
+	if err != nil {
+		t.Fatalf("NewTests: %v", err)
+	}
+	return got
 }

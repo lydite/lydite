@@ -24,6 +24,7 @@ components:
     setup: ["make migrate"]
     teardown: ["rm -rf ./data"]
     mutation: false                # opt-out; the default is true
+    api_surface: {}                # opt-in; the default is unmeasured
 ```
 
 **A component is the unit its build tool treats as a whole** — a Cargo workspace, a Go module, a
@@ -61,6 +62,18 @@ without the environment it declared — while every run still reports a result.
 scan root, `depends_on` that resolves to declared components, and no cycles. A dangling edge is
 rejected rather than dropped, because the edge exists to make a dependent run on a change to its
 dependency and an edge naming nothing silently stops doing that while the dependent keeps passing.
+
+**`api_surface` opts a component into a public-API diff against the merge-base, and is opt-in
+rather than opt-out** — the reverse of `mutation` — because most components declared here are
+binaries and services nobody imports, and a surface diff over one is pure noise. It is an object
+rather than a boolean: presence alone (`api_surface: {}`) is the opt-in, and the empty shape
+leaves room for a field a later language needs — a Rust crate root, a TypeScript entry point —
+to arrive additively instead of as a breaking change to this one's own shape. It carries nothing
+today because Go needs nothing named: `internal/` is already the language's own public/private
+boundary. Setting it on a component whose `Lang()` is not Go is a load-time error, not a row
+reported `unmeasured`: a load error is unmissable and correct on the day another language lands,
+where a silent row is something a reader learns to scroll past — see
+[ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md).
 
 ## Runners: three invocations of one suite
 
@@ -232,14 +245,27 @@ lydite will not install `jest-junit` into a workspace it is about to gate, for t
 installs no coverage provider — so a jest component contributes no counts and says so. The plain
 variant asks for none of it: that is what mutation runs once per mutant.
 
-**`runner.GoJUnitPlain` is a fourth invocation, not a fourth `Variant`.** `--gate-flaky` reads a
-new test's first outcome out of run 1's own JUnit report, and under `--no-coverage` the plain
-variant is a bare `go test`, which writes none — so asking for the gate has to make the plain
-run write one whichever variant it ran. It is a function of its own rather than a widening of
-`Plain` itself, because the wrapper has to stay off `Plain` everywhere else: mutation runs it
-once per mutant ([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)), and a JUnit
-report written and discarded thousands of times is a process sitting in the way of the thing
-being timed.
+**`runner.GoJUnitPlain`, `runner.CargoNextestJUnitPlain` and `runner.VitestJUnitPlain` are a
+fourth invocation per gated language, not a fourth `Variant`.** `--gate-flaky` reads a new
+test's first outcome out of run 1's own JUnit report, and under `--no-coverage` the plain
+variant is a bare `go test` / `cargo nextest run` / `vitest run`, which writes none — so asking
+for the gate has to make the plain run write one whichever variant it ran. Each is a function of
+its own rather than a widening of `Plain` itself, because the wrapper has to stay off `Plain`
+everywhere else: mutation runs it once per mutant
+([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)), and a JUnit report written and
+discarded thousands of times is a process sitting in the way of the thing being timed. jest gets
+none of the three: it has no JUnit reporter lydite will install, for the reason given above.
+
+**`--gate-flaky` covers cargo-nextest and vitest components on the same terms as `go test`**
+([ADR 0041](../../docs/adr/0041-a-new-test-is-rerun-in-rust-and-typescript-too.md)): one rerun
+per component, filtered to the tests a change declares as new, reading both runs' JUnit reports.
+A Rust or TypeScript test's identity in this gate is its report's `classname` and `name`
+together (`internal/junit.ReadOutcomesByClass`), because neither `cargo nextest`'s test binaries
+nor vitest's files share Go's scope — one process per package, one name per function inside
+it — so a name alone collides across them where it cannot for Go. Run 2's nextest report goes
+through a second, static reporting profile lydite's staged tool config declares
+(`[profile.rerun.junit]`), so it lands at `target/nextest/rerun/junit-rerun.xml` beside run 1's
+`target/nextest/default/junit.xml` rather than over it.
 
 
 ## Output: captured, not streamed

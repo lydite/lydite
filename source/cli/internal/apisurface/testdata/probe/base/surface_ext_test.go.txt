@@ -1,0 +1,17 @@
+package probe_test
+
+import (
+	"testing"
+
+	"lydite.example/probe"
+)
+
+// Helper is exported from an external test package, which no module can
+// import. It is removed by the excluded-packages shape.
+func Helper() {}
+
+func TestCached(t *testing.T) {
+	if probe.Cached("k") != "k" {
+		t.Fatal("the probe's own suite is never run; it exists to be a package the loader must leave out")
+	}
+}
