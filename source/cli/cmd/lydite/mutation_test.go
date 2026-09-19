@@ -1947,24 +1947,24 @@ func TestAGatingRunKeepsTheRowItMeasured(t *testing.T) {
 	}}
 	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
 		mutation.Summary{Killed: 4, Survived: 1}, survivor, nil, 12*time.Second)
-	if got := completedRow(failing, true); !reflect.DeepEqual(got, failing) {
+	if got := completedRow(failing, false); !reflect.DeepEqual(got, failing) {
 		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, failing)
 	}
-	if completedRow(failing, true).Status != ui.StatusFail {
+	if completedRow(failing, false).Status != ui.StatusFail {
 		t.Error("a survivor stopped failing a run that gates")
 	}
 	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
 		mutation.Summary{Killed: 4}, nil, nil, 12*time.Second)
-	if got := completedRow(passing, true); !reflect.DeepEqual(got, passing) {
+	if got := completedRow(passing, false); !reflect.DeepEqual(got, passing) {
 		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, passing)
 	}
 	// A denominator of zero says nothing about the suite either way: --no-gate
 	// has nothing to add to a row that was never voting.
 	empty, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
 		mutation.Summary{Unviable: 2}, nil, nil, 12*time.Second)
-	for _, gate := range []bool{true, false} {
-		if got := completedRow(empty, gate); got.Status != ui.StatusUnmeasured {
-			t.Errorf("an empty denominator is %q under gate=%v, want unmeasured", got.Status, gate)
+	for _, noGate := range []bool{true, false} {
+		if got := completedRow(empty, noGate); got.Status != ui.StatusUnmeasured {
+			t.Errorf("an empty denominator is %q under no-gate=%v, want unmeasured", got.Status, noGate)
 		}
 	}
 }

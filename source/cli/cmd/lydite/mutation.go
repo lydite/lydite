@@ -195,7 +195,7 @@ a suppression, declaring one refers the change to a human.`,
 				timeout: timeout,
 				memory:  maxMemory,
 				stream:  stream,
-				gate:    !noGate,
+				noGate:  noGate,
 				// A run responsible for part of the declaration emits no
 				// summary row, for the reason it emits no coverage(repo):
 				// the figure counts over the whole repository, and a shard
@@ -317,10 +317,12 @@ type mutationOptions struct {
 	// in bytes, and zero asks for the derivation.
 	memory int64
 	stream bool
-	// gate is whether a completed component's outcome votes on the exit code.
-	// False under --no-gate, where the mutants still run, the findings are
-	// still emitted and mutants.json is still written.
-	gate    bool
+	// noGate is whether a completed component's outcome stops voting on the
+	// exit code. True under --no-gate, where the mutants still run, the
+	// findings are still emitted and mutants.json is still written. The zero
+	// value keeps gating, so a caller that leaves this unset gets today's
+	// behaviour rather than a silent, unasked-for --no-gate.
+	noGate  bool
 	summary bool
 }
 
@@ -694,7 +696,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	out = componentMutation{summary: s, elapsed: time.Since(baselineStarted), ran: true}
 	row, findings := mutationRow(label, c.Name, c.Dir, log, s, results, scoped, out.elapsed)
 	out.findings = findings
-	return completedRow(row, opts.gate), out
+	return completedRow(row, opts.noGate), out
 }
 
 // completedRow is what a component whose mutants ran is worth to the exit code.
@@ -710,8 +712,8 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 // non-voting — a denominator of zero — was never a measurement this flag has
 // anything to say about, and every way a component could not run at all is a
 // row mutateComponent returned before this.
-func completedRow(row ui.Row, gate bool) ui.Row {
-	if gate {
+func completedRow(row ui.Row, noGate bool) ui.Row {
+	if !noGate {
 		return row
 	}
 	if row.Status == ui.StatusPass || row.Status == ui.StatusFail {
