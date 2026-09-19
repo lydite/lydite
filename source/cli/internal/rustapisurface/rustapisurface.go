@@ -14,6 +14,12 @@
 // directories that already hold the crate checked out, and hands back raw
 // findings for a caller to finish.
 //
+// Building rustdoc for the head tree runs that crate's own build.rs and
+// proc-macros, which is code the change under review controls. The comparison
+// runs with an isolated environment rather than this process's own — see
+// isolatedEnv — because the caller may be review's own publish step, which
+// carries a credential that code must never reach.
+//
 // [ADR 0040]: ../../../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md
 package rustapisurface
 
@@ -155,8 +161,34 @@ func Compare(ctx context.Context, req Request) Result {
 	// --root-installed subcommand is named plainly cargo-semver-checks and is
 	// not on the PATH cargo searches, and it takes the subcommand as its own
 	// first argument.
-	res := executil.RunQuietEnv(ctx, req.HeadDir, req.Env.Check, bin, argv(req.BaseDir, req.HeadDir)...)
+	res := executil.RunQuietIsolatedEnv(ctx, req.HeadDir, isolatedEnv(req.Env.Check), bin, argv(req.BaseDir, req.HeadDir)...)
 	return readRun(exitCode(res), res.Output, res.Stderr, req)
+}
+
+// isolatedAmbientVars are the ambient variables cargo and rustup need to
+// resolve their own state — a toolchain, a registry cache — from this
+// process's own environment. Nothing else in it reaches the comparison.
+var isolatedAmbientVars = []string{"HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR", "TMP", "TEMP", "USER", "LANG", "LC_ALL"}
+
+// isolatedEnv is check plus the ambient variables above, and nothing else this
+// process's own environment carries.
+//
+// The comparison builds rustdoc for the head tree, which runs that crate's own
+// build.rs and proc-macros — code the change under review controls, not
+// lydite. review's own publish step runs with a credential that can write a
+// commit status, and every other Run* in internal/executil layers its extra
+// environment onto this process's own — which would hand that credential to a
+// crate's build.rs the moment it opts into api_surface, letting it forge the
+// verdict it is itself being judged by. RunQuietIsolatedEnv is the one call
+// that replaces the environment instead of extending it, for this reason.
+func isolatedEnv(check []string) []string {
+	env := append([]string{}, check...)
+	for _, k := range isolatedAmbientVars {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }
 
 // argv is the invocation, as argv.

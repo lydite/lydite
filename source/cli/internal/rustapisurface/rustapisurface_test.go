@@ -403,6 +403,45 @@ func TestResolvedFallsBackToTheOriginalPath(t *testing.T) {
 	}
 }
 
+// The comparison's environment carries what the caller composed plus the
+// ambient variables cargo and rustup need to find their own state — and
+// nothing else this process's own environment holds, a secret an unrelated
+// caller set included.
+func TestIsolatedEnvCarriesOnlyCheckAndTheAllowedAmbientVars(t *testing.T) {
+	t.Setenv("HOME", "/home/probe")
+	t.Setenv("GITHUB_TOKEN", "leaked-if-this-test-fails")
+	t.Setenv("SOME_OTHER_AMBIENT_VAR", "also-leaked-if-this-test-fails")
+
+	allowed := map[string]bool{}
+	for _, k := range isolatedAmbientVars {
+		allowed[k] = true
+	}
+
+	got := isolatedEnv([]string{"PATH=/composed/bin"})
+
+	foundComposed, foundHome := false, false
+	for _, kv := range got {
+		if kv == "PATH=/composed/bin" {
+			foundComposed = true
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !allowed[k] || v != os.Getenv(k) {
+			t.Errorf("isolatedEnv carried %q, which is neither the composed environment nor an allowed ambient variable at its real value", kv)
+			continue
+		}
+		if k == "HOME" {
+			foundHome = true
+		}
+	}
+	if !foundComposed {
+		t.Error("isolatedEnv dropped the composed environment")
+	}
+	if !foundHome {
+		t.Error("isolatedEnv dropped HOME")
+	}
+}
+
 // run is one recorded invocation, replayed over the trees it compared.
 type run struct {
 	base, head string
