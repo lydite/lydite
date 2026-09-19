@@ -49,44 +49,45 @@ publish in another that never runs the change's own code.`,
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
 
-			// --surfaces reads a comparison review compare already made, in a
-			// job that ran the change's own code, rather than running it
-			// again here — which is the one thing this invocation must not
-			// do when it is the one about to publish with a credential that
-			// code must never reach. The base travels with that document
-			// rather than being re-resolved, so the decision below is
-			// answered against the exact commit the comparison ran against.
-			var baseSHA string
+			// The base is always resolved here, never taken from --surfaces's
+			// document: that document crosses from a job that ran the
+			// change's own code — a Rust component's build.rs, a proc-macro
+			// — to this one, which is about to publish with a credential,
+			// and a base claimed equal to HEAD is exactly the kind of thing
+			// that code could forge to make the diff this run reads look
+			// empty. Trusting it would be trusting the code under review to
+			// say what it was compared against.
+			baseSHA, err := resolveReviewBase(ctx, dir, base, baseBranch)
+			if err != nil {
+				return err
+			}
+
 			var surfaces []surfaceComparison
 			if surfacesPath != "" {
 				doc, readErr := readSurfaces(surfacesPath)
 				switch readErr {
 				case nil:
-					baseSHA, surfaces = doc.Base, doc.Results
-				default:
-					// Unreadable, not absent: a run that could not read what
-					// review compare wrote still has to reach a base to
-					// decide anything else against, and it must still refer
-					// rather than exit quietly under 2 and publish nothing —
-					// exit 1 here would read to the caller as "an answer",
-					// and the workflow step that only re-fails a job past 2
-					// would let this pass with no status posted at all.
-					var err error
-					baseSHA, err = resolveReviewBase(ctx, dir, base, baseBranch)
+					// reconcileSurfaces checks the document's base against
+					// baseSHA above and requires a result for every
+					// component this tree says opted in — neither is taken
+					// on the document's own word.
+					surfaces, err = reconcileSurfaces(dir, baseSHA, doc)
 					if err != nil {
 						return err
 					}
+				default:
+					// Unreadable, not absent: a run that could not read what
+					// review compare wrote must still refer rather than exit
+					// quietly under 2 and publish nothing — exit 1 here
+					// would read to the caller as "an answer", and the
+					// workflow step that only re-fails a job past 2 would
+					// let this pass with no status posted at all.
 					surfaces, err = uncomputableSurfaces(dir, "the comparison document could not be read: "+readErr.Error())
 					if err != nil {
 						return err
 					}
 				}
 			} else {
-				var err error
-				baseSHA, err = resolveReviewBase(ctx, dir, base, baseBranch)
-				if err != nil {
-					return err
-				}
 				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA)
 				if err != nil {
 					return err

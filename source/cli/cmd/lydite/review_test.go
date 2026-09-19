@@ -1030,6 +1030,61 @@ func TestReviewWithAnUnreadableSurfacesDocumentRefers(t *testing.T) {
 	}
 }
 
+// A comparison document is exactly what the change under review's own code
+// could have written — a Rust component's build.rs runs inside the job that
+// produces it — so a base claiming HEAD, which would make the diff this run
+// reads look empty, must be refused rather than trusted, even though the
+// document is otherwise well-formed and readable.
+func TestReviewRefersAForgedBaseInTheSurfacesDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+
+	forged := filepath.Join(t.TempDir(), "surfaces.json")
+	if err := writeSurfaces(forged, head, nil); err != nil {
+		t.Fatalf("writeSurfaces: %v", err)
+	}
+
+	out, err := runReview(t, dir, base, "--surfaces", forged)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a base that does not match what this run resolved must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "a different commit") {
+		t.Errorf("the referral must say the base did not match, got:\n%s", out)
+	}
+}
+
+// A comparison document naming the right base but carrying no result for a
+// component this tree says opted in is exactly what an empty-results forgery
+// looks like — and exactly what a comparison that silently failed to run for
+// one component looks like too. Both must be referred, never rendered as
+// "nothing to report".
+func TestReviewRefersAMissingResultInTheSurfacesDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	missing := filepath.Join(t.TempDir(), "surfaces.json")
+	if err := writeSurfaces(missing, base, nil); err != nil {
+		t.Fatalf("writeSurfaces: %v", err)
+	}
+
+	out, err := runReview(t, dir, base, "--surfaces", missing)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a missing result for an opted-in component must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "carries no result") {
+		t.Errorf("the referral must say the result was missing, got:\n%s", out)
+	}
+}
+
 // A document that opens fine but decodes into nothing readable, or names no
 // base commit, is exactly as unreadable as a missing file: readSurfaces
 // refuses both rather than handing review a document with nothing in it.

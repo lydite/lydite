@@ -50,15 +50,9 @@ type surfaceComparison struct {
 // itself: the caller may be a job that must never hold a publishing
 // credential, or one that must never run this comparison again to get it.
 func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string) ([]surfaceComparison, error) {
-	file, err := component.Load(dir)
+	opted, err := optedInComponents(dir)
 	if err != nil {
 		return nil, err
-	}
-	var opted []component.Component
-	for _, c := range file.Components {
-		if c.APISurface != nil {
-			opted = append(opted, c)
-		}
 	}
 	// A repository where nothing opted in pays none of what follows, and says
 	// nothing about it. Nothing was asked for, so there is no gate here that
@@ -101,6 +95,21 @@ func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base strin
 	return results, nil
 }
 
+// optedInComponents is every component this tree declares api_surface for.
+func optedInComponents(dir string) ([]component.Component, error) {
+	file, err := component.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	var opted []component.Component
+	for _, c := range file.Components {
+		if c.APISurface != nil {
+			opted = append(opted, c)
+		}
+	}
+	return opted, nil
+}
+
 // uncomputableSurfaces reports every component that opted into api_surface as
 // uncomputable for the given reason, without running any comparison.
 //
@@ -111,15 +120,59 @@ func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base strin
 // under 2 as an answer rather than a malfunction would then publish nothing
 // at all, which is worse than a referral it can at least act on.
 func uncomputableSurfaces(dir, reason string) ([]surfaceComparison, error) {
-	file, err := component.Load(dir)
+	opted, err := optedInComponents(dir)
 	if err != nil {
 		return nil, err
 	}
 	var results []surfaceComparison
-	for _, c := range file.Components {
-		if c.APISurface != nil {
-			results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: reason})
+	for _, c := range opted {
+		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: reason})
+	}
+	return results, nil
+}
+
+// reconcileSurfaces validates a comparison document against what this
+// invocation independently determines to be true, rather than trusting
+// either the base or the result set the document itself claims.
+//
+// The document crosses from a job that ran the change's own code — a Rust
+// component's build.rs, a proc-macro — to one that is about to publish with
+// a credential, so both fields it carries are exactly what that code could
+// forge: a base equal to HEAD makes the diff this run reads look empty, and
+// an empty result set skips every gate silently. Neither is accepted at
+// face value. base is what this invocation resolved itself, never the
+// document's own claim, and a mismatch refers every opted-in component
+// rather than trusting a comparison that ran against some other commit. The
+// opted-in component list is read fresh from this tree, and any one of them
+// missing from the document's results — forged, or simply never written —
+// is its own uncomputable row rather than a silent absence a reader cannot
+// tell apart from "found nothing".
+func reconcileSurfaces(dir, base string, doc surfaceDocument) ([]surfaceComparison, error) {
+	opted, err := optedInComponents(dir)
+	if err != nil {
+		return nil, err
+	}
+	if doc.Base != base {
+		return uncomputableSurfaces(dir, fmt.Sprintf(
+			"the comparison document names %s as its base, but this run resolved %s — a comparison against a different commit cannot be trusted",
+			shortSHA(doc.Base), shortSHA(base)))
+	}
+	byName := make(map[string]surfaceComparison, len(doc.Results))
+	for _, r := range doc.Results {
+		byName[r.Component] = r
+	}
+	results := make([]surfaceComparison, 0, len(opted))
+	for _, c := range opted {
+		r, ok := byName[c.Name]
+		if !ok {
+			results = append(results, surfaceComparison{
+				Component:    c.Name,
+				Dir:          c.Dir,
+				Uncomputable: "the comparison document carries no result for this component",
+			})
+			continue
 		}
+		results = append(results, r)
 	}
 	return results, nil
 }
