@@ -57,6 +57,12 @@ jobs:
           # never a red one, which is how it goes unnoticed.
           cache-dependency-path: source/cli/go.sum
 
+      # Runs here, ahead of goreleaser, because this checkout is the only one with
+      # both full history and the tags a range walk needs (docs/adr/0045).
+      - name: lydite release check
+        working-directory: source/cli
+        run: go run ./cmd/lydite release check --dir ../..
+
       # goreleaser derives the release body from commit subjects, which can say
       # what landed but not what it means: a change to how a coverage number is
       # computed, or an upgrade step a consumer has to take, has no commit

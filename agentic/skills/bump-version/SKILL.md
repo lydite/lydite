@@ -82,8 +82,16 @@ since the last release (SemVer):
 - **patch** (`vX.Y.Z+1`) — bug fixes only; no new user-facing behaviour.
 - **minor** (`vX.Y+1.0`) — backward-compatible features / new flags / new
   scanner integrations.
-- **major** (`vX+1.0.0`) — breaking changes (config schema changes, removed
-  CLI surface, `lydite` baseline format changes).
+- **breaking** (config schema changes, removed CLI surface, `lydite` baseline
+  format changes) — the **leftmost non-zero component** increases: a minor
+  bump while the line is `0.x` (`v0.2.0` → `v0.3.0`), a major bump from
+  `1.0.0` onward. `1.0.0` is reserved for the dashboard release and is never
+  reached by a break alone (ADR 0010).
+
+`lydite release check` enforces that last rule at tag time: a range whose
+commits declare a break — a `feat!:` subject or a `BREAKING CHANGE:` footer —
+fails the release unless the tag is that bump (ADR 0045). It reads
+declarations only, so it is no evidence that nothing else broke.
 
 Nothing pins a CLI version: the action's `version` input defaults to
 `latest`, so **every release reaches every consumer on their next CI run**,

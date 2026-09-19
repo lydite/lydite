@@ -44,6 +44,7 @@ func newRootCmd() *cobra.Command {
 		newPublishCmd(),
 		newThreadsCmd(),
 		newClearanceCmd(),
+		newReleaseCmd(),
 		newRemovedCoverageCmd(),
 		newVersionCmd(),
 		newUpdateCmd(),
