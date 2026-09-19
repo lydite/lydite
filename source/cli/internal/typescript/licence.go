@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"lydite/lydite/internal/finding"
@@ -107,6 +108,13 @@ func licenceText(raw json.RawMessage) string {
 //
 // A package is named by the segment after the last `node_modules/`, because a
 // duplicate is nested — `node_modules/wrangler/node_modules/esbuild` is esbuild.
+//
+// The install paths are sorted before the slice is built, because
+// licence.Set.Add keeps only the first dependency it sees under a pair, and a
+// plain range over lock.Packages would hand it whichever nested duplicate Go's
+// randomised map order produced first — the version a row and a finding name
+// for a rejected pair would then change between two scans of the identical
+// lockfile, even though the verdict itself would not.
 func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 	data, err := os.ReadFile(filepath.Join(dir, npmLockFile)) // #nosec G304 -- dir is a declared component's directory
 	if err != nil {
@@ -116,8 +124,14 @@ func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 	if err := json.Unmarshal(data, &lock); err != nil {
 		return nil, fmt.Errorf("parsing %s in %s: %w", npmLockFile, dir, err)
 	}
-	out := make([]licence.Dependency, 0, len(lock.Packages))
-	for path, p := range lock.Packages {
+	paths := make([]string, 0, len(lock.Packages))
+	for path := range lock.Packages {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]licence.Dependency, 0, len(paths))
+	for _, path := range paths {
+		p := lock.Packages[path]
 		name, ok := packageName(path)
 		if !ok || p.Link {
 			continue

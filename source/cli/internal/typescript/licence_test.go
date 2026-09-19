@@ -69,6 +69,49 @@ func TestLicenceSetNamesANestedDuplicateByItsPackage(t *testing.T) {
 	}
 }
 
+// Two lockfile entries for the same package under the same rejected licence,
+// at different versions, resolve to the same version on every call — Go
+// randomises map iteration order per run, and licence.Set.Add keeps only the
+// first dependency it sees under a pair, so an unsorted read would let the
+// version a row and a finding name for that pair change between two scans of
+// the identical lockfile.
+func TestLockfileDependenciesPicksTheVersionDeterministically(t *testing.T) {
+	dir := t.TempDir()
+	lockfile := `{
+  "name": "dupeprobe",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "dupeprobe", "version": "0.0.0"},
+    "node_modules/zlib-sync": {"version": "0.6.0", "license": "GPL-3.0-only"},
+    "node_modules/wrangler/node_modules/zlib-sync": {"version": "0.6.1", "license": "GPL-3.0-only"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(lockfile), 0o600); err != nil {
+		t.Fatalf("writing package-lock.json: %v", err)
+	}
+
+	var versions []string
+	for range 20 {
+		set, err := LicenceSet(context.Background(), dir, licence.NewPolicy([]string{"MIT"}))
+		if err != nil {
+			t.Fatalf("LicenceSet: %v", err)
+		}
+		d, held := rejected(t, set)["zlib-sync"]
+		if !held {
+			t.Fatal("zlib-sync is GPL-3.0-only, which the allow-list does not hold, want it in the set")
+		}
+		versions = append(versions, d.Version)
+	}
+	for i, v := range versions {
+		if v != versions[0] {
+			t.Fatalf("read %d picked version %q, read 0 picked %q — the version is not deterministic", i, v, versions[0])
+		}
+	}
+	if want := "0.6.1"; versions[0] != want {
+		t.Errorf("picked version %q, want %q — the lexicographically first install path (node_modules/wrangler/... sorts before node_modules/zlib-sync, 'w' < 'z')", versions[0], want)
+	}
+}
+
 // A `licenses` array composes through licence.Expression: each type is one term
 // of an OR, sorted, so the pair a reordering produces is the same pair.
 func TestLicenceSetComposesALicensesArray(t *testing.T) {
