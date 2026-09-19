@@ -24,7 +24,7 @@ says why it is that way and what breaks if it changes.
 | `config` | [`configuration.md`](../../../agentic/references/configuration.md) |
 | `secrets` | [`scanning.md`](../../../agentic/references/scanning.md), and [`tool-pins.md`](../../../agentic/references/tool-pins.md) for the gitleaks pin |
 | `ui` | [`output-grammar.md`](../../../agentic/references/output-grammar.md), and [`surface.md`](../../../agentic/references/surface.md) for the comment |
-| `referral`, `clearance`, `forge` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
+| `referral`, `clearance`, `forge`, `depdelta` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |
 
 A `*-pin/` directory is a tool pin, not a component: see

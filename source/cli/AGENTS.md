@@ -36,7 +36,7 @@ governs what you are about to change, before you change it.
 | [`tool-pins.md`](../../agentic/references/tool-pins.md) | `internal/pins`, `tools/pinsync`, every `*-pin/` manifest |
 | [`configuration.md`](../../agentic/references/configuration.md) | `internal/config` |
 | [`output-grammar.md`](../../agentic/references/output-grammar.md) | `internal/ui` |
-| [`referral-and-clearance.md`](../../agentic/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge` |
+| [`referral-and-clearance.md`](../../agentic/references/referral-and-clearance.md) | `internal/referral`, `internal/clearance`, `internal/forge`, `internal/depdelta` |
 | [`surface.md`](../../agentic/references/surface.md) | `lydite publish` and the standing comment, `lydite threads` and `internal/threads` |
 
 Conventions, boundaries and the repository layout are in the root
