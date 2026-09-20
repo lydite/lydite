@@ -54,12 +54,9 @@ The distinction this closes is not academic: for four merged pull requests —
 [#188](https://github.com/lydite/lydite/pull/188), and
 [#193](https://github.com/lydite/lydite/pull/193) — the referral job's report was never uploaded,
 `buildComment` was never given a directory to find it missing from, and the standing comment
-rendered no referral section at all while its overall verdict still read clean. The sentence
-above, read with "named directory" as its only subject, was true throughout: every directory it
-was given that lacked a document did render `unmeasured`. The property the sentence exists to
-guarantee — that no check can silently vanish from the surface — was false the whole time,
-because the one check that mattered on those four pull requests was never in a directory to
-begin with.
+rendered no referral section at all while its overall verdict still read clean. No check can
+silently vanish from the surface is the property this guarantee exists to hold, and it was false
+on all four, because the one check that mattered was never in a directory to begin with.
 
 **A section is `unmeasured` only when nothing in it was decided.** Promoting on any single
 unmeasured row would mark ordinary runs as ungated: `--affected` reports every unselected
