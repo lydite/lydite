@@ -13,11 +13,12 @@ exemptions:
       lydite can read at both sides. Anything that brings a package into the
       tree is disqualified before this entry is consulted, so what is left is
       a version moving inside its own compatibility range with the licence and
-      SCA rows green for every component — a lockfile diff a reviewer confirms
-      by re-reading the number Dependabot already put in the title. The
-      seven-day cooldown in .github/dependabot.yml is the other half: by the
-      time the pull request exists the upstream release has been public long
-      enough for a yank or a compromised publisher to have surfaced.
+      SCA rows green for every component. That is the whole guarantee: this
+      entry has no way to require the change came from Dependabot or to check
+      how long the bumped version has been public, so it does not lean on
+      either — a human-authored PR moving a version by the same patch-or-minor
+      distance, with the same gates green, is exactly as boring by this
+      entry's own measure, and merges on the same evidence.
     # Only the lockfiles internal/depdelta actually reads a comparison from,
     # never the manifests beside them (Cargo.toml, package.json). depdelta.Detect
     # names Cargo.lock and package-lock.json as manifests and leaves Cargo.toml
