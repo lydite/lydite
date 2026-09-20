@@ -1,6 +1,8 @@
 package clearance
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,14 +34,29 @@ func clearRequest(mutate func(*Request)) Request {
 }
 
 func exemptRequest(mutate func(*Request)) Request {
-	r := clearRequest(func(r *Request) {
-		r.Command = Parse("/lydite exempt docs-only")
-		r.Uncovered = []string{"docs/one.md"}
-	})
+	r := clearRequest(func(r *Request) { r.Command = Parse("/lydite exempt docs-only") })
 	if mutate != nil {
 		mutate(&r)
 	}
 	return r
+}
+
+// uncovering is the answer a test hands the ladder when it should reach the
+// branch that asks for one.
+func uncovering(paths ...string) Uncover {
+	return func() ([]string, error) { return paths, nil }
+}
+
+// unasked fails the test if the ladder derives the uncovered set at all.
+// Deriving it reads the exemptions file and asks the platform what the pull
+// request touched, and a request the ladder refuses without that answer must
+// not pay for it.
+func unasked(t *testing.T) Uncover {
+	return func() ([]string, error) {
+		t.Helper()
+		t.Error("the uncovered set was derived for a request refused without needing it")
+		return nil, nil
+	}
 }
 
 func TestParseReadsTheVerbAndAnOptionalRevision(t *testing.T) {
@@ -60,6 +77,16 @@ func TestParseReadsTheVerbAndAnOptionalRevision(t *testing.T) {
 		// command is answered rather than ignored: nobody may read silence
 		// as a command that was accepted.
 		{"exempt with no shape", "/lydite exempt", Command{Verb: VerbUnknown, Word: "exempt"}},
+		{"exempt with a separated shape", "/lydite exempt moved-sources", Command{Verb: VerbExempt, Word: "exempt", Shape: "moved-sources"}},
+		// The shape is rendered into a comment lydite signs, so one carrying
+		// markup is refused outright rather than escaped into a name nobody
+		// asked for.
+		{"exempt with markup for a shape", "/lydite exempt </summary><h3>forged", Command{Verb: VerbUnknown, Word: "exempt"}},
+		{"exempt with a shape starting in a separator", "/lydite exempt -docs", Command{Verb: VerbUnknown, Word: "exempt"}},
+		{"exempt with a shape of 64 characters", "/lydite exempt " + strings.Repeat("a", 64),
+			Command{Verb: VerbExempt, Word: "exempt", Shape: strings.Repeat("a", 64)}},
+		{"exempt with a shape of 65 characters", "/lydite exempt " + strings.Repeat("a", 65),
+			Command{Verb: VerbUnknown, Word: "exempt"}},
 		{"a verb we do not have", "/lydite bless docs", Command{Verb: VerbUnknown, Word: "bless"}},
 		{"not a command, merely mentions one", "you could run /lydite clear here", Command{Verb: VerbNone}},
 	} {
@@ -83,7 +110,7 @@ func TestParseIgnoresAQuotedCommandOnALaterLine(t *testing.T) {
 }
 
 func TestOrdinaryConversationIsIgnored(t *testing.T) {
-	got := Decide(Request{Command: Parse("ship it"), CanWrite: true})
+	got := Decide(Request{Command: Parse("ship it"), CanWrite: true}, unasked(t))
 	if got.Kind != KindIgnore {
 		t.Fatalf("Kind = %v, want KindIgnore", got.Kind)
 	}
@@ -97,7 +124,7 @@ func TestAStrangerClearsNothing(t *testing.T) {
 		got := Decide(clearRequest(func(r *Request) {
 			r.Command = Parse(body)
 			r.CanWrite = false
-		}))
+		}), unasked(t))
 		if got.Kind != KindRefuse || got.Reason != ReasonNotPermitted {
 			t.Errorf("%q = %+v, want refuse/not-permitted", body, got)
 		}
@@ -105,7 +132,7 @@ func TestAStrangerClearsNothing(t *testing.T) {
 }
 
 func TestAReferralOnTheHeadIsCleared(t *testing.T) {
-	got := Decide(clearRequest(nil))
+	got := Decide(clearRequest(nil), unasked(t))
 	if got.Kind != KindClear {
 		t.Fatalf("Kind = %v, want KindClear", got.Kind)
 	}
@@ -120,7 +147,7 @@ func TestAReferralOnTheHeadIsCleared(t *testing.T) {
 func TestTheIsolationGateIsNotClearableByComment(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Status = &Status{State: StateFailure, CreatedAt: before}
-	}))
+	}), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonNotReferred {
 		t.Fatalf("got %+v, want refuse/not-referred", got)
 	}
@@ -130,7 +157,7 @@ func TestTheIsolationGateIsNotClearableByComment(t *testing.T) {
 func TestAnErroredStatusIsNotCleared(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Status = &Status{State: StateError, CreatedAt: before}
-	}))
+	}), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonNotReferred {
 		t.Fatalf("got %+v, want refuse/not-referred", got)
 	}
@@ -140,7 +167,7 @@ func TestAnErroredStatusIsNotCleared(t *testing.T) {
 // resolve. Refusing here is also what closes the ordinary form of the race
 // below: a push that lands before the comment has no verdict published yet.
 func TestAHeadWithNoVerdictIsRefused(t *testing.T) {
-	got := Decide(clearRequest(func(r *Request) { r.Status = nil }))
+	got := Decide(clearRequest(func(r *Request) { r.Status = nil }), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonNoStatus {
 		t.Fatalf("got %+v, want refuse/no-status", got)
 	}
@@ -150,7 +177,7 @@ func TestAHeadWithNoVerdictIsRefused(t *testing.T) {
 // person read, so their decision must not attach to it. Both timestamps come
 // from the platform, so neither is the author's to set.
 func TestAVerdictNewerThanTheCommentIsRefused(t *testing.T) {
-	got := Decide(clearRequest(func(r *Request) { r.Status = referred(after) }))
+	got := Decide(clearRequest(func(r *Request) { r.Status = referred(after) }), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonHeadMoved {
 		t.Fatalf("got %+v, want refuse/head-moved", got)
 	}
@@ -163,7 +190,7 @@ func TestNamingTheRevisionOverridesTheTimestampGuard(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Command = Parse("/lydite clear " + head)
 		r.Status = referred(after)
-	}))
+	}), unasked(t))
 	if got.Kind != KindClear {
 		t.Fatalf("got %+v, want KindClear", got)
 	}
@@ -173,7 +200,7 @@ func TestNamingAnotherRevisionIsRefused(t *testing.T) {
 	other := "0a885730000000000000000000000000000000ff"
 	got := Decide(clearRequest(func(r *Request) {
 		r.Command = Parse("/lydite clear " + other)
-	}))
+	}), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonStaleSHA {
 		t.Fatalf("got %+v, want refuse/stale-sha", got)
 	}
@@ -182,7 +209,7 @@ func TestNamingAnotherRevisionIsRefused(t *testing.T) {
 func TestAnAbbreviatedRevisionNamesTheHead(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Command = Parse("/lydite clear " + head[:8])
-	}))
+	}), unasked(t))
 	if got.Kind != KindClear {
 		t.Fatalf("abbreviated revision: got %+v, want KindClear", got)
 	}
@@ -195,7 +222,7 @@ func TestARevisionThatDoesNotNameTheHeadIsRefused(t *testing.T) {
 	for _, named := range []string{head[:4], head + "ff"} {
 		got := Decide(clearRequest(func(r *Request) {
 			r.Command = Command{Verb: VerbClear, Word: "clear", SHA: named}
-		}))
+		}), unasked(t))
 		if got.Kind != KindRefuse || got.Reason != ReasonStaleSHA {
 			t.Errorf("%q = %+v, want refuse/stale-sha", named, got)
 		}
@@ -205,7 +232,7 @@ func TestARevisionThatDoesNotNameTheHeadIsRefused(t *testing.T) {
 func TestAChangeThatAlreadyMergesIsNotClearedAgain(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Status = &Status{State: StateSuccess, CreatedAt: before}
-	}))
+	}), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonAlreadyPassing {
 		t.Fatalf("got %+v, want refuse/already-passing", got)
 	}
@@ -215,7 +242,7 @@ func TestAChangeThatAlreadyMergesIsNotClearedAgain(t *testing.T) {
 // indistinguishable from a broken workflow, and nobody must be able to read a
 // typo as a clearance.
 func TestAnUnknownVerbIsAnswered(t *testing.T) {
-	got := Decide(clearRequest(func(r *Request) { r.Command = Parse("/lydite clera") }))
+	got := Decide(clearRequest(func(r *Request) { r.Command = Parse("/lydite clera") }), unasked(t))
 	if got.Kind != KindRefuse || got.Reason != ReasonUnknownVerb {
 		t.Fatalf("got %+v, want refuse/unknown-verb", got)
 	}
@@ -225,14 +252,14 @@ func TestExplainNeedsNoStandingVerdict(t *testing.T) {
 	got := Decide(clearRequest(func(r *Request) {
 		r.Command = Parse("/lydite explain")
 		r.Status = nil
-	}))
+	}), unasked(t))
 	if got.Kind != KindExplain || got.SHA != head {
 		t.Fatalf("got %+v, want explain at the head", got)
 	}
 }
 
 func TestAReferredChangeWithUncoveredPathsGetsAProposal(t *testing.T) {
-	got := Decide(exemptRequest(nil))
+	got := Decide(exemptRequest(nil), uncovering("docs/one.md"))
 	if got.Kind != KindExempt {
 		t.Fatalf("Kind = %v, want KindExempt", got.Kind)
 	}
@@ -248,9 +275,20 @@ func TestAReferredChangeWithUncoveredPathsGetsAProposal(t *testing.T) {
 // full set would be an entry duplicating others and widened by their union,
 // and proposing an empty one would not parse.
 func TestAChangeWithNothingUncoveredGetsNoProposal(t *testing.T) {
-	got := Decide(exemptRequest(func(r *Request) { r.Uncovered = nil }))
+	got := Decide(exemptRequest(nil), uncovering())
 	if got.Kind != KindRefuse || got.Reason != ReasonNothingToPropose {
 		t.Fatalf("got %+v, want refuse/nothing-to-propose", got)
+	}
+}
+
+// An uncovered set that could not be answered is refused, not proposed over
+// and not swallowed: the commenter reads why, because the one thing nobody
+// may conclude from silence is that their change was cleared.
+func TestAnUnanswerableUncoveredSetIsRefused(t *testing.T) {
+	failing := func() ([]string, error) { return nil, errors.New("the platform would not say") }
+	got := Decide(exemptRequest(nil), failing)
+	if got.Kind != KindRefuse || got.Reason != ReasonCouldNotDerive {
+		t.Fatalf("got %+v, want refuse/could-not-derive", got)
 	}
 }
 
@@ -268,7 +306,7 @@ func TestExemptRefusesEveryStatusButAReferral(t *testing.T) {
 		t.Run(string(tc.state), func(t *testing.T) {
 			got := Decide(exemptRequest(func(r *Request) {
 				r.Status = &Status{State: tc.state, CreatedAt: before}
-			}))
+			}), unasked(t))
 			if got.Kind != KindRefuse || got.Reason != tc.want {
 				t.Fatalf("got %+v, want refuse/%s", got, tc.want)
 			}
@@ -290,7 +328,7 @@ func TestProposingIsRefusedByEveryReasonAClearanceIs(t *testing.T) {
 		{"against a newer verdict", func(r *Request) { r.Status = referred(after) }, ReasonHeadMoved},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Decide(exemptRequest(tc.mutate))
+			got := Decide(exemptRequest(tc.mutate), unasked(t))
 			if got.Kind != KindRefuse || got.Reason != tc.want {
 				t.Fatalf("got %+v, want refuse/%s", got, tc.want)
 			}
@@ -313,7 +351,7 @@ func TestClearingIsTheOnlyUnrefusedPath(t *testing.T) {
 		{"naming another revision", func(r *Request) { r.Command = Command{Verb: VerbClear, SHA: "deadbeefdeadbeef"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Decide(clearRequest(tc.mutate)); got.Kind == KindClear {
+			if got := Decide(clearRequest(tc.mutate), unasked(t)); got.Kind == KindClear {
 				t.Fatalf("%s cleared the change", tc.name)
 			}
 		})

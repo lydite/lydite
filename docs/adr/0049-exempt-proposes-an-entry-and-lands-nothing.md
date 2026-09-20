@@ -57,8 +57,11 @@ them all. There is no path list that would make that change exempt — the accur
 "declare this combination", which is a judgement about which shapes belong together and not a
 list lydite can derive. Emitting an empty `paths` would fail validation; emitting the change's
 full path list would propose an entry duplicating two others, widened by union, which is the
-reading ADR 0014 rejected outright. So the reply says which exemptions cover which paths and
-that no single one covers the change, and proposes nothing.
+reading ADR 0014 rejected outright. So the reply proposes nothing: it says every path the
+change touches is already covered, declines to name which of the two indistinguishable causes
+is responsible — paths split across exemptions no single one covers, or a disqualifier vetoing
+a match this computation never sees — and points at the standing verdict comment for what is
+actually holding the change.
 
 ## A list of changed paths is metadata, and fetching it is not fetching content
 

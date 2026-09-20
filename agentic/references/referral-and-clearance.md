@@ -328,11 +328,15 @@ design.
 
 The third verb answers with a paste-ready `.lydite/exemptions.yml` entry and writes
 nothing: no status, no edit to the standing comment, no commit. `name` is the `<shape>`
-the commenter typed; `paths` is the change's own **uncovered** set, which `Decide`'s
-caller computes by running `referral.Uncovered` over the pull request's changed paths
-against the exemptions file in the clearance job's own checkout; `reason` is a
-placeholder stating the question a person has to answer. Landing the entry is an
-ordinary pull request somebody opens, reviews and merges. See
+the commenter typed; `paths` is the change's own **uncovered** set, answered by a
+`clearance.Uncover` callback the caller passes into `Decide` — `Decide` calls it only
+from the one branch that has already passed every other gate, so a command refused for
+permission, a stale revision, a missing verdict or a moved head never pays for reading
+the exemptions file or asking the platform what the pull request touched. The callback
+itself runs `referral.Uncovered` over the pull request's changed paths against the
+exemptions file in the clearance job's own checkout; `reason` is a placeholder stating
+the question a person has to answer. Landing the entry is an ordinary pull request
+somebody opens, reviews and merges. See
 [ADR 0049](../../docs/adr/0049-exempt-proposes-an-entry-and-lands-nothing.md).
 
 Nothing a commenter writes may widen what the block says. A glob argument was rejected

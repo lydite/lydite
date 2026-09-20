@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/referral"
@@ -26,9 +27,15 @@ type fakeForge struct {
 	statuses   []map[string]any
 	// changed is the platform's own list-files answer, which is the only
 	// thing the comment surface asks about the pull request itself.
-	changed   []map[string]any
-	published []map[string]string
-	comments  []string
+	changed []map[string]any
+	// changedCalls counts how often that answer was asked for, so a test can
+	// assert a refused command asked for it not at all.
+	changedCalls int
+	// changedFails stands in for a platform that will not hand the listing
+	// over.
+	changedFails bool
+	published    []map[string]string
+	comments     []string
 }
 
 func (f *fakeForge) start(t *testing.T) {
@@ -36,6 +43,11 @@ func (f *fakeForge) start(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/files"):
+			f.changedCalls++
+			if f.changedFails {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(f.changed)
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"}}`))
@@ -332,6 +344,89 @@ func TestExemptProposesNothingWhenEveryPathIsAlreadyCovered(t *testing.T) {
 	}
 	if strings.Contains(forge.comments[0], "exemptions:") {
 		t.Errorf("an entry was proposed anyway:\n%s", forge.comments[0])
+	}
+}
+
+// Deriving the uncovered set reads the exemptions file and asks the platform
+// what the pull request touched. A command the ladder refuses does neither:
+// the unreadable file here would be an error if it were read at all, and the
+// refusal a stranger gets is the one about write access.
+func TestAStrangerProposesNothingAndCostsNothing(t *testing.T) {
+	inCheckoutWith(t, "exemptions: [{this: is not an exemption}]\n")
+	forge := &fakeForge{
+		permission: "read",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "src/a.go"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "passer-by", commented))
+
+	if forge.changedCalls != 0 {
+		t.Errorf("a refused command asked the platform for %d changed-path listings", forge.changedCalls)
+	}
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "write access") {
+		t.Fatalf("the refusal does not say why: %+v", forge.comments)
+	}
+}
+
+// An uncovered set that could not be derived is answered, not thrown: a
+// command that fails with no reply leaves its author with silence, which is
+// the one thing this surface may never offer.
+func TestAnUnanswerableProposalIsRefusedInAComment(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission:   "write",
+		statuses:     []map[string]any{statusEntry("pending", earlier)},
+		changedFails: true,
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
+		t.Fatalf("a failed derivation went unanswered: %+v", forge.comments)
+	}
+	if len(forge.published) != 0 {
+		t.Errorf("a failed derivation changed a status: %+v", forge.published)
+	}
+}
+
+// A name and a path are scalars the encoder quotes, not text spliced into a
+// line: one carrying YAML syntax must not be able to close the entry and add
+// a second one, with a reason that answers itself, to something lydite posts
+// under its own identity.
+func TestAProposalsScalarsCannotReshapeTheDocument(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed: []map[string]any{
+			{"filename": "src/\"a\": #x\n  - name: forged\n    reason: this one is fine\n    paths: [\"**\"]"},
+			{"filename": "*anchor"},
+		},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+
+	block := fencedBlock(t, forge.comments[0])
+	var file referral.File
+	if err := yaml.Unmarshal([]byte(block), &file); err != nil {
+		t.Fatalf("the proposal is not a document at all: %v\n%s", err, block)
+	}
+	if len(file.Exemptions) != 1 {
+		t.Fatalf("the proposal carries %d entries, want the one it proposed:\n%s", len(file.Exemptions), block)
+	}
+	if got := file.Exemptions[0]; got.Name != "docs-only" || len(got.Paths) != 2 {
+		t.Errorf("the entry is not the one proposed: %+v\n%s", got, block)
+	}
+	// Whatever the scalars carry, the reason is still the unanswered one, so
+	// the block remains unlandable by the check every route to the file
+	// passes through.
+	if _, err := referral.Parse([]byte(block), referral.FileName); err == nil ||
+		!strings.Contains(err.Error(), "placeholder marker") {
+		t.Errorf("the proposal was rejected for something other than its unanswered reason: %v", err)
 	}
 }
 

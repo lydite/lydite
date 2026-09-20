@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
@@ -107,16 +110,20 @@ func runClearance(ctx context.Context, cmd *cobra.Command, eventPath string, noC
 		Status:    status,
 		CommentAt: event.Comment.CreatedAt,
 	}
-	if command.Verb == clearance.VerbExempt {
-		request.Uncovered, err = uncoveredPaths(ctx, client, repo, event.Issue.Number)
+	// The uncovered set is derived inside the ladder rather than before it,
+	// so a command the ladder refuses never reads the exemptions file nor
+	// asks the platform what the pull request touched. What went wrong goes
+	// to the job log; the commenter reads a refusal, because a command that
+	// errors out with no reply is one whose author has only silence to go on.
+	uncover := func() ([]string, error) {
+		uncovered, err := uncoveredPaths(ctx, client, repo, event.Issue.Number)
 		if err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "lydite: deriving the change's uncovered paths: %v\n", err)
 		}
+		return uncovered, err
 	}
 
-	action := clearance.Decide(request)
-
-	row, err := applyAction(ctx, client, repo, event, head, action)
+	row, err := applyAction(ctx, client, repo, event, head, clearance.Decide(request, uncover))
 	if err != nil {
 		return err
 	}
@@ -143,7 +150,7 @@ func applyAction(ctx context.Context, client *forge.Client, repo forge.Repo, eve
 		return explain(ctx, client, repo, event, head)
 
 	case clearance.KindExempt:
-		return propose(ctx, client, repo, event, head, action), nil
+		return propose(ctx, client, repo, event, head, action)
 
 	case clearance.KindRefuse:
 		text := refusal(action.Reason, event.Comment.User.Login, head)
@@ -225,9 +232,47 @@ func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, 
 // it, which defeats the requirement that somebody did. The opening literal is
 // reserved, so an entry landed with this text still in it fails
 // referral.Exemption.validate rather than becoming a live exemption.
-var proposalReason = []string{
-	`    reason: "` + referral.ReasonPlaceholderMarker + ` why is a change touching only these paths safe to merge unread?`,
-	`      State what this entry's paths guarantee, and nothing the schema does not check."`,
+const proposalReason = referral.ReasonPlaceholderMarker +
+	" why is a change touching only these paths safe to merge unread? " +
+	"State what this entry's paths guarantee, and nothing the schema does not check."
+
+// proposalFile and proposalEntry are the document a draft is encoded through.
+//
+// They mirror referral.File's and referral.Exemption's own keys rather than
+// being those types, so a draft carries no disqualifiers skeleton and no
+// empty condition for a reader to paste and wonder about. A key drifting out
+// of step with referral's is one referral.Parse rejects as unknown, which is
+// what TestTheProposedEntryDoesNotParseAsAnExemption reads the block back
+// through.
+type proposalFile struct {
+	Exemptions []proposalEntry `yaml:"exemptions"`
+}
+
+type proposalEntry struct {
+	Name   string   `yaml:"name"`
+	Reason string   `yaml:"reason"`
+	Paths  []string `yaml:"paths"`
+}
+
+// proposalYAML encodes the draft entry.
+//
+// The encoder is what quotes and escapes every scalar. A name or a path
+// assembled into a line by hand carries whatever YAML syntax it contains
+// into the document's structure — enough to close the paths sequence early
+// and add a second entry, with a reason that answers itself, to something
+// lydite posts under its own identity.
+func proposalYAML(name string, paths []string) ([]string, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	entry := proposalEntry{Name: name, Reason: proposalReason, Paths: paths}
+	if err := enc.Encode(proposalFile{Exemptions: []proposalEntry{entry}}); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimRight(buf.String(), "\n"), "\n"), nil
 }
 
 // propose answers with a draft exemptions-file entry, and changes nothing.
@@ -236,12 +281,10 @@ var proposalReason = []string{
 // set: a pattern a person typed could widen the entry past what their change
 // needs covered, and an entry that reads as lydite's output is the one a
 // reviewer is least likely to re-derive.
-func propose(ctx context.Context, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head string, action clearance.Action) ui.Row {
-	lines := []string{"exemptions:", "  - name: " + action.Name}
-	lines = append(lines, proposalReason...)
-	lines = append(lines, "    paths:")
-	for _, p := range action.Paths {
-		lines = append(lines, "      - "+p)
+func propose(ctx context.Context, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head string, action clearance.Action) (ui.Row, error) {
+	lines, err := proposalYAML(action.Name, action.Paths)
+	if err != nil {
+		return ui.Row{}, err
 	}
 	headline := fmt.Sprintf("a draft entry covering the %d path(s) no declared exemption covers. "+
 		"Nothing has changed and nobody has reviewed this: the referral stands until an entry "+
@@ -263,7 +306,7 @@ func propose(ctx context.Context, client *forge.Client, repo forge.Repo, event f
 		Status: ui.StatusRefer,
 		Label:  "exempt",
 		Value:  fmt.Sprintf("proposed %q over %d path(s)", action.Name, len(action.Paths)),
-	}
+	}, nil
 }
 
 // refusal is what a person reads when their command changed nothing.
@@ -277,7 +320,8 @@ func refusal(reason clearance.Reason, login, head string) string {
 	case clearance.ReasonNotPermitted:
 		return fmt.Sprintf("@%s does not have write access to this repository, so this changes nothing", login)
 	case clearance.ReasonUnknownVerb:
-		return "unknown command — this surface has `/lydite clear`, `/lydite explain` and `/lydite exempt <shape>`"
+		return "unknown command — this surface has `/lydite clear`, `/lydite explain` and `/lydite exempt <shape>`, " +
+			"where a shape is up to 64 letters, digits, dots, dashes and underscores"
 	case clearance.ReasonStaleSHA:
 		return fmt.Sprintf("that revision is not the current head (%s), so nothing was cleared", shortSHA(head))
 	case clearance.ReasonNoStatus:
@@ -297,6 +341,9 @@ func refusal(reason clearance.Reason, login, head string) string {
 		return fmt.Sprintf("every path this change touches is already covered by a declared exemption, "+
 			"and it is still referred — so there is no entry to propose. The standing verdict comment "+
 			"says what is holding it; widening `%s` is not it", referral.FileName)
+	case clearance.ReasonCouldNotDerive:
+		return "lydite could not work out which paths this change touches, so there is no entry to " +
+			"propose — try again, and if it keeps happening the clearance job's log says what failed"
 	default:
 		return "nothing to do"
 	}

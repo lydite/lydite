@@ -11,7 +11,10 @@
 // them without a network. See docs/adr/0015-clearance-binds-to-a-commit.md.
 package clearance
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Prefix is what addresses a comment to lydite. A comment not starting with
 // it is not for us, and is not an error either — most comments on a pull
@@ -57,6 +60,17 @@ type Command struct {
 	Word string
 }
 
+// shapePattern is what an exemption name may be made of: a letter or a digit,
+// then letters, digits and the three separators a name is written with, up to
+// 64 characters.
+//
+// The shape is the one part of a proposal a stranger writes, and it is
+// rendered into a comment lydite posts under its own identity — inside a
+// <summary> element, where markup is markup. An allowlist this narrow carries
+// nothing a renderer treats as syntax, and bounds a name that has to be
+// recognisable back to the person who asked for it.
+var shapePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
 // Parse reads the first line of a comment body.
 //
 // Only the first line, because a comment may quote an earlier one — GitHub's
@@ -87,7 +101,12 @@ func Parse(body string) Command {
 		// rather than ignored: the entry has to be named by the person
 		// asking for it, and nothing lydite could pick instead would be
 		// their name for it.
-		if len(fields) < 3 {
+		//
+		// A shape outside shapePattern is refused rather than escaped or
+		// trimmed into one that fits: a name somebody cannot recognise back
+		// is not the name they asked for, and answering with it would put
+		// a stranger's text into a comment lydite signs.
+		if len(fields) < 3 || !shapePattern.MatchString(fields[2]) {
 			cmd.Verb = VerbUnknown
 			return cmd
 		}
