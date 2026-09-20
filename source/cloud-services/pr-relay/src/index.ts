@@ -147,28 +147,11 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
   if (route === "/comment" && (!payload.body || !payload.marker)) {
     return json(400, { error: "a marker and a body are required" });
   }
-  if (
-    route === "/status" &&
-    (!payload.state || !payload.context || !payload.description || !payload.sha)
-  ) {
-    return json(400, { error: "a state, a context, a description and a sha are required" });
-  }
-  if (route === "/status" && !payload.context?.startsWith("lydite/")) {
-    // A context is a check's name, and this is the App's identity to spend.
-    // Confined to lydite's own namespace, the worst a caller can do is author
-    // a wrong lydite check — never stand in for a check that belongs to
-    // another tool.
-    return json(400, { error: "a status context must start with lydite/" });
-  }
-  if (route === "/status" && payload.context === CLEARANCE_CONTEXT) {
-    // The OIDC claim names a repository and a pull request, not a job — this
-    // relay cannot tell `referral-publish`, the one job isolated to hold
-    // `statuses: write`, from any other job in the same workflow that also
-    // holds `id-token: write` and runs the pull request's own code. Until a
-    // caller can be told apart from the code it is running, the one context a
-    // human Clearance acts on is refused here rather than trusted to whoever
-    // asks for it.
-    return json(400, { error: `${CLEARANCE_CONTEXT} is not accepted through this relay yet` });
+  if (route === "/status") {
+    const error = statusPayloadError(payload);
+    if (error) {
+      return json(400, { error });
+    }
   }
   if (route === "/review" && payload.version !== OPS_VERSION) {
     // Refused whole rather than half-applied. A document from a newer lydite
@@ -255,6 +238,39 @@ const UNWRITTEN: Record<string, string> = {
   "/review": "the review could not be applied",
   "/status": "the status could not be posted",
 };
+
+/**
+ * What is wrong with a `/status` payload, or nothing.
+ *
+ * Everything checkable without a network call lives here — the fields the
+ * caller must supply, the namespace its `context` must stay inside, and the
+ * one context this relay does not yet accept at all. `sha` against the pull
+ * request's real head is not: that check needs the installation token, so it
+ * stays in `handle`, beside the write it gates.
+ */
+function statusPayloadError(payload: StatusRequest): string | undefined {
+  if (!payload.state || !payload.context || !payload.description || !payload.sha) {
+    return "a state, a context, a description and a sha are required";
+  }
+  if (!payload.context.startsWith("lydite/")) {
+    // A context is a check's name, and this is the App's identity to spend.
+    // Confined to lydite's own namespace, the worst a caller can do is author
+    // a wrong lydite check — never stand in for a check that belongs to
+    // another tool.
+    return "a status context must start with lydite/";
+  }
+  if (payload.context === CLEARANCE_CONTEXT) {
+    // The OIDC claim names a repository and a pull request, not a job — this
+    // relay cannot tell `referral-publish`, the one job isolated to hold
+    // `statuses: write`, from any other job in the same workflow that also
+    // holds `id-token: write` and runs the pull request's own code. Until a
+    // caller can be told apart from the code it is running, the one context a
+    // human Clearance acts on is refused here rather than trusted to whoever
+    // asks for it.
+    return `${CLEARANCE_CONTEXT} is not accepted through this relay yet`;
+  }
+  return undefined;
+}
 
 /**
  * The pull request's current head, so a submitted `sha` can be checked
