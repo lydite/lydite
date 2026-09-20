@@ -1007,6 +1007,70 @@ func TestReviewCompareRecordsTheBaseItResolved(t *testing.T) {
 	}
 }
 
+// review compare is reached through `review`'s own command tree, not only by
+// constructing it directly the way the tests above do: without it wired in,
+// `lydite review compare` has no --write-surfaces flag of its own to parse,
+// and this fails before RunE ever runs.
+func TestReviewCompareRunsAsASubcommandOfReview(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	review := newReviewCmd()
+	var out bytes.Buffer
+	review.SetOut(&out)
+	review.SetErr(&out)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	review.SetArgs([]string{"compare", "--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := review.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, out.String())
+	}
+	if _, err := readSurfaces(surfacesPath); err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+}
+
+// --base-branch is the only way to name the branch "review compare --base
+// auto" resolves the merge-base against: the origin below has neither a
+// main nor a master branch, so auto-discovery has nothing to fall back to
+// and this only succeeds because --base-branch names "trunk" directly.
+func TestReviewCompareAutoBaseUsesBaseBranch(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	ctx := context.Background()
+	run := func(d string, args ...string) {
+		t.Helper()
+		r := executil.RunQuiet(ctx, d, "git", args...)
+		if !r.Ok() {
+			t.Fatalf("git %v (in %s): %v\n%s", args, d, r.Err, r.Output)
+		}
+	}
+	origin := t.TempDir()
+	run(origin, "init", "--quiet", "--bare")
+	run(dir, "remote", "add", "origin", "file://"+origin)
+	run(dir, "push", "--quiet", "origin", base+":refs/heads/trunk")
+
+	compare := newReviewCompareCmd()
+	var out bytes.Buffer
+	compare.SetOut(&out)
+	compare.SetErr(&out)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", "auto", "--base-branch", "trunk", "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, out.String())
+	}
+
+	doc, err := readSurfaces(surfacesPath)
+	if err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+	if doc.Base != base {
+		t.Errorf("recorded base = %q, want %q", doc.Base, base)
+	}
+}
+
 // A --surfaces document that cannot be read at all — missing, or the job
 // that would have written it never ran — must still be referred, not answer
 // with a bare error: main.go maps any error that is not a ui.ExitError to

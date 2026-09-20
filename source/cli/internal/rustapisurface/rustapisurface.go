@@ -471,8 +471,6 @@ func refusal(stderr string) string {
 		}
 	}
 	lines = lines[from:]
-	if len(lines) > reasonLines {
-		lines = lines[:reasonLines]
-	}
+	lines = lines[:min(len(lines), reasonLines)]
 	return strings.Join(lines, "\n")
 }
