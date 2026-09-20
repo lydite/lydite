@@ -580,68 +580,111 @@ func TestAFileOverTheReadCapIdentifiesNothing(t *testing.T) {
 	}
 }
 
-func TestAReportThatWillNotParseLeavesTheVerdictToTheExitStatus(t *testing.T) {
+func TestAReportThatWillNotParseIsNotAReport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.json")
 	for _, data := range []string{"", "not json at all", `[{"RuleID": `, `{"leaks":[]}`} {
-		if _, ok := parseReport([]byte(data)); ok {
-			t.Errorf("parseReport(%q) reported success", data)
+		write(t, dir, "report.json", data)
+		if _, err := readReport(path); err == nil {
+			t.Errorf("readReport(%q) reported success", data)
 		}
 	}
-	if _, ok := parseReport([]byte(`[]`)); !ok {
-		t.Error("a report that does parse was rejected")
+	write(t, dir, "report.json", `[]`)
+	if _, err := readReport(path); err != nil {
+		t.Errorf("a report that does parse was rejected: %v", err)
+	}
+	if _, err := readReport(filepath.Join(dir, "absent.json")); err == nil {
+		t.Error("a report that was never written read as one")
 	}
 }
 
-func TestResultFallsBackToTheExitStatus(t *testing.T) {
+func TestAReportNothingCouldReadIsNotAPass(t *testing.T) {
+	// The claims decide the row, so a run whose claims lydite never got is a
+	// gate that could not run — and a gate that could not run renders as a
+	// pass nowhere, least of all beside a clean exit, where it is
+	// indistinguishable from a tree with no secret in it.
 	dir := t.TempDir()
-	unreadable := filepath.Join(dir, "no-report.json")
+	absent := filepath.Join(dir, "no-report.json")
 	corrupt := filepath.Join(dir, "corrupt.json")
 	write(t, dir, "corrupt.json", `[{"RuleID": "generic-api-key"`)
 
-	leaked := errors.New("exit status 1")
 	cases := []struct {
-		name   string
-		path   string
-		in     executil.Result
-		wantOk bool
+		name string
+		path string
+		in   executil.Result
 	}{
-		{"no report beside a failing run", unreadable, executil.Result{Name: Gate, Err: leaked}, false},
-		{"no report beside a clean run", unreadable, executil.Result{Name: Gate}, true},
-		{"a corrupt report beside a failing run", corrupt, executil.Result{Name: Gate, Err: leaked}, false},
-		{"a corrupt report beside a clean run", corrupt, executil.Result{Name: Gate}, true},
+		{"no report beside a failing run", absent, executil.Result{Name: Gate, Err: exitedWith(t, 1)}},
+		{"no report beside a clean run", absent, executil.Result{Name: Gate}},
+		{"a corrupt report beside a failing run", corrupt, executil.Result{Name: Gate, Err: exitedWith(t, 1)}},
+		{"a corrupt report beside a clean run", corrupt, executil.Result{Name: Gate}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := result(tc.in, dir, tc.path, unscoped, nil)
-			if got.Ok() != tc.wantOk {
-				t.Errorf("Ok() = %v, want %v — the exit status decides the row", got.Ok(), tc.wantOk)
+			if got.Ok() {
+				t.Error("Ok() = true for a gate with no report to decide on")
+			}
+			if !strings.Contains(got.Detail, "could not read the report") {
+				t.Errorf("Detail = %q, want the reason the gate has nothing to decide on", got.Detail)
 			}
 			if len(got.Findings) != 0 {
 				t.Errorf("Findings = %d, want none from a report nothing could read", len(got.Findings))
-			}
-			if got.Detail != "" {
-				t.Errorf("Detail = %q, want none: a parse failure is not a claim about the code", got.Detail)
 			}
 		})
 	}
 }
 
-func TestResultReadsTheReportBesideTheExitStatus(t *testing.T) {
-	dir, rep := captured(t, "gitleaks")
+func TestGitleaksFailingForItsOwnReasonIsNotAPass(t *testing.T) {
+	// gitleaks exits 1 for a directory it could not walk exactly as it does for
+	// a leak, and writes the same empty report a clean run writes. A row
+	// derived from the claims that survived would read that as a scanned tree
+	// with nothing in it.
+	dir := t.TempDir()
+	write(t, dir, "report.json", `[]`)
+	path := filepath.Join(dir, "report.json")
+
+	cases := []struct {
+		name string
+		exit error
+	}{
+		{"the leaks status with no leak in the report", exitedWith(t, 1)},
+		{"a status that is not the leaks one", exitedWith(t, 126)},
+		{"a failure carrying no status at all", errors.New("exec: \"gitleaks\": executable file not found in $PATH")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := result(executil.Result{Name: Gate, Err: tc.exit}, dir, path, unscoped, nil)
+			if got.Ok() {
+				t.Error("Ok() = true for a gitleaks that did not finish its walk")
+			}
+			if !strings.Contains(got.Detail, "may not have been walked whole") {
+				t.Errorf("Detail = %q, want the reason the walk is not a statement about the tree", got.Detail)
+			}
+		})
+	}
+}
+
+func TestALeakInAFileGitWouldCarryFailsTheRow(t *testing.T) {
+	// The whole capture: leaks in a tracked file and in an untracked one
+	// .gitignore does not cover, beside one in the build output. The first two
+	// survive the filter, so there is something left to fail on.
+	dir, rep := captured(t, "gitleaks-ignored")
 	data, err := json.Marshal(rep)
 	if err != nil {
 		t.Fatalf("marshalling the capture: %v", err)
 	}
 	write(t, dir, "report.json", string(data))
 
-	got := result(executil.Result{Name: Gate, Err: errors.New("exit status 1")}, dir, filepath.Join(dir, "report.json"), unscoped, nil)
-	if len(got.Findings) != 5 {
-		t.Errorf("Findings = %d, want the capture's 5", len(got.Findings))
+	leaked := exitedWith(t, 1)
+	got := result(executil.Result{Name: Gate, Err: leaked}, dir, filepath.Join(dir, "report.json"), carriedBy(t, dir), nil)
+	if len(got.Findings) != 2 {
+		t.Errorf("Findings = %d, want the two leaks in files git would carry", len(got.Findings))
 	}
 	if got.Detail != "" {
 		t.Errorf("Detail = %q, want none — gitleaks prints its own findings", got.Detail)
 	}
-	if got.Ok() {
-		t.Error("Ok() = true beside a non-zero exit")
+	if !errors.Is(got.Err, leaked) {
+		t.Errorf("Err = %v, want gitleaks' own failure kept for the row it is the whole story of", got.Err)
 	}
 }
 
@@ -676,10 +719,9 @@ func TestResultSaysWhatItCouldNotLocate(t *testing.T) {
 		t.Errorf("Detail = %q, want the leak lydite could not place", clean.Detail)
 	}
 
-	leaked := errors.New("exit status 1")
-	failing := result(executil.Result{Name: Gate, Err: leaked}, dir, path, unscoped, nil)
-	if !errors.Is(failing.Err, leaked) {
-		t.Errorf("Err = %v, want gitleaks' own failure kept", failing.Err)
+	failing := result(executil.Result{Name: Gate, Err: exitedWith(t, 1)}, dir, path, unscoped, nil)
+	if failing.Ok() {
+		t.Error("a leak lydite could not locate read as a pass beside gitleaks' own failure")
 	}
 	if !strings.Contains(failing.Detail, "generic-api-key") {
 		t.Errorf("Detail = %q, want the unplaced leak said whatever the status", failing.Detail)
@@ -726,7 +768,7 @@ func TestAReportOfNothingButIgnoredOutputIsAPass(t *testing.T) {
 	}
 	write(t, dir, "report.json", string(data))
 
-	got := result(executil.Result{Name: Gate, Err: errors.New("exit status 1")}, dir, filepath.Join(dir, "report.json"), carriedBy(t, dir), nil)
+	got := result(executil.Result{Name: Gate, Err: exitedWith(t, 1)}, dir, filepath.Join(dir, "report.json"), carriedBy(t, dir), nil)
 	if !got.Ok() {
 		t.Errorf("Ok() = false: %v", got.Err)
 	}
@@ -765,10 +807,12 @@ func TestAScopeGitCouldNotAnswerForIsNotACleanScan(t *testing.T) {
 		t.Errorf("Findings = %d, want the capture's %d — an unscoped run reports every leak", len(clean.Findings), len(rep))
 	}
 
-	leaked := errors.New("exit status 1")
-	failing := result(executil.Result{Name: Gate, Err: leaked}, dir, path, nil, gitdiff.ErrNoRepository)
-	if !errors.Is(failing.Err, leaked) {
-		t.Errorf("Err = %v, want gitleaks' own failure kept", failing.Err)
+	// A run that leaked as well as going unscoped fails on the scope: the leaks
+	// gitleaks printed are on the terminal either way, and the scope is the
+	// half of the row a reader cannot see anywhere else.
+	failing := result(executil.Result{Name: Gate, Err: exitedWith(t, 1)}, dir, path, nil, gitdiff.ErrNoRepository)
+	if !errors.Is(failing.Err, gitdiff.ErrNoRepository) {
+		t.Errorf("Err = %v, want the reason the run went unscoped", failing.Err)
 	}
 
 	// A report nothing could read leaves the scope unsaid nowhere either.
@@ -814,6 +858,23 @@ func carriedBy(t *testing.T, dir string) carried {
 		t.Fatalf("tracked: %v", err)
 	}
 	return keep
+}
+
+// exitedWith is a real *exec.ExitError carrying code, which is the shape
+// executil.Run hands result for a gitleaks that exited non-zero.
+//
+// A plain error carries no status, and the status is what separates the leaks
+// gitleaks reported from a walk it abandoned — a test asserting on the verdict
+// with an invented error asserts on the statusless case whatever it says it is
+// testing.
+func exitedWith(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit "+strconv.Itoa(code)).Run()
+	var status *exec.ExitError
+	if !errors.As(err, &status) {
+		t.Fatalf("running a command that exits %d: %v", code, err)
+	}
+	return err
 }
 
 func initRepo(t *testing.T, dir string, add ...string) {

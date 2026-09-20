@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -21,9 +22,9 @@ import (
 
 // report is gitleaks' JSON report: a bare array of leaks, one per match.
 //
-// It carries no errors key and no summary, which is why the exit status decides
-// the row here and there is no Semgrep-style exception for a tool that
-// under-reports its own failure.
+// It carries no errors key and no summary, so a run that failed writes the same
+// empty array a clean one does. Whether gitleaks did the walk at all is read
+// from its exit status against what this array holds, in ranToCompletion.
 type report []leak
 
 // leak mirrors the subset of one gitleaks entry lydite reads.
@@ -193,9 +194,9 @@ func findings(dir string, rep report, keep carried) (out []finding.Finding, unpl
 	for _, l := range inSourceOrder(rep) {
 		p := root.place(l.File)
 		if p == "" || l.StartLine < 1 {
-			// Neither a thread nor an identity can be made from this, and the
-			// row still fails on gitleaks' own exit status. What must not happen
-			// is that it goes unsaid.
+			// Neither a thread nor an identity can be made from this, so it is
+			// returned rather than dropped and result fails the row on it: a
+			// leak reported and never located is not a tree with no leak in it.
 			unplaced = append(unplaced, fmt.Sprintf("gitleaks reported %s at %q line %d, which names no line inside the scan root", ruleOf(l), l.File, l.StartLine))
 			continue
 		}
@@ -444,18 +445,80 @@ func clip(s string) string {
 	return string(runes[:min(len(runes), maxSiteRunes)])
 }
 
-// parseReport reads a report, saying whether it could.
+// readReport reads the report gitleaks was told to write.
 //
-// A report that will not parse leaves the verdict entirely to gitleaks' own
-// exit status and output. Inventing one from an unreadable report is the one
-// thing worse than having no findings: it would either fail a clean run or pass
-// a leaking one on the strength of a parse error.
-func parseReport(data []byte) (report, bool) {
+// Absent and unparseable are one thing to the caller: a run whose claims lydite
+// does not have. Treating either as an empty report is what would pass a
+// leaking tree on the strength of a parse error.
+func readReport(path string) (report, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- path is our own CreateTemp result, not user input
+	if err != nil {
+		return nil, err
+	}
 	var rep report
 	if err := json.Unmarshal(data, &rep); err != nil {
-		return nil, false
+		return nil, fmt.Errorf("parsing gitleaks' report: %w", err)
 	}
-	return rep, true
+	return rep, nil
+}
+
+// leaksExit is the status gitleaks exits with when it found a leak.
+//
+// It is the default of gitleaks' own --exit-code flag, which argv deliberately
+// does not pass. Any other non-zero status is gitleaks failing to be a scanner
+// rather than reporting as one — 126 for a flag it does not know, and whatever
+// a signal leaves behind.
+const leaksExit = 1
+
+// ranToCompletion reports whether gitleaks' exit is accounted for by the report
+// it wrote.
+//
+// A clean exit is, and so is leaksExit beside a report naming at least one
+// leak. Nothing else is: gitleaks exits 1 for a directory it could not walk as
+// well as for a leak, and an exit carrying no status at all is a binary that
+// never started or a context that was cancelled. Every one of those leaves an
+// empty report, which reads as a scanned, clean tree to everything downstream
+// unless the status is checked against it here.
+//
+// A walk that failed after finding something exits 1 with a non-empty report
+// and is indistinguishable from one that found it and finished. What it costs
+// is a run whose surviving claims were all filtered away passing on a partial
+// walk; the report gitleaks writes carries nothing that would separate them.
+func ranToCompletion(exit error, rep report) bool {
+	if exit == nil {
+		return true
+	}
+	var status *exec.ExitError
+	return errors.As(exit, &status) && status.ExitCode() == leaksExit && len(rep) > 0
+}
+
+// verdict is the row's outcome: nil for a tree this gate scanned and found
+// nothing in, and an error naming which of the other things happened.
+//
+// Ordered by what the reader of a red row can act on. A gate with no claims to
+// decide from — an unreadable report, a gitleaks that did not finish its walk —
+// is said ahead of anything derived from claims lydite does not have; an
+// unscoped run ahead of the claims it over-reports; and gitleaks' own exit is
+// kept verbatim for the one case where it is the whole story.
+func verdict(exit error, readErr, scopeErr error, rep report, unplaced []string, claims int) error {
+	switch {
+	case readErr != nil:
+		return fmt.Errorf("the secret gate has no report to decide on: %w", readErr)
+	case !ranToCompletion(exit, rep):
+		return fmt.Errorf("gitleaks did not finish its walk, so nothing here is a statement about the tree: %w", exit)
+	case scopeErr != nil:
+		return fmt.Errorf("the secret gate could not be scoped to the files git would carry: %w", scopeErr)
+	case len(unplaced) > 0:
+		return errors.New("gitleaks reported a leak lydite could not locate")
+	case claims > 0:
+		if exit == nil {
+			// A leak in the report beside a clean exit is gitleaks
+			// contradicting itself, and the leak is the half that must survive.
+			return errors.New("gitleaks reported a leak")
+		}
+		return exit
+	}
+	return nil
 }
 
 // result is everything decided after gitleaks has exited, given its result and
@@ -467,16 +530,23 @@ func parseReport(data []byte) (report, bool) {
 //
 // keep and scopeErr are what tracked answered: the paths git would carry, or
 // the reason it could not say. A scope lydite could not establish costs the
-// row rather than the claims — every leak is reported and the row fails
-// saying why, because a pass there is indistinguishable from a tree that was
-// scoped and clean.
+// row rather than the claims — every leak is reported and the row fails saying
+// why, because a pass there is indistinguishable from a tree that was scoped
+// and clean.
 //
-// The exit status decides the row, with one exception: gitleaks exits non-zero
-// for a leak anywhere it walked, including the ignored output no claim here
-// survives, so a report whose every leak was filtered away leaves nothing to
-// fail on. A missing or unparseable report costs the run its findings and
-// changes no verdict, which is the fallback ADR 0035 states — the report has
-// no error array, so there is nothing in it that could contradict the status.
+// The row follows the claims that survived that filter and not gitleaks' exit
+// status, which fails for a leak anywhere it walked including the ignored
+// output no claim here survives. What the status is still read for is whether
+// gitleaks walked at all, because a run that did not is the one thing an empty
+// claim list cannot tell apart from a clean tree.
+//
+// Three outcomes are this gate failing rather than this gate's finding, and
+// each fails the row with its reason in Detail: a report lydite could not read,
+// a leak it could not place, and a scope git could not be asked for. A failing
+// row is the strictest thing available here and not the precise one — the
+// grammar's own status for a gate that could not run is the amber
+// StatusUnmeasured, and executil.Result carries a verdict as an error or
+// nothing, so resultRows has only pass and fail to render these as.
 func result(r executil.Result, dir, reportPath string, keep carried, scopeErr error) executil.Result {
 	// Detail because this is lydite's own statement rather than gitleaks', and
 	// report() prints Detail under a failing row and nothing else.
@@ -484,31 +554,21 @@ func result(r executil.Result, dir, reportPath string, keep carried, scopeErr er
 	if scopeErr != nil {
 		keep = unscoped
 		notes = append(notes, "lydite could not ask git which files it would carry, so these claims are not scoped to them: "+scopeErr.Error())
-		if r.Ok() {
-			r.Err = fmt.Errorf("the secret gate could not be scoped to the files git would carry: %w", scopeErr)
-		}
 	}
-	data, readErr := os.ReadFile(reportPath) // #nosec G304 -- reportPath is our own CreateTemp result, not user input
+	rep, readErr := readReport(reportPath)
+	var unplaced []string
 	if readErr == nil {
-		if rep, ok := parseReport(data); ok {
-			found, unplaced := findings(dir, rep, keep)
-			r.Findings = found
-			// Said whatever the status, because a leak lydite could not place
-			// is lost from the document either way.
-			notes = append(notes, unplaced...)
-			if len(unplaced) > 0 && r.Ok() {
-				// A leak reported beside a clean exit is a pass nothing else
-				// would contradict.
-				r.Err = errors.New("gitleaks reported a leak lydite could not locate")
-			}
-			if scopeErr == nil && len(rep) > 0 && len(found) == 0 && len(unplaced) == 0 {
-				// Every leak gitleaks found is in a file git would not carry,
-				// so the status is failing on something this gate makes no
-				// claim about.
-				r.Err = nil
-			}
-		}
+		r.Findings, unplaced = findings(dir, rep, keep)
+		// Said whatever the verdict, because a leak lydite could not place is
+		// lost from the document either way.
+		notes = append(notes, unplaced...)
+	} else {
+		notes = append(notes, "lydite could not read the report gitleaks was told to write, so this run states nothing about the tree: "+readErr.Error())
 	}
+	if !ranToCompletion(r.Err, rep) {
+		notes = append(notes, "gitleaks exited on something other than the leaks it reported, so the tree may not have been walked whole: "+r.Err.Error())
+	}
+	r.Err = verdict(r.Err, readErr, scopeErr, rep, unplaced, len(r.Findings))
 	if len(notes) > 0 {
 		r.Detail = strings.Join(notes, "\n")
 	}
