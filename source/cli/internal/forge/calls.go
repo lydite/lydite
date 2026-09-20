@@ -114,6 +114,60 @@ func (c *Client) PublishStatus(ctx context.Context, repo Repo, sha string, state
 	return nil
 }
 
+// ChangedPaths lists the file names a pull request touches.
+//
+// This is metadata the platform holds about the pull request, and not its
+// contents: nothing here is compiled, and nothing beyond the strings
+// themselves is parsed. That is what lets the comment surface ask for it at
+// all — `/lydite exempt` derives a proposal's paths from what the platform
+// reports changed, never from what a commenter says changed, and never from a
+// tree the clearance job (which holds a writing token) would have to
+// materialise. `clear` and `explain` ask the platform nothing about the pull
+// request itself.
+//
+// A rename contributes both of its names. Counting only the destination would
+// let a file move into or out of an exempt tree with the proposal none the
+// wiser.
+//
+// The walk is capped, and reaching the cap is an error rather than a shorter
+// answer: a proposal derived from part of a change names fewer paths than the
+// change needs covered, which is the one way this verb could produce an entry
+// narrower than the reader believes.
+func (c *Client) ChangedPaths(ctx context.Context, repo Repo, number int) ([]string, error) {
+	var out []string
+	for page := range filesPages {
+		var files []struct {
+			Filename string `json:"filename"`
+			Previous string `json:"previous_filename"`
+		}
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=%d&page=%d",
+			escape(repo.Owner), escape(repo.Name), number, filesPerPage, page+1)
+		if err := c.do(ctx, "GET", path, nil, &files); err != nil {
+			return nil, fmt.Errorf("reading the changed paths of %s#%d: %w", repo, number, err)
+		}
+		for _, f := range files {
+			out = append(out, f.Filename)
+			if f.Previous != "" {
+				out = append(out, f.Previous)
+			}
+		}
+		if len(files) < filesPerPage {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("%s#%d changes more than %d files, which is more than lydite lists: "+
+		"a proposal derived from part of a change covers less than the change does",
+		repo, number, filesPages*filesPerPage)
+}
+
+// filesPages and filesPerPage bound the walk, the same shape reviewPages and
+// reviewPerPage take: a `range` and a page size, so there is no boundary to
+// shift and no step to drop.
+const (
+	filesPages   = 30
+	filesPerPage = 100
+)
+
 // Comment is one comment on a pull request's conversation.
 type Comment struct {
 	ID   int64  `json:"id"`

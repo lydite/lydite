@@ -31,6 +31,17 @@ func clearRequest(mutate func(*Request)) Request {
 	return r
 }
 
+func exemptRequest(mutate func(*Request)) Request {
+	r := clearRequest(func(r *Request) {
+		r.Command = Parse("/lydite exempt docs-only")
+		r.Uncovered = []string{"docs/one.md"}
+	})
+	if mutate != nil {
+		mutate(&r)
+	}
+	return r
+}
+
 func TestParseReadsTheVerbAndAnOptionalRevision(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -44,7 +55,12 @@ func TestParseReadsTheVerbAndAnOptionalRevision(t *testing.T) {
 		{"trailing prose on later lines", "/lydite clear\nthanks!", Command{Verb: VerbClear, Word: "clear"}},
 		{"ordinary conversation", "looks good to me", Command{Verb: VerbNone}},
 		{"addressed but empty", "/lydite", Command{Verb: VerbUnknown}},
-		{"a verb we do not have", "/lydite exempt docs", Command{Verb: VerbUnknown, Word: "exempt"}},
+		{"exempt with a shape", "/lydite exempt docs", Command{Verb: VerbExempt, Word: "exempt", Shape: "docs"}},
+		// The entry has to be named by the person asking for it, and a bare
+		// command is answered rather than ignored: nobody may read silence
+		// as a command that was accepted.
+		{"exempt with no shape", "/lydite exempt", Command{Verb: VerbUnknown, Word: "exempt"}},
+		{"a verb we do not have", "/lydite bless docs", Command{Verb: VerbUnknown, Word: "bless"}},
 		{"not a command, merely mentions one", "you could run /lydite clear here", Command{Verb: VerbNone}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,7 +93,7 @@ func TestOrdinaryConversationIsIgnored(t *testing.T) {
 // floor that keeps a stranger from resolving a referral, and it is read about
 // the commenter rather than asserted by them.
 func TestAStrangerClearsNothing(t *testing.T) {
-	for _, body := range []string{"/lydite clear", "/lydite explain", "/lydite nonsense"} {
+	for _, body := range []string{"/lydite clear", "/lydite explain", "/lydite exempt docs", "/lydite nonsense"} {
 		got := Decide(clearRequest(func(r *Request) {
 			r.Command = Parse(body)
 			r.CanWrite = false
@@ -212,6 +228,73 @@ func TestExplainNeedsNoStandingVerdict(t *testing.T) {
 	}))
 	if got.Kind != KindExplain || got.SHA != head {
 		t.Fatalf("got %+v, want explain at the head", got)
+	}
+}
+
+func TestAReferredChangeWithUncoveredPathsGetsAProposal(t *testing.T) {
+	got := Decide(exemptRequest(nil))
+	if got.Kind != KindExempt {
+		t.Fatalf("Kind = %v, want KindExempt", got.Kind)
+	}
+	if got.Name != "docs-only" {
+		t.Errorf("Name = %q, want the shape the commenter named", got.Name)
+	}
+	if len(got.Paths) != 1 || got.Paths[0] != "docs/one.md" {
+		t.Errorf("Paths = %v, want the change's own uncovered set", got.Paths)
+	}
+}
+
+// There is no path list that would make such a change exempt: proposing its
+// full set would be an entry duplicating others and widened by their union,
+// and proposing an empty one would not parse.
+func TestAChangeWithNothingUncoveredGetsNoProposal(t *testing.T) {
+	got := Decide(exemptRequest(func(r *Request) { r.Uncovered = nil }))
+	if got.Kind != KindRefuse || got.Reason != ReasonNothingToPropose {
+		t.Fatalf("got %+v, want refuse/nothing-to-propose", got)
+	}
+}
+
+// An exemption is proposed for a referral and nothing else: a change that
+// already merges has none, and a gate or an errored run is not one.
+func TestExemptRefusesEveryStatusButAReferral(t *testing.T) {
+	for _, tc := range []struct {
+		state State
+		want  Reason
+	}{
+		{StateSuccess, ReasonAlreadyPassing},
+		{StateFailure, ReasonNotReferred},
+		{StateError, ReasonNotReferred},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			got := Decide(exemptRequest(func(r *Request) {
+				r.Status = &Status{State: tc.state, CreatedAt: before}
+			}))
+			if got.Kind != KindRefuse || got.Reason != tc.want {
+				t.Fatalf("got %+v, want refuse/%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The proposal passes the same ladder a clearance does. There is no shortcut
+// for it being the verb that changes nothing: one derived from a head the
+// commenter never read names the wrong paths.
+func TestProposingIsRefusedByEveryReasonAClearanceIs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Request)
+		want   Reason
+	}{
+		{"without permission", func(r *Request) { r.CanWrite = false }, ReasonNotPermitted},
+		{"with no verdict", func(r *Request) { r.Status = nil }, ReasonNoStatus},
+		{"against a newer verdict", func(r *Request) { r.Status = referred(after) }, ReasonHeadMoved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Decide(exemptRequest(tc.mutate))
+			if got.Kind != KindRefuse || got.Reason != tc.want {
+				t.Fatalf("got %+v, want refuse/%s", got, tc.want)
+			}
+		})
 	}
 }
 

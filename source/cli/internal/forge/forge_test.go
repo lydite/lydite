@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -277,6 +278,79 @@ func TestReviewCommentsWalksEveryPage(t *testing.T) {
 	}
 	if len(asked) != 2 || asked[0] != "1" || asked[1] != "2" {
 		t.Errorf("the pages asked for were %v", asked)
+	}
+}
+
+// A rename contributes both of its names. Counting only the destination
+// would let a file move into or out of an exempt tree with a proposal derived
+// from the list none the wiser.
+func TestChangedPathsCountsBothSidesOfARename(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"filename": "docs/one.md", "status": "modified"},
+			{"filename": "src/new.go", "status": "renamed", "previous_filename": "src/old.go"},
+		})
+	})
+	got, err := client.ChangedPaths(context.Background(), repo, 7)
+	if err != nil {
+		t.Fatalf("ChangedPaths: %v", err)
+	}
+	want := []string{"docs/one.md", "src/new.go", "src/old.go"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestChangedPathsWalksEveryPage(t *testing.T) {
+	var asked []string
+	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Query().Get("page"))
+		if r.URL.Query().Get("page") == "1" {
+			full := make([]map[string]any, 100)
+			for i := range full {
+				full[i] = map[string]any{"filename": fmt.Sprintf("src/%d.go", i)}
+			}
+			_ = json.NewEncoder(w).Encode(full)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"filename": "src/last.go"}})
+	})
+	got, err := client.ChangedPaths(context.Background(), repo, 7)
+	if err != nil {
+		t.Fatalf("ChangedPaths: %v", err)
+	}
+	if len(got) != 101 || got[100] != "src/last.go" {
+		t.Fatalf("the second page was not read: %d paths, last %q", len(got), got[len(got)-1])
+	}
+	if len(asked) != 2 || asked[0] != "1" || asked[1] != "2" {
+		t.Errorf("the pages asked for were %v", asked)
+	}
+}
+
+// A proposal derived from part of a change covers less than the change does,
+// so a listing that ran out of pages is a refusal rather than a short answer.
+func TestChangedPathsRefusesAListingItCouldNotFinish(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		full := make([]map[string]any, 100)
+		for i := range full {
+			full[i] = map[string]any{"filename": fmt.Sprintf("src/%d.go", i)}
+		}
+		_ = json.NewEncoder(w).Encode(full)
+	})
+	got, err := client.ChangedPaths(context.Background(), repo, 7)
+	if err == nil {
+		t.Fatalf("a truncated listing was returned as an answer: %d paths", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refusal must carry no half-read listing: %d paths", len(got))
+	}
+	if !strings.Contains(err.Error(), "more than 3000 files") {
+		t.Errorf("the refusal does not say what happened: %v", err)
 	}
 }
 

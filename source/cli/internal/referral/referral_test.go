@@ -241,6 +241,41 @@ func TestValidationRequiresNameReasonAndPaths(t *testing.T) {
 	}
 }
 
+// The marker is what makes `/lydite exempt`'s proposal unlandable: a block
+// pasted into the file with its question still in it fails here rather than
+// becoming a live exemption. Anywhere in the reason, because a reason that
+// keeps the question and prefixes a sentence to it has answered nothing.
+func TestAReasonCarryingThePlaceholderMarkerIsRejected(t *testing.T) {
+	// The generated block, exactly as the comment surface emits it.
+	const proposed = `
+exemptions:
+  - name: docs-only
+    reason: "TODO(lydite): why is a change touching only these paths safe to merge unread?
+      State what this entry's paths guarantee, and nothing the schema does not check."
+    paths: ["docs/**"]
+`
+	for name, doc := range map[string]string{
+		"the generated proposal, pasted unedited": proposed,
+		"the marker prefixed with an answer": "exemptions:\n  - name: n\n" +
+			"    reason: \"docs carry no runtime risk. TODO(lydite): why is this safe?\"\n    paths: [\"a\"]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(doc), FileName)
+			if err == nil {
+				t.Fatal("a generated question landed as a live exemption")
+			}
+			if !strings.Contains(err.Error(), "placeholder marker") {
+				t.Errorf("the error does not say the marker is what was wrong: %v", err)
+			}
+		})
+	}
+
+	// A reason somebody meant still parses: the literal is one nobody writes
+	// by accident, so the check must not fire on ordinary prose about a TODO.
+	parseOrFail(t, "exemptions:\n  - name: n\n"+
+		"    reason: \"these paths are documentation, and a TODO in one changes nothing that runs\"\n    paths: [\"a\"]\n")
+}
+
 // patch-and-minor is the only condition there is, and a value lydite does not
 // know is rejected by name: an unrecognised condition dropped in silence is an
 // exemption that applies unconditionally.

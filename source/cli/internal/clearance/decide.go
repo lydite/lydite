@@ -49,6 +49,15 @@ type Request struct {
 	Status *Status
 	// CommentAt is when the comment was recorded.
 	CommentAt time.Time
+	// Uncovered is the changed paths no declared exemption covers, which
+	// the caller computes for an exempt request and leaves empty for every
+	// other verb.
+	//
+	// It arrives already computed because answering it needs the exemptions
+	// file and a list of what the pull request touched, and this package is
+	// a pure function of a payload and the statuses standing on a commit.
+	// cmd/lydite is where the two meet.
+	Uncovered []string
 }
 
 // Kind is what the caller should do.
@@ -61,6 +70,9 @@ const (
 	KindClear
 	// KindExplain restates the standing verdict.
 	KindExplain
+	// KindExempt answers with a proposed exemptions-file entry, and changes
+	// nothing. Landing it is a pull request somebody opens.
+	KindExempt
 	// KindRefuse answers without changing any status.
 	KindRefuse
 )
@@ -90,6 +102,14 @@ const (
 	ReasonNotReferred Reason = "not-referred"
 	// ReasonAlreadyPassing is a revision that already merges unattended.
 	ReasonAlreadyPassing Reason = "already-passing"
+	// ReasonNothingToPropose is a referred change every one of whose paths
+	// some declared exemption already covers, so there is nothing left to
+	// name: no path list would add coverage. Which of the things that can
+	// refer it anyway is doing so is not knowable from here — the paths may
+	// split across exemptions that together cover them where no single one
+	// does, or a disqualifier this computation never sees may be vetoing
+	// the match. Either way there is no entry to propose.
+	ReasonNothingToPropose Reason = "nothing-to-propose"
 )
 
 // Action is the decision.
@@ -99,6 +119,11 @@ type Action struct {
 	SHA string
 	// Reason is set when Kind is KindRefuse.
 	Reason Reason
+	// Name and Paths are the proposed entry, set when Kind is KindExempt.
+	// Name is the commenter's; Paths is derived from the change, and is
+	// the whole of what the entry would cover.
+	Name  string
+	Paths []string
 }
 
 // Decide answers one request.
@@ -108,6 +133,11 @@ type Action struct {
 // it, from someone with push permission. Every other shape is refused and
 // says which, because a clearance that quietly does not happen is
 // indistinguishable from one that did.
+//
+// KindExempt passes the same ladder, and there is no shortcut for it being
+// the verb that changes nothing: a proposal derived from a head the commenter
+// never read names the wrong paths, which is clearing code nobody saw
+// delivered as a suggestion.
 func Decide(r Request) Action {
 	if r.Command.Verb == VerbNone {
 		return Action{Kind: KindIgnore}
@@ -147,6 +177,15 @@ func Decide(r Request) Action {
 	}
 	switch r.Status.State {
 	case StatePending:
+		if r.Command.Verb == VerbExempt {
+			// Nothing to propose is its own answer rather than an empty
+			// entry: every changed path is already covered by something,
+			// so no path list would make this change exempt.
+			if len(r.Uncovered) == 0 {
+				return Action{Kind: KindRefuse, Reason: ReasonNothingToPropose}
+			}
+			return Action{Kind: KindExempt, SHA: r.HeadSHA, Name: r.Command.Shape, Paths: r.Uncovered}
+		}
 		return Action{Kind: KindClear, SHA: r.HeadSHA}
 	case StateSuccess:
 		return Action{Kind: KindRefuse, Reason: ReasonAlreadyPassing}

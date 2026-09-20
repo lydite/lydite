@@ -28,6 +28,10 @@ const (
 	VerbClear Verb = "clear"
 	// VerbExplain restates the standing verdict.
 	VerbExplain Verb = "explain"
+	// VerbExempt proposes an exemptions-file entry and lands nothing. It
+	// resolves no referral: what it answers with is text addressed to a
+	// person, who opens the pull request that declares it.
+	VerbExempt Verb = "exempt"
 	// VerbUnknown is a comment addressed to lydite naming something else.
 	// It is answered rather than ignored: silence is indistinguishable from
 	// a broken workflow, and the one thing a person must never conclude
@@ -42,6 +46,12 @@ type Command struct {
 	// Naming one is the difference between "clear what is there now" and
 	// "clear what I read", which matters when a push lands in between.
 	SHA string
+	// Shape is the name a proposed exemption is to carry, empty for every
+	// verb but exempt. It is the one thing a commenter contributes to a
+	// proposal: the paths are derived from the change, because a name a
+	// person chose cannot widen what the entry covers and a pattern they
+	// typed can.
+	Shape string
 	// Word is what was written where a verb belongs, kept so an unknown
 	// verb can be quoted back.
 	Word string
@@ -72,6 +82,18 @@ func Parse(body string) Command {
 		cmd.Verb = VerbClear
 	case "explain":
 		cmd.Verb = VerbExplain
+	case "exempt":
+		// The shape is required, and a bare `/lydite exempt` is unknown
+		// rather than ignored: the entry has to be named by the person
+		// asking for it, and nothing lydite could pick instead would be
+		// their name for it.
+		if len(fields) < 3 {
+			cmd.Verb = VerbUnknown
+			return cmd
+		}
+		cmd.Verb = VerbExempt
+		cmd.Shape = fields[2]
+		return cmd
 	default:
 		cmd.Verb = VerbUnknown
 		return cmd

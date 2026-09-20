@@ -114,6 +114,18 @@ type Exemption struct {
 // docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md.
 const VersionsPatchAndMinor = "patch-and-minor"
 
+// ReasonPlaceholderMarker is reserved, and no exemption may carry it.
+//
+// `/lydite exempt` proposes a paste-ready entry whose reason is a question
+// rather than an answer, and this literal is what makes the question
+// unlandable: a proposal copied into the file unedited fails validate instead
+// of becoming a live exemption. The check lives here because generating the
+// comment is one route to this file and not one lydite controls — a block is
+// copied by hand, or by whatever an author's editor does with a fenced code
+// block — and validate is the route every producer already passes through.
+// See docs/adr/0049-exempt-proposes-an-entry-and-lands-nothing.md.
+const ReasonPlaceholderMarker = "TODO(lydite):"
+
 // satisfied reports whether e's condition holds for the evidence a caller
 // measured. An exemption declaring no condition is satisfied by anything,
 // including the zero Evidence.
@@ -198,6 +210,14 @@ func (f File) validate(source string) error {
 		seen[e.Name] = true
 		if e.Reason == "" {
 			return fmt.Errorf("%s (%s): reason is required — it is what makes this entry reviewable", where, e.Name)
+		}
+		// Anywhere in the reason rather than only at its head: a reason that
+		// keeps the question and prefixes a sentence to it has answered
+		// nothing. The literal is one nobody writes by accident, so the check
+		// never fires on a reason somebody meant.
+		if strings.Contains(e.Reason, ReasonPlaceholderMarker) {
+			return fmt.Errorf("%s (%s): reason still carries lydite's own placeholder marker — "+
+				"an exemption needs a person's judgement, not a generated question", where, e.Name)
 		}
 		// An exemption with no patterns covers only a change that touches
 		// nothing, so it can never fire. Accepting it would leave a dead

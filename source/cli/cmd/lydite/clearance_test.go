@@ -24,14 +24,19 @@ import (
 type fakeForge struct {
 	permission string
 	statuses   []map[string]any
-	published  []map[string]string
-	comments   []string
+	// changed is the platform's own list-files answer, which is the only
+	// thing the comment surface asks about the pull request itself.
+	changed   []map[string]any
+	published []map[string]string
+	comments  []string
 }
 
 func (f *fakeForge) start(t *testing.T) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/files"):
+			_ = json.NewEncoder(w).Encode(f.changed)
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"}}`))
 		case strings.Contains(r.URL.Path, "/permission"):
@@ -218,6 +223,129 @@ func TestAMistypedVerbIsAnsweredAndClearsNothing(t *testing.T) {
 	}
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "unknown command") {
 		t.Errorf("a typo went unanswered: %+v", forge.comments)
+	}
+}
+
+// inCheckoutWith puts the test in a working directory shaped like the
+// clearance job's own checkout of the default branch, which is where the
+// declarations in force are read from. An empty document stands in for a
+// repository that has declared nothing.
+func inCheckoutWith(t *testing.T, exemptions string) {
+	t.Helper()
+	dir := t.TempDir()
+	if exemptions != "" {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(referral.FileName)), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, referral.FileName), []byte(exemptions), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+}
+
+// The proposal covers the paths nothing declared covers, and nothing else:
+// the paths already under an exemption are not widened into a second entry,
+// and the commenter contributes the name alone.
+func TestExemptProposesAnEntryOverTheUncoveredPathsAlone(t *testing.T) {
+	inCheckoutWith(t, "exemptions:\n  - name: docs\n    reason: prose only\n    paths: [\"docs/**\"]\n")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed: []map[string]any{
+			{"filename": "docs/one.md"},
+			{"filename": "src/new.go", "status": "renamed", "previous_filename": "src/old.go"},
+		},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt moved-sources", "pedromvgomes", commented))
+
+	if len(forge.published) != 0 {
+		t.Fatalf("a proposal changed a status: %+v", forge.published)
+	}
+	if len(forge.comments) != 1 {
+		t.Fatalf("posted %d comments, want 1", len(forge.comments))
+	}
+	body := forge.comments[0]
+	for _, want := range []string{"exemptions:", "- name: moved-sources", referral.ReasonPlaceholderMarker,
+		"      - src/new.go", "      - src/old.go"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the proposal is missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "docs/one.md") {
+		t.Errorf("a path an exemption already covers was proposed again:\n%s", body)
+	}
+}
+
+// The generated entry is a draft and not an exemption: landed unedited it
+// fails the parse every route to the file passes through.
+func TestTheProposedEntryDoesNotParseAsAnExemption(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "docs/one.md"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+
+	block := fencedBlock(t, forge.comments[0])
+	if _, err := referral.Parse([]byte(block), referral.FileName); err == nil {
+		t.Fatal("the proposal parsed as a live exemption, so pasting it unedited would declare one")
+	} else if !strings.Contains(err.Error(), "placeholder marker") {
+		t.Errorf("the entry was rejected for something other than its unanswered reason: %v", err)
+	}
+}
+
+// fencedBlock returns the one fenced block of a rendered comment, which is
+// the YAML a reader copies out of it.
+func fencedBlock(t *testing.T, body string) string {
+	t.Helper()
+	parts := strings.Split(body, "```")
+	if len(parts) < 3 {
+		t.Fatalf("the comment carries no fenced block:\n%s", body)
+	}
+	return strings.TrimPrefix(parts[1], "\n")
+}
+
+// A change every one of whose paths some exemption already covers has no
+// entry to propose, and the refusal does not guess which of the things that
+// can refer it anyway is doing so.
+func TestExemptProposesNothingWhenEveryPathIsAlreadyCovered(t *testing.T) {
+	inCheckoutWith(t, "exemptions:\n"+
+		"  - name: docs\n    reason: prose only\n    paths: [\"docs/**\"]\n"+
+		"  - name: sources\n    reason: code only\n    paths: [\"src/**\"]\n")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "docs/one.md"}, {"filename": "src/a.go"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt everything", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "already covered") {
+		t.Fatalf("the refusal does not say why there is nothing to propose: %+v", forge.comments)
+	}
+	if strings.Contains(forge.comments[0], "exemptions:") {
+		t.Errorf("an entry was proposed anyway:\n%s", forge.comments[0])
+	}
+}
+
+// The shape names the entry, and a command without one is answered rather
+// than guessed at.
+func TestExemptWithoutAShapeIsAnswered(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "unknown command") {
+		t.Fatalf("a command with no shape went unanswered: %+v", forge.comments)
 	}
 }
 

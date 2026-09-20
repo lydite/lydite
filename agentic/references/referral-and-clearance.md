@@ -260,7 +260,7 @@ licence and SCA evidence a `versions:` condition needs. This is added latency on
 request (`referral` no longer answers as soon as `setup` does) and one more artifact dependency
 to keep correct, which ADR 0047 records as a cost asked about and approved before it was built.
 
-# Clearance: `/lydite clear`
+# Clearance: `/lydite clear`, `explain` and `exempt`
 
 A referral is resolved by a person commenting on the pull request, never by the author
 pushing more code. `lydite clearance` is that surface and `internal/clearance` is its
@@ -322,9 +322,51 @@ comment not addressed to lydite costs nothing rather than costing a short job.
 `gt` renders and hardcodes to `ci-gate` alone, so it cannot be set from this repository —
 see [#34](https://github.com/lydite/lydite/issues/34). Until then the loop is published
 and flipped correctly and enforces nothing, which is a temporary state rather than the
-design. `/lydite exempt` is likewise held back, in
-[#33](https://github.com/lydite/lydite/issues/33), because what it should emit is
-undecided rather than unbuilt.
+design.
+
+## `/lydite exempt <shape>` proposes an entry and lands nothing
+
+The third verb answers with a paste-ready `.lydite/exemptions.yml` entry and writes
+nothing: no status, no edit to the standing comment, no commit. `name` is the `<shape>`
+the commenter typed; `paths` is the change's own **uncovered** set, which `Decide`'s
+caller computes by running `referral.Uncovered` over the pull request's changed paths
+against the exemptions file in the clearance job's own checkout; `reason` is a
+placeholder stating the question a person has to answer. Landing the entry is an
+ordinary pull request somebody opens, reviews and merges. See
+[ADR 0049](../../docs/adr/0049-exempt-proposes-an-entry-and-lands-nothing.md).
+
+Nothing a commenter writes may widen what the block says. A glob argument was rejected
+for exactly that — it lets an author propose `docs/**` off a change that touched one
+README — and it is worse here than in a hand-written entry, because the block reads as
+lydite's output and the reviewer who would have interrogated a colleague's glob accepts
+the same glob from a tool.
+
+**The `reason` is a question, and the marker in it is reserved.**
+`referral.ReasonPlaceholderMarker` is the literal `TODO(lydite):`, and
+`Exemption.validate` rejects any reason carrying it *anywhere* — a reason that keeps the
+question and prefixes a sentence to it has answered nothing. The check is in
+`internal/referral` rather than in the generator because copying the block into a pull
+request is a route lydite does not control, and `validate` is the one place every route
+already passes through. A templated real-sounding reason was rejected outright: prose
+that already reads review-quality is prose a skimming reader accepts, which defeats the
+requirement that somebody actually thought about it.
+
+**`forge.Client.ChangedPaths` is the one thing the comment surface asks about the pull
+request itself**, and it returns names rather than content — nothing is compiled, nothing
+beyond the strings is parsed, no tree is materialised. That is what keeps it on the right
+side of ADR 0015's "no pull-request content is fetched at comment time", which exists to
+protect a job holding a writing token. A rename contributes both of its names, the rule
+ADR 0014 sets for the diff and for the same reason. A proposal carries no `versions:`:
+the evidence behind it is a full `review` run's, no endpoint holds it, and reading a
+manifest off the head is the line falling the other way.
+
+**An empty uncovered set refuses rather than proposing.** Every changed path is already
+covered by something and the change is referred regardless, so there is no path list that
+would make it exempt — proposing its full set would be an entry duplicating others and
+widened by their union. The refusal deliberately does not say *which* cause it is: a
+path-only computation cannot tell "covered between several exemptions, by none alone"
+from "covered, and a disqualifier vetoed the match", because `exempt` never computes
+`Disqualifications` at all. It names the standing comment as where the answer is.
 
 The pull-request comment follows `docs/design/reference/surfaces.dc.html`: verdict badge,
 one-sentence headline, a `Check / Head / Base` table, named list sections, and a footer
