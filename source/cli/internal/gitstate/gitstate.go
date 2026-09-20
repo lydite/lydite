@@ -37,6 +37,7 @@ package gitstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,6 +45,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
@@ -275,10 +278,94 @@ func CommitMessages(ctx context.Context, dir, from, to string) ([]string, error)
 	return messages, nil
 }
 
+// TagPattern is the glob every release tag matches, and the only tags lydite
+// reads as versions. A repository's tags may include anything — a vendor's
+// marker, a moved pointer — and a listing that took them all would have to
+// decide what a non-version tag means.
+const TagPattern = "v*"
+
+// Tags lists every tag matching TagPattern, in git's own order.
+//
+// Unordered on purpose: version order is semver's answer and not git's, so a
+// caller that needs it sorts with golang.org/x/mod/semver rather than relying
+// on a listing whose order is lexical.
+//
+// An empty list is not an error. A repository before its first release has no
+// tags, and so does a shallow checkout that fetched none — the two are
+// indistinguishable here, and a caller that cannot proceed without tags is the
+// one able to name the fetch depth as the fix.
+func Tags(ctx context.Context, dir string) ([]string, error) {
+	r := executil.RunQuiet(ctx, dir, "git", "tag", "-l", TagPattern)
+	if !r.Ok() {
+		return nil, fmt.Errorf("git tag -l %s: %w", TagPattern, r.Err)
+	}
+	var tags []string
+	for _, line := range strings.Split(r.Output, "\n") {
+		if tag := strings.TrimSpace(line); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags, nil
+}
+
+// PreviousTag is the release that precedes tag: the semver-highest tag in the
+// repository strictly below it, and false when there is none.
+//
+// Version order and never the commit graph. A tag's git parent says where the
+// work sat — a hotfix cut from an older commit, a tag moved after the fact —
+// while consumers upgrade along the version line, so the range a release
+// actually delivers is the one bounded by its version-highest predecessor.
+//
+// A prerelease is never a predecessor, in either direction. `v0.3.0` compares
+// against `v0.2.0` rather than against its own release candidates, whose ranges
+// it wholly contains, and `v0.3.0-rc.1` compares against `v0.2.0` too — its own
+// version sorts below the stable release it leads to, so excluding prereleases
+// as candidates answers both cases with one rule.
+//
+// tag need not be a tag this repository holds: it is read as a version, which
+// is what lets a release be checked from the commit it is about to be cut at.
+// It must be valid semver, and so must every candidate — a listing carrying a
+// tag lydite cannot order is refused rather than silently narrowed, because the
+// tag it cannot place may be exactly the predecessor, and a range quietly
+// widened past a release is a check reporting a pass it never performed.
+//
+// False with no error is the first release: nothing precedes it, the range is
+// empty by definition, and that is a fact about the repository rather than a
+// failure to look.
+func PreviousTag(ctx context.Context, dir, tag string) (string, bool, error) {
+	if !semver.IsValid(tag) {
+		return "", false, fmt.Errorf("%q is not a valid version — a release tag is vMAJOR.MINOR.PATCH, such as v1.4.0", tag)
+	}
+	tags, err := Tags(ctx, dir)
+	if err != nil {
+		return "", false, err
+	}
+	previous := ""
+	for _, candidate := range tags {
+		if !semver.IsValid(candidate) {
+			return "", false, fmt.Errorf("the tag %q matches %s but is not a valid version, so the release preceding %s cannot be established — delete or rename it", candidate, TagPattern, tag)
+		}
+		if semver.Prerelease(candidate) != "" {
+			continue
+		}
+		if semver.Compare(candidate, tag) >= 0 {
+			continue
+		}
+		if previous == "" || semver.Compare(candidate, previous) > 0 {
+			previous = candidate
+		}
+	}
+	return previous, previous != "", nil
+}
+
 // BaseBranchFlag names the flag every command that resolves a merge-base
 // offers, so an error raised here can name the fix without each caller
 // restating it.
 const BaseBranchFlag = "--base-branch"
+
+// BaseSHAFlag names the flag that supplies a revision to ResolveRevision, for
+// the same reason BaseBranchFlag names its own.
+const BaseSHAFlag = "--base-sha"
 
 // remote is the remote every base ref is resolved against.
 //
@@ -423,6 +510,30 @@ func ResolveBaseSHA(ctx context.Context, dir, override string) (string, error) {
 		return "", err
 	}
 	return BaseSHA(ctx, dir, branch)
+}
+
+// ResolveRevision resolves a revision the caller named to the commit it
+// stands for, for a caller asserting which commit the base is rather than
+// asking where a branch diverged.
+//
+// It fetches nothing and computes no merge-base: whatever
+// `git rev-parse --verify <revision>^{commit}` answers in the checkout as it
+// stands is the base. That is the whole difference from BaseSHA, which reads
+// its argument as a branch on the remote — so this takes anything git itself
+// resolves, a full or abbreviated SHA or a relative ref such as HEAD~1, and
+// takes no branch name.
+func ResolveRevision(ctx context.Context, dir, revision string) (string, error) {
+	if revision == "" {
+		return "", errors.New("no revision to resolve — name one with " + BaseSHAFlag)
+	}
+	rev := revision + "^{commit}"
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--verify", rev)
+	if !r.Ok() {
+		return "", fmt.Errorf("git rev-parse --verify %s: %w"+
+			"\n       %s names no commit in this checkout — a shallow checkout that truncated the history is"+
+			" the usual cause for a relative ref, so fetch with depth 0", rev, r.Err, revision)
+	}
+	return strings.TrimSpace(r.Output), nil
 }
 
 // Entry is one component's measurement: its line counts, and what produced

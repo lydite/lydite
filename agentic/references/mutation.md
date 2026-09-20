@@ -26,13 +26,26 @@ coverage already said about the same line. Half of that bound is knowable before
 a component the change does not touch pays for no baseline, no compose stack and no setup command —
 which on the default branch is every component.
 
-**Mutation has no baseline and writes nothing to the `lydite` branch.** There is no per-tree
-quantity to record and nothing to compare against last time; the gate is absolute the way
-`coverage.floor` is. `lydite test record` is untouched, and the single `gitstate.Write`
-call site stays the one place a baseline is written.
+**Mutation has no baseline of its own to gate against.** There is no per-tree quantity to compare
+this run against last time's; the gate is absolute the way `coverage.floor` is. It still reaches
+the ledger, through a different door: a post-merge run's `mutants.json` is one more document
+`lydite test record` reads, alongside `measurements.json` and `scan.json`, into
+`Component.Mutation` — and the single `gitstate.Write` call site stays the one place any of it
+lands on the `lydite` branch. See [`quality-history.md`](../../agentic/references/quality-history.md)
+and [ADR 0043](../../docs/adr/0043-mutation-reaches-the-ledger-from-a-post-merge-run.md).
 
 **Five outcomes, and only one fails.** A **survivor** makes its component's row `✗` and the run
-exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. A mutant
+exit 1 — a Gate in CONTEXT.md's sense, cleared by writing the assertion that kills it. `--no-gate`
+turns off exactly that vote: a completed component's row renders `StatusContext` under the flag,
+whether or not it had survivors — never `StatusPass` for a clean run, since nothing gated it, and
+never `StatusFail` for a run with survivors, since the exit code is not asked to speak for them.
+Recording, `mutants.json` and the findings in `--json` and the document are identical with or
+without the flag; only the row's vote changes. Everything in the "could not run" family — a
+variant that is not runnable, an unresolvable base revision, a baseline that did not pass, a
+component with no headroom under the memory bound, a run interrupted before it finished — fails or
+renders `unmeasured` exactly as it does without the flag, because those rows were never voting on a
+survivor to begin with. See
+[ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md). A mutant
 whose run **hangs** or whose run **allocates without stopping** both count as killed: a runaway is
 a behaviour change something noticed, whether the harness caught it by clock or by peak memory,
 and the two are kept as separate outcomes — `TimedOut` and `OutOfMemory` — rather than folded into
@@ -358,9 +371,12 @@ repository — so a gating row could only restate the conjunction of the rows ab
 measured decision rather than a guess. A run responsible for only part of the declaration emits no
 summary row, for the reason it emits no `coverage(repo)`.
 
-It reads each component's score back out of the row the run rendered, because a report's rows carry
-rendered prose and mutation writes no measurements document beside them — the same trade
-`foldedScheduleRow` already makes for `max N concurrent`. `TestTheFoldReadsBackTheScoreARunRendered`
-is what holds the renderer and the reader together, since a wording change would otherwise be a
-fold that silently stops counting.
+It reads each component's counts out of `mutants.json`, folded across shards by `foldMutants`,
+because the counts are typed data there and arithmetic over data does not care how a row happens
+to be worded. A shard that wrote no such document — an older lydite in the matrix, or one whose
+document would not parse — falls back to reading the score back out of the row that shard
+rendered, the same trade `foldedScheduleRow` already makes for `max N concurrent`.
+`TestTheFoldReadsBackTheScoreARunRendered` is what holds that fallback's renderer and reader
+together, since a wording change would otherwise be a fold that silently stops counting a shard
+with no document to fall back on.
 

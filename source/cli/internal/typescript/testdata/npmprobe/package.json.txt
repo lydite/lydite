@@ -1,0 +1,17 @@
+{
+  "name": "npmprobe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "pr-relay"
+  ],
+  "dependencies": {
+    "lightningcss": "1.33.0",
+    "pause-stream": "0.0.11"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.129.1"
+  }
+}

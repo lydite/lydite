@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,10 +32,10 @@ func testLog(t *testing.T) *componentLog {
 	return log
 }
 
-// The fold reads each component's score back out of the row a run rendered,
-// because a report's rows carry prose and mutation writes no second document
-// beside them. Nothing else holds the two together, so a wording change here
-// is a fold that silently stops counting.
+// A shard that wrote no mutants.json — an older lydite, or a document that
+// would not parse — still has its score read back out of the row it rendered.
+// Nothing else holds the wording and the regex together, so a change to either
+// is a fold that silently stops counting that shard.
 func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -63,7 +64,7 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t), c.s, c.results, nil, 42*time.Second)
 			decl := component.File{Components: []component.Component{{Name: "app"}}}
-			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, decl)
+			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, mutantsDoc{}, decl)
 
 			want := formatScore(c.killed, c.denom, 1, 42*time.Second)
 			if folded.Value != want {
@@ -536,6 +537,147 @@ func TestTheFoldSumsTheShardsScoresAndGatesNothing(t *testing.T) {
 	}
 }
 
+// countsShard writes one shard's report directory with the counts document
+// beside the rendered report, the way a matrix job leaves it behind.
+func countsShard(t *testing.T, counts mutantsDoc, rows ...ui.Row) string {
+	t.Helper()
+	dir := mutationShard(t, rows...)
+	data, err := json.Marshal(counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, mutantsName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The fold sums what the shards measured rather than what they said, and a
+// shard that ran nothing at all folds in: its document holds no component, so
+// it contributes nothing to the score and its own rows still take their place.
+func TestTheFoldSumsTheShardsCountsIncludingAShardThatRanNothing(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, Unviable: 2}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc"},
+			ui.Row{Status: ui.StatusContext, Label: mutationLabel("b"), Value: "mutation is off for this component"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, ok := rowNamed(doc, "mutation")
+	if !ok {
+		t.Fatal("the fold emitted no summary row")
+	}
+	// Seven killed of the eight that say something about the suite. The two
+	// that did not compile are outside the denominator, and the shard that ran
+	// nothing adds neither a component nor a mutant.
+	want := "7 of 8 mutant(s) killed across 1 component(s) in 1m30s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
+	}
+	// A shard that measured nothing is a shard of this run all the same: it was
+	// responsible for a component that opted out, and refusing its document
+	// would make an opt-out anywhere in the matrix a fold that cannot complete.
+	shards, _ := rowNamed(doc, "shards")
+	if shards.Status != ui.StatusPass {
+		t.Errorf("the shards row is %+v, want the shard that ran nothing folded in", shards)
+	}
+}
+
+// A component whose mutants said nothing about the suite still ran, and the
+// fold counts it because its shard's counts hold it — the rendered row is
+// `unmeasured` and carries no score at all. It is the count an unsharded run
+// reports for the same declaration, which is what a fold reading numbers rather
+// than sentences is for.
+func TestTheFoldCountsAComponentWhoseMutantsSaidNothing(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Unviable: 3}}},
+			ui.Row{Status: ui.StatusUnmeasured, Label: mutationLabel("b"),
+				Value: "3 mutant(s), none of which says anything about the suite: 3 did not compile"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "7 of 8 mutant(s) killed across 2 component(s) in 1m30s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
+	}
+}
+
+// A shard whose counts are missing still contributed a verdict, so its score
+// comes back out of its rendered row rather than silently out of the total. A
+// version skew in a matrix is what produces that, and dropping the shard would
+// under-report the run while every row still read green.
+func TestAShardWithNoCountsIsReadBackFromItsRows(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "10 of 11 mutant(s) killed across 2 component(s) in 2m0s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want the shard with no counts read back from its row", summary.Value)
+	}
+}
+
+// Counts that are there and will not parse are neither a shard that wrote none
+// nor one that measured nothing, and are named on that shard's row: read as
+// absent, the fold would answer from the prose while the row still read `pass`.
+func TestAShardWhoseCountsWillNotParseFailsItsRow(t *testing.T) {
+	root := mergeRepo(t)
+	broken := mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "4 of 4 mutant(s) killed in 10s"})
+	if err := os.WriteFile(filepath.Join(broken, mutantsName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := runMutationMerge(t, root, broken,
+		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("a shard whose counts would not parse passed the fold")
+	}
+	row, ok := rowNamed(doc, "read("+broken+")")
+	if !ok || row.Status != ui.StatusFail {
+		t.Fatalf("the shard's row is %+v, want a failure naming what could not be read", row)
+	}
+	// The score is still reported, from the prose: the shard rendered a
+	// verdict whatever became of its counts.
+	summary, _ := rowNamed(doc, "mutation")
+	if !strings.HasPrefix(summary.Value, "7 of 7 mutant(s) killed") {
+		t.Errorf("summary = %q, want the unreadable shard read back from its row", summary.Value)
+	}
+}
+
+// Shards that mutated different trees are not parts of one run, and the row
+// that says so is `shards` — the one row about whether these documents fold
+// into a run at all.
+func TestShardsThatMutatedDifferentTreesDoNotFold(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t, mutantsDoc{Tree: "aaaaaaaaaaaa", Components: map[string]mutantCounts{"a": {Killed: 4}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "4 of 4 mutant(s) killed in 10s"}),
+		countsShard(t, mutantsDoc{Tree: "bbbbbbbbbbbb", Components: map[string]mutantCounts{"b": {Killed: 3}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err == nil {
+		t.Error("shards of two trees folded into one run")
+	}
+	row, _ := rowNamed(doc, "shards")
+	if row.Status != ui.StatusFail || !strings.Contains(strings.Join(row.Detail, "\n"), "different trees") {
+		t.Errorf("the shards row is %+v, want it to name the disagreement", row)
+	}
+}
+
 // A survivor in a shard is what fails the run, and the fold carries that row
 // rather than laundering it into a summary.
 func TestASurvivorInAShardFailsTheFold(t *testing.T) {
@@ -656,6 +798,58 @@ func TestARepositoryDeclaringNoComponentIsReported(t *testing.T) {
 	}
 	if doc.Verdict != ui.VerdictPass {
 		t.Errorf("verdict is %q; nothing was declared, which is not a failure", doc.Verdict)
+	}
+}
+
+// `--declined` writes the one-row document ADR 0044 describes and returns
+// before any component is loaded: a declaration `component.Load` would refuse
+// is left untouched, and the run still succeeds.
+func TestADeclinedRunWritesOneRowAndTouchesNoComponent(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n  - name: app\n    dir: nowhere\n    runner: go-test\n")
+	doc, _, err := runMutationCmd(t, "--dir", root, "--declined")
+	if err != nil {
+		t.Fatalf("a declined run failed: %v", err)
+	}
+	if len(doc.Rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly one", doc.Rows)
+	}
+	row := doc.Rows[0]
+	if row.Status != ui.StatusDeclined || row.Label != "mutation" || row.Value != "declined for this run" {
+		t.Errorf("row = %+v, want the declined row ADR 0044 describes", row)
+	}
+	if doc.Verdict != ui.VerdictPass {
+		t.Errorf("verdict is %q; a declined run is not a failure", doc.Verdict)
+	}
+
+	// The document a real run would have written is where publish looks for
+	// it, holding the same one row.
+	written, err := readDocument(documentPath(reportsDir(root), "mutation"))
+	if err != nil {
+		t.Fatalf("no document was written to the report directory: %v", err)
+	}
+	if len(written.Rows) != 1 || written.Rows[0].Status != ui.StatusDeclined {
+		t.Errorf("written document rows = %+v, want the one declined row", written.Rows)
+	}
+}
+
+// The document `lydite mutation --declined` writes renders as a declined
+// section once `lydite publish` reads it back — the round-trip ADR 0044
+// exists to guarantee: a repository that declined the concern sees that
+// stated, not a silently absent section.
+func TestADeclinedMutationDocumentRendersAsADeclinedSection(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components: []\n")
+	if _, _, err := runMutationCmd(t, "--dir", root, "--declined"); err != nil {
+		t.Fatalf("a declined run failed: %v", err)
+	}
+	comment := buildComment([]string{reportsDir(root)}, "")
+	if len(comment.Sections) != 1 {
+		t.Fatalf("sections = %+v, want exactly the mutation section", comment.Sections)
+	}
+	if got := comment.Sections[0].Status; got != ui.StatusDeclined {
+		t.Errorf("section status = %q, want declined", got)
 	}
 }
 
@@ -1320,6 +1514,203 @@ func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
 	}
 }
 
+// --base-sha is the commit it names and nothing else: no fetch and no
+// merge-base, which is what lets a run on the default branch have a range at
+// all. The fixture is two commits deep so the two flags name different
+// commits, and every spelling git resolves names the same one.
+func TestAnExplicitBaseResolvesTheCommitItNames(t *testing.T) {
+	root := twoChangesRepo(t)
+	ctx := context.Background()
+	want := revParse(t, root, "HEAD~1")
+	mergeBase, err := resolveMutationBase(ctx, root, "main", "")
+	if err != nil {
+		t.Fatalf("the merge-base against main did not resolve: %v", err)
+	}
+	if mergeBase == want {
+		t.Fatal("the fixture's merge-base is its own HEAD~1, so nothing here distinguishes the two bases")
+	}
+	for _, c := range []struct {
+		name     string
+		revision string
+	}{
+		{"the full SHA", want},
+		{"an abbreviated SHA", want[:8]},
+		{"a relative ref", "HEAD~1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveMutationBase(ctx, root, "", c.revision)
+			if err != nil {
+				t.Fatalf("%s did not resolve: %v", c.revision, err)
+			}
+			if got != want {
+				t.Errorf("--base-sha %s resolved %s, want %s", c.revision, got, want)
+			}
+		})
+	}
+}
+
+// The mutants themselves, and not only the commit behind them: pointed at a
+// base explicitly, a run produces exactly what the merge-base run over the
+// same range produces — over a repository whose merge-base is further back,
+// and so would carry an earlier change's mutants too.
+func TestAnExplicitBaseProducesTheMutantsTheMergeBaseWould(t *testing.T) {
+	score := func(t *testing.T, root string, args ...string) string {
+		t.Helper()
+		doc, _, err := runMutationCmd(t, append([]string{"--dir", root}, args...)...)
+		if err != nil {
+			t.Fatalf("the run failed: %v\n%+v", err, doc.Rows)
+		}
+		row, ok := rowNamed(doc, mutationLabel("app"))
+		if !ok {
+			t.Fatalf("no row for the component: %+v", doc.Rows)
+		}
+		// The counts alone. The elapsed time is in the same value and
+		// differs between two runs of the same range.
+		counts, _, _ := strings.Cut(row.Value, " in ")
+		return counts
+	}
+	// The second change alone, as a branch whose merge-base holds the first.
+	want := score(t, goModuleRepo(t, shallower, killsShallower), "--base-branch", "main")
+	if !strings.Contains(want, "mutant(s) killed") {
+		t.Fatalf("the fixture mutated nothing, so the two runs agree about nothing: %q", want)
+	}
+	got := score(t, twoChangesRepo(t), "--base-sha", "HEAD~1")
+	if got != want {
+		t.Errorf("--base-sha HEAD~1 mutated %q, want the equivalent merge-base run's %q", got, want)
+	}
+}
+
+// twoChangesRepo is a branch carrying two changes over main, so the merge-base
+// with main is a commit behind HEAD~1 and the two bases name different ranges.
+func twoChangesRepo(t *testing.T) string {
+	t.Helper()
+	root := goModuleRepoWith(t, goModuleDecl, "", nil, deeper, killsItsMutants)
+	write(t, root, "paths/paths.go", baseSource+deeper+shallower)
+	write(t, root, "paths/paths_test.go", baseSuite+killsItsMutants+killsShallower)
+	commitAll(t, root, "the second change")
+	return root
+}
+
+// shallower is a second change, on its own commit: one comparison, on a line
+// the suite below executes.
+const shallower = "\nfunc Shallower(a, b string) bool { return Depth(a) < Depth(b) }\n"
+
+const killsShallower = `
+func TestShallower(t *testing.T) {
+	if !Shallower("a", "a/b") {
+		t.Error("a is shallower than a/b")
+	}
+	if Shallower("a", "a") {
+		t.Error("a is not shallower than itself")
+	}
+}
+`
+
+// revParse is what the fixture's own git says a revision is, which is what
+// resolution is checked against rather than against itself.
+func revParse(t *testing.T, root, revision string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", revision)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v", revision, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// --affected answers about the range the mutants came from. Selection
+// resolving a base of its own would report a component untouched while its own
+// mutants were being run, or the reverse — so the fixture is built where the
+// two bases disagree: the last commit touches web alone, and the merge-base
+// with main is behind a commit that touched app.
+func TestAnExplicitBaseSelectsTheComponentsItsMutantsCameFrom(t *testing.T) {
+	root := goModuleRepoWith(t,
+		"components:\n  - name: app\n    dir: app\n    runner: go-test\n    args: [\"./...\"]\n"+
+			"  - name: web\n    dir: web\n    runner: go-test\n    args: [\"./...\"]\n",
+		"app",
+		map[string]string{
+			"web/go.mod": "module fixture/web\n\ngo 1.26.4\n",
+			"web/web.go": "package web\n\nfunc Version() int { return 1 }\n",
+		},
+		deeper, killsItsMutants)
+	write(t, root, "web/web.go", "package web\n\nfunc Version() int { return 2 }\n")
+	commitAll(t, root, "a change to web alone")
+
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-sha", "HEAD~1", "--affected")
+	if err != nil {
+		t.Fatalf("an affected run against an explicit base failed: %v\n%+v", err, doc.Rows)
+	}
+	app, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("the deselected component took no row: %+v", doc.Rows)
+	}
+	// The component the explicit base's range does not touch, and the one
+	// whose mutants that same range produced none of.
+	if app.Status != ui.StatusUnmeasured || app.Value != "not affected" {
+		t.Errorf("app = %+v, want unmeasured/not affected — the range this run mutated does not touch it", app)
+	}
+	if _, ok := rowNamed(doc, mutationLabel("web")); !ok {
+		t.Fatalf("the selected component took no row: %+v", doc.Rows)
+	}
+	sel, ok := rowNamed(doc, "select")
+	if !ok {
+		t.Fatal("an affected run emitted no select row")
+	}
+	if !strings.Contains(sel.Value, "1 of 2 affected") {
+		t.Errorf("select = %q, want 1 of 2 affected", sel.Value)
+	}
+}
+
+// commitAll commits everything in the fixture as one commit.
+func commitAll(t *testing.T, root, message string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "--quiet", "-m", message}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@example.com",
+			"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// Two answers to one question. Refused rather than resolved by precedence: a
+// mis-wired workflow supplying both would otherwise mutate a range nobody
+// asked for, silently.
+func TestABaseBranchAndABaseSHATogetherAreRefused(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	// Both of them resolvable in this fixture, so what is under test is the
+	// refusal rather than one of the two failing on its own.
+	_, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--base-sha", "HEAD")
+	if err == nil {
+		t.Fatal("both bases were accepted, so one of them silently decided the range")
+	}
+	for _, want := range []string{"base-branch", "base-sha"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run failed with %q, want it to name %s", err, want)
+		}
+	}
+}
+
+// An unresolvable explicit base is an error naming the revision and the fix,
+// exactly as an unresolvable merge-base is — never a run that mutates nothing
+// and reports a pass.
+func TestAnUnresolvableExplicitBaseIsAnErrorNamingTheFix(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	_, _, err := runMutationCmd(t, "--dir", root, "--base-sha", "HEAD~99")
+	if err == nil {
+		t.Fatal("a base no commit answers to was accepted")
+	}
+	for _, want := range []string{"--base-sha", "HEAD~99", "depth 0"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run failed with %q, want it to say %q", err, want)
+		}
+	}
+}
+
 // A ceiling the component's own baseline would not fit under gates nothing and
 // says why. Under one, every mutant dies of the bound rather than of a test,
 // and a row reporting that as a suite that killed everything is a score
@@ -1403,5 +1794,197 @@ func TestSomethingUnrelatedIsBroken(t *testing.T) {
 	})
 	if strings.Contains(quiet, "app |") {
 		t.Errorf("a run that was not asked to stream mirrored anyway:\n%s", quiet)
+	}
+}
+
+// After the merge a survivor is history rather than a verdict: the branch is
+// gone and the remedy the row prints belongs to a pull request that no longer
+// exists. Under --no-gate the component is measured and recorded in full, and
+// the run stays green.
+func TestASurvivorUnderNoGateIsRecordedAndDoesNotVote(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
+	Deeper("a/b", "a")
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a survivor failed a run that gates nothing: %v\n%+v", err, doc.Rows)
+	}
+	if doc.Verdict != ui.VerdictPass {
+		t.Errorf("verdict is %q, want a pass: nothing here was gated", doc.Verdict)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("no row for the component: %+v", doc.Rows)
+	}
+	if row.Status != ui.StatusContext {
+		t.Fatalf("row = %+v, want %q", row, ui.StatusContext)
+	}
+	// Measured and recorded is the whole point of the run, so the numbers and
+	// the survivor are on the row a reader acts on.
+	if !strings.Contains(row.Value, "survived") {
+		t.Errorf("value = %q, want it to say what survived", row.Value)
+	}
+	if detail := strings.Join(row.Detail, "\n"); !strings.Contains(detail, "paths/paths.go:") {
+		t.Errorf("the survivor is not located: %v", row.Detail)
+	}
+	// The finding anchors to a line in the commit that was measured, which on
+	// the default branch is a commit that exists and does not move. A count
+	// with no locations is what the ledger would otherwise inherit.
+	if len(doc.Findings) == 0 {
+		t.Error("a recorded survivor produced no finding")
+	}
+	for _, f := range doc.Findings {
+		if f.Gate != "mutation" || f.Line == 0 {
+			t.Errorf("finding = %+v, want a located mutation claim", f)
+		}
+	}
+}
+
+// StatusContext and never StatusPass. Nothing was gated, so a component that
+// killed every mutant would otherwise render the ✓ of a gate that examined it
+// and cleared it — indistinguishable from the run that did gate.
+func TestACleanRunUnderNoGateRendersContextAndNeverPass(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestDeeper(t *testing.T) {
+	if !Deeper("a/b", "a") {
+		t.Error("a/b is deeper than a")
+	}
+	if Deeper("a", "a") {
+		t.Error("a is not deeper than itself")
+	}
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a suite that kills every mutant failed: %v\n%+v", err, doc.Rows)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("no row for the component: %+v", doc.Rows)
+	}
+	if row.Status == ui.StatusPass {
+		t.Fatalf("a component nothing gated rendered a pass: %+v", row)
+	}
+	if row.Status != ui.StatusContext {
+		t.Fatalf("row = %+v, want %q", row, ui.StatusContext)
+	}
+	if !strings.Contains(row.Value, "mutant(s) killed") {
+		t.Errorf("value = %q, want the kill count", row.Value)
+	}
+}
+
+// Nothing can be concluded about tests that were not passing before the
+// mutation, whichever way the run votes: the flag decides what a completed
+// measurement is worth, and this is not one.
+func TestABaselineThatDidNotPassIsUnmeasuredUnderNoGateToo(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestSomethingUnrelatedIsBroken(t *testing.T) {
+	Deeper("a/b", "a")
+	t.Fatal("this suite was already red")
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a red baseline failed the run: %v", err)
+	}
+	row, _ := rowNamed(doc, mutationLabel("app"))
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured — a red baseline measured nothing", row)
+	}
+	if !strings.Contains(row.Value, "baseline suite did not pass") {
+		t.Errorf("value = %q, want it to name the cause", row.Value)
+	}
+}
+
+// A component that could not run is not a measurement, so the flag that stops
+// a survivor voting leaves it failing. Swallowing this is what a
+// `continue-on-error` on the workflow step would have done, and it is the
+// family --no-gate exists to keep apart from a survivor.
+func TestAComponentThatCouldNotRunFailsUnderNoGateToo(t *testing.T) {
+	root := t.TempDir()
+	c := component.Component{Name: "app", Dir: ".", Runner: runner.GoTest}
+	inv, err := invocation(c, runner.Instrumented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A coverage report the run cannot clear: what it read back afterwards
+	// would be the last run's, so the component never starts.
+	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(inv.CoverageReport), "held"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	plan := componentPlan{c: c, log: testLog(t)}
+	row, out := mutateComponent(t.Context(), plan, config.Config{}, nil, nil,
+		mutationOptions{root: root, changed: map[string][]int{"paths/paths.go": {4}}})
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want a failure", row)
+	}
+	if out.ran {
+		t.Error("a component that never started is recorded as having run")
+	}
+}
+
+// The flag the post-merge workflow passes, spelled as the negation of a
+// default: mutation gates unless a caller says otherwise, and a run that
+// forgot the flag gates exactly as it does today.
+func TestMutationGatesUnlessNoGateIsPassed(t *testing.T) {
+	flag := newMutationCmd().Flags().Lookup("no-gate")
+	if flag == nil {
+		t.Fatal("mutation declares no --no-gate, so the post-merge run has no way to record without gating")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--no-gate defaults to %q, want a run that gates unless asked otherwise", flag.DefValue)
+	}
+}
+
+// The default is byte-identical: a gating run's row is the one mutationRow
+// built, status and value and detail alike.
+func TestAGatingRunKeepsTheRowItMeasured(t *testing.T) {
+	survivor := []mutation.Result{{
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}}
+	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 4, Survived: 1}, survivor, nil, 12*time.Second)
+	if got := completedRow(failing, false); !reflect.DeepEqual(got, failing) {
+		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, failing)
+	}
+	if completedRow(failing, false).Status != ui.StatusFail {
+		t.Error("a survivor stopped failing a run that gates")
+	}
+	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 4}, nil, nil, 12*time.Second)
+	if got := completedRow(passing, false); !reflect.DeepEqual(got, passing) {
+		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, passing)
+	}
+	// A denominator of zero says nothing about the suite either way: --no-gate
+	// has nothing to add to a row that was never voting.
+	empty, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 2}, nil, nil, 12*time.Second)
+	for _, noGate := range []bool{true, false} {
+		if got := completedRow(empty, noGate); got.Status != ui.StatusUnmeasured {
+			t.Errorf("an empty denominator is %q under no-gate=%v, want unmeasured", got.Status, noGate)
+		}
+	}
+}
+
+// A teardown that failed left state behind for the next run to inherit, and
+// --no-gate does not excuse it: the flag is about what the mutants said, and a
+// teardown is a command that did not run. It still never masks a reason the
+// component could not be measured, nor a survivor a gating run is failing on.
+func TestATeardownFailureTakesOverAMeasurementAndNothingElse(t *testing.T) {
+	for _, c := range []struct {
+		status ui.Status
+		want   bool
+	}{
+		{ui.StatusPass, true},
+		{ui.StatusContext, true},
+		{ui.StatusFail, false},
+		{ui.StatusUnmeasured, false},
+	} {
+		if got := teardownFailureReplaces(c.status); got != c.want {
+			t.Errorf("a teardown failure over a %q row = %v, want %v", c.status, got, c.want)
+		}
 	}
 }

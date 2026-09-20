@@ -277,3 +277,7 @@ a gate that could not run never renders as one that passed.
 - TypeScript has no licence source here and gets one `context` row naming the
   limit, the shape [ADR 0028](0028-crap-gates-the-delta-above-the-threshold.md)
   gives a language with no complexity source.
+  **Closed by [ADR 0042](0042-a-typescript-components-licences-are-read-from-its-lockfile.md)**,
+  which reads an npm component's licences from its lockfile directly, with no
+  install; yarn and pnpm remain `unmeasured` absent an install this
+  repository's `scan` does not perform.

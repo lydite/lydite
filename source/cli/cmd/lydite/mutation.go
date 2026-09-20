@@ -50,8 +50,8 @@ import (
 func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected bool
-	var concurrency, baseBranch, memory string
+	var asJSON, noColor, stream, onlyAffected, declined, noGate bool
+	var concurrency, baseBranch, baseSHA, memory string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
@@ -66,7 +66,8 @@ change to one of those lines, and the suite is asked whether anything fails. A
 change nothing notices is a survivor, and a survivor is the only outcome that
 fails the gate.
 
-Mutants come only from lines in the change against the merge-base, and only
+Mutants come only from lines in the change against the base — the merge-base
+with the base branch, or the commit --base-sha names — and only
 from lines the component's own coverage reports as executed. There is no
 whole-repository mode: it would run for hours on any mature codebase, and a
 mutant on an uncovered line cannot be killed by construction.
@@ -78,6 +79,16 @@ a suppression, declaring one refers the change to a human.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("mutation")
+
+			// Checked before anything else in this RunE, and answered with
+			// no component loaded, planned, scheduled or built: a repository
+			// that told CI not to run mutation this run has nothing here to
+			// measure, and the row says so rather than the section going
+			// missing the way an unrun job would leave it. See ADR 0044.
+			if declined {
+				rep.Add(ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"})
+				return renderReport(cmd, rep, dir, asJSON, noColor)
+			}
 
 			// The same interrupt handling `lydite test` installs, and for the
 			// same reason: this command starts a component's compose stack
@@ -124,21 +135,27 @@ a suppression, declaring one refers the change to a human.`,
 				return err
 			}
 
-			// Mutation is diff-scoped always, so the merge-base is not a flag
-			// this command can do without: an unresolvable one is an error
-			// naming the fix rather than a run that quietly mutates nothing
-			// and reports a pass.
-			base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+			// Mutation is diff-scoped always, so the base is not something this
+			// command can do without: an unresolvable one is an error naming
+			// the fix rather than a run that quietly mutates nothing and
+			// reports a pass. --base-sha names the commit outright and
+			// --base-branch asks where this branch diverged from one; they
+			// answer the same question two ways, which is why cobra refuses
+			// both at once.
+			base, err := resolveMutationBase(ctx, dir, baseBranch, baseSHA)
 			if err != nil {
-				return fmt.Errorf("mutation is scoped to the change against the merge-base, and it could not be resolved: %w"+
-					"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
+				return err
 			}
 
 			selected := own
 			var skipped map[string]ui.Row
 			var ordered []component.Component
 			if onlyAffected {
-				res, err := selectAffected(ctx, dir, file, baseBranch)
+				// From the base already resolved, never from the flag again:
+				// selection answering about a different range than the mutants
+				// were generated against would report a component untouched
+				// while its own mutants ran, or the reverse.
+				res, err := affectedFrom(ctx, dir, file, base)
 				if err != nil {
 					return err
 				}
@@ -178,6 +195,7 @@ a suppression, declaring one refers the change to a human.`,
 				timeout: timeout,
 				memory:  maxMemory,
 				stream:  stream,
+				noGate:  noGate,
 				// A run responsible for part of the declaration emits no
 				// summary row, for the reason it emits no coverage(repo):
 				// the figure counts over the whole repository, and a shard
@@ -185,7 +203,8 @@ a suppression, declaring one refers the change to a human.`,
 				// under a label about all of them.
 				summary: len(components) == 0,
 			}
-			runMutation(ctx, rep, selected, ordered, skipped, cfg, envs, opts)
+			ran := runMutation(ctx, rep, selected, ordered, skipped, cfg, envs, opts)
+			recordMutants(ctx, cmd, dir, ran)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -198,8 +217,18 @@ a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().StringVar(&concurrency, "concurrency", strconv.Itoa(defaultConcurrency),
 		`how many suites to run at once, or "max" for no bound`)
 	cmd.Flags().BoolVar(&onlyAffected, "affected", false,
-		"of the components this run is responsible for, mutate only those the change against the merge-base could have broken")
+		"of the components this run is responsible for, mutate only those the change against the base could have broken")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	// The base a caller states rather than one lydite discovers. A post-merge
+	// run is where the difference is load-bearing: on the default branch the
+	// merge-base against the default branch is HEAD itself, so a run there has
+	// no diff and nothing to mutate.
+	cmd.Flags().StringVar(&baseSHA, "base-sha", "",
+		"exact commit the change is measured against, as a SHA or a relative ref such as HEAD~1; "+
+			"resolved with git rev-parse and never fetched, so no merge-base is computed")
+	// Two answers to one question. Picking a winner silently would let a
+	// mis-wired workflow mutate a range nobody asked for.
+	cmd.MarkFlagsMutuallyExclusive("base-branch", "base-sha")
 	// Overrides the budget derived from the component's own baseline. A
 	// number nobody measured is what ADR 0027 refuses as a runtime budget;
 	// this is the escape for a suite whose own timing is not representative,
@@ -213,7 +242,44 @@ a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().StringVar(&memory, "memory", "",
 		"how much memory one mutant's suite may hold before it counts as killed, e.g. 4GiB; derived from the component's own baseline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
+	cmd.Flags().BoolVar(&declined, "declined", false,
+		"write a report saying this repository declined mutation testing for this run, and do nothing else")
+	// The post-merge run, where a survivor is history rather than a verdict:
+	// the change has landed, the branch is gone, and the remedy a failing row
+	// prints is addressed to a pull request that no longer exists. Only a
+	// completed measurement stops voting — a variant that is not runnable, an
+	// unresolvable base and every error still fail, which is the family a
+	// `continue-on-error` on the step could not tell a survivor from. Spelled
+	// as the negation of a default because mutation gates by default, the way
+	// `lydite test`'s --no-coverage is. See ADR 0048.
+	cmd.Flags().BoolVar(&noGate, "no-gate", false,
+		"measure and record every mutant as usual, and let no survivor fail the command")
 	return cmd
+}
+
+// resolveMutationBase is the commit this run's mutants come from the diff
+// against, resolved once for the whole run.
+//
+// Each flag fails with its own value named. The two resolutions fail for
+// different reasons and have different fixes — a branch that could not be
+// fetched or merged-base against, and a revision this checkout does not hold —
+// so one message covering both would name a cause the caller can act on only
+// half the time.
+func resolveMutationBase(ctx context.Context, dir, baseBranch, baseSHA string) (string, error) {
+	if baseSHA != "" {
+		base, err := gitstate.ResolveRevision(ctx, dir, baseSHA)
+		if err != nil {
+			return "", fmt.Errorf("mutation is scoped to the change against %s %s, and it could not be resolved: %w",
+				gitstate.BaseSHAFlag, baseSHA, err)
+		}
+		return base, nil
+	}
+	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
+	if err != nil {
+		return "", fmt.Errorf("mutation is scoped to the change against the merge-base, and it could not be resolved: %w"+
+			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
+	}
+	return base, nil
 }
 
 // annotationMarker is the declaration an author writes to say no test could
@@ -249,8 +315,14 @@ type mutationOptions struct {
 	timeout time.Duration
 	// memory overrides the ceiling derived from each component's own baseline,
 	// in bytes, and zero asks for the derivation.
-	memory  int64
-	stream  bool
+	memory int64
+	stream bool
+	// noGate is whether a completed component's outcome stops voting on the
+	// exit code. True under --no-gate, where the mutants still run, the
+	// findings are still emitted and mutants.json is still written. The zero
+	// value keeps gating, so a caller that leaves this unset gets today's
+	// behaviour rather than a silent, unasked-for --no-gate.
+	noGate  bool
 	summary bool
 }
 
@@ -263,8 +335,38 @@ type componentMutation struct {
 	findings []finding.Finding
 }
 
+// recordMutants writes what this run made of its mutants beside its report.
+//
+// Unconditionally, and never only under a flag: a count that reaches the
+// recording step only when somebody remembered one records nothing when they
+// forget. A run that mutated no component writes a document naming its tree and
+// holding no component, which is what a later fold needs to tell a shard that
+// ran nothing from a shard whose job died.
+//
+// The tree is resolved out from under the run's cancellation, because a run cut
+// short still reports the components that finished — the same rule the teardown
+// above runs under. Every failure warns and none of them fails the command: the
+// mutants ran, their verdict is in the report, and losing the byproduct is not
+// a reason to discard it.
+func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]mutation.Summary) {
+	tree, err := gitstate.TreeSHA(context.WithoutCancel(ctx), dir, "HEAD")
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so the mutant counts were not written: %v\n", err)
+		return
+	}
+	if err := writeMutants(dir, mutantsFrom(tree, ran)); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write the mutant counts: %v\n", err)
+	}
+}
+
 // runMutation plans every selected component, runs its mutants and adds the
 // rows in declaration order.
+//
+// It returns what became of the mutants of every component that ran, keyed by
+// component name. A component that did not run is absent from it rather than
+// present with zeros, which is the distinction mutants.json exists to carry: a
+// zeroed entry for a component nothing mutated reads, permanently, as a suite
+// that killed everything.
 //
 // The components go through the same scheduler `lydite test` uses, under the
 // same bound: a component is one item, so its compose stack is started and
@@ -275,7 +377,7 @@ type componentMutation struct {
 // `lydite test`. Two independent bounds would multiply into components times
 // mutants, which is the quadratic oversubscription defaultConcurrency is a
 // constant rather than NumCPU to avoid.
-func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) {
+func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]mutation.Summary {
 	plans := planComponents(ctx, opts.root, selected, "mutation", opts.stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -323,6 +425,21 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	if opts.summary {
 		rep.Add(mutationSummaryRow(results))
 	}
+	// Plans and results are indexed in parallel, and `ran` is set only where a
+	// component's mutants were generated and executed to a summary — including
+	// the run withdrawInterrupted took back, which resets the result and with it
+	// that flag.
+	var ran map[string]mutation.Summary
+	for i, p := range plans {
+		if !results[i].ran {
+			continue
+		}
+		if ran == nil {
+			ran = map[string]mutation.Summary{}
+		}
+		ran[p.c.Name] = results[i].summary
+	}
+	return ran
 }
 
 // withdrawInterrupted takes back every failing verdict a cancelled run reached.
@@ -505,7 +622,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	defer stop()
 	defer func() {
 		failed, ok := runCommands(context.WithoutCancel(ctx), dir, label, c, tc, "teardown", c.Teardown, log)
-		if !ok && row.Status == ui.StatusPass {
+		if !ok && teardownFailureReplaces(row.Status) {
 			row = failed
 		}
 	}()
@@ -579,7 +696,46 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	out = componentMutation{summary: s, elapsed: time.Since(baselineStarted), ran: true}
 	row, findings := mutationRow(label, c.Name, c.Dir, log, s, results, scoped, out.elapsed)
 	out.findings = findings
-	return row, out
+	return completedRow(row, opts.noGate), out
+}
+
+// completedRow is what a component whose mutants ran is worth to the exit code.
+//
+// Under --no-gate it is worth nothing, and the row says so as StatusContext —
+// whether or not it had survivors. A component that killed every mutant renders
+// the same glyph as one that did not, because a ✓ is the claim that a gate
+// examined this component and cleared it, and no gate examined anything. The
+// value and the detail are untouched: the numbers and the surviving mutants are
+// the whole point of the run.
+//
+// Only a pass and a survivor are converted. A row that reached here already
+// non-voting — a denominator of zero — was never a measurement this flag has
+// anything to say about, and every way a component could not run at all is a
+// row mutateComponent returned before this.
+func completedRow(row ui.Row, noGate bool) ui.Row {
+	if !noGate {
+		return row
+	}
+	if row.Status == ui.StatusPass || row.Status == ui.StatusFail {
+		row.Status = ui.StatusContext
+	}
+	return row
+}
+
+// teardownFailureReplaces says whether a component's teardown failing takes
+// over its row.
+//
+// It does where the row is the component's own completed measurement: the
+// mutants said what they had to say, and a stack the teardown left running is
+// then the only thing left to report. StatusContext is that same measurement
+// under --no-gate, and a teardown failure is a command that did not run rather
+// than a measurement, so the flag does not excuse it.
+//
+// A row that already names why the component could not be measured keeps that
+// reason, and so does a survivor a gating run is failing on: both are upstream
+// of the teardown, and the cause a reader acts on is the one they name.
+func teardownFailureReplaces(status ui.Status) bool {
+	return status == ui.StatusPass || status == ui.StatusContext
 }
 
 // backendFor is the isolation strategy one language's mutants are run under.
@@ -824,8 +980,8 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	// The elapsed time is in the value rather than under the row, because it
 	// is what a later runtime budget would be a multiple of and the fold has
-	// no other channel to read it from — a report's rows carry rendered prose,
-	// and mutation writes no measurements document beside them.
+	// no other channel to read it from — mutants.json carries what became of
+	// each mutant, not how long the component took to say so.
 	row := ui.Row{Status: ui.StatusPass, Label: label, Log: log.Rel,
 		Value: fmt.Sprintf("%d of %d mutant(s) killed in %s", killed, total, elapsed.Round(time.Second))}
 	if a := aside(s); a != "" {

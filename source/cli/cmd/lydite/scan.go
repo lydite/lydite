@@ -181,6 +181,7 @@ func newScanCmd() *cobra.Command {
 					continue
 				}
 				scanned[key] = c.Name
+				warnDeclaredEnv(cmd.ErrOrStderr(), c, env.Check)
 
 				var results []executil.Result
 				switch lang {
@@ -198,7 +199,7 @@ func newScanCmd() *cobra.Command {
 				case runner.Rust:
 					recordRustLicence(ctx, rep, licenceTree, c, cdir, env, cfg, changed)
 				case runner.TypeScript:
-					recordNoLicenceSource(rep, c)
+					recordTypeScriptLicence(ctx, rep, licenceTree, c, cdir, cfg, changed)
 				}
 			}
 
@@ -258,6 +259,111 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&diffBase, "diff-base", "", `only report findings introduced since this commit ("auto" resolves the merge-base with the base branch); empty scans everything`)
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	return cmd
+}
+
+// warnDeclaredEnv names the environment a component's checks are composed
+// with, on the writer the caller reserves for what the scan ran under. A
+// component that composed nothing says nothing.
+//
+// A warning and not a row: a declaration is the repository's own configuration
+// of its own scan, which ADR 0020 records as legitimate influence, and no
+// status fits it — a `pass` asserts something nobody measured, a `fail` turns a
+// declaration the repository is entitled to make into a gate, and an
+// `unmeasured` spends the tag that exists to be noticed on a component that
+// scanned perfectly well. Naming it is the whole of what lydite owes here, and
+// editing the file is already a referral disqualifier.
+func warnDeclaredEnv(w io.Writer, c component.Component, composed []string) {
+	names := declaredEnvNames(c, composed)
+	if len(names) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "warning: %s's checks are composed with the environment %s declares: %s — names only, because a declared value can carry a credential\n",
+		c.Name, component.FileName, strings.Join(names, ", "))
+}
+
+// steeringEnv is the variables lydite knows change what a check does — which
+// files it compiles, which vulnerability database it consults, which registry
+// or dependency it resolves against — rather than an ordinary variable a suite
+// merely happens to read. declaredEnvNames marks a declared name found here so
+// a reader scanning a long list finds the two or three worth a second look.
+//
+// This list is best-effort and is not a security boundary. It may rot as
+// scanners gain new variables, and rotting is harmless: a name that falls off
+// it is still reported, just without the mark. Nothing reads this set to
+// decide whether to fail, refuse or gate anything — the mark exists only to
+// help a reader's eye, never to filter.
+var steeringEnv = map[string]bool{
+	"GOFLAGS":            true,
+	"GOVULNDB":           true,
+	"GOPRIVATE":          true,
+	"RUSTFLAGS":          true,
+	"RUSTC_WRAPPER":      true,
+	"CARGO_BUILD_TARGET": true,
+	"NODE_OPTIONS":       true,
+}
+
+// declaredEnvNames is the names of what a component's declaration contributed
+// to composed, in the order env sorts them, with a folded PATH last.
+//
+// Names, never values, and no future refinement of this prints a value. A
+// declared value is arbitrary text the repository controls, and the places a
+// repository puts a token are exactly the places that look like configuration:
+// a registry URL with credentials in it, a `*_TOKEN` a suite needs, a DSN. This
+// line reaches a CI log, which on a public repository is world-readable.
+// Redacting rather than omitting is the same object as an allowlist — a pattern
+// list that has to be complete to be safe, which publishes the secret it did
+// not recognise while reading as though it had checked. What a reader needs is
+// that the name was set for this component, and the value is in the file under
+// review.
+//
+// It reads the composed environment and not the declaration, because the two
+// differ in ways that matter. A declared PATH is not a variable of the child at
+// all — childEnv folds it into the single composed PATH entry, behind the
+// inherited one — so it is named as the path extension it is. A declared key
+// the resolved toolchain also sets is cancelled, since the toolchain's
+// variables compose last; naming it plainly would report a steering variable
+// that never reached the check.
+//
+// Every declared name is reported unconditionally; a name also found in
+// steeringEnv carries an additional mark, and the two annotations compose
+// into one parenthetical rather than one clobbering the other.
+func declaredEnvNames(c component.Component, composed []string) []string {
+	dirs, vars := splitPath(env(c))
+	if len(dirs) == 0 && len(vars) == 0 {
+		return nil
+	}
+	// The last occurrence of a key is the one the child reads, which is how
+	// the toolchain's variables win.
+	effective := map[string]string{}
+	for _, kv := range composed {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			effective[k] = v
+		}
+	}
+	var names []string
+	for _, kv := range vars {
+		k, v, _ := strings.Cut(kv, "=")
+		mark := ""
+		if steeringEnv[k] {
+			mark = "steers a check"
+		}
+		if effective[k] != v {
+			if mark != "" {
+				mark += ", overridden by the resolved toolchain"
+			} else {
+				mark = "overridden by the resolved toolchain"
+			}
+		}
+		if mark != "" {
+			names = append(names, k+" ("+mark+")")
+			continue
+		}
+		names = append(names, k)
+	}
+	if len(dirs) > 0 {
+		names = append(names, "PATH (appended after lydite's own)")
+	}
+	return names
 }
 
 // scanUnits is what each declared component needs a toolchain for, in
@@ -498,16 +604,48 @@ func policySourceSays(s rust.PolicySource) string {
 	return string(s)
 }
 
-// recordNoLicenceSource is the licence row for a component in a language
-// lydite reads no dependency set for: context and never amber, the same
-// reason a language crapRow has no complexity source for renders the same
-// way — nothing about this repository could make the row green, and a
-// component silently absent from the report would read as one that scored
-// clean.
-func recordNoLicenceSource(rep *ui.Report, c component.Component) {
+// recordTypeScriptLicence is the licence gate for one TypeScript component: the
+// dependencies its lockfile resolved, against the same set recomputed at the
+// merge-base.
+//
+// No install is run on either side, for any package manager. npm's lockfile
+// states every dependency's licence outright; yarn's and pnpm's state none, and
+// a tree no earlier step installed is the row saying so. See docs/adr/0042.
+func recordTypeScriptLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTree, c component.Component, cdir string, cfg config.Config, changed map[string][]int) {
+	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	label := licence.Gate + "(" + c.Name + ")"
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: label,
-		Value: "not measured — lydite reads no licence source for " + c.Name + ", a " + string(runner.TypeScript) + " component"})
+	if !policy.Configured() {
+		// Nothing is read for a repository that stated no policy. A manager
+		// that states no licence answers unmeasured, and reporting that where
+		// the row's answer is already known asks its author for an install to
+		// settle a question nobody put.
+		rep.Add(licenceRow(label, licence.Comparison{Verdict: licence.VerdictNotConfigured}))
+		return
+	}
+	base := typescriptLicenceBase(ctx, tree, c.Dir, policy)
+	current, err := typescript.LicenceSet(ctx, cdir, policy)
+	if err != nil {
+		// Unmeasured and never fail: a component whose own dependencies could
+		// not be enumerated has had nothing decided about it, and a red row
+		// here would ask its author to answer for a claim the gate never made.
+		rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: label,
+			Value: "the component's dependencies could not be read", Detail: []string{err.Error()}})
+		return
+	}
+	comparison := licence.Compare(policy, current, base)
+	rep.Add(licenceRow(label, comparison))
+	if comparison.Verdict != licence.VerdictFail {
+		// A claim per pair only where the gate failed on them. Every other
+		// verdict gates nothing, and a located claim under one would reach the
+		// review surface as a thread about a dependency nothing is blocking on.
+		return
+	}
+	// Through labelled and findingsOf, so a licence claim's component, its path
+	// from the scan root and its row label are derived exactly where every other
+	// scanner's are.
+	claims := findingsOf(labelled([]executil.Result{{Name: licence.Gate, Findings: typescript.LicenceFindings(cdir, comparison.Pairs)}}, c.Name, c.Dir))
+	finding.Anchored(claims, changed)
+	rep.AddFindings(claims...)
 }
 
 // licenceRow renders one component's comparison.
@@ -577,6 +715,21 @@ func rustLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir st
 	return tree.set(ctx, componentDir, "Cargo.lock", func(dir string) (licence.Set, error) {
 		set, _, err := rust.LicenceSet(ctx, dir, env, policy)
 		return set, err
+	})
+}
+
+// typescriptLicenceBase is the TypeScript component's non-conforming set
+// recomputed at the merge-base.
+//
+// The manifest is what has to be there, rather than a lockfile: a component
+// declares one whichever package manager it uses, while the lockfile that
+// answers its licences is npm's alone. A component with no package.json at the
+// base is one this change adds, and a base missing only the lockfile is a set
+// that could not be read — which is unmeasured, never the empty set that would
+// make every dependency it already had read as introduced here.
+func typescriptLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir string, policy licence.Policy) licence.Base {
+	return tree.set(ctx, componentDir, "package.json", func(dir string) (licence.Set, error) {
+		return typescript.LicenceSet(ctx, dir, policy)
 	})
 }
 

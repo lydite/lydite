@@ -215,9 +215,19 @@ type Component struct {
 	// Scanner gates only. CRAP is already counted by CRAP.Above, and
 	// recording it again here would make two quantities that must agree into
 	// two quantities free to disagree; patch coverage is likewise the
-	// PatchPercent the coverage counts already carry. Mutation is absent for
-	// the structural reason docs/adr/0029 gives.
+	// PatchPercent the coverage counts already carry. Mutation is counted by
+	// Mutation, whose six outcomes one total could not express.
 	Findings map[string]int `json:"findings,omitempty"`
+	// Mutation is what a post-merge run made of this component's mutants.
+	//
+	// One pointer to a struct and not six optional counts: the six always
+	// arrive together out of one run, and per-field optionality would encode a
+	// granularity the data never has. It is absent for a component the merge
+	// commit's diff did not touch, for one declared `mutation: false`, and for
+	// one whose run did not complete — a component that ran and killed every
+	// mutant records a survived count of nought, which is a measured zero and
+	// a different fact from absence.
+	Mutation *Mutation `json:"mutation,omitempty"`
 	// Producer names the instrument that measured the coverage, for the
 	// reason a baseline entry carries one: a runner or provider bump changes
 	// what a line is, so a step in the line is a change of definition rather
@@ -236,6 +246,23 @@ type Lines struct {
 type CRAP struct {
 	Above int     `json:"above"`
 	Worst float64 `json:"worst"`
+}
+
+// Mutation is the six outcomes a mutation run sorts every mutant into, exactly
+// as mutants.json stores them.
+//
+// Acknowledged is here for the reason the other five are: a `//lydite:equivalent`
+// declaration is a fact about a mutant that existed only on a line the change
+// touched, and after the merge there is no diff left to re-derive it from. It
+// is also what keeps a total reconstructible rather than an undercount missing
+// whatever a declaration took out of the denominator.
+type Mutation struct {
+	Killed       int `json:"killed"`
+	TimedOut     int `json:"timed_out"`
+	OutOfMemory  int `json:"out_of_memory"`
+	Survived     int `json:"survived"`
+	Unviable     int `json:"unviable"`
+	Acknowledged int `json:"acknowledged"`
 }
 
 // Gap is a break in the history, and what the writer could establish about it.

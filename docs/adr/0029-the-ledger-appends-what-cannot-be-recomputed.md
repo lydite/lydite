@@ -142,6 +142,13 @@ measurement to the branch that does not hand a branch's own code a writable toke
 [#49](https://github.com/lydite/lydite/issues/49) and is filed as
 [#112](https://github.com/lydite/lydite/issues/112).
 
+> Closed by
+> [ADR 0043](0043-mutation-reaches-the-ledger-from-a-post-merge-run.md): the recording job runs
+> mutation itself, over the merge commit's own first-parent diff, so the numbers are lydite's
+> own and no route from a pull request's measurement is needed. A component that did not run
+> records nothing rather than zeroes. See
+> [`quality-history.md`](../../agentic/references/quality-history.md).
+
 **Finding counts are out**, and are a slice of their own. `lydite scan` streams each tool's
 own output live, because for a scanner the findings *are* the result; a count means each
 scanner emitting a structured report and lydite rendering the findings from it, as it

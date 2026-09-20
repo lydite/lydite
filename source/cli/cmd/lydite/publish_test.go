@@ -301,6 +301,69 @@ func TestTheSummaryAccountsForRowsThatVoteOnNothing(t *testing.T) {
 	}
 }
 
+// A section made entirely of declined rows is a decision stated on purpose,
+// not a gap — it must not read as unmeasured, and the run that produced it
+// must not be told "no verdict came from" the concern it chose to skip.
+func TestADeclinedSectionIsNotUnmeasured(t *testing.T) {
+	dir := reportDirWith(t, "mutation",
+		ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"},
+	)
+	comment := buildComment([]string{dir}, "")
+	if got := comment.Sections[0].Status; got != ui.StatusDeclined {
+		t.Fatalf("section status is %q, want declined", got)
+	}
+	if comment.Verdict != ui.VerdictPass {
+		t.Fatalf("verdict is %q, want pass", comment.Verdict)
+	}
+	if strings.Contains(comment.Headline, "no verdict came from") {
+		t.Errorf("a declined concern must not read as one that went missing: %q", comment.Headline)
+	}
+	if comment.Headline != "every check passed" {
+		t.Errorf("headline is %q, want %q", comment.Headline, "every check passed")
+	}
+}
+
+// A section that fails alongside a declined row must still fail — declined
+// never outranks a real failure.
+func TestAFailureOutranksADeclinedRowInTheSameSection(t *testing.T) {
+	dir := reportDirWith(t, "mutation",
+		ui.Row{Status: ui.StatusFail, Label: "mutation(cli)", Value: "failed"},
+		ui.Row{Status: ui.StatusDeclined, Label: "mutation(web)", Value: "declined for this run"},
+	)
+	comment := buildComment([]string{dir}, "")
+	if got := comment.Sections[0].Status; got != ui.StatusFail {
+		t.Fatalf("section status is %q, want fail", got)
+	}
+	if comment.Verdict != ui.VerdictFail {
+		t.Fatalf("verdict is %q, want fail", comment.Verdict)
+	}
+}
+
+// The shut summary names a declined concern by its own word, distinct from
+// "unmeasured", so a reader does not have to open the section to tell a gap
+// from a decision.
+func TestTheSummaryNamesADeclinedRow(t *testing.T) {
+	dir := reportDirWith(t, "mutation",
+		ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"},
+	)
+	got := buildComment([]string{dir}, "").Sections[0].Summary
+	if !strings.Contains(got, "1 declined") {
+		t.Errorf("summary %q is missing %q", got, "1 declined")
+	}
+}
+
+// StatusDeclined is non-voting, like StatusContext — it must never turn a
+// comment's badge into a referral or a failure on its own.
+func TestADeclinedSectionDoesNotVoteOnTheVerdict(t *testing.T) {
+	dir := reportDirWith(t, "mutation",
+		ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"},
+	)
+	comment := buildComment([]string{dir}, "")
+	if verdictOf(comment.Sections) != ui.VerdictPass {
+		t.Fatalf("verdictOf = %q, want pass", verdictOf(comment.Sections))
+	}
+}
+
 // Mutation is the fourth concern, and it reaches the comment through the
 // mechanism the other three already use: a document a run wrote, rendered by
 // the generic mapping from a row's label and value. The order is declared

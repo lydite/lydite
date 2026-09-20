@@ -234,6 +234,14 @@ unattended.
 > Biome is the same shape and is not addressed. See
 > [`semgrep.md`](../../agentic/references/semgrep.md).
 
+> The declared-environment half is closed the same way, by
+> [ADR 0046](0046-a-components-declared-environment-is-named-in-the-scan.md): `lydite scan`
+> warns on stderr, per component and before the checks run, with the variable **names** its
+> checks were composed with — never a value, since a declared value can carry a token and the
+> warning reaches a CI log. Nothing is refused, so no allowlist is introduced; the referral
+> disqualifier on a `.lydite/components.yml` edit stays the enforcement. See
+> [`scanning.md`](../../agentic/references/scanning.md).
+
 ## Consequences
 
 - A consumer upgrading must declare its components before `lydite scan` will run,

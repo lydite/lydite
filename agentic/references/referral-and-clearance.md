@@ -151,6 +151,12 @@ per run, independent of whether any component opted in. A change that declares a
 even in a repository with no `api_surface` component and nothing compared, because the claim
 needs no corroboration from the surface diff to be worth a person's attention.
 
+This refers rather than gates only because the version is not chosen yet. At tag time the same
+declaration is read again, over the commit range a release closes, but as a hard gate rather
+than a referral — a version number now exists to check the claim against. See
+[ADR 0045](../../docs/adr/0045-a-tag-that-is-not-the-breaking-bump-cannot-carry-a-declared-break.md)
+and [`ci.md`](ci.md) for `lydite release check`.
+
 Computing any of this costs `review` three things it otherwise has no reason to pay for:
 loading components, resolving a Go toolchain, and materialising the merge-base as a real tree on
 disk, since `go/packages` loads a module by running the `go` tool over one and `git show

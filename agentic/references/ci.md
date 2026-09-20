@@ -97,7 +97,17 @@ nothing else in that workflow produces one. It passes **no** `--diff-base`, beca
 branch there is no change to scope to — so it covers the whole repository, every claim lands
 unanchorable, and the count is the standing total rather than what one change introduced. That is
 also why it is the one lydite job needing no `fetch-depth: 0`: since ADR 0032 a base is resolved
-whenever `--diff-base` is given, and this job gives none.
+whenever `--diff-base` is given, and this job gives none. A `mutate` matrix job runs beside
+`measure` too, `contents: read`, scoped with `--base-sha HEAD~1` rather than a merge-base —
+the merge commit is its own merge-base against the default branch, which is why `measure`'s
+unconditional, unaffected run has no equivalent scoping need and `mutate`'s explicit one does —
+and `record` folds its `mutants.json` documents into the ledger alongside `measure`'s
+measurements and `scan`'s findings. It invokes `lydite mutation --no-gate`: a survivor on the merge
+commit is recorded, not gated, so it no longer turns `lydite-baseline` red — the branch is gone by
+the time anyone could act on it, and the remedy belongs to the pull request the survivor came from.
+`lydite-pr.yml`'s own `mutation` matrix is unchanged and still gates; the gate belongs before the
+merge, not after it. See
+[ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md).
 
 Each shard uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`:
 `publish` reads the latter, and a shard's document rendered as a `test` section of its own would put
@@ -181,5 +191,16 @@ longer need to pin `go-version` on lydite's account. Keep the pins here regardle
 `ci-build` and `ci-test` jobs invoke `go` directly rather than through lydite, so nothing in that
 mechanism covers them, and the self-scan benefits from the pin holding independently of the feature
 it is dogfooding.
+
+**`release.yml` is release infrastructure, not a third sharded workflow, and shares no
+machinery with `lydite-pr.yml`/`lydite-baseline.yml` above.** It is not a `gt` stage either — it
+triggers on a `v*.*.*` tag push, never a pull request, and has no `plan`/`test`/`merge`
+matrix. Its `goreleaser` job runs `lydite release check --dir ../..` as a step ahead of
+goreleaser itself, reading the tag being released and the commit range back to the previous
+release for a declared break its bump does not admit; a failure there stops the release before
+goreleaser publishes anything. That step runs in `goreleaser` and not `build-test` because only
+`goreleaser`'s checkout already sets `fetch-depth: 0` and fetches the tags a range walk needs.
+See [ADR 0045](../../docs/adr/0045-a-tag-that-is-not-the-breaking-bump-cannot-carry-a-declared-break.md)
+for the rule it enforces.
 
 

@@ -751,30 +751,6 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	}
 }
 
-// A TypeScript component still gets a licence row — never a section that
-// quietly disappears — but it renders context, the way a language crapRow
-// has no complexity source for does: nothing about this repository could
-// make the row green, because lydite reads no licence source for TypeScript
-// at all.
-func TestATypeScriptComponentGetsAContextLicenceRow(t *testing.T) {
-	var rep ui.Report
-	recordNoLicenceSource(&rep, component.Component{Name: "web"})
-
-	rows := rep.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("rows = %+v, want exactly one", rows)
-	}
-	if rows[0].Label != "licence(web)" {
-		t.Fatalf("label = %q, want licence(web)", rows[0].Label)
-	}
-	if rows[0].Status != ui.StatusContext {
-		t.Fatalf("status = %q, want %q — a gate that never ran must not render as one that passed", rows[0].Status, ui.StatusContext)
-	}
-	if !strings.Contains(rows[0].Value, "no licence source") {
-		t.Fatalf("value = %q, want it to say lydite reads no licence source for the component", rows[0].Value)
-	}
-}
-
 // A repository may say how its own code builds; it may not say where lydite's
 // scanners come from. `go install`, `cargo install` and `npm ci` read GOPROXY,
 // GOSUMDB, CARGO_REGISTRIES_* and npm_config_registry, so a declared
@@ -1036,7 +1012,7 @@ func TestEachLanguageNamesTheGatesThatReportItsFindings(t *testing.T) {
 	}{
 		{runner.Go, []string{golang.GateGosec, golang.GateGovulncheck}},
 		{runner.Rust, []string{rust.GateClippy, rust.GateAudit, rust.GateDeny}},
-		{runner.TypeScript, []string{typescript.GateBiome}},
+		{runner.TypeScript, []string{typescript.GateBiome, typescript.GateLicence}},
 	} {
 		got := scannerGates(tc.lang)
 		for _, gate := range tc.want {
@@ -1476,6 +1452,213 @@ func TestARustComponentsOwnPolicyCountsEveryCrateItRejected(t *testing.T) {
 	}
 }
 
+// tsProbeFiles is a captured TypeScript probe tree, as the files one commit is
+// made of, rooted at prefix.
+func tsProbeFiles(t *testing.T, probe, prefix string) map[string]string {
+	t.Helper()
+	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", probe))
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		t.Fatalf("reading the probe: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(tree, e.Name()))
+		if err != nil {
+			t.Fatalf("reading the probe: %v", err)
+		}
+		out[path.Join(prefix, e.Name())] = string(data)
+	}
+	return out
+}
+
+// The gate's whole shape for a TypeScript component: a lockfile the merge-base
+// did not carry is a set every dependency of which the change introduced, the
+// row fails, and each claim is anchored to what the change touched — without
+// which every claim reaches the review surface at no anchor at all.
+func TestTheTypeScriptLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
+		tsProbeFiles(t, "npmprobe", "web"))
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	// Line 10 of the probe's manifest is the dependency naming lightningcss,
+	// which the stated policy rejects under MPL-2.0.
+	changed := map[string][]int{"web/package.json": {10}}
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), changed)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
+		t.Fatalf("rows = %+v, want one failing licence row", rows)
+	}
+	if rows[0].Label != "licence(web)" || !strings.Contains(rows[0].Value, "introduced") {
+		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
+	}
+	found := rep.Findings()
+	// lightningcss, the two sharp-libvips builds and the entry stating no
+	// licence at all: every dependency of the probe the allow-list rejects.
+	if len(found) != 4 {
+		t.Fatalf("claims = %+v, want one per introduced pair", found)
+	}
+	var direct, transitive int
+	for _, f := range found {
+		if f.Path != "web/package.json" {
+			t.Errorf("claim located at %q, want the component's manifest from the scan root", f.Path)
+		}
+		if f.Line > 0 {
+			direct++
+			if f.Anchor != finding.AnchorLine {
+				t.Errorf("%q anchored %q, want %q — it is on the manifest line the change touched", f.Message, f.Anchor, finding.AnchorLine)
+			}
+			continue
+		}
+		transitive++
+		// A package the manifest names on no line reaches the change nowhere,
+		// however much of that manifest the change edited: an anchor here would
+		// put a transitive dependency's claim on a line whose edit does nothing
+		// about it.
+		if f.Anchor != finding.AnchorNowhere {
+			t.Errorf("%q anchored %q, want %q — it is reached only transitively", f.Message, f.Anchor, finding.AnchorNowhere)
+		}
+	}
+	if direct != 1 || transitive != 3 {
+		t.Fatalf("claims = %d direct and %d transitive, want lightningcss located and the other three not", direct, transitive)
+	}
+}
+
+// A dependency the merge-base already carried is not this change's to answer
+// for, however many of them the allow-list rejects: the row passes and makes no
+// claim at all.
+func TestTheTypeScriptLicenceGatePassesWhereTheBaseCarriedTheSameLockfile(t *testing.T) {
+	files := tsProbeFiles(t, "npmprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
+		t.Fatalf("rows = %+v, want one passing licence row", rows)
+	}
+	if len(rep.Findings()) != 0 {
+		t.Fatalf("claims = %+v, want none: the base carried every pair", rep.Findings())
+	}
+}
+
+// yarn states no dependency licence in its lockfile and scan runs no install to
+// produce one, so a component with no installed tree beside it has had nothing
+// decided about it. Amber naming what was missing, never the green of a gate
+// whose dependencies nothing read.
+func TestTheTypeScriptLicenceRowIsUnmeasuredWhereNoLicenceSourceExists(t *testing.T) {
+	files := tsProbeFiles(t, "yarnprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
+		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
+	}
+	if len(rows[0].Detail) == 0 {
+		t.Fatalf("row = %+v, want the reason the component could not be read", rows[0])
+	}
+	if len(rep.Findings()) != 0 {
+		t.Fatalf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
+	}
+}
+
+// A repository that stated no policy gets the row that names the file an edit
+// would go in — not the amber of a manager whose licences could not be read,
+// which is an answer to a question nobody asked here.
+func TestTheTypeScriptLicenceRowIsNotConfiguredWithoutAPolicy(t *testing.T) {
+	dir := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", "yarnprobe"))
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
+		component.Component{Name: "web", Dir: "."}, dir, config.Default(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context licence row", rows)
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) {
+		t.Fatalf("value = %q, want the file a policy is stated in named on it", rows[0].Value)
+	}
+}
+
+// The base a TypeScript component is compared against is the set its own
+// lockfile resolved at the merge-base, read in the checked-out tree rather than
+// from a stored figure: an entry written by a lydite that computed no licences
+// reads back as the empty set, and the delta on the day of the upgrade is then
+// the absolute set.
+func TestTheTypeScriptLicenceBaseReadsTheLockfileAtTheMergeBase(t *testing.T) {
+	files := tsProbeFiles(t, "npmprobe", "web")
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
+	if base.State() != licence.Measured {
+		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
+	}
+	want := []string{"@img/sharp-libvips-darwin-arm64", "@img/sharp-libvips-linux-x64", "lightningcss", "unlicensed-probe"}
+	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, want) {
+		t.Fatalf("base set = %v, want %v — the probe's rejected dependencies, read under the stated policy", got, want)
+	}
+}
+
+// What has to be at the base for the component to have been there is its
+// manifest, and not the one lockfile that states licences.
+//
+// A yarn component declares no package-lock.json in any tree, so gating on one
+// would make every base read as a component the change adds — a measured empty
+// set, against which every dependency the repository already shipped is
+// introduced, and a red row on a change that touched none of them.
+func TestTheTypeScriptLicenceBaseIsTheManifestAndNotTheNpmLockfile(t *testing.T) {
+	files := tsProbeFiles(t, "yarnprobe", "web")
+	// An installed tree, the only licence source a yarn component has, and one
+	// both sides of the comparison carry.
+	files["web/node_modules/lightningcss/package.json"] = `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`
+	root, baseSHA := licenceBaseRepo(t, files, files)
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	var rep ui.Report
+	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
+		filepath.Join(root, "web"), licenceConfig(), nil)
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
+		t.Fatalf("rows = %+v, want one passing licence row: the base carried the same installed tree", rows)
+	}
+}
+
+// A component with no manifest at the merge-base is one this change adds, which
+// is a measured empty set and never an unmeasured base: nothing failed, there
+// was nothing there.
+func TestTheTypeScriptLicenceBaseIsEmptyWhereTheComponentWasNotThere(t *testing.T) {
+	root, baseSHA := licenceBaseRepo(t,
+		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
+		tsProbeFiles(t, "npmprobe", "web"))
+	tree := newLicenceBaseTree(root, baseSHA)
+	defer tree.close(context.Background())
+
+	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
+	if base.State() != licence.Measured || base.Set().Len() != 0 {
+		t.Fatalf("base = %q holding %d, want a measured empty set for a component the base did not carry", base.State(), base.Set().Len())
+	}
+}
+
 // Which document decided a Rust component's licences cannot be read off the
 // verdict, and a reader told only that nothing was gated has no way to find the
 // file an edit would go in.
@@ -1902,5 +2085,151 @@ func TestABaseThatWillNotCheckOutIsUnmeasuredForEveryComponent(t *testing.T) {
 	}
 	if got := worktrees(t, root); got != 1 {
 		t.Fatalf("worktrees = %d, want no registered base after a checkout that failed", got)
+	}
+}
+
+// The names reported are the ones the child actually reads, so the two cases
+// where the composition disagrees with the declaration are pinned here: a
+// declared PATH is folded into lydite's own entry rather than set, and a key
+// the resolved toolchain also sets is cancelled by composing last. A component
+// that composed nothing says nothing at all — a warning for every component is
+// a warning nobody reads.
+func TestDeclaredEnvNamesWhatWasComposed(t *testing.T) {
+	cases := []struct {
+		name     string
+		c        component.Component
+		composed []string
+		want     []string
+	}{
+		{
+			name:     "no declaration at all",
+			c:        component.Component{Name: "cli"},
+			composed: []string{"PATH=/usr/bin"},
+		},
+		{
+			name:     "an empty declaration is no declaration",
+			c:        component.Component{Name: "cli", Env: map[string]string{}},
+			composed: []string{"PATH=/usr/bin"},
+		},
+		{
+			name:     "a declared variable is named",
+			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": "true", "CGO_ENABLED": "0"}},
+			composed: []string{"CGO_ENABLED=0", "SQLX_OFFLINE=true"},
+			want:     []string{"CGO_ENABLED", "SQLX_OFFLINE"},
+		},
+		{
+			name:     "an empty value is still a declaration",
+			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": ""}},
+			composed: []string{"SQLX_OFFLINE="},
+			want:     []string{"SQLX_OFFLINE"},
+		},
+		{
+			name:     "a declared PATH is the extension it is",
+			c:        component.Component{Name: "cli", Env: map[string]string{"PATH": "ci-bin"}},
+			composed: []string{"PATH=/usr/bin" + string(os.PathListSeparator) + "ci-bin"},
+			want:     []string{"PATH (appended after lydite's own)"},
+		},
+		{
+			name:     "a key the toolchain composes last never reached the check",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto"}},
+			composed: []string{"GOTOOLCHAIN=auto", "GOTOOLCHAIN=local"},
+			want:     []string{"GOTOOLCHAIN (overridden by the resolved toolchain)"},
+		},
+		{
+			name:     "a known steering variable is marked",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOVULNDB": "https://db.example"}},
+			composed: []string{"GOVULNDB=https://db.example"},
+			want:     []string{"GOVULNDB (steers a check)"},
+		},
+		{
+			name:     "an ordinary variable that merely resembles a steering name is not marked",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAG": "not-a-steering-name"}},
+			composed: []string{"GOFLAG=not-a-steering-name"},
+			want:     []string{"GOFLAG"},
+		},
+		{
+			name:     "a steering variable the toolchain overrides carries both marks",
+			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAGS": "-tags x"}},
+			composed: []string{"GOFLAGS=-tags x", "GOFLAGS=-tags y"},
+			want:     []string{"GOFLAGS (steers a check, overridden by the resolved toolchain)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declaredEnvNames(tc.c, tc.composed); !slices.Equal(got, tc.want) {
+				t.Errorf("declaredEnvNames = %q, want %q", got, tc.want)
+			}
+			var buf bytes.Buffer
+			warnDeclaredEnv(&buf, tc.c, tc.composed)
+			if (buf.Len() == 0) != (len(tc.want) == 0) {
+				t.Errorf("warnDeclaredEnv wrote %q for %d composed name(s)", buf.String(), len(tc.want))
+			}
+		})
+	}
+}
+
+// The composition the warning describes is childEnv's, so it is childEnv that
+// produces the environment here rather than a hand-written slice: a reordering
+// that let a declared GOTOOLCHAIN win would otherwise still be reported as
+// cancelled.
+func TestDeclaredEnvReadsTheEnvironmentChildEnvComposed(t *testing.T) {
+	c := component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto", "SQLX_OFFLINE": "true", "PATH": "ci-bin"}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+	got := declaredEnvNames(c, childEnv(tc, c, runner.Invocation{}))
+	want := []string{"GOTOOLCHAIN (overridden by the resolved toolchain)", "SQLX_OFFLINE", "PATH (appended after lydite's own)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("declaredEnvNames = %q, want %q", got, want)
+	}
+}
+
+// Names, never values. A declared value is arbitrary text the repository
+// controls, and this line goes to a CI log that is world-readable on a public
+// repository — so the value of a variable, and the directories of a declared
+// PATH, must never appear however the names are assembled.
+func TestDeclaredEnvValuesNeverReachTheWarning(t *testing.T) {
+	const secret = "ghp_examplesecretvaluenobodyshouldsee"
+	c := component.Component{Name: "cli", Env: map[string]string{
+		"NPM_TOKEN":    secret,
+		"DATABASE_URL": "postgres://user:" + secret + "@db/app",
+		"PATH":         "/opt/" + secret + "/bin",
+	}}
+	var buf bytes.Buffer
+	warnDeclaredEnv(&buf, c, childEnv(&toolchain.Env{}, c, runner.Invocation{}))
+	if strings.Contains(buf.String(), secret) {
+		t.Fatalf("a declared value reached the warning:\n%s", buf.String())
+	}
+	for _, want := range []string{"NPM_TOKEN", "DATABASE_URL", "PATH (appended after lydite's own)"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("warning is missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+// warnDeclaredEnv is only useful if the scan calls it with the stream it
+// reserves for warnings and with the environment it actually composed — a unit
+// test over the function proves neither. The PATH is stripped and the
+// toolchain disabled so no tool is found and every check fails at once, which
+// is after the warning either way.
+func TestScanWarnsAboutADeclaredEnvironmentOnItsStderr(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n    env:\n      GOFLAGS: \"-tags secretvalue\"\n")
+	writeLydite(t, dir, config.FileName,
+		"toolchain:\n  enabled: false\nsemgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+
+	var out, errOut bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	if !strings.Contains(errOut.String(), "GOFLAGS") {
+		t.Fatalf("stderr = %q, want the declared environment named on the stream warnings go to", errOut.String())
+	}
+	if strings.Contains(errOut.String()+out.String(), "secretvalue") {
+		t.Fatalf("a declared value reached the scan's output:\nstderr: %s\nstdout: %s", errOut.String(), out.String())
 	}
 }

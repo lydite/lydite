@@ -27,6 +27,12 @@ components:
     api_surface: {}                # opt-in; the default is unmeasured
 ```
 
+**A declared `env:` reaches the checks that scan the component, not only the suite that tests
+it.** `lydite scan` composes it into the resolved toolchain's environment before a component's
+language checks run, and names every variable it contributed — never a value — on stderr first.
+See [Scanning](scanning.md) and
+[ADR 0046](../../docs/adr/0046-a-components-declared-environment-is-named-in-the-scan.md).
+
 **A component is the unit its build tool treats as a whole** — a Cargo workspace, a Go module, a
 JavaScript workspace — not a deployable. Nothing enforces it, because it cannot be read off a
 manifest; it is stated in the package doc because it is the rule most likely to be got wrong.

@@ -18,3 +18,14 @@ or a new major. `docs/release-notes/v0.2.0.md` is the worked example, and the
 file has to be on `main` before the tag is pushed — the workflow reads it out of
 the tagged tree.
 
+`lydite release check`, the step immediately before this assembly in
+`release.yml`, is an unrelated gate over an unrelated question. This file is
+about what a human reads describing the release; that check is about whether
+the *version number* being tagged is allowed to carry a declared break, and it
+can fail the release outright, stopping it before goreleaser runs — nothing
+here ever does. Per [ADR 0045](../../docs/adr/0045-a-tag-that-is-not-the-breaking-bump-cannot-carry-a-declared-break.md)'s
+own "Release notes are out of scope" section, the check does not look at
+`docs/release-notes/<tag>.md` at all: a missing per-version file is not a
+release-time condition for it, any more than a declared break is a condition
+here.
+
