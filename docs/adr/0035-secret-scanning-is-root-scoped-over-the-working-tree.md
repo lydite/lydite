@@ -356,7 +356,25 @@ last of those reports every claim unscoped as well as failing: a scope lydite co
 costs the row, never the claims, because a pass there is indistinguishable from a tree that was
 scoped and clean.
 
-Three limits of that are named rather than claimed away.
+**An empty answer from git is not a filter.** `git ls-files` run inside an ignored subtree — a
+vendored checkout, a `--dir` pointed at build output — lists nothing and exits zero, and as a
+filter that drops every claim and reports clean over a tree nothing scoped. So an empty set is
+its own scope failure, the one `internal/orphan` reports as `ErrNoFiles`, and it costs the row
+where it changes an answer: beside a report naming no leak it is a repository with no file in it
+agreeing with a gitleaks that found nothing, and beside a report naming one it is the filter that
+would have dropped all of them.
+
+**A nested repository is kept in scope, not dropped.** `git ls-files` stops at both of its shapes
+— a submodule is one index entry naming the gitlink path itself, and an embedded repository is
+listed as its directory and not descended into — while gitleaks walks each as ordinary source. So
+the report names paths underneath them and git's answer names none, and comparing the two as text
+would drop every leak there in silence. The gitlink paths come from `git ls-files --stage`'s mode
+`160000` entries and the embedded directories from the trailing slash git already writes, and any
+path beneath one of those prefixes is carried. Over-reporting is the direction an unestablished
+scope already chooses: a submodule's own files are committed somewhere, and a leak in one that
+lydite mentions twice is a better failure than one it never mentions.
+
+Two limits of that are named rather than claimed away.
 
 - **A failing row is the strictest thing available here, not the precise one.** The grammar's own
   status for a gate that could not run is the amber `StatusUnmeasured`
@@ -368,10 +386,6 @@ Three limits of that are named rather than claimed away.
 - **A partial walk that exits 1 with a non-empty report is indistinguishable from a finished
   one.** gitleaks writes nothing that separates them. What it costs is a run whose surviving
   claims were all filtered away passing on a walk that stopped early.
-- **`lydite scan --dir <a gitignored subtree>` reports clean.** `git ls-files` run inside an
-  ignored directory lists nothing, so every claim is filtered and the gate finds no leak in a
-  tree it may well have leaks in. The scan root is meant to be the repository root, where this
-  cannot arise; a root inside an ignored subtree is not detected as the degenerate case it is.
 
 ### Known cost: the whole tree is still walked
 

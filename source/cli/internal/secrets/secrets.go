@@ -24,6 +24,13 @@
 // file that is untracked but not ignored is one `git add .` from being
 // published, so it stays in scope. A real credential sitting in ignored output
 // is what that gives up.
+//
+// Two answers from git are not a filter. A nested repository — a submodule, or
+// an embedded one — is where ls-files stops and gitleaks does not, so
+// everything under it is kept rather than dropped unexamined; and a root git
+// lists no file at all under is a scope lydite never established, which fails
+// the row beside a report naming a leak instead of filtering every one of them
+// away.
 package secrets
 
 import (

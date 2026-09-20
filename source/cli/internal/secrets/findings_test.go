@@ -846,6 +846,90 @@ func TestTrackedNamesPathsTheWayAClaimDoes(t *testing.T) {
 	}
 }
 
+func TestAScopeGitListsNothingForIsNoScope(t *testing.T) {
+	// `git ls-files` run inside an ignored subtree lists nothing and exits
+	// zero, which as a filter drops every claim and reports clean over a tree
+	// nothing scoped. The empty answer is its own error, and the filter that
+	// comes with it keeps everything rather than nothing.
+	root := t.TempDir()
+	write(t, root, ".gitignore", "vendored/\n")
+	initRepo(t, root, ".gitignore")
+	dir := filepath.Join(root, "vendored")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("making the ignored subtree: %v", err)
+	}
+	write(t, dir, "app.py", "token = \"abcdef1234567890\"\n")
+
+	keep, err := tracked(t.Context(), dir)
+	if !errors.Is(err, errNoScope) {
+		t.Fatalf("err = %v, want errNoScope from a root git lists nothing under", err)
+	}
+	if keep == nil || !keep("app.py") {
+		t.Error("the filter that comes with an empty scope drops a path, which is the clean row it exists to prevent")
+	}
+}
+
+func TestAnEmptyScopeCostsTheRowOnlyWhereItChangesTheAnswer(t *testing.T) {
+	// A repository git lists nothing for and a gitleaks that found nothing
+	// agree, so there is nothing for the row to be wrong about. A report
+	// naming a leak is the case where the empty scope would filter every claim
+	// away and call the tree clean.
+	dir := t.TempDir()
+	write(t, dir, "empty.json", `[]`)
+	write(t, dir, "leaking.json", `[{"RuleID":"generic-api-key","File":"app.py","StartLine":1,"StartColumn":2}]`)
+
+	clean := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "empty.json"), unscoped, errNoScope)
+	if !clean.Ok() {
+		t.Errorf("Ok() = false over a tree with no file and no leak in it: %v", clean.Err)
+	}
+	if clean.Detail != "" {
+		t.Errorf("Detail = %q, want none", clean.Detail)
+	}
+
+	leaking := result(executil.Result{Name: Gate, Err: exitedWith(t, 1)}, dir, filepath.Join(dir, "leaking.json"), unscoped, errNoScope)
+	if leaking.Ok() {
+		t.Error("a leak reported against a scope git listed nothing for read as a pass")
+	}
+	if !errors.Is(leaking.Err, errNoScope) {
+		t.Errorf("Err = %v, want the reason the run went unscoped", leaking.Err)
+	}
+	if !strings.Contains(leaking.Detail, errNoScope.Error()) {
+		t.Errorf("Detail = %q, want the reason nothing could be scoped", leaking.Detail)
+	}
+	if len(leaking.Findings) != 1 {
+		t.Errorf("Findings = %d, want the leak reported unscoped rather than filtered away", len(leaking.Findings))
+	}
+}
+
+func TestALeakUnderANestedRepositoryIsInScope(t *testing.T) {
+	// `git ls-files` names a submodule by its gitlink path alone and stops at
+	// an embedded repository's directory, while gitleaks walks both as
+	// ordinary source. Comparing the two answers as text drops every leak
+	// underneath one in silence.
+	dir := t.TempDir()
+	write(t, dir, "app.py", "x = 1\n")
+	initRepo(t, dir, "app.py")
+	gitIn(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+strings.Repeat("0", 39)+"1,sub")
+	if err := os.MkdirAll(filepath.Join(dir, "embedded"), 0o750); err != nil {
+		t.Fatalf("making the embedded repository: %v", err)
+	}
+	gitIn(t, filepath.Join(dir, "embedded"), "init", "--quiet")
+	write(t, filepath.Join(dir, "embedded"), "e.py", "token = \"abcdef1234567890\"\n")
+
+	keep, err := tracked(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("tracked: %v", err)
+	}
+	for _, p := range []string{"sub/s.py", "sub/deep/s.py", "embedded/e.py"} {
+		if !keep(p) {
+			t.Errorf("%s is out of scope, and git's own answer says nothing about it either way", p)
+		}
+	}
+	if keep("subterfuge.py") {
+		t.Error("a path merely beginning with a nested repository's name is carried")
+	}
+}
+
 // carriedBy is what git would carry out of the materialised probe tree, with
 // the tree made a repository first: the .gitignore and one source file added,
 // and the draft left untracked so the "--others --exclude-standard" half of
@@ -879,15 +963,17 @@ func exitedWith(t *testing.T, code int) error {
 
 func initRepo(t *testing.T, dir string, add ...string) {
 	t.Helper()
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
+	gitIn(t, dir, "init", "--quiet")
+	gitIn(t, dir, append([]string{"add", "--"}, add...)...)
+}
+
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	run("init", "--quiet")
-	run(append([]string{"add", "--"}, add...)...)
 }
 
 // secretsIn is every credential-shaped string in a probe file, so a test can

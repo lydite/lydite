@@ -177,6 +177,18 @@ file that is untracked but not ignored is one `git add .` from being published, 
 scope. What it gives up is a real credential sitting in ignored output, and gitleaks still walks
 that output, so the filter buys correctness and no scan time at all.
 
+**Two answers from git are not a filter.** `git ls-files` stops at a nested repository in both of
+its shapes — a submodule is one index entry naming the gitlink path, and an embedded repository is
+listed as its directory and not descended into — while gitleaks walks each as ordinary source, so
+comparing the two answers as text would drop every leak underneath one in silence. The gitlink
+paths come from `git ls-files --stage`'s mode `160000` entries and the embedded directories from
+the trailing slash git already writes, and anything beneath one of those prefixes is kept. And a
+root git lists no file at all under — a `--dir` inside a gitignored subtree, a vendored checkout —
+is a scope lydite never established rather than a tree with nothing in it: `tracked` reports it as
+its own error, the answer `internal/orphan` gives as `ErrNoFiles`, and it fails the row beside a
+report naming a leak instead of filtering every one of them away. Beside a report naming none it
+costs nothing, because a repository with no file in it and a gitleaks that found nothing agree.
+
 **The row follows the claims that survive**, because gitleaks exits 1 for a leak in the ignored
 output no claim survives, and a gate whose every claim was filtered away must not still fail.
 Four outcomes are the gate failing rather than the gate's finding, each with its reason in
@@ -184,11 +196,9 @@ Four outcomes are the gate failing rather than the gate's finding, each with its
 naming no line inside the scan root, and a scope git could not be asked for — the last reporting
 every claim unscoped as well, since a pass there is indistinguishable from a tree that was scoped
 and clean. Each renders as a failing row rather than the amber `unmeasured` the grammar has for a
-gate that could not run, because `executil.Result` carries a verdict as an error or nothing. Two
-gaps are named in ADR 0035 rather than closed: a walk that stopped early after finding something
-exits 1 with a non-empty report and is indistinguishable from one that finished, and `lydite scan
---dir` pointed inside a gitignored subtree makes git list nothing, so every claim is filtered and
-the gate reports clean.
+gate that could not run, because `executil.Result` carries a verdict as an error or nothing. One
+gap is named in ADR 0035 rather than closed: a walk that stopped early after finding something
+exits 1 with a non-empty report and is indistinguishable from one that finished.
 
 **`scan` has no `--component` or `--affected`.** Selection is `lydite test`'s surface today; a scan
 that narrowed itself would need the same widening-on-ignorance argument made again, and nothing

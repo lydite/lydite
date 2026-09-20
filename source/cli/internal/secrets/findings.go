@@ -53,7 +53,8 @@ type leak struct {
 // instead of the walk. A file git will not carry cannot be committed by
 // accident, which is the leak this gate exists to catch; a file that is
 // untracked but not ignored is one `git add .` from being published, so it
-// stays in scope.
+// stays in scope, and so does everything under a nested repository git's
+// answer stops at.
 type carried func(path string) bool
 
 // tracked asks git which paths it would carry out of dir: everything it
@@ -65,8 +66,19 @@ type carried func(path string) bool
 //
 // Its paths are relative to dir and slash-separated, which is the shape a
 // finding's Path carries, so the two compare as text.
+//
+// An empty answer is returned as errNoScope with a filter that keeps
+// everything, because a filter that drops everything is a clean row over a
+// tree nothing was scoped to.
 func tracked(ctx context.Context, dir string) (carried, error) {
 	paths, err := gitdiff.Tracked(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return unscoped, errNoScope
+	}
+	nested, err := nestedRepositories(ctx, dir, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +86,71 @@ func tracked(ctx context.Context, dir string) (carried, error) {
 	for _, p := range paths {
 		set[p] = true
 	}
-	return func(path string) bool { return set[path] }, nil
+	return func(path string) bool {
+		if set[path] {
+			return true
+		}
+		return slices.ContainsFunc(nested, func(prefix string) bool {
+			return strings.HasPrefix(path, prefix)
+		})
+	}, nil
+}
+
+// errNoScope reports that git named no path at all under the scan root.
+//
+// Distinct from a tree every one of whose leaks was filtered, and the
+// distinction is the whole point: a scan root inside an ignored subtree — a
+// vendored checkout, a --dir pointed at build output — is inside a work tree,
+// lists nothing and exits zero, so every claim is dropped and the row reads as
+// a scanned, clean tree. internal/orphan separates the same two answers with
+// ErrNoFiles.
+var errNoScope = errors.New("git lists no file it would carry under the scan root, so nothing gitleaks reported can be scoped to one")
+
+// gitlinkMode is the index mode git records a submodule under.
+const gitlinkMode = "160000"
+
+// nestedRepositories is the prefixes beneath which git's answer for this
+// repository says nothing at all, each with its trailing slash.
+//
+// `git ls-files` stops at a nested repository's boundary in both of its
+// shapes: a submodule is one index entry naming the gitlink path itself, and
+// an embedded repository — a directory holding a .git that no gitlink records
+// — is listed as that directory, with a trailing slash, and not descended
+// into. gitleaks walks both as ordinary source, so a leak underneath one is in
+// the report and in neither list, and comparing the two as text drops it in
+// silence.
+//
+// So a path under one of these prefixes is kept. Over-reporting is the
+// direction a scope lydite could not establish already chooses, and the
+// alternative is the failure this gate is least allowed to have.
+func nestedRepositories(ctx context.Context, dir string, paths []string) ([]string, error) {
+	var out []string
+	for _, p := range paths {
+		if strings.HasSuffix(p, "/") {
+			out = append(out, p)
+		}
+	}
+	// --stage is the only form that carries an entry's mode, and the gitlink
+	// mode is the only thing that tells a submodule's path from an ordinary
+	// file's. -z for the reason gitdiff.Tracked passes it: a path git would
+	// otherwise render as a quoted escape arrives intact.
+	res := executil.RunQuiet(ctx, dir, "git", "ls-files", "-z", "--stage")
+	if !res.Ok() {
+		return nil, fmt.Errorf("git ls-files --stage: %w", res.Err)
+	}
+	for _, entry := range strings.Split(res.Output, "\x00") {
+		// <mode> SP <object> SP <stage> TAB <path>
+		mode, rest, ok := strings.Cut(entry, " ")
+		if !ok || mode != gitlinkMode {
+			continue
+		}
+		_, p, ok := strings.Cut(rest, "\t")
+		if !ok || p == "" {
+			continue
+		}
+		out = append(out, p+"/")
+	}
+	return out, nil
 }
 
 // unscoped holds every path, for a root git could not be asked about. The
@@ -521,6 +597,23 @@ func verdict(exit error, readErr, scopeErr error, rep report, unplaced []string,
 	return nil
 }
 
+// scopeFailure is the scope error this report has to be decided under.
+//
+// Every reason git could not be asked is one, whatever the report holds. An
+// empty scope is one only against a report that names a leak: git listing
+// nothing and gitleaks finding nothing agree with each other, and failing on
+// that pair would fail every scan of a tree with no file in it — a fresh
+// repository, a component directory holding only ignored output. The moment
+// the report names a leak the two disagree, and the filter that would silently
+// drop every one of them is the gate reporting clean over a tree it never
+// scoped.
+func scopeFailure(err error, rep report) error {
+	if errors.Is(err, errNoScope) && len(rep) == 0 {
+		return nil
+	}
+	return err
+}
+
 // result is everything decided after gitleaks has exited, given its result and
 // the file it was told to write.
 //
@@ -532,7 +625,8 @@ func verdict(exit error, readErr, scopeErr error, rep report, unplaced []string,
 // the reason it could not say. A scope lydite could not establish costs the
 // row rather than the claims — every leak is reported and the row fails saying
 // why, because a pass there is indistinguishable from a tree that was scoped
-// and clean.
+// and clean. Which reasons count as one is scopeFailure's, because an empty
+// answer from git is only a failure against a report that names something.
 //
 // The row follows the claims that survived that filter and not gitleaks' exit
 // status, which fails for a leak anywhere it walked including the ignored
@@ -551,11 +645,12 @@ func result(r executil.Result, dir, reportPath string, keep carried, scopeErr er
 	// Detail because this is lydite's own statement rather than gitleaks', and
 	// report() prints Detail under a failing row and nothing else.
 	var notes []string
+	rep, readErr := readReport(reportPath)
+	scopeErr = scopeFailure(scopeErr, rep)
 	if scopeErr != nil {
 		keep = unscoped
-		notes = append(notes, "lydite could not ask git which files it would carry, so these claims are not scoped to them: "+scopeErr.Error())
+		notes = append(notes, "these claims are not scoped to the files git would carry: "+scopeErr.Error())
 	}
-	rep, readErr := readReport(reportPath)
 	var unplaced []string
 	if readErr == nil {
 		r.Findings, unplaced = findings(dir, rep, keep)
