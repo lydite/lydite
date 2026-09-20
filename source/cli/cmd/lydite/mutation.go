@@ -561,7 +561,11 @@ func prepareMutation(p componentPlan, cfg config.Config, tc *toolchain.Env, opts
 			// node_modules fails at import, naming the tests rather than the
 			// absent dependencies. Once per worker and never once per mutant,
 			// which is the bound that makes a tree copy affordable.
-			row, ok := prepare(ctx, t.suite, dir, label, c, cfg, tc, log)
+			//
+			// No root of its own: dir is inside a copy of opts.root, not
+			// opts.root itself, so the bound has to come from the copy's own
+			// tree rather than from the repository it was copied from.
+			row, ok := prepare(ctx, t.suite, dir, "", label, c, cfg, tc, log)
 			if !ok {
 				return errors.New(strings.Join(row.Detail, "; "))
 			}
@@ -612,7 +616,7 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 	if err := clearReport(dir, inv.CoverageReport); err != nil {
 		return failure(label, log, err.Error(), "not runnable", ""), out
 	}
-	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, tc, log); !ok {
+	if prepared, ok := prepare(ctx, inv, dir, opts.root, label, c, cfg, tc, log); !ok {
 		return prepared, out
 	}
 	stop, started, ok := startServices(ctx, p, label)

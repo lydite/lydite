@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"lydite/lydite/internal/executil"
 )
@@ -65,6 +66,58 @@ func HasLockfile(dir string) bool {
 		}
 	}
 	return false
+}
+
+// WorkspaceRoot is the directory an install for dir runs in: dir itself, or
+// the nearest ancestor of it holding a recognised lockfile, and false when
+// neither does.
+//
+// A package of a workspace declares its dependencies nowhere — the lockfile
+// that resolves them sits at the root above it — so a walk is what turns a
+// declared component directory into the directory an install is possible in.
+// Without it a component at packages/ui in a repository whose only
+// pnpm-lock.yaml is at the root installs nothing at all, and its suite then
+// fails at import naming the tests rather than the absent dependencies.
+//
+// scanRoot bounds the walk: it is the repository lydite was pointed at, and a
+// lockfile above it belongs to a tree this run was never asked about. A dir
+// outside scanRoot is its own bound, so the walk can never climb past what the
+// caller named either way.
+//
+// The nearest directory holding *any* lockfile ends the walk, ambiguous or
+// not. A root carrying two of them is still the root its packages share, and
+// continuing past it would install from a grandparent whose lockfile resolves
+// different versions than the ones this package sits under — so ambiguity
+// resolves to nothing here exactly as it does in Manager.
+func WorkspaceRoot(dir, scanRoot string) (string, bool) {
+	dir = filepath.Clean(dir)
+	bound := dir
+	if within(dir, scanRoot) {
+		bound = filepath.Clean(scanRoot)
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if HasLockfile(d) {
+			if _, ok := Manager(d); !ok {
+				return "", false
+			}
+			return d, true
+		}
+		if d == bound || filepath.Dir(d) == d {
+			return "", false
+		}
+	}
+}
+
+// within reports whether dir is root or lies below it.
+func within(dir, root string) bool {
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), dir)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
 
 // PackageVersion reads an installed package's own version out of the tree an
@@ -155,20 +208,76 @@ func Commands(root, override string) []Command {
 	}
 }
 
-// Install runs the install for root, writing each command's output to out, and
-// reports the first command that failed or nil when there was nothing to do.
+// Install runs the install dir's dependencies need, writing each command's
+// output to out, and reports the first command that failed or nil when there
+// was nothing to do.
+//
+// It runs in the workspace root WorkspaceRoot resolves for dir, bounded by
+// scanRoot — a frozen install from the root is what installs the package, and
+// running a package manager in a directory holding no lockfile installs
+// nothing. An override is run in dir itself: it replaces detection entirely,
+// and a repository that authored one said where it meant it to run by
+// declaring the component there.
+//
+// One root is installed once: every component resolving it shares the single
+// install the first of them runs, and one arriving while that runs waits for
+// it rather than starting its own.
 //
 // Whether a failure is fatal is the caller's to decide, and the two callers
 // answer differently: the coverage gate omits a package it cannot measure,
 // while a test run that proceeds after a failed install reports import errors
 // naming the tests rather than the missing dependencies.
-func Install(ctx context.Context, root, override string, env []string, out io.Writer) error {
+func Install(ctx context.Context, dir, scanRoot, override string, env []string, out io.Writer) error {
+	root := filepath.Clean(dir)
+	if override == "" {
+		var ok bool
+		if root, ok = WorkspaceRoot(dir, scanRoot); !ok {
+			return nil
+		}
+	}
+	if _, done := installed.Load(root); done {
+		return nil
+	}
+	unlock := lockRoot(root)
+	defer unlock()
+	// Re-checked under the lock: the install this one waited for is the one it
+	// was about to do, over the same node_modules tree.
+	if _, done := installed.Load(root); done {
+		return nil
+	}
 	for _, cmd := range Commands(root, override) {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
 		res := executil.RunOutput(ctx, root, env, out, cmd.Argv[0], cmd.Argv[1:]...)
 		if !res.Ok() && !cmd.Optional {
+			// Only success is recorded, so the next component resolving this
+			// root installs again: a root whose install failed has no tree to
+			// share, and skipping would hand it a second failure it cannot
+			// explain.
 			return fmt.Errorf("%s: %w", strings.Join(cmd.Argv, " "), res.Err)
 		}
 	}
+	installed.Store(root, struct{}{})
 	return nil
+}
+
+// installLocks serialises installs of one workspace root within this process,
+// and installed names the roots an install has already completed for.
+//
+// In-process only, and that is the whole of what it claims: two lydite
+// processes installing the same workspace still race. What it closes is the
+// case this process creates for itself by preparing components concurrently —
+// a frozen install run from inside a workspace package installs the *whole*
+// workspace, so every component resolving one root writes one node_modules
+// tree, and internal/scheduler locks a component's own declared directory and
+// the ports it publishes, never a root above them all.
+var (
+	installLocks sync.Map
+	installed    sync.Map
+)
+
+func lockRoot(root string) func() {
+	v, _ := installLocks.LoadOrStore(root, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }

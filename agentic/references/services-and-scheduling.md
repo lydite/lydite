@@ -85,7 +85,18 @@ the port, and two components rooted at one tree install into, build in and
 write their output to it at once, where an `npm ci` removing and recreating a
 `node_modules` another is importing from is not a race either suite can report
 honestly. `component.validate` enforces unique names, not unique directories,
-so a repository may legitimately declare two components over one root. It takes plain data — an item
+so a repository may legitimately declare two components over one root.
+
+**A shared `node_modules` above several components is not something this lock
+covers.** The directory lock is keyed on a component's own declared `dir:`, by
+containment — and a workspace root a lockfile puts *above* every one of those
+directories names nothing the scheduler ever holds a lock on. Two components
+each resolving that root for their install would otherwise mutate the one
+`node_modules` tree it produces without the scheduler serialising either of
+them. The gap is closed by installing that root exactly once per process
+(`internal/nodedeps`, see [Components](components.md)) rather than by growing
+a second lock: nothing here needs to know a workspace root exists, because
+nothing races to write it twice. It takes plain data — an item
 is a name and a set of ports — and the caller supplies the function that runs one,
 so the constraint is testable without a container runtime and the port-conflict
 predicate has one implementation rather than one here and another in the planner
