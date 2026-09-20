@@ -1,0 +1,27 @@
+/**
+ * The package's entry point. Everything a consumer can reach is named here,
+ * directly or through a re-export.
+ */
+
+export * from "./store";
+export * from "./config";
+
+/** A function a consumer calls. */
+export function removed(n: number): number {
+  return n;
+}
+
+/** A function whose parameter type one shape narrows. */
+export function narrowed(value: string | number): string {
+  return String(value);
+}
+
+/** A function whose return type one shape widens. */
+export function widened(): string {
+  return "";
+}
+
+/** A function whose return type is inferred rather than written down. */
+export function inferred() {
+  return { timeout: 30 };
+}

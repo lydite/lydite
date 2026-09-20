@@ -41,6 +41,14 @@ peer range on it and the failure class would be identical. Biome parses TypeScri
 own Rust parser and depends on no compiler package, so `biome-pin` has no peer range to cross
 and the failure class does not exist for it.
 
+**This is a claim about linting, and `internal/typescript/api-extractor-pin/` does not
+complicate it.** That pin, beside `biome-pin` in the same package, carries its own locked
+`typescript` dependency — but it backs the `api_surface` comparison
+([ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)'s
+amendment), a different gate from the one this file governs, and its `typescript` version is
+api-extractor's own, not one lydite chose or a repository's own version can cross. Biome's own
+lint still needs no `typescript` package and still cannot be broken by one.
+
 Four things about the Biome integration were established against Biome directly rather than
 from its docs. The pin is now **2.5.10**, and `biome.json`'s `$schema` URL must be bumped with
 it — `TestBiomePinMatchesConfigSchema` fails the build otherwise, the same mirror guard

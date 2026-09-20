@@ -1,0 +1,32 @@
+The TypeScript compiler API candidate, driven by a ~30-line node script that
+enumerates getExportsOfModule of the entry point and prints each symbol's
+typeToString, sorted.
+
+Over the emitted declarations (dist/index.d.ts), base against head:
+
+  removed-export          - removed: (n: number) => number
+  reexport-only           (no difference)
+  added-required-member   Store: { get(...); size() } -> { get(...); put(...); size() }
+  optional-to-required    Config: { retries?: number | undefined; ... }
+                               -> { retries: number; ... }
+  generated-dts           inferred: () => { timeout: number; }
+                               -> () => { timeout: string; }
+
+Over the sources (src/index.ts), with no build run at all, the same script
+prints the same surface — including the inferred return type the
+generated-dts shape changes, and including the tree that does not typecheck,
+which it reports a full surface for because the type error is in a function
+body.
+
+Dependency resolution is what makes the source-side run unsound. An export
+whose type is inferred from a dependency:
+
+  export function make() { return build(); }   // build() from "widgetlib"
+
+  node_modules present:  make: () => Widget
+  node_modules absent:   make: () => any
+
+The degradation is silent. A comparison run over a tree whose install did not
+complete reports `any` where the surface is a real type, so an install that
+failed on one side alone is a break the comparison invents, and one that
+failed on both is a surface it cannot see at all.

@@ -1,0 +1,15 @@
+$ api-extractor run --local        # with dist/ absent
+
+api-extractor 7.59.1  - https://api-extractor.com/
+
+Using configuration from ./api-extractor.json
+
+ERROR: Error parsing $TREE/api-extractor.json:
+The "mainEntryPointFilePath" path does not exist: $TREE/dist/index.d.ts
+exit 1
+
+$ api-extractor run --local        # mainEntryPointFilePath pointed at src/index.ts
+
+ERROR: Error parsing $TREE/api-extractor.json:
+The "mainEntryPointFilePath" value is not a declaration file: $TREE/src/index.ts
+exit 1

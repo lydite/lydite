@@ -1,0 +1,11 @@
+--- base/report/surface.api.md
++++ head/report/surface.api.md
+@@ -28,7 +28,7 @@
+ }
+ 
+ // @public
+-export function widened(): string;
++export function widened(): string | null;
+ 
+ // (No @packageDocumentation comment for this package)
+ 

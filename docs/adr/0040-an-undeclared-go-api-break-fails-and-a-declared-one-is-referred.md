@@ -374,3 +374,177 @@ calls it, and the tool calls it major. The two 101 cases are the ones ADR 0040's
 is not the author's to fix, and a component that opted in with no library target has no API to
 compare. Both get their own row naming the reason and refer the change. Neither is ever silent,
 and neither is ever green.
+
+## Amendment (2026-09-20): the TypeScript comparison is `@microsoft/api-extractor`, as a pinned subprocess
+
+This discharges the TypeScript half of that same consequence, and with it the last language
+slice. It is an amendment for the reason the Rust one is: the rule is not restated. An undeclared
+break fails, a declared one is referred, a declaration with no break is referred, and an author
+claim may only ever add a referral. `review` computes it, the declaration is read from the title
+and from every commit in the range, a component opts in through `api_surface:`, there is no
+calibration period, and a surface that could not be computed refers — all five carry over word
+for word. Only *the comparison* is language-specific, and this names TypeScript's.
+
+The tool is `@microsoft/api-extractor`, invoked as a subprocess against each tree. It is an npm
+package, so it is a tool pin and not a `go.mod` entry — `internal/typescript`'s
+`ensureNPMToolchain` already installs a pinned npm tool from a `package.json`/`package-lock.json`
+pair into a cache keyed by the lockfile's hash, which is the shape `biome-pin` has, and the
+ritual [`tool-pins.md`](../../agentic/references/tool-pins.md) prescribes applies in full: an
+`api-extractor-pin/` beside the package that invokes it, a `.gt-repo.yaml` entry that renders
+into `.github/dependabot.yml`, and the `*-pin/**` exclude `.lydite/components.yml` already
+carries.
+
+api-extractor brings its own TypeScript as a locked dependency and lydite drives no compiler of
+its own, so `internal/typescript`'s standing claim survives scoped to what it is about: **Biome**
+needs no `typescript` package to lint, and lydite's linting still cannot be broken by a compiler
+version. The comparison is not linting, and the compiler that reads a declaration is
+api-extractor's, pinned in api-extractor's own lockfile rather than chosen by lydite.
+
+The comparison lives in `internal/tsapisurface`, beside `internal/apisurface` and
+`internal/rustapisurface` and with the same boundary — two directories in, raw findings out, no
+git, no components and no verdicts. Its signature is Rust's, `Compare(ctx, Request) Result` with
+the three-state outcome and no error return, for the reason `rustapisurface` gives: every way a
+subprocess comparison fails is one fact for the caller, and a second channel carrying half of
+them leaves a caller that handled only the other half silently reporting a pass.
+
+### The tool reports a surface, and lydite classifies the difference
+
+This is where TypeScript departs from both earlier slices. `apidiff` marks each change
+`Compatible`; `cargo-semver-checks` types each lint `major` or `minor`. api-extractor does
+neither — it emits an **API report**, a normalised `api.md` in which every re-export is resolved
+to the declaration it names, doc comments are stripped, release tags are kept, and the result is
+sorted alphabetically. There is no verdict in it.
+
+So the classification is lydite's own, and it is the one rule the report's shape supports: a
+declaration present in the head report and absent from the base is an **addition**, and
+compatible; a declaration present in the base and absent from the head, or one whose text
+changed, is a **break**. Nothing else is read. That is a coarser rule than `apidiff`'s — widening
+a return type is a break here and a narrowing of a parameter is a break here, both because the
+declaration changed — and it is deliberately coarse: a rule that tried to decide variance from
+two strings of TypeScript would be lydite maintaining a type-compatibility judgement the tool
+does not hand over.
+
+### A version bump has nothing to silence
+
+The report names the package and never its version. A head tree that removes an export *and*
+bumps `package.json` from `0.1.0` to `1.0.0` produces a report diff byte-identical to the one
+that only removes the export. There is no analogue of `--release-type minor` to force, because
+there is no version-derived verdict to suppress; the property
+[`an-author-claim-may-only-add-a-referral-never-remove-one`](../../agentic/rules/an-author-claim-may-only-add-a-referral-never-remove-one.md)
+demands holds here by construction rather than by a flag.
+
+### `api_surface` gains no field: the entry point is resolved
+
+ADR 0040 kept `api_surface` an object partly against the day a TypeScript entry point had to be
+named, and the day arrives without needing one. `package.json` already names it, and the
+resolution is the module resolution TypeScript itself performs: `exports["."]`'s `types`
+condition, then `types`, then `typings`, then `main` with the declaration beside it — a package
+whose `main` is `./dist/index.js` and which names no types resolves `./dist/index.d.ts`, which is
+what the compiler does with that package as a dependency. A field would let a component name
+something its own consumers cannot reach, which is a surface no consumer has.
+
+`mainEntryPointFilePath` is one path per run, so a package that exports several subpaths is
+several runs, one per subpath that resolves to a declaration. Anything a consumer reaches by
+deep-importing past `exports` is outside the compared surface, which is the same boundary
+`exports` already draws for every consumer's own resolver.
+
+### A component's surface is every package under its directory that names an entry point
+
+A component `dir` holding a single package is one comparison. A `workspaces` root is one
+comparison per member package, each reported on its own — the same read `internal/rust` gives a
+cargo workspace, and the same one `internal/typescript`'s other checks already give a component
+directory.
+
+A package that resolves **no** entry point is skipped and named in the summary. That is the
+analogue of Rust's binary-only member, and the test is naming no entry point rather than being
+`"private": true` — a private package with an `exports` map has a surface its workspace siblings
+consume, and a published package that names nothing has none. A component in which *no* package
+resolves an entry point is not skipped: it opted in and there is nothing to compare, so it is
+uncomputable and refers.
+
+### Each tree that has anything to read is installed and built, and its exit codes are what say it was measurable
+
+api-extractor reads a `.d.ts` and nothing else. Pointing `mainEntryPointFilePath` at a `.ts` is
+rejected outright as "not a declaration file", so the component's own install and its own build
+must have run in whichever of the two trees a compared package resolves a declaration —
+ordinarily both, since a change ordinarily touches a package that already existed. A component
+this change introduces resolves nothing at all in the base worktree `cmd/lydite/coverage.go`'s
+`measureBaseTree` materialises, so the base side of that comparison runs neither step and every
+declaration in the head tree is an addition; installing and building a directory the base tree
+never had would fail before the comparison ever reached that answer.
+
+The exit codes of those two steps are the contract, not the presence of a declaration and not
+api-extractor's own. `tsc` emits declarations for a tree that does not typecheck — the probe's
+base tree exits 2 with `dist/` fully written, and api-extractor then reports a complete surface
+from it. And an export whose type is inferred from a dependency silently degrades to `any` when
+`node_modules` is absent, so a comparison over a tree whose install did not complete invents
+breaks that are not there. An install or a build that failed on either side is **uncomputable**,
+which refers; it is never a pass, and never a break reported against the author.
+
+api-extractor's own exit code is `0` when it produced a report and `1` with a message otherwise;
+its warnings, including the `ae-missing-release-tag` one every untagged package produces, do not
+fail the run. Only `0` is an answer.
+
+### Running the head tree's install and build is running the change's own code
+
+`npm ci` executes lifecycle scripts, and the build executes the tree's own compiler
+configuration. This is the same class as a Rust crate's `build.rs`, so the same rule binds:
+[`give-untrusted-build-scripts-no-inherited-environment`](../../agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md)
+and `executil.RunQuietIsolatedEnv`, and the referral / referral-publish job split that keeps the
+credential out of the process that runs it.
+
+### What the comparison cannot see
+
+- **A tree that does not install or does not build.** Uncomputable by construction, on either
+  side, and the base tree's build is not the author's to fix.
+- **Anything outside `exports`.** A consumer deep-importing into `dist/` is reaching past the
+  boundary the package declares, and a change there is invisible to this gate.
+- **A package that names no entry point**, which is skipped where a sibling has one.
+- **One build's declarations.** The surface is whatever the component's own `tsconfig` emits, for
+  one target and one set of compiler options. A declaration that differs under a different `lib`
+  or a different `strict` setting is not compared — TypeScript's analogue of Go's untagged-build
+  gap and Rust's default-feature union.
+- **Runtime behaviour a declaration does not change.** The gate compares types, as the Go and
+  Rust ones do.
+- **Variance.** Widening a return type and narrowing a parameter are both breaks here, because
+  both change the declaration. The gate over-reports rather than reasoning about assignability.
+
+### What the probe measured
+
+`source/cli/internal/tsapisurface/testdata/probe/` holds the probe package: a `base/` tree
+materialised through `internal/fixture`, one overlay per shape, and a second package naming no
+entry point. Each tree was built with TypeScript 5.9.3 and read by **api-extractor 7.59.1**
+(analysing with its own bundled TypeScript 5.9.3) on node 26.7.0, and the two reports compared as
+text. The diffs are recorded verbatim under `observed/`, so a change to any of them is a change
+to what this amendment claims. `FINDINGS.txt` beside them is the comparison in full, including
+the candidates not chosen.
+
+| Shape | What the report diff held |
+|---|---|
+| exported function removed | the declaration, removed |
+| parameter type narrowed | the signature, changed |
+| return type widened | the signature, changed |
+| interface member removed | the member, removed |
+| required interface member added | the member, added |
+| optional property made required | `retries?: number` → `retries: number` |
+| function and optional property added | the function, added; the property's own interface, changed — an addition and a break |
+| re-export form changed, no signature touched | **nothing: the two reports are byte-identical** |
+| inferred return type changed | `inferred(): { timeout: number }` → `{ timeout: string }` |
+| export removed and version bumped to `1.0.0` | the removal, and nothing about the version |
+| base tree does not typecheck | a full report, from a build that exited 2 |
+| package names no entry point | nothing to point the tool at |
+
+The re-export row is the one worth stating explicitly, as the interface row was for Go and the
+trait row for Rust. Changing `export type { Store } from "./store"` to `export * from "./store"`
+changes no name and no signature, and a text diff of the emitted `.d.ts` files fires on it — that
+noise is what ruled out `tsc --declaration` with a differ lydite writes, and what rules out
+reading source with tree-sitter, which additionally cannot see the inferred-return row at all
+because that type appears in no source text.
+
+The TypeScript compiler API behind an embedded node script was measured too, and matched
+api-extractor on every shape here, including over sources with no build run. It was rejected for
+what it costs rather than for what it saw: a `typescript` pin, a JavaScript script embedded in
+the Go binary with no precedent in this repository, and lydite owning — permanently — what a
+class, an overload set, a generic constraint, a namespace or a merged declaration renders as.
+Every gap in that rendering is a break the gate silently misses, and api-extractor's report
+already has an answer for each of them.

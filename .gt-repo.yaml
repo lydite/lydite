@@ -37,6 +37,16 @@ dependabot:
       no src/lib.rs, so it carries real Rust that .lydite/components.yml has to
       exclude. Nothing enforces this entry, though, so a pin added without one is
       a pin no bot ever bumps.
+  - ecosystem: npm
+    directory: /source/cli/internal/typescript/api-extractor-pin
+    note: |
+      @microsoft/api-extractor (internal/tsapisurface), the API-break
+      comparison a TypeScript component's api_surface opt-in runs. Its own
+      manifest beside Biome's rather than a shared one, for the reason the
+      cargo pins already split: one resolution per tool.
+
+      It carries its own TypeScript as a locked dependency, so a bump here is
+      also the compiler that reads a declaration moving.
   - ecosystem: cargo
     directory: /source/cli/internal/rust/cargo-audit-pin
     note: |

@@ -172,14 +172,9 @@ func TestParseRejects(t *testing.T) {
 			want: "cycle",
 		},
 		{
-			name: "api_surface on a TypeScript runner",
-			yaml: "components:\n  - {name: a, dir: cli, runner: vitest, api_surface: {}}\n",
-			want: "api_surface is only supported for Go and Rust components in this version",
-		},
-		{
 			name: "api_surface on a command component",
 			yaml: "components:\n  - {name: a, dir: cli, command: [make, test], api_surface: {}}\n",
-			want: "api_surface is only supported for Go and Rust components in this version",
+			want: "this component declares no language",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,6 +226,25 @@ components:
 	}
 	if f.Components[0].APISurface == nil {
 		t.Error("api_surface: {} must set APISurface on a Rust component")
+	}
+}
+
+// A TypeScript component opts in the same way a Go or Rust one does: the
+// surface it carries is whatever its own package.json names as an entry
+// point, so api_surface itself names nothing language-specific.
+func TestAPISurfaceOptInTypeScript(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: sdk
+    dir: sdk
+    runner: vitest
+    api_surface: {}
+`), "components.yml")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Components[0].APISurface == nil {
+		t.Error("api_surface: {} must set APISurface on a TypeScript component")
 	}
 }
 
@@ -455,14 +469,14 @@ func TestLoadHistoricalIgnoresAnUnknownKeyAndNothingElse(t *testing.T) {
 		t.Errorf("components = %+v, want the declaration read as written", lenient.Components)
 	}
 
-	// api_surface on an unsupported component is Load's rejection to make,
-	// not LoadHistorical's: the coverage baseline that calls LoadHistorical
-	// never reads api_surface, and a base tree carrying it — set before the
-	// component's runner changed, or before this repository's own history —
-	// must still be measurable.
-	unsupported := "components:\n  - {name: svc, dir: svc, runner: vitest, api_surface: {}}\n"
+	// api_surface on a component that declares no language is Load's rejection
+	// to make, not LoadHistorical's: the coverage baseline that calls
+	// LoadHistorical never reads api_surface, and a base tree carrying it —
+	// set before the component's runner changed, or before this repository's
+	// own history — must still be measurable.
+	unsupported := "components:\n  - {name: svc, dir: svc, command: [make, test], api_surface: {}}\n"
 	if _, err := Load(write(t, unsupported)); err == nil {
-		t.Error("Load accepted api_surface on an unsupported component")
+		t.Error("Load accepted api_surface on a component that declares no language")
 	}
 	if _, err := LoadHistorical(write(t, unsupported)); err != nil {
 		t.Errorf("LoadHistorical refused a historical tree over api_surface, which it never reads: %v", err)

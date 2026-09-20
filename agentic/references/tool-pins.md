@@ -11,6 +11,7 @@ Dependabot watches, colocated with the package that uses it:
 | Tool(s) | Manifest | Runtime source |
 |---|---|---|
 | @biomejs/biome | `internal/typescript/biome-pin/package.json` + lock | the manifest itself (`npm ci`) |
+| @microsoft/api-extractor | `internal/typescript/api-extractor-pin/package.json` + lock | the manifest itself (`npm ci`) |
 | cargo-audit | `internal/rust/cargo-audit-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | cargo-nextest | `internal/runner/cargo-nextest-pin/Cargo.toml` | parsed by `internal/runner/pins.go` |
 | gotestsum | `internal/runner/gotestsum-pin/go.mod` | **a Go constant** in `internal/runner/pins.go` — see below |

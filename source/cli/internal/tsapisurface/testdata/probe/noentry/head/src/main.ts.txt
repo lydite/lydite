@@ -1,0 +1,4 @@
+/** A program's own code, which no package entry point names. */
+export function run(n: number, label: string): number {
+  return label.length + n;
+}

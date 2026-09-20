@@ -1,0 +1,10 @@
+--- base/report/surface.api.md
++++ head/report/surface.api.md
+@@ -24,7 +24,6 @@
+ // @public
+ export interface Store {
+     get(key: string): string | undefined;
+-    size(): number;
+ }
+ 
+ // @public

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -23,6 +24,7 @@ import (
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rustapisurface"
 	"lydite/lydite/internal/toolchain"
+	"lydite/lydite/internal/tsapisurface"
 	"lydite/lydite/internal/ui"
 )
 
@@ -39,23 +41,32 @@ type surfaceComparison struct {
 	Dir          string            `json:"dir"`
 	Findings     []finding.Finding `json:"findings,omitempty"`
 	Uncomputable string            `json:"uncomputable,omitempty"`
+	// Skipped names every part of the component the comparison left out
+	// because it declares no surface at all — a TypeScript package naming no
+	// entry point. It is rendered rather than dropped: a package nothing
+	// compared is otherwise indistinguishable from one compared and found
+	// clean. Like Findings and Uncomputable it crosses the job boundary as
+	// text the compared code could have written, and like them it can only
+	// ever add a line to the report, never remove a gate.
+	Skipped []string `json:"skipped,omitempty"`
 }
 
 // computeAPISurfaces runs the comparison for every component that opted into
 // api_surface, and only that: no report, no decision, no exemptions, no
 // declaration. It is the one function in this file that runs a component's
 // own code — building rustdoc for a Rust component's head tree runs that
-// crate's own build.rs and proc-macros — and nothing past it does, which is
+// crate's own build.rs and proc-macros, and installing a TypeScript component
+// runs both trees' lifecycle scripts — and nothing past it does, which is
 // why it returns data for a caller to render rather than rendering anything
 // itself: the caller may be a job that must never hold a publishing
 // credential, or one that must never run this comparison again to get it.
 //
-// guardCredential refuses to run a Rust component's comparison at all,
-// reporting it uncomputable instead: it is set exactly when this same
-// process is about to publish with a credential, because
-// executil.RunQuietIsolatedEnv keeps that credential out of the comparison's
-// own child environment but not out of this process's — a same-user
-// descendant can still reach it another way (see
+// guardCredential refuses to run the comparisons that execute the tree under
+// review — see untrustedBuild — reporting each uncomputable instead: it is set
+// exactly when this same process is about to publish with a credential,
+// because executil.RunQuietIsolatedEnv keeps that credential out of the
+// comparison's own child environment but not out of this process's — a
+// same-user descendant can still reach it another way (see
 // agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md).
 // review compare, which never publishes, always passes false.
 func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string, guardCredential bool) ([]surfaceComparison, error) {
@@ -98,17 +109,38 @@ func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base strin
 
 	results := make([]surfaceComparison, 0, len(opted))
 	for _, c := range opted {
-		if guardCredential && langOf(c) == runner.Rust {
+		if what := untrustedBuild(c); guardCredential && what != "" {
 			results = append(results, surfaceComparison{
 				Component: c.Name, Dir: c.Dir,
-				Uncomputable: "a Rust component's comparison runs the head tree's own build.rs and proc-macros, which must not happen in the same process that is about to publish with a credential — run `review compare` and `review --surfaces` as two separate invocations instead",
+				Uncomputable: "this component's comparison runs " + what + ", which must not happen in the same process that is about to publish with a credential — run `review compare` and `review --surfaces` as two separate invocations instead",
 			})
 			continue
 		}
-		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
-		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Findings: findings, Uncomputable: uncomputable})
+		findings, skipped, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
+		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Findings: findings, Skipped: skipped, Uncomputable: uncomputable})
 	}
 	return results, nil
+}
+
+// untrustedBuild names what a component's comparison executes out of the tree
+// under review, and is empty for one that executes none of it.
+//
+// Not every comparison does. Go's loads the two trees with the Go tool and
+// compiles nothing the change wrote, so a Go component's surface can be
+// compared beside a credential. Rust's builds rustdoc, which runs the head
+// tree's own build.rs and proc-macros, and TypeScript's installs and builds
+// both trees, which runs their lifecycle scripts and their own compiler
+// configuration. Both put the change's code in a child of this process, which
+// is the thing guardCredential exists to keep out of a publishing job.
+func untrustedBuild(c component.Component) string {
+	switch langOf(c) {
+	case runner.Rust:
+		return "the head tree's own build.rs and proc-macros"
+	case runner.TypeScript:
+		return "both trees' own npm lifecycle scripts and build"
+	default:
+		return ""
+	}
 }
 
 // optedInComponents is every component this tree declares api_surface for.
@@ -225,14 +257,17 @@ func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Re
 
 	for _, res := range results {
 		c := component.Component{Name: res.Component, Dir: res.Dir}
+		note := skippedNote(res.Skipped)
+		skipped := detailOf(note)
 		switch {
 		case res.Uncomputable != "":
-			referUncomputable(d, c, res.Uncomputable)
+			referUncomputable(d, c, withNote(res.Uncomputable, note))
 		case len(res.Findings) == 0:
 			report.Add(ui.Row{
 				Status: ui.StatusPass,
 				Label:  gateAPISurface + "(" + c.Name + ")",
 				Value:  "no incompatible change against " + shortSHA(base),
+				Detail: skipped,
 			})
 		case where != "":
 			// Declared, so the referral above is the verdict and this row is
@@ -242,15 +277,17 @@ func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Re
 				Status: ui.StatusRefer,
 				Label:  gateAPISurface + "(" + c.Name + ")",
 				Value:  fmt.Sprintf("%s, declared", incompatible(len(res.Findings))),
-				Detail: capped(locate(res.Findings, c.Dir)),
+				Detail: append(capped(locate(res.Findings, c.Dir)), skipped...),
 			})
 		default:
+			detail := append(capped(locate(res.Findings, c.Dir)), skipped...)
+			detail = append(detail,
+				"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer")
 			report.Add(ui.Row{
 				Status: ui.StatusFail,
 				Label:  gateAPISurface + "(" + c.Name + ")",
 				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(res.Findings))),
-				Detail: append(capped(locate(res.Findings, c.Dir)),
-					"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer"),
+				Detail: detail,
 			})
 		}
 	}
@@ -260,15 +297,19 @@ func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Re
 // with the comparison its language has, and names what stopped it when the
 // comparison could not be made at all.
 //
-// Both trees are prepared here rather than in either comparison package: the
-// merge-base is materialised with git, and neither internal/apisurface nor
-// internal/rustapisurface does any — each takes two directories and returns
-// findings.
+// Both trees are prepared here rather than in any comparison package: the
+// merge-base is materialised with git, and none of internal/apisurface,
+// internal/rustapisurface or internal/tsapisurface does any — each takes two
+// directories and returns findings.
 //
-// The two languages differ only in which tool makes the comparison. What a
+// The second return is every part of the component that declares no surface at
+// all, which is neither a break nor a failure to compare one but has to reach a
+// reader all the same: see surfaceComparison.Skipped.
+//
+// The three languages differ only in which tool makes the comparison. What a
 // break means, and what a surface that could not be compared means, is one rule
-// for both: see renderAPISurfaceRows.
-func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Component, root, dir string, envs toolchain.Envs) ([]finding.Finding, string) {
+// for all of them: see renderAPISurfaceRows.
+func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Component, root, dir string, envs toolchain.Envs) ([]finding.Finding, []string, string) {
 	base := filepath.Join(root, filepath.FromSlash(c.Dir))
 	head := filepath.Join(dir, filepath.FromSlash(c.Dir))
 	tc := envs.For(c.Name)
@@ -277,11 +318,11 @@ func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Compone
 		findings, err := apisurface.Compare(base, head, gateAPISurface, c.Name, tc.Environ())
 		switch {
 		case errors.Is(err, apisurface.ErrModulePathChanged):
-			return nil, "the module path changed between the merge-base and this change"
+			return nil, nil, "the module path changed between the merge-base and this change"
 		case err != nil:
-			return nil, err.Error()
+			return nil, nil, err.Error()
 		}
-		return findings, ""
+		return findings, nil, ""
 	case runner.Rust:
 		// The two environments every other Rust check runs under, composed the
 		// same way: the component's own toolchain and declaration build the two
@@ -298,15 +339,36 @@ func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Compone
 			Progress: cmd.ErrOrStderr(),
 		})
 		if res.Outcome == rustapisurface.Unmeasurable {
-			return nil, res.Reason
+			return nil, nil, res.Reason
 		}
-		return res.Findings, ""
+		return res.Findings, nil, ""
+	case runner.TypeScript:
+		// The same two environments, composed the same way: the component's own
+		// toolchain and declaration install and build the two trees, and
+		// lydite's own provisions the pinned api-extractor. The isolation that
+		// keeps this process's own environment out of the install is
+		// internal/tsapisurface's, for the reason its package doc gives.
+		res := tsapisurface.Compare(ctx, tsapisurface.Request{
+			BaseDir:   base,
+			HeadDir:   head,
+			Gate:      gateAPISurface,
+			Component: c.Name,
+			Env: executil.Env{
+				Check:   childEnv(tc, c, runner.Invocation{}),
+				Install: tc.Environ(),
+			},
+			Progress: cmd.ErrOrStderr(),
+		})
+		if res.Outcome == tsapisurface.Unmeasurable {
+			return nil, res.Skipped, res.Reason
+		}
+		return res.Findings, res.Skipped, ""
 	default:
-		// component.Load refuses api_surface on every other language, so a
-		// component reaching here has none lydite can compare. Said out loud,
-		// because a comparison that never happened must not render as one that
-		// found nothing.
-		return nil, "no public-API comparison exists for this component's language"
+		// component.Load refuses api_surface on a component that declares no
+		// language, so a component reaching here has nothing lydite can
+		// compare. Said out loud, because a comparison that never happened must
+		// not render as one that found nothing.
+		return nil, nil, "no public-API comparison exists for a component that declares no language"
 	}
 }
 
@@ -332,6 +394,39 @@ func referUncomputable(d *referral.Decision, c component.Component, reason strin
 
 func incompatible(n int) string {
 	return fmt.Sprintf("%d incompatible change(s) to the exported API", n)
+}
+
+// skippedNote names what the comparison left out, and is empty when it left
+// out nothing.
+//
+// A package naming no entry point declares no surface a consumer can reach, so
+// leaving it out is the right answer rather than a failure. It is still said
+// out loud: a component whose every package was skipped reads exactly like one
+// compared and found clean, and a reader told nothing cannot tell which they
+// are looking at.
+func skippedNote(skipped []string) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	return "not compared, because it names no entry point: " + strings.Join(skipped, ", ")
+}
+
+// detailOf is one sentence as a row's detail, and no detail at all for an
+// empty one — a row whose detail is a blank line says something happened and
+// then does not say what.
+func detailOf(note string) []string {
+	if note == "" {
+		return nil
+	}
+	return []string{note}
+}
+
+// withNote puts a note after a reason, and is the reason alone when there is none.
+func withNote(reason, note string) string {
+	if note == "" {
+		return reason
+	}
+	return reason + "; " + note
 }
 
 // locate renders each finding as the line a reader opens, rebasing its path

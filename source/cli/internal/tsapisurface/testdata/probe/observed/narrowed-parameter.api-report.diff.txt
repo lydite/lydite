@@ -1,0 +1,11 @@
+--- base/report/surface.api.md
++++ head/report/surface.api.md
+@@ -16,7 +16,7 @@
+ };
+ 
+ // @public
+-export function narrowed(value: string | number): string;
++export function narrowed(value: string): string;
+ 
+ // @public
+ export function removed(n: number): number;

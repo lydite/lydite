@@ -1,0 +1,13 @@
+case                       build(base) build(head)  api-extractor(base) api-extractor(head)
+removed-export             0           0            0                   0
+narrowed-parameter         0           0            0                   0
+widened-return             0           0            0                   0
+removed-interface-member   0           0            0                   0
+added-required-member      0           0            0                   0
+optional-to-required       0           0            0                   0
+compatible-addition        0           0            0                   0
+reexport-only              0           0            0                   0
+generated-dts              0           0            0                   0
+version-bump               0           0            0                   0
+base-does-not-typecheck    2           0            0                   0
+no-entry-point             0           0            not run             not run

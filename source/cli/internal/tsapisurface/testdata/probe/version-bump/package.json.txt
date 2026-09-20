@@ -1,0 +1,17 @@
+{
+  "name": "@lydite-probe/surface",
+  "version": "1.0.0",
+  "description": "A probe package whose public surface each shape changes in exactly one way.",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}
