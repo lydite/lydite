@@ -14,7 +14,11 @@ is the first thing built to the rule rather than merely stated by it.
 
 Any future `internal/referral.Disqualification` kind, exemption rule, or clearance check whose
 input includes something an author wrote (a commit message, a PR title, a code comment) rather
-than something computed from a diff.
+than something computed from a diff. `/lydite exempt` is built to it: the commenter's `<shape>`
+names the proposed entry, but a commenter-supplied glob for `paths` was rejected outright — it
+would let an author widen a proposal past what their own change needs covered, and worse than in
+a hand-written entry, because the block reads as lydite's own output. `paths` is always the
+change's own uncovered set, never an argument.
 
 ## Example
 
