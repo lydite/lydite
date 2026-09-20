@@ -12,12 +12,14 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
 func newReviewCmd() *cobra.Command {
 	var dir, base, baseBranch, eventPath, surfacesPath string
 	var asJSON, noColor, doPublish bool
+	var reports []string
 	cmd := &cobra.Command{
 		Use: "review",
 		// A non-zero verdict is an answer, not a misuse of the command and
@@ -36,9 +38,17 @@ merge unattended, or it is referred to a person.
 A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
-It runs one check: for each component that declares api_surface, the exported
+It runs two checks. For each component that declares api_surface, the exported
 API of its Go module or its Rust crate is compared against the merge-base. A
-break this change did not declare fails, and a declared one is referred.
+break this change did not declare fails, and a declared one is referred. For
+each dependency manifest the change touches, the packages pinned at the
+merge-base and at HEAD are compared. A package the merge-base did not pin is
+referred, and so is a manifest whose dependencies could not be read at all.
+
+An exemption declaring ` + "`versions: " + referral.VersionsPatchAndMinor + "`" + ` covers a change only when every
+version it moves moved by a patch or a minor, and the licence and SCA rows for
+every component ran and passed in a scan document under --reports. Without
+--reports that condition is never met, and such a change is referred.
 
 --surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
 here. A component's own comparison executes its own code — a Rust crate's
@@ -107,7 +117,16 @@ publish in another that never runs the change's own code.`,
 				return err
 			}
 
-			decision := referral.Decide(change, file)
+			// Measured before the decision, because a conditional exemption
+			// is tested against how far the versions moved, and the rows the
+			// same comparison carries are added after it.
+			deltas := measureDependencies(ctx, dir, baseSHA, change.Paths)
+			evidence := referral.Evidence{
+				PatchAndMinor: versionsPatchAndMinor(deltas) &&
+					dependencyGatesPassed(dir, reports, cmd.ErrOrStderr()),
+			}
+
+			decision := referral.Decide(change, file, evidence)
 			if referral.Dirty(ctx, dir) {
 				report.Add(ui.Row{
 					Status: ui.StatusUnmeasured,
@@ -120,6 +139,7 @@ publish in another that never runs the change's own code.`,
 			// reach the report through the same disqualification the verdict
 			// line is derived from.
 			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath, surfaces)
+			addDependencyRows(report, &decision, deltas, baseSHA)
 			addDecisionRows(report, decision, len(file.Exemptions))
 
 			// Published after the rows are added and from the report's own
@@ -154,6 +174,11 @@ publish in another that never runs the change's own code.`,
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
 	cmd.Flags().StringVar(&surfacesPath, "surfaces", "", "read a comparison 'review compare' already made instead of running it here, and decide from that instead")
+	// Evidence only, never a gate of its own: an exemption conditioned on
+	// `versions: patch-and-minor` needs a scan that ran, and a run given no
+	// directory refers exactly as it does without the flag.
+	cmd.Flags().StringSliceVar(&reports, "reports", nil,
+		"a "+runner.ReportDir+" directory whose scan document supplies the licence and SCA evidence a conditional exemption needs; repeatable")
 	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
 }
@@ -249,6 +274,8 @@ func referralReason(d referral.Decision, declared int) string {
 		return "a disqualifier reached the change with no path in the diff at all"
 	case d.Exemption != "":
 		return fmt.Sprintf("%s matched, then disqualified", d.Exemption)
+	case len(d.Unsatisfied) > 0:
+		return fmt.Sprintf("%s covers these paths, and its condition was not met", strings.Join(capped(d.Unsatisfied), ", "))
 	case declared == 0:
 		return "no exemptions declared"
 	default:
@@ -273,6 +300,16 @@ func referralDetail(d referral.Decision, declared int) []string {
 	}
 	var detail []string
 	switch {
+	// Before the uncovered list, because an exemption that covered every path
+	// and failed its condition leaves nothing uncovered, and the reader would
+	// otherwise be told every path is covered by more than one exemption —
+	// sending them after a second declaration that is not there.
+	case len(d.Unsatisfied) > 0:
+		return []string{
+			"a conditional exemption covers the paths, and the condition is a further test the change has to pass",
+			"every dependency version must move by a patch or a minor, and the licence and SCA rows for every component must have run and passed in a scan document given to --reports",
+			"ask a human to clear this change",
+		}
 	case len(d.Uncovered) > 0:
 		detail = append(detail, fmt.Sprintf("%d path(s) covered by no exemption:", len(d.Uncovered)))
 		detail = append(detail, capped(d.Uncovered)...)
@@ -378,28 +415,44 @@ func resolveReviewBase(ctx context.Context, dir, base, baseBranch string) (strin
 //
 // An absent file is the day-one state and not an error: it declares no
 // exemptions, so everything is referred. A file that exists and cannot be
-// read is a different thing entirely, and the two are asked separately —
-// `cat-file -e` answers "is it there", and only then does `show` read it.
-// Collapsing them would make a broken read indistinguishable from an empty
-// allowlist, which is safe today only because the safe answer happens to
-// coincide; the moment an exemption exists, a silent read failure would
-// change the verdict with nothing said.
+// read is a different thing entirely, and showAtRevision keeps the two apart.
 func loadExemptionsAt(ctx context.Context, dir, base string) (referral.File, error) {
 	prefix, err := referral.RootRelative(ctx, dir)
 	if err != nil {
 		return referral.File{}, err
 	}
 	repoPath := path.Join(prefix, referral.FileName)
-	spec := base + ":" + repoPath
-	if r := executil.RunQuiet(ctx, dir, "git", "cat-file", "-e", spec); !r.Ok() {
+	content, present, err := showAtRevision(ctx, dir, base, repoPath)
+	if err != nil {
+		return referral.File{}, err
+	}
+	if !present {
 		return referral.File{}, nil
+	}
+	return referral.Parse(content, repoPath+" at "+shortSHA(base))
+}
+
+// showAtRevision reads a repository-root-relative path out of a commit,
+// never out of the working tree, and says separately whether the commit has
+// the path at all.
+//
+// The two questions are asked with two commands — `cat-file -e` answers "is
+// it there", and only then does `show` read it. Collapsing them would make a
+// broken read indistinguishable from a path the commit never had, and every
+// caller here treats those differently: an absent exemptions file declares no
+// exemptions, an absent manifest states no dependencies, and a read that
+// failed states nothing at all.
+func showAtRevision(ctx context.Context, dir, rev, repoPath string) ([]byte, bool, error) {
+	spec := rev + ":" + repoPath
+	if r := executil.RunQuiet(ctx, dir, "git", "cat-file", "-e", spec); !r.Ok() {
+		return nil, false, nil
 	}
 	r := executil.RunQuiet(ctx, dir, "git", "show", spec)
 	if !r.Ok() {
-		return referral.File{}, fmt.Errorf("reading %s at %s: %w: %s",
-			repoPath, shortSHA(base), r.Err, strings.TrimSpace(r.Stderr))
+		return nil, true, fmt.Errorf("reading %s at %s: %w: %s",
+			repoPath, shortSHA(rev), r.Err, strings.TrimSpace(r.Stderr))
 	}
-	return referral.Parse([]byte(r.Output), repoPath+" at "+shortSHA(base))
+	return []byte(r.Output), true, nil
 }
 
 func shortSHA(sha string) string {

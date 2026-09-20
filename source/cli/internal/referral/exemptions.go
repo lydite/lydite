@@ -92,6 +92,36 @@ type Exemption struct {
 	// path. They are repository-root-relative even when lydite runs with
 	// --dir pointing at a subdirectory — see Match for the syntax and why.
 	Paths []string `yaml:"paths"`
+	// Versions conditions the match on how far the change moved the
+	// dependency versions it touches. VersionsPatchAndMinor is the only
+	// value it accepts, and empty is no condition at all — a match on paths
+	// alone.
+	//
+	// A condition is a further test a single matched exemption must pass,
+	// never a term in a disjunction across several: Covers is consulted
+	// first, so an exemption requiring nothing and an exemption requiring
+	// patch-and-minor still cannot combine into a union that requires
+	// neither.
+	Versions string `yaml:"versions"`
+}
+
+// VersionsPatchAndMinor is the one value Exemption.Versions accepts: every
+// version pair the change moves classifies as a patch or a minor, and the
+// licence and SCA rows for every component ran and passed.
+//
+// It is one value rather than a vocabulary because a condition nothing
+// computes is a condition that widens to its unconditional form. See
+// docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md.
+const VersionsPatchAndMinor = "patch-and-minor"
+
+// satisfied reports whether e's condition holds for the evidence a caller
+// measured. An exemption declaring no condition is satisfied by anything,
+// including the zero Evidence.
+func (e Exemption) satisfied(ev Evidence) bool {
+	if e.Versions == "" {
+		return true
+	}
+	return ev.PatchAndMinor
 }
 
 // Covers reports whether every changed path falls under one of e's patterns.
@@ -180,6 +210,14 @@ func (f File) validate(source string) error {
 			if err := pathmatch.ValidatePattern(p); err != nil {
 				return fmt.Errorf("%s (%s): %w", where, e.Name, err)
 			}
+		}
+		// Named rather than ignored, the same stance an unknown key gets. A
+		// condition lydite does not recognise, quietly dropped, is an
+		// exemption that applies unconditionally — wider than what its author
+		// wrote and wider than what review saw.
+		if e.Versions != "" && e.Versions != VersionsPatchAndMinor {
+			return fmt.Errorf("%s (%s): versions: %q is not a condition lydite knows — the only value is %q",
+				where, e.Name, e.Versions, VersionsPatchAndMinor)
 		}
 	}
 	for _, p := range f.Disqualifiers.Paths {

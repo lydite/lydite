@@ -20,7 +20,7 @@ func parseOrFail(t *testing.T, yaml string) File {
 // Day one, and the correct starting state rather than a transitional one:
 // with nothing declared, every change is referred.
 func TestEmptyFileRefersEverything(t *testing.T) {
-	d := Decide(Change{Paths: []string{"README.md"}}, File{})
+	d := Decide(Change{Paths: []string{"README.md"}}, File{}, Evidence{})
 	if !d.Referred {
 		t.Fatalf("an empty exemption set must refer everything, got %+v", d)
 	}
@@ -33,7 +33,7 @@ exemptions:
     reason: prose changes nothing executable
     paths: ["README.md"]
 `)
-	d := Decide(Change{Paths: []string{"README.md"}}, f)
+	d := Decide(Change{Paths: []string{"README.md"}}, f, Evidence{})
 	if d.Referred || d.Exemption != "readme-only" {
 		t.Fatalf("expected an unattended pass under readme-only, got %+v", d)
 	}
@@ -49,7 +49,7 @@ exemptions:
     reason: prose changes nothing executable
     paths: ["README.md"]
 `)
-	d := Decide(Change{Paths: []string{"README.md", "src/auth.go"}}, f)
+	d := Decide(Change{Paths: []string{"README.md", "src/auth.go"}}, f, Evidence{})
 	if !d.Referred {
 		t.Fatal("a change with one uncovered path must be referred")
 	}
@@ -71,7 +71,7 @@ exemptions:
     reason: design notes are not shipped
     paths: ["docs/**"]
 `)
-	d := Decide(Change{Paths: []string{"README.md", "docs/adr/0013.md"}}, f)
+	d := Decide(Change{Paths: []string{"README.md", "docs/adr/0013.md"}}, f, Evidence{})
 	if !d.Referred {
 		t.Fatal("a change covered only by two exemptions between them must be referred")
 	}
@@ -153,7 +153,7 @@ exemptions:
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := Decide(tc.ch, f)
+			d := Decide(tc.ch, f, Evidence{})
 			if !d.Referred {
 				t.Fatalf("expected a referral, got %+v", d)
 			}
@@ -187,10 +187,10 @@ exemptions:
 disqualifiers:
   paths: ["infra/**"]
 `)
-	if d := Decide(Change{Paths: []string{".github/workflows/ci.yml"}}, f); !d.Referred {
+	if d := Decide(Change{Paths: []string{".github/workflows/ci.yml"}}, f, Evidence{}); !d.Referred {
 		t.Error("declaring a disqualifier list must not displace the built-in vetoes")
 	}
-	if d := Decide(Change{Paths: []string{"infra/main.tf"}}, f); !d.Referred {
+	if d := Decide(Change{Paths: []string{"infra/main.tf"}}, f, Evidence{}); !d.Referred {
 		t.Error("a declared disqualifying path must veto a match")
 	}
 }
@@ -200,7 +200,7 @@ disqualifiers:
 // whether the file happens to be empty, since every exemption covers it
 // vacuously.
 func TestAnEmptyChangeIsNotReferred(t *testing.T) {
-	if d := Decide(Change{}, File{}); d.Referred || !d.Empty {
+	if d := Decide(Change{}, File{}, Evidence{}); d.Referred || !d.Empty {
 		t.Errorf("an empty change must not be referred, got %+v", d)
 	}
 }
@@ -238,6 +238,109 @@ func TestValidationRequiresNameReasonAndPaths(t *testing.T) {
 				t.Fatalf("expected %s to be rejected", name)
 			}
 		})
+	}
+}
+
+// patch-and-minor is the only condition there is, and a value lydite does not
+// know is rejected by name: an unrecognised condition dropped in silence is an
+// exemption that applies unconditionally.
+func TestVersionsConditionParsesOnlyItsOneValue(t *testing.T) {
+	f := parseOrFail(t, `
+exemptions:
+  - name: dependency-bump
+    reason: routine version maintenance, no new dependency
+    paths: ["go.sum"]
+    versions: patch-and-minor
+`)
+	if f.Exemptions[0].Versions != VersionsPatchAndMinor {
+		t.Errorf("versions = %q, want %q", f.Exemptions[0].Versions, VersionsPatchAndMinor)
+	}
+
+	_, err := Parse([]byte(`
+exemptions:
+  - name: dependency-bump
+    reason: routine version maintenance
+    paths: ["go.sum"]
+    versions: anything-goes
+`), FileName)
+	if err == nil {
+		t.Fatal("a condition lydite does not know must be rejected, not ignored")
+	}
+	if !strings.Contains(err.Error(), "anything-goes") {
+		t.Errorf("the error must name what was rejected, got %v", err)
+	}
+}
+
+// Unset is no condition at all, which is the path-only behaviour every
+// exemption written before conditions existed relies on.
+func TestAnExemptionWithNoConditionIgnoresTheEvidence(t *testing.T) {
+	f := parseOrFail(t, `
+exemptions:
+  - name: readme-only
+    reason: prose changes nothing executable
+    paths: ["README.md"]
+`)
+	for _, ev := range []Evidence{{}, {PatchAndMinor: true}} {
+		d := Decide(Change{Paths: []string{"README.md"}}, f, ev)
+		if d.Referred || d.Exemption != "readme-only" {
+			t.Fatalf("an unconditional exemption must match whatever the evidence says, got %+v for %+v", d, ev)
+		}
+	}
+}
+
+// The condition is a further test the matched exemption has to pass. Failing
+// it lands where no exemption at all lands — referred — and the decision says
+// which exemption's condition went unmet, since that is a different thing to
+// act on from a shape nobody declared.
+func TestAVersionsConditionIsTestedAfterTheMatch(t *testing.T) {
+	f := parseOrFail(t, `
+exemptions:
+  - name: dependency-bump
+    reason: routine version maintenance, no new dependency
+    paths: ["go.sum"]
+    versions: patch-and-minor
+`)
+	ch := Change{Paths: []string{"go.sum"}}
+
+	met := Decide(ch, f, Evidence{PatchAndMinor: true})
+	if met.Referred || met.Exemption != "dependency-bump" {
+		t.Fatalf("a met condition must let the exemption match, got %+v", met)
+	}
+
+	unmet := Decide(ch, f, Evidence{})
+	if !unmet.Referred {
+		t.Fatal("an unmet condition must refer the change")
+	}
+	if unmet.Exemption != "" {
+		t.Errorf("an unmet condition grants nothing, got exemption %q", unmet.Exemption)
+	}
+	if len(unmet.Unsatisfied) != 1 || unmet.Unsatisfied[0] != "dependency-bump" {
+		t.Errorf("the referral must name the exemption whose condition went unmet, got %v", unmet.Unsatisfied)
+	}
+}
+
+// A conditional exemption and an unconditional one cannot be combined into a
+// union that requires neither: Covers is asked of one exemption at a time, and
+// the condition only ever narrows the one that covered.
+func TestAConditionalAndAnUnconditionalExemptionDoNotUnion(t *testing.T) {
+	f := parseOrFail(t, `
+exemptions:
+  - name: dependency-bump
+    reason: routine version maintenance, no new dependency
+    paths: ["go.sum"]
+    versions: patch-and-minor
+  - name: readme-only
+    reason: prose changes nothing executable
+    paths: ["README.md"]
+`)
+	// Covered between them and by neither alone, with the condition met, so
+	// nothing but the union could grant this change a pass.
+	d := Decide(Change{Paths: []string{"go.sum", "README.md"}}, f, Evidence{PatchAndMinor: true})
+	if !d.Referred {
+		t.Fatalf("a change covered only by two exemptions between them must be referred, got %+v", d)
+	}
+	if d.Exemption != "" {
+		t.Errorf("no single exemption covered this change, got %q", d.Exemption)
 	}
 }
 
@@ -491,7 +594,7 @@ exemptions:
     reason: prose changes nothing executable
     paths: ["source/README.md"]
 `)
-	if d := Decide(Change{Paths: []string{"source/README.md"}}, f); d.Referred {
+	if d := Decide(Change{Paths: []string{"source/README.md"}}, f, Evidence{}); d.Referred {
 		t.Errorf("a repository-root-relative pattern must match the path git reports, got %+v", d)
 	}
 }
@@ -576,14 +679,14 @@ func TestSelectorCallsAreNotTestDeclarations(t *testing.T) {
 // in a large change approved for its other contents — after which the
 // widening is permanent and nobody read it.
 func TestBundledExemptionChangeIsReported(t *testing.T) {
-	d := Decide(Change{Paths: []string{FileName, "src/app.go"}}, File{})
+	d := Decide(Change{Paths: []string{FileName, "src/app.go"}}, File{}, Evidence{})
 	if len(d.Bundled) != 1 || d.Bundled[0] != "src/app.go" {
 		t.Fatalf("Bundled = %v, want the path riding along", d.Bundled)
 	}
 
 	// Alone, it is the isolated change the rule asks for — still referred,
 	// because editing it is a disqualifier, but not a failure.
-	alone := Decide(Change{Paths: []string{FileName}}, File{})
+	alone := Decide(Change{Paths: []string{FileName}}, File{}, Evidence{})
 	if len(alone.Bundled) != 0 {
 		t.Errorf("an isolated exemption change must not be reported as bundled, got %v", alone.Bundled)
 	}
@@ -593,7 +696,7 @@ func TestBundledExemptionChangeIsReported(t *testing.T) {
 
 	// The ordinary config file carries no isolation requirement: report
 	// paths change alongside code for honest reasons.
-	bundled := Decide(Change{Paths: []string{config.FileName, "src/app.go"}}, File{})
+	bundled := Decide(Change{Paths: []string{config.FileName, "src/app.go"}}, File{}, Evidence{})
 	if len(bundled.Bundled) != 0 {
 		t.Errorf("%s must carry no isolation requirement, got %v", config.FileName, bundled.Bundled)
 	}
@@ -610,7 +713,7 @@ func TestLyditeConfigMatchingIsNotByBaseName(t *testing.T) {
 		if IsExemptionsPath(p) {
 			t.Errorf("%s is not the exemption set", p)
 		}
-		if d := Decide(Change{Paths: []string{p}}, File{}); len(d.Bundled) != 0 {
+		if d := Decide(Change{Paths: []string{p}}, File{}, Evidence{}); len(d.Bundled) != 0 {
 			t.Errorf("%s must carry no isolation requirement, got %v", p, d.Bundled)
 		}
 	}
@@ -621,7 +724,7 @@ func TestLyditeConfigMatchingIsNotByBaseName(t *testing.T) {
 // changes what gets tested.
 func TestEveryFileUnderTheConfigDirIsADisqualifier(t *testing.T) {
 	for _, p := range []string{config.Dir + "/components.yml", config.FileName, FileName, "source/" + config.Dir + "/config.yml"} {
-		d := Decide(Change{Paths: []string{p}}, File{Exemptions: []Exemption{{Name: "everything", Reason: "r", Paths: []string{"**"}}}})
+		d := Decide(Change{Paths: []string{p}}, File{Exemptions: []Exemption{{Name: "everything", Reason: "r", Paths: []string{"**"}}}}, Evidence{})
 		if !d.Referred {
 			t.Errorf("%s must be a disqualifier", p)
 		}
@@ -635,7 +738,7 @@ func TestExemptionsPathIsRecognisedUnderAScanRoot(t *testing.T) {
 	if !IsExemptionsPath("source/" + FileName) {
 		t.Errorf("source/%s is an exemption set", FileName)
 	}
-	d := Decide(Change{Paths: []string{"source/" + FileName, "src/app.go"}}, File{})
+	d := Decide(Change{Paths: []string{"source/" + FileName, "src/app.go"}}, File{}, Evidence{})
 	if len(d.Bundled) != 1 || d.Bundled[0] != "src/app.go" {
 		t.Errorf("bundled = %v, want the non-exemption path", d.Bundled)
 	}

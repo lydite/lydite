@@ -1,0 +1,58 @@
+# What may merge without a human reading it.
+#
+# The model is an allowlist and the default is to refer: a change merges
+# unattended only when a single entry here covers every path it touched and
+# that entry's conditions hold. `git log .lydite/exemptions.yml` is the whole
+# record of what this repository has decided to stop reading, which is why an
+# entry carries a reason and why a pull request touching this file may touch
+# nothing else.
+exemptions:
+  - name: dependency-version-bump
+    reason: >-
+      A bump of packages the merge-base already depended on, in a manifest
+      lydite can read at both sides. Anything that brings a package into the
+      tree is disqualified before this entry is consulted, so what is left is
+      a version moving inside its own compatibility range with the licence and
+      SCA rows green for every component. That is the whole guarantee: this
+      entry has no way to require the change came from Dependabot or to check
+      how long the bumped version has been public, so it does not lean on
+      either — a human-authored PR moving a version by the same patch-or-minor
+      distance, with the same gates green, is exactly as boring by this
+      entry's own measure, and merges on the same evidence.
+    # Only the lockfiles internal/depdelta actually reads a comparison from,
+    # never the manifests beside them (Cargo.toml, package.json). depdelta.Detect
+    # names Cargo.lock and package-lock.json as manifests and leaves Cargo.toml
+    # and package.json unrecognised, so a path it does not name is not reported
+    # as unmeasured — it is skipped outright, and versionsPatchAndMinor would
+    # pass vacuously over a change that touched only the manifest. Listing the
+    # manifest here would let a Cargo.toml or package.json edit clear with the
+    # lockfile beside it untouched. What a real Dependabot bump also edits —
+    # the manifest — is therefore left off this list on purpose: that leg of
+    # the change is an uncovered path, so the pull request is referred rather
+    # than silently trusting a file this entry cannot measure.
+    #
+    # Three further watched sets are deliberately absent, each a referral
+    # rather than a silent pass:
+    #
+    #   - the two pip manifests (internal/semgrep, proving-ground-pyyaml) —
+    #     depdelta has no pip reader, so a bump there is unmeasured and
+    #     disqualified whatever this list says;
+    #   - cargo-nextest-pin and cargo-llvm-cov-pin, whose Cargo.toml commits no
+    #     Cargo.lock beside it — a requirement edit there moves no manifest
+    #     depdelta reads, so nothing would check how far the version went;
+    #   - github-actions, which pins no dependency manifest at all.
+    paths:
+      - source/cli/go.mod
+      - source/cli/go.sum
+      - source/cli/internal/golang/go-pin/go.mod
+      - source/cli/internal/golang/go-pin/go.sum
+      - source/cli/internal/runner/gotestsum-pin/go.mod
+      - source/cli/internal/runner/gotestsum-pin/go.sum
+      - source/cli/internal/secrets/gitleaks-pin/go.mod
+      - source/cli/internal/secrets/gitleaks-pin/go.sum
+      - source/cli/internal/rust/cargo-audit-pin/Cargo.lock
+      - source/cli/internal/rust/cargo-deny-pin/Cargo.lock
+      - source/cli/internal/rust/cargo-semver-checks-pin/Cargo.lock
+      - source/cli/internal/typescript/biome-pin/package-lock.json
+      - source/cloud-services/package-lock.json
+    versions: patch-and-minor
