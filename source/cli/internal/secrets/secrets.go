@@ -14,6 +14,16 @@
 // a claim with no line to anchor to. What that gives up is stated rather than
 // buried: a credential committed and later deleted stays leaked and lydite
 // never mentions it.
+//
+// And the part of that working tree git would carry. gitleaks walks every file
+// under the scan root, so a warm target/ or an installed node_modules/ is read
+// as source and its compiled-in test vectors are reported as leaks; no flag
+// scopes that walk, so the claims are scoped instead, against what
+// gitdiff.Tracked answers. A credential in a file git will not carry cannot be
+// committed by accident, which is the leak this gate exists to catch — and a
+// file that is untracked but not ignored is one `git add .` from being
+// published, so it stays in scope. A real credential sitting in ignored output
+// is what that gives up.
 package secrets
 
 import (
@@ -105,5 +115,10 @@ func run(ctx context.Context, dir, bin string) executil.Result {
 	r := executil.Run(ctx, dir, bin, argv(reportPath)...)
 	r.Name = Gate
 
-	return result(r, dir, reportPath)
+	// Asked after the walk rather than before it: gitleaks' own output and exit
+	// status are what a reader sees first, and a git that will not answer is a
+	// row this gate fails with the reason rather than a run it declines to
+	// make.
+	keep, scopeErr := tracked(ctx, dir)
+	return result(r, dir, reportPath, keep, scopeErr)
 }

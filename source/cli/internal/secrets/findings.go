@@ -1,11 +1,13 @@
 package secrets
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -14,6 +16,7 @@ import (
 
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/gitdiff"
 )
 
 // report is gitleaks' JSON report: a bare array of leaks, one per match.
@@ -39,6 +42,114 @@ type leak struct {
 	StartLine   int    `json:"StartLine"`
 	EndLine     int    `json:"EndLine"`
 	StartColumn int    `json:"StartColumn"`
+}
+
+// carried reports whether a path is one git would carry out of the scan root.
+//
+// gitleaks walks every file under that root — a warm target/, an installed
+// node_modules/, a dist/ — and offers no flag that scopes the walk: `dir`
+// takes exactly one path and reads no .gitignore. So the claims are scoped
+// instead of the walk. A file git will not carry cannot be committed by
+// accident, which is the leak this gate exists to catch; a file that is
+// untracked but not ignored is one `git add .` from being published, so it
+// stays in scope.
+type carried func(path string) bool
+
+// tracked asks git which paths it would carry out of dir: everything it
+// tracks, plus everything untracked that .gitignore does not cover.
+//
+// gitdiff.Tracked is that one question, asked the way internal/orphan and the
+// mutation worktree already ask it. A second ls-files here would agree with it
+// only until one of the two learned something about git the other did not.
+//
+// Its paths are relative to dir and slash-separated, which is the shape a
+// finding's Path carries, so the two compare as text.
+func tracked(ctx context.Context, dir string) (carried, error) {
+	paths, err := gitdiff.Tracked(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		set[p] = true
+	}
+	return func(path string) bool { return set[path] }, nil
+}
+
+// unscoped holds every path, for a root git could not be asked about. The
+// claims are what a scope lydite could not establish must not cost; the row
+// says so instead, in result.
+func unscoped(string) bool { return true }
+
+// scanRoot places the paths gitleaks reports onto the scan root.
+//
+// gitleaks names a file the way its target named it: `lydite scan` passes ".",
+// so the paths arrive relative and slash-separated, and an absolute target
+// yields absolute paths instead. A path that is not reduced to the root's own
+// shape matches neither git's answer nor the tree a site is read from, and
+// the failure is silent — every claim filtered away and a clean row. The root
+// is held with its symlinks resolved as well as literally, because darwin
+// walks /var/folders/... as /private/var/folders/...
+type scanRoot struct{ dir, resolved string }
+
+func newScanRoot(dir string) scanRoot {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		resolved = abs
+	}
+	return scanRoot{dir: abs, resolved: resolved}
+}
+
+// place is file as a path relative to the scan root, or "" for one that names
+// nothing inside it.
+//
+// Empty rather than the path itself: a claim outside the root can be compared
+// against neither git's answer nor the tree, so it is one lydite cannot place,
+// and the caller reports it rather than dropping it.
+func (r scanRoot) place(file string) string {
+	if file == "" {
+		return ""
+	}
+	if filepath.IsAbs(file) {
+		return r.rel(file)
+	}
+	return inside(filepath.ToSlash(file))
+}
+
+// rel places an absolute path against either form of the root, resolving the
+// path's own symlinks as a third candidate: the report and the root may each
+// name the same file through a different link.
+func (r scanRoot) rel(file string) string {
+	files := []string{file}
+	if resolved, err := filepath.EvalSymlinks(file); err == nil && resolved != file {
+		files = append(files, resolved)
+	}
+	for _, base := range []string{r.dir, r.resolved} {
+		for _, f := range files {
+			rel, err := filepath.Rel(base, f)
+			if err != nil {
+				continue
+			}
+			if p := inside(filepath.ToSlash(rel)); p != "" {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// inside is a slash-separated path cleaned of "./" and ".." segments, or ""
+// when what it names is the root itself or something above it.
+func inside(p string) string {
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return ""
+	}
+	return cleaned
 }
 
 // rotate is appended to every message, verbatim.
@@ -67,22 +178,28 @@ const (
 	maxFileBytes = 4 << 20
 )
 
-// findings is every leak as a located claim, and everything the report named
-// that could not become one.
+// findings is every leak in a file git would carry as a located claim, and
+// everything the report named that could not become one.
 //
 // A leak lydite cannot place is returned rather than dropped: a parser that
 // silently discards input is how a gate quietly stops working, and here the
-// discarded thing is a credential somebody committed.
-func findings(dir string, rep report) (out []finding.Finding, unplaced []string) {
+// discarded thing is a credential somebody committed. A leak in a path keep
+// excludes is a different thing and is dropped in silence — it is located
+// perfectly well and is simply not a file this gate has a claim over.
+func findings(dir string, rep report, keep carried) (out []finding.Finding, unplaced []string) {
+	root := newScanRoot(dir)
 	src := newTree(dir)
-	cols := earliestColumnPerLine(rep)
+	cols := earliestColumnPerLine(root, rep)
 	for _, l := range inSourceOrder(rep) {
-		path := filepath.ToSlash(strings.TrimPrefix(l.File, "./"))
-		if path == "" || l.StartLine < 1 {
+		p := root.place(l.File)
+		if p == "" || l.StartLine < 1 {
 			// Neither a thread nor an identity can be made from this, and the
 			// row still fails on gitleaks' own exit status. What must not happen
 			// is that it goes unsaid.
-			unplaced = append(unplaced, fmt.Sprintf("gitleaks reported %s at %q line %d, which names no file line", ruleOf(l), l.File, l.StartLine))
+			unplaced = append(unplaced, fmt.Sprintf("gitleaks reported %s at %q line %d, which names no line inside the scan root", ruleOf(l), l.File, l.StartLine))
+			continue
+		}
+		if !keep(p) {
 			continue
 		}
 		end := 0
@@ -93,21 +210,21 @@ func findings(dir string, rep report) (out []finding.Finding, unplaced []string)
 		// gitleaks reports one leak per match, and a line with two matches
 		// would otherwise put the first one's secret into the second one's
 		// site, published in scan.json for text no rule flagged as its own.
-		col := cols[lineKey{path, l.StartLine}]
+		col := cols[lineKey{p, l.StartLine}]
 		out = append(out, finding.Finding{
 			Gate: Gate,
 			// No Component. This gate is root-scoped, and an empty component is
 			// what that already means; attributing a claim to whichever
 			// component happens to contain its path is the ownership question
 			// ADR 0033 refuses to answer.
-			Path:    path,
+			Path:    p,
 			Line:    l.StartLine,
 			EndLine: end,
 			Rule:    l.RuleID,
 			Message: message(l),
 			// No Detail. Everything gitleaks would put there is either already a
 			// field — the rule, the description — or is the secret.
-			Site: site(l.RuleID, src.prefix(path, l.StartLine, col)),
+			Site: site(l.RuleID, src.prefix(p, l.StartLine, col)),
 		})
 	}
 	finding.Number(out)
@@ -128,17 +245,17 @@ type lineKey struct {
 // reports each as its own leak. Every claim on that line has to cut its site
 // before the first of them, not just before itself, or the claim for the
 // second match publishes the first match's secret as its own identity.
-func earliestColumnPerLine(rep report) map[lineKey]int {
+func earliestColumnPerLine(root scanRoot, rep report) map[lineKey]int {
 	cols := make(map[lineKey]int, len(rep))
 	for _, l := range rep {
 		if l.StartLine < 1 {
 			continue
 		}
-		path := filepath.ToSlash(strings.TrimPrefix(l.File, "./"))
-		if path == "" {
+		p := root.place(l.File)
+		if p == "" {
 			continue
 		}
-		k := lineKey{path, l.StartLine}
+		k := lineKey{p, l.StartLine}
 		if cur, ok := cols[k]; !ok || l.StartColumn < cur { // [lydite:exclude_from_mutation][< vs <=
 			// differ only when l.StartColumn == cur, and writing the same value back
 			// changes nothing a caller can observe]
@@ -348,32 +465,52 @@ func parseReport(data []byte) (report, bool) {
 // test that had to run gitleaks to reach these decisions would be testing the
 // machine's gitleaks.
 //
-// The exit status decides the row. A missing or unparseable report costs the
-// run its findings and changes no verdict, which is the fallback ADR 0035
-// states — the report has no error array, so there is nothing in it that could
-// contradict the status.
-func result(r executil.Result, dir, reportPath string) executil.Result {
-	data, readErr := os.ReadFile(reportPath) // #nosec G304 -- reportPath is our own CreateTemp result, not user input
-	if readErr != nil {
-		return r
-	}
-	rep, ok := parseReport(data)
-	if !ok {
-		return r
-	}
-	found, unplaced := findings(dir, rep)
-	r.Findings = found
-	if len(unplaced) > 0 {
-		// Detail because this is lydite's own statement rather than gitleaks',
-		// and report() prints Detail under a failing row and nothing else. It is
-		// said whatever the status, because a leak lydite could not place is
-		// lost from the document either way.
-		r.Detail = strings.Join(unplaced, "\n")
+// keep and scopeErr are what tracked answered: the paths git would carry, or
+// the reason it could not say. A scope lydite could not establish costs the
+// row rather than the claims — every leak is reported and the row fails
+// saying why, because a pass there is indistinguishable from a tree that was
+// scoped and clean.
+//
+// The exit status decides the row, with one exception: gitleaks exits non-zero
+// for a leak anywhere it walked, including the ignored output no claim here
+// survives, so a report whose every leak was filtered away leaves nothing to
+// fail on. A missing or unparseable report costs the run its findings and
+// changes no verdict, which is the fallback ADR 0035 states — the report has
+// no error array, so there is nothing in it that could contradict the status.
+func result(r executil.Result, dir, reportPath string, keep carried, scopeErr error) executil.Result {
+	// Detail because this is lydite's own statement rather than gitleaks', and
+	// report() prints Detail under a failing row and nothing else.
+	var notes []string
+	if scopeErr != nil {
+		keep = unscoped
+		notes = append(notes, "lydite could not ask git which files it would carry, so these claims are not scoped to them: "+scopeErr.Error())
 		if r.Ok() {
-			// A leak reported beside a clean exit is a pass nothing else would
-			// contradict.
-			r.Err = errors.New("gitleaks reported a leak lydite could not locate")
+			r.Err = fmt.Errorf("the secret gate could not be scoped to the files git would carry: %w", scopeErr)
 		}
+	}
+	data, readErr := os.ReadFile(reportPath) // #nosec G304 -- reportPath is our own CreateTemp result, not user input
+	if readErr == nil {
+		if rep, ok := parseReport(data); ok {
+			found, unplaced := findings(dir, rep, keep)
+			r.Findings = found
+			// Said whatever the status, because a leak lydite could not place
+			// is lost from the document either way.
+			notes = append(notes, unplaced...)
+			if len(unplaced) > 0 && r.Ok() {
+				// A leak reported beside a clean exit is a pass nothing else
+				// would contradict.
+				r.Err = errors.New("gitleaks reported a leak lydite could not locate")
+			}
+			if scopeErr == nil && len(rep) > 0 && len(found) == 0 && len(unplaced) == 0 {
+				// Every leak gitleaks found is in a file git would not carry,
+				// so the status is failing on something this gate makes no
+				// claim about.
+				r.Err = nil
+			}
+		}
+	}
+	if len(notes) > 0 {
+		r.Detail = strings.Join(notes, "\n")
 	}
 	return r
 }

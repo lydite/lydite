@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/fixture"
+	"lydite/lydite/internal/gitdiff"
 )
 
 // captured is one of the reports the pinned gitleaks wrote over the tree beside
@@ -26,6 +28,7 @@ func captured(t *testing.T, name string) (dir string, rep report) {
 	probes := map[string]string{
 		"gitleaks":         "glprobe",
 		"gitleaks-shifted": "glprobe-shifted",
+		"gitleaks-ignored": "glprobe-ignored",
 	}
 	probe, ok := probes[name]
 	if !ok {
@@ -43,7 +46,7 @@ func captured(t *testing.T, name string) (dir string, rep report) {
 
 func TestReadsTheRealReport(t *testing.T) {
 	dir, rep := captured(t, "gitleaks")
-	got, unplaced := findings(dir, rep)
+	got, unplaced := findings(dir, rep, unscoped)
 	if len(unplaced) != 0 {
 		t.Errorf("unplaced = %q, want none — every leak in the capture names a file and a line", unplaced)
 	}
@@ -84,7 +87,7 @@ func TestEveryMessageSaysToRotate(t *testing.T) {
 	// description ends at what it found, and an author who deletes the line has
 	// fixed nothing.
 	dir, rep := captured(t, "gitleaks")
-	got, _ := findings(dir, rep)
+	got, _ := findings(dir, rep, unscoped)
 	for _, f := range got {
 		if !strings.HasSuffix(f.Message, rotate) {
 			t.Errorf("message = %q, want it to end with the instruction to rotate", f.Message)
@@ -119,7 +122,7 @@ func TestMessageNormalisesTheDescriptionsFullStop(t *testing.T) {
 
 func TestSiteIsTheLinePrefixAndNeverTheSecret(t *testing.T) {
 	dir, rep := captured(t, "gitleaks")
-	got, _ := findings(dir, rep)
+	got, _ := findings(dir, rep, unscoped)
 
 	// Every invented credential in the probe tree, read back out of the
 	// materialised files: none of them may appear in a site, which travels in
@@ -172,7 +175,7 @@ func TestASiteNeverIncludesAnotherMatchOnTheSameLine(t *testing.T) {
 		// hex string that is rule-a's match.
 		{RuleID: "rule-b", File: "config.yml", StartLine: 3, StartColumn: 40},
 	}
-	got, unplaced := findings(dir, rep)
+	got, unplaced := findings(dir, rep, unscoped)
 	if len(unplaced) != 0 {
 		t.Fatalf("unplaced = %v, want none", unplaced)
 	}
@@ -191,7 +194,7 @@ func TestOrdinalSeparatesTwoClaimsSharingASite(t *testing.T) {
 	// ordinals 0 and 1 — the cost ADR 0035 names and accepts. Without the
 	// ordinal they are one claim and the second is dropped as a duplicate.
 	dir, rep := captured(t, "gitleaks")
-	got, _ := findings(dir, rep)
+	got, _ := findings(dir, rep, unscoped)
 	var sharing []finding.Finding
 	for _, f := range got {
 		if f.Path == "app.py" && f.Site == site("generic-api-key", "") {
@@ -213,9 +216,9 @@ func TestASiteSurvivesAnEditAboveIt(t *testing.T) {
 	// The same tree with two lines inserted above every match, scanned by the
 	// same gitleaks: every claim moves and none is re-identified.
 	dir, rep := captured(t, "gitleaks")
-	before, _ := findings(dir, rep)
+	before, _ := findings(dir, rep, unscoped)
 	shiftedDir, shiftedRep := captured(t, "gitleaks-shifted")
-	after, _ := findings(shiftedDir, shiftedRep)
+	after, _ := findings(shiftedDir, shiftedRep, unscoped)
 
 	if len(before) != len(after) {
 		t.Fatalf("got %d claims before the edit and %d after", len(before), len(after))
@@ -236,9 +239,9 @@ func TestSourceOrderIsIndependentOfTheReportsOrder(t *testing.T) {
 	// runs. Ordinals are counted in the order given, so an unsorted parser hands
 	// two claims sharing a site each other's identity from one run to the next.
 	dir, rep := captured(t, "gitleaks")
-	forwards, _ := findings(dir, rep)
+	forwards, _ := findings(dir, rep, unscoped)
 	slices.Reverse(rep)
-	backwards, _ := findings(dir, rep)
+	backwards, _ := findings(dir, rep, unscoped)
 
 	for i := range forwards {
 		if forwards[i].Line != backwards[i].Line || forwards[i].Path != backwards[i].Path {
@@ -278,7 +281,7 @@ func TestALeakThatNamesNoLineIsReportedRatherThanDropped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, unplaced := findings(t.TempDir(), report{tc.leak})
+			got, unplaced := findings(t.TempDir(), report{tc.leak}, unscoped)
 			if len(got) != 0 {
 				t.Errorf("got %d claims, want none — neither a thread nor an identity can be made from this", len(got))
 			}
@@ -296,7 +299,7 @@ func TestAClaimOnTheFirstLineIsKept(t *testing.T) {
 	// Line 1 is a real line; a boundary excluding it would drop every claim on
 	// the first line of every file.
 	dir, _ := captured(t, "gitleaks")
-	got, unplaced := findings(dir, report{{RuleID: "r", File: "config.yml", StartLine: 1, StartColumn: 2}})
+	got, unplaced := findings(dir, report{{RuleID: "r", File: "config.yml", StartLine: 1, StartColumn: 2}}, unscoped)
 	if len(got) != 1 || len(unplaced) != 0 {
 		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
 	}
@@ -306,12 +309,12 @@ func TestEarliestColumnPerLineKeepsTheFirstLine(t *testing.T) {
 	// A boundary excluding line 1 would drop the earliest-column entry for
 	// every match on a file's first line, leaving its site cut at column 0
 	// (the map's zero value) rather than the column gitleaks reported.
-	cols := earliestColumnPerLine(report{{File: "a.py", StartLine: 1, StartColumn: 10}})
+	cols := earliestColumnPerLine(newScanRoot(t.TempDir()), report{{File: "a.py", StartLine: 1, StartColumn: 10}})
 	if got, ok := cols[lineKey{"a.py", 1}]; !ok || got != 10 {
 		t.Errorf("cols[a.py:1] = %d, %v, want 10, true", got, ok)
 	}
 	for _, l := range []int{0, -1} {
-		cols := earliestColumnPerLine(report{{File: "a.py", StartLine: l, StartColumn: 10}})
+		cols := earliestColumnPerLine(newScanRoot(t.TempDir()), report{{File: "a.py", StartLine: l, StartColumn: 10}})
 		if _, ok := cols[lineKey{"a.py", l}]; ok {
 			t.Errorf("a leak naming line %d entered the map, which has no line to be a key for", l)
 		}
@@ -319,16 +322,73 @@ func TestEarliestColumnPerLineKeepsTheFirstLine(t *testing.T) {
 }
 
 func TestAPathIsNamedFromTheScanRoot(t *testing.T) {
-	// gitleaks reports `./config.yml` for some inputs and `config.yml` for
-	// others. One file named two ways is two claims, and only one of them can be
-	// anchored.
+	// gitleaks names a file the way its target named it: `./config.yml` under
+	// some inputs, `config.yml` under others, and an absolute path when the
+	// walk was given one. One file named several ways is several claims, only
+	// one of which can be anchored — and only the root-relative form is the
+	// shape git's own answer is compared against.
 	dir, _ := captured(t, "gitleaks")
-	got, _ := findings(dir, report{{RuleID: "r", File: "./config.yml", StartLine: 3, StartColumn: 2}})
-	if len(got) != 1 {
-		t.Fatalf("got %d claims, want 1", len(got))
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", dir, err)
+	}
+	cases := []struct {
+		name string
+		file string
+	}{
+		{"relative", "config.yml"},
+		{"relative with a leading dot", "./config.yml"},
+		// darwin's temporary directories live under a symlinked /var, so the
+		// root lydite was given and the path a walk of it reports are the same
+		// file under two names.
+		{"absolute as the root was given", filepath.Join(dir, "config.yml")},
+		{"absolute with the root's symlinks resolved", filepath.Join(resolved, "config.yml")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, unplaced := findings(dir, report{{RuleID: "r", File: tc.file, StartLine: 3, StartColumn: 2}}, unscoped)
+			if len(got) != 1 || len(unplaced) != 0 {
+				t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+			}
+			if got[0].Path != "config.yml" {
+				t.Errorf("path = %q, want it named from the scan root", got[0].Path)
+			}
+		})
+	}
+}
+
+func TestARootThatWillNotResolveStillPlacesTheRelativePaths(t *testing.T) {
+	// The root is a path lydite was handed and a directory the run does not
+	// own: it can be replaced or removed under the scan. A root whose symlinks
+	// cannot be resolved still names the shape every relative path in the
+	// report is already in, and only a site read from the tree is lost.
+	gone := filepath.Join(t.TempDir(), "removed-under-the-run")
+	got, unplaced := findings(gone, report{{RuleID: "r", File: "./config.yml", StartLine: 3, StartColumn: 2}}, unscoped)
+	if len(got) != 1 || len(unplaced) != 0 {
+		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
 	}
 	if got[0].Path != "config.yml" {
 		t.Errorf("path = %q, want it named from the scan root", got[0].Path)
+	}
+}
+
+func TestAPathOutsideTheScanRootIsReportedRatherThanPlaced(t *testing.T) {
+	// A path lydite cannot reduce to the scan root can be compared against
+	// neither git's answer nor the tree a site is read from. Naming it anyway
+	// would file a claim under a path nothing anchors; dropping it in silence
+	// would lose a credential somebody committed.
+	dir, _ := captured(t, "gitleaks")
+	for _, file := range []string{"../outside.yml", filepath.Join(filepath.Dir(dir), "sibling", "config.yml"), string(filepath.Separator)} {
+		got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: file, StartLine: 3, StartColumn: 2}}, unscoped)
+		if len(got) != 0 {
+			t.Errorf("%s: got %d claims, want none", file, len(got))
+		}
+		if len(unplaced) != 1 {
+			t.Fatalf("%s: unplaced = %q, want the leak named", file, unplaced)
+		}
+		if !strings.Contains(unplaced[0], "generic-api-key") {
+			t.Errorf("%s: unplaced = %q, want the rule named", file, unplaced[0])
+		}
 	}
 }
 
@@ -345,7 +405,7 @@ func TestASpanIsKeptOnlyWhenItIsOne(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _ := findings(dir, report{{RuleID: "r", File: "config.yml", StartLine: tc.start, EndLine: tc.end, StartColumn: 2}})
+			got, _ := findings(dir, report{{RuleID: "r", File: "config.yml", StartLine: tc.start, EndLine: tc.end, StartColumn: 2}}, unscoped)
 			if len(got) != 1 {
 				t.Fatalf("got %d claims, want 1", len(got))
 			}
@@ -471,7 +531,7 @@ func TestASiteDropsAnEarlierAssignmentEvenWhenGitleaksDidNotFlagIt(t *testing.T)
 			// The match starts at tc.match: one past its first byte, per
 			// gitleaks' own StartColumn convention.
 			col := strings.Index(tc.line, tc.match) + 2
-			got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: "env.sh", StartLine: 1, StartColumn: col}})
+			got, unplaced := findings(dir, report{{RuleID: "generic-api-key", File: "env.sh", StartLine: 1, StartColumn: col}}, unscoped)
 			if len(unplaced) != 0 || len(got) != 1 {
 				t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
 			}
@@ -551,7 +611,7 @@ func TestResultFallsBackToTheExitStatus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := result(tc.in, dir, tc.path)
+			got := result(tc.in, dir, tc.path, unscoped, nil)
 			if got.Ok() != tc.wantOk {
 				t.Errorf("Ok() = %v, want %v — the exit status decides the row", got.Ok(), tc.wantOk)
 			}
@@ -573,7 +633,7 @@ func TestResultReadsTheReportBesideTheExitStatus(t *testing.T) {
 	}
 	write(t, dir, "report.json", string(data))
 
-	got := result(executil.Result{Name: Gate, Err: errors.New("exit status 1")}, dir, filepath.Join(dir, "report.json"))
+	got := result(executil.Result{Name: Gate, Err: errors.New("exit status 1")}, dir, filepath.Join(dir, "report.json"), unscoped, nil)
 	if len(got.Findings) != 5 {
 		t.Errorf("Findings = %d, want the capture's 5", len(got.Findings))
 	}
@@ -591,7 +651,7 @@ func TestACleanRunSaysNothingOfItsOwn(t *testing.T) {
 	// would fail every scan of a repository with no secrets in it.
 	dir := t.TempDir()
 	write(t, dir, "report.json", `[]`)
-	got := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "report.json"))
+	got := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "report.json"), unscoped, nil)
 	if !got.Ok() {
 		t.Errorf("Ok() = false on a clean run: %v", got.Err)
 	}
@@ -608,7 +668,7 @@ func TestResultSaysWhatItCouldNotLocate(t *testing.T) {
 	write(t, dir, "report.json", `[{"RuleID":"generic-api-key","StartLine":3}]`)
 	path := filepath.Join(dir, "report.json")
 
-	clean := result(executil.Result{Name: Gate}, dir, path)
+	clean := result(executil.Result{Name: Gate}, dir, path, unscoped, nil)
 	if clean.Ok() {
 		t.Error("a leak reported beside a clean exit read as a pass")
 	}
@@ -617,13 +677,156 @@ func TestResultSaysWhatItCouldNotLocate(t *testing.T) {
 	}
 
 	leaked := errors.New("exit status 1")
-	failing := result(executil.Result{Name: Gate, Err: leaked}, dir, path)
+	failing := result(executil.Result{Name: Gate, Err: leaked}, dir, path, unscoped, nil)
 	if !errors.Is(failing.Err, leaked) {
 		t.Errorf("Err = %v, want gitleaks' own failure kept", failing.Err)
 	}
 	if !strings.Contains(failing.Detail, "generic-api-key") {
 		t.Errorf("Detail = %q, want the unplaced leak said whatever the status", failing.Detail)
 	}
+}
+
+func TestOnlyAFileGitWouldCarryIsClaimed(t *testing.T) {
+	// The capture is the pinned gitleaks over a tree with a warm build
+	// directory in it: one leak in a tracked file, one in an untracked file
+	// .gitignore does not cover, and one in the compiled output git will not
+	// carry. The third is not a file this gate has a claim over.
+	dir, rep := captured(t, "gitleaks-ignored")
+	got, unplaced := findings(dir, rep, carriedBy(t, dir))
+	if len(unplaced) != 0 {
+		t.Errorf("unplaced = %q, want none — every leak in the capture names a file and a line", unplaced)
+	}
+	want := []string{"app.py", "draft.py"}
+	var paths []string
+	for _, f := range got {
+		paths = append(paths, f.Path)
+	}
+	if !slices.Equal(paths, want) {
+		t.Errorf("claims = %q, want %q — the tracked file and the untracked one .gitignore does not cover", paths, want)
+	}
+}
+
+func TestAReportOfNothingButIgnoredOutputIsAPass(t *testing.T) {
+	// gitleaks exits 1 for a leak anywhere it walked, so a repository with a
+	// warm target/ fails a gate whose every claim was filtered away. The row
+	// has nothing left to fail on.
+	dir, rep := captured(t, "gitleaks-ignored")
+	var ignoredOnly report
+	for _, l := range rep {
+		if strings.HasPrefix(l.File, "target/") {
+			ignoredOnly = append(ignoredOnly, l)
+		}
+	}
+	if len(ignoredOnly) == 0 {
+		t.Fatal("the capture names no leak in ignored output, so this test proves nothing")
+	}
+	data, err := json.Marshal(ignoredOnly)
+	if err != nil {
+		t.Fatalf("marshalling the capture: %v", err)
+	}
+	write(t, dir, "report.json", string(data))
+
+	got := result(executil.Result{Name: Gate, Err: errors.New("exit status 1")}, dir, filepath.Join(dir, "report.json"), carriedBy(t, dir), nil)
+	if !got.Ok() {
+		t.Errorf("Ok() = false: %v", got.Err)
+	}
+	if len(got.Findings) != 0 {
+		t.Errorf("Findings = %d, want none", len(got.Findings))
+	}
+	if got.Detail != "" {
+		t.Errorf("Detail = %q, want none", got.Detail)
+	}
+}
+
+func TestAScopeGitCouldNotAnswerForIsNotACleanScan(t *testing.T) {
+	// A tree git will not answer for is a gate that could not be scoped, and a
+	// row that passed there reads exactly like one scoped to what git carries
+	// and clean. The claims are kept — losing them is the one cost worse than
+	// a red row — and the row says which of the two it is.
+	dir, rep := captured(t, "gitleaks-ignored")
+	data, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshalling the capture: %v", err)
+	}
+	write(t, dir, "report.json", string(data))
+	path := filepath.Join(dir, "report.json")
+
+	clean := result(executil.Result{Name: Gate}, dir, path, nil, gitdiff.ErrNoRepository)
+	if clean.Ok() {
+		t.Error("a scope git could not answer for read as a pass")
+	}
+	if !errors.Is(clean.Err, gitdiff.ErrNoRepository) {
+		t.Errorf("Err = %v, want git's own reason kept", clean.Err)
+	}
+	if !strings.Contains(clean.Detail, gitdiff.ErrNoRepository.Error()) {
+		t.Errorf("Detail = %q, want the reason git could not be asked", clean.Detail)
+	}
+	if len(clean.Findings) != len(rep) {
+		t.Errorf("Findings = %d, want the capture's %d — an unscoped run reports every leak", len(clean.Findings), len(rep))
+	}
+
+	leaked := errors.New("exit status 1")
+	failing := result(executil.Result{Name: Gate, Err: leaked}, dir, path, nil, gitdiff.ErrNoRepository)
+	if !errors.Is(failing.Err, leaked) {
+		t.Errorf("Err = %v, want gitleaks' own failure kept", failing.Err)
+	}
+
+	// A report nothing could read leaves the scope unsaid nowhere either.
+	missing := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "no-report.json"), nil, gitdiff.ErrNoRepository)
+	if missing.Ok() || !strings.Contains(missing.Detail, gitdiff.ErrNoRepository.Error()) {
+		t.Errorf("Ok() = %v, Detail = %q, want a failing row naming why the scope is unknown", missing.Ok(), missing.Detail)
+	}
+}
+
+func TestTrackedNamesPathsTheWayAClaimDoes(t *testing.T) {
+	// gitdiff.Tracked answers relative to the root and slash-separated, which
+	// is the shape a finding's Path carries. A mismatch there filters every
+	// claim away and reports a clean scan of a leaking tree.
+	dir, _ := captured(t, "gitleaks-ignored")
+	initRepo(t, dir, ".gitignore", "app.py")
+	keep, err := tracked(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("tracked: %v", err)
+	}
+	for _, p := range []string{"app.py", "draft.py"} {
+		if !keep(p) {
+			t.Errorf("%s is not carried, and git both tracks it or leaves it unignored", p)
+		}
+	}
+	if keep("target/debug/deps/probe.rmeta") {
+		t.Error("a path .gitignore covers is carried")
+	}
+
+	if _, err := tracked(t.Context(), t.TempDir()); !errors.Is(err, gitdiff.ErrNoRepository) {
+		t.Errorf("err = %v, want ErrNoRepository from a tree git knows nothing about", err)
+	}
+}
+
+// carriedBy is what git would carry out of the materialised probe tree, with
+// the tree made a repository first: the .gitignore and one source file added,
+// and the draft left untracked so the "--others --exclude-standard" half of
+// the answer is exercised rather than assumed.
+func carriedBy(t *testing.T, dir string) carried {
+	t.Helper()
+	initRepo(t, dir, ".gitignore", "app.py")
+	keep, err := tracked(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("tracked: %v", err)
+	}
+	return keep
+}
+
+func initRepo(t *testing.T, dir string, add ...string) {
+	t.Helper()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "--quiet")
+	run(append([]string{"add", "--"}, add...)...)
 }
 
 // secretsIn is every credential-shaped string in a probe file, so a test can
