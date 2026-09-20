@@ -772,7 +772,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 		withTestCounts(&failed, dir, inv)
 		return failure(label, log, strings.Join(append([]string{inv.Name}, inv.Args...), " ")+" in "+c.Dir, "failed", res.Output), failed
 	}
-	passed := measure(ctx, root, c, inv, tc, instrument)
+	passed := measure(ctx, root, c, inv, cfg, tc, instrument)
 	withTestCounts(&passed, dir, inv)
 	return ui.Row{Status: ui.StatusPass, Label: label, Value: "passed", Log: log.Rel}, passed
 }

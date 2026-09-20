@@ -1060,15 +1060,16 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 // version can never come from a different place than the invocation does. dir
 // is the component's directory, root is the scan root — the same one Install
 // resolves a workspace root against, so a hoisted package is found where the
-// install actually wrote it — and lang is the resolved language toolchain —
-// the Go toolchain that wrote a profile, or the Rust toolchain whose LLVM
-// wrote an lcov.
+// install actually wrote it, unless override names typescript.install, which
+// Install runs in dir itself regardless of any lockfile above it — and lang
+// is the resolved language toolchain — the Go toolchain that wrote a profile,
+// or the Rust toolchain whose LLVM wrote an lcov.
 //
 // An empty answer means lydite could not identify the instrument, which is
 // possible only for JavaScript: it is the one language whose measuring tool
 // lydite deliberately does not pin, because installing one into the tree it is
 // about to gate would have lydite change what the repository resolves to.
-func (r Runner) Producer(dir, root, lang string) string {
+func (r Runner) Producer(dir, root, override, lang string) string {
 	switch r.Name {
 	case GoTest:
 		// The profile is the toolchain's own output; nothing else is
@@ -1080,11 +1081,11 @@ func (r Runner) Producer(dir, root, lang string) string {
 		// so the pair is the instrument, not either half.
 		return both(join("cargo-llvm-cov", cargoLLVMCov.Version), join("rust", lang))
 	case Vitest:
-		return jsProducer(dir, root, "vitest", "@vitest/coverage-v8", "@vitest/coverage-istanbul")
+		return jsProducer(dir, root, override, "vitest", "@vitest/coverage-v8", "@vitest/coverage-istanbul")
 	case Jest:
 		// Jest instruments through babel-plugin-istanbul, which it bundles,
 		// so the runner's own version is the whole of the answer.
-		return jsProducer(dir, root, "jest")
+		return jsProducer(dir, root, override, "jest")
 	default:
 		return ""
 	}
@@ -1100,15 +1101,18 @@ func (r Runner) Producer(dir, root, lang string) string {
 // workspace carries the one its config selects.
 //
 // Read from the same directory Install actually wrote to: dir's own
-// node_modules for a component with its own lockfile, or the workspace root
+// node_modules for a component with its own lockfile, the workspace root
 // WorkspaceRoot resolves for one nested in a workspace whose install hoists
-// its packages above the component. A component's own directory otherwise —
-// the typescript.install case Install itself runs in dir, which this mirrors
-// since nodedeps has no way to know where an arbitrary override wrote to.
-func jsProducer(dir, scanRoot, run string, providers ...string) string {
+// its packages above the component, or dir itself when override names
+// typescript.install — an override always runs there regardless of any
+// lockfile above it, so resolving a workspace root for it would read from a
+// tree the install never touched.
+func jsProducer(dir, scanRoot, override, run string, providers ...string) string {
 	root := dir
-	if r, ok := nodedeps.WorkspaceRoot(dir, scanRoot); ok {
-		root = r
+	if override == "" {
+		if r, ok := nodedeps.WorkspaceRoot(dir, scanRoot); ok {
+			root = r
+		}
 	}
 	version, ok := nodedeps.PackageVersion(root, run)
 	if !ok {

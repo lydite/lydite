@@ -35,7 +35,7 @@ func installs(t *testing.T, versions map[string]string) string {
 // this is the only way to know what measured it.
 func TestAJavaScriptProducerNamesTheRunnerAndTheProvider(t *testing.T) {
 	root := installs(t, map[string]string{"vitest": "4.1.11", "@vitest/coverage-v8": "4.1.11"})
-	got := registry[Vitest].Producer(root, root, "22.11.0")
+	got := registry[Vitest].Producer(root, root, "", "22.11.0")
 	if !strings.Contains(got, "vitest 4.1.11") || !strings.Contains(got, "@vitest/coverage-v8 4.1.11") {
 		t.Errorf("producer = %q, want the runner and the provider named", got)
 	}
@@ -45,7 +45,7 @@ func TestAJavaScriptProducerNamesTheRunnerAndTheProvider(t *testing.T) {
 // workspace carries whichever its own config selects.
 func TestAJavaScriptProducerFindsTheIstanbulProvider(t *testing.T) {
 	root := installs(t, map[string]string{"vitest": "4.1.11", "@vitest/coverage-istanbul": "4.1.11"})
-	if got := registry[Vitest].Producer(root, root, "22.11.0"); !strings.Contains(got, "@vitest/coverage-istanbul 4.1.11") {
+	if got := registry[Vitest].Producer(root, root, "", "22.11.0"); !strings.Contains(got, "@vitest/coverage-istanbul 4.1.11") {
 		t.Errorf("producer = %q, want the installed provider named", got)
 	}
 }
@@ -56,7 +56,7 @@ func TestAJavaScriptProducerFindsTheIstanbulProvider(t *testing.T) {
 // half that changed what a line means.
 func TestAJavaScriptProducerIsEmptyWithoutItsProvider(t *testing.T) {
 	root := installs(t, map[string]string{"vitest": "4.1.11"})
-	if got := registry[Vitest].Producer(root, root, "22.11.0"); got != "" {
+	if got := registry[Vitest].Producer(root, root, "", "22.11.0"); got != "" {
 		t.Errorf("producer = %q, want nothing when the provider cannot be identified", got)
 	}
 }
@@ -67,7 +67,7 @@ func TestAJavaScriptProducerIsEmptyWithoutItsProvider(t *testing.T) {
 // cannot name: the alternative never gates it again.
 func TestAWorkspaceWithNoInstallHasNoProducer(t *testing.T) {
 	root := t.TempDir()
-	if got := registry[Vitest].Producer(root, root, "22.11.0"); got != "" {
+	if got := registry[Vitest].Producer(root, root, "", "22.11.0"); got != "" {
 		t.Errorf("producer = %q, want nothing when there is no node_modules", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestAWorkspaceWithNoInstallHasNoProducer(t *testing.T) {
 // the instrument.
 func TestTheGoProducerIsTheToolchain(t *testing.T) {
 	root := t.TempDir()
-	if got := registry[GoTest].Producer(root, root, "1.26.6"); got != "go 1.26.6" {
+	if got := registry[GoTest].Producer(root, root, "", "1.26.6"); got != "go 1.26.6" {
 		t.Errorf("producer = %q, want the Go toolchain named", got)
 	}
 }
@@ -86,7 +86,7 @@ func TestTheGoProducerIsTheToolchain(t *testing.T) {
 // compare equal across a change to the other.
 func TestTheRustProducerNamesTheInstrumentationAndTheToolchain(t *testing.T) {
 	root := t.TempDir()
-	got := registry[CargoNextest].Producer(root, root, "1.91.0")
+	got := registry[CargoNextest].Producer(root, root, "", "1.91.0")
 	if !strings.Contains(got, "cargo-llvm-cov "+cargoLLVMCov.Version) || !strings.Contains(got, "rust 1.91.0") {
 		t.Errorf("producer = %q, want both halves named", got)
 	}
@@ -97,7 +97,7 @@ func TestTheRustProducerNamesTheInstrumentationAndTheToolchain(t *testing.T) {
 func TestAnUnknownToolchainLeavesNoProducer(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []Name{GoTest, CargoNextest} {
-		if got := registry[name].Producer(root, root, ""); got != "" {
+		if got := registry[name].Producer(root, root, "", ""); got != "" {
 			t.Errorf("%s producer = %q, want nothing when the toolchain is unknown", name, got)
 		}
 	}
@@ -107,11 +107,11 @@ func TestAnUnknownToolchainLeavesNoProducer(t *testing.T) {
 // the whole of the instrument and there is no provider to name beside it.
 func TestTheJestProducerIsTheRunnerAlone(t *testing.T) {
 	root := installs(t, map[string]string{"jest": "30.2.0"})
-	if got := registry[Jest].Producer(root, root, "22.11.0"); got != "jest 30.2.0" {
+	if got := registry[Jest].Producer(root, root, "", "22.11.0"); got != "jest 30.2.0" {
 		t.Errorf("producer = %q, want the runner alone", got)
 	}
 	empty := t.TempDir()
-	if got := registry[Jest].Producer(empty, empty, "22.11.0"); got != "" {
+	if got := registry[Jest].Producer(empty, empty, "", "22.11.0"); got != "" {
 		t.Errorf("producer = %q, want nothing when jest is not installed", got)
 	}
 }
@@ -122,7 +122,7 @@ func TestTheJestProducerIsTheRunnerAlone(t *testing.T) {
 // instrumented variant is.
 func TestBothRustRunnersNameTheSameProducer(t *testing.T) {
 	dir, lang := t.TempDir(), "1.91.0"
-	if a, b := registry[CargoNextest].Producer(dir, dir, lang), registry[CargoLLVMCovNextest].Producer(dir, dir, lang); a != b {
+	if a, b := registry[CargoNextest].Producer(dir, dir, "", lang), registry[CargoLLVMCovNextest].Producer(dir, dir, "", lang); a != b {
 		t.Errorf("cargo-nextest = %q, cargo-llvm-cov-nextest = %q, want one answer", a, b)
 	}
 }
@@ -138,9 +138,27 @@ func TestAProducerFollowsTheWorkspaceRootInstallResolved(t *testing.T) {
 	writePackage(t, scanRoot, "vitest", "4.1.11")
 	writePackage(t, scanRoot, "@vitest/coverage-v8", "4.1.11")
 
-	got := registry[Vitest].Producer(dir, scanRoot, "22.11.0")
+	got := registry[Vitest].Producer(dir, scanRoot, "", "22.11.0")
 	if !strings.Contains(got, "vitest 4.1.11") || !strings.Contains(got, "@vitest/coverage-v8 4.1.11") {
 		t.Errorf("producer = %q, want the runner and provider named from the hoisted root", got)
+	}
+}
+
+// An override runs in the component's own directory regardless of any
+// lockfile above it, so its producer has to be read from there too — a
+// workspace root above a component with no runner of its own must not be
+// mistaken for where an override installed.
+func TestAnOverrideProducerReadsTheComponentDirectoryNotTheWorkspaceRoot(t *testing.T) {
+	scanRoot := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, scanRoot, config.Dir)
+	touch(t, filepath.Join(scanRoot, "pnpm-lock.yaml"))
+	dir := mkdirAll(t, scanRoot, "packages", "ui")
+	writePackage(t, dir, "vitest", "4.1.11")
+	writePackage(t, dir, "@vitest/coverage-v8", "4.1.11")
+
+	got := registry[Vitest].Producer(dir, scanRoot, "npm install", "22.11.0")
+	if !strings.Contains(got, "vitest 4.1.11") || !strings.Contains(got, "@vitest/coverage-v8 4.1.11") {
+		t.Errorf("producer = %q, want the runner and provider named from the component's own directory", got)
 	}
 }
 

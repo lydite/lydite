@@ -212,7 +212,7 @@ func langOf(c component.Component) runner.Lang {
 // instead would drop it from the language and global figures silently, leaving
 // a gate that covered fewer components than the repository has reading as a
 // complete one.
-func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, tc *toolchain.Env, instrument bool) measurement {
+func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, cfg config.Config, tc *toolchain.Env, instrument bool) measurement {
 	switch {
 	case !instrument:
 		return unmeasuredComponent(c, "coverage is off for this run")
@@ -236,7 +236,7 @@ func measure(ctx context.Context, root string, c component.Component, inv runner
 		return m
 	}
 	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
-		Lines: rep.Lines, Hits: rep.Hits, Unused: rep.Unused, Producer: producerOf(root, c, tc)}
+		Lines: rep.Lines, Hits: rep.Hits, Unused: rep.Unused, Producer: producerOf(root, c, cfg, tc)}
 	m.CRAP, m.CRAPWhy = score(root, m)
 	return m
 }
@@ -304,13 +304,16 @@ func noComplexitySource(m measurement) string {
 // The component's own directory, or the workspace root above it when the
 // install hoisted there — a JavaScript workspace's runner and coverage
 // provider are its dependencies, and Producer reads them out of the same
-// tree Install actually wrote to.
-func producerOf(root string, c component.Component, tc *toolchain.Env) string {
+// tree Install actually wrote to. cfg.TypeScript.Install is passed through
+// for the same reason: an override runs in the component's own directory
+// regardless of any lockfile above it, and Producer has to look where the
+// install actually ran rather than where one would otherwise be inferred.
+func producerOf(root string, c component.Component, cfg config.Config, tc *toolchain.Env) string {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok {
 		return ""
 	}
-	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, tc.Version())
+	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version())
 }
 
 // coverageOptions is what the command decided about coverage before anything
