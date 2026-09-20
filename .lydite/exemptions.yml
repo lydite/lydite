@@ -1,0 +1,51 @@
+# What may merge without a human reading it.
+#
+# The model is an allowlist and the default is to refer: a change merges
+# unattended only when a single entry here covers every path it touched and
+# that entry's conditions hold. `git log .lydite/exemptions.yml` is the whole
+# record of what this repository has decided to stop reading, which is why an
+# entry carries a reason and why a pull request touching this file may touch
+# nothing else.
+exemptions:
+  - name: dependency-version-bump
+    reason: >-
+      A bump of packages the merge-base already depended on, in a manifest
+      lydite can read at both sides. Anything that brings a package into the
+      tree is disqualified before this entry is consulted, so what is left is
+      a version moving inside its own compatibility range with the licence and
+      SCA rows green for every component — a lockfile diff a reviewer confirms
+      by re-reading the number Dependabot already put in the title. The
+      seven-day cooldown in .github/dependabot.yml is the other half: by the
+      time the pull request exists the upstream release has been public long
+      enough for a yank or a compromised publisher to have surfaced.
+    # Every manifest .github/dependabot.yml watches whose ecosystem
+    # internal/depdelta can read. Three watched sets are deliberately absent,
+    # and each is a referral rather than a silent pass:
+    #
+    #   - the two pip manifests (internal/semgrep, proving-ground-pyyaml) —
+    #     depdelta has no pip reader, so a bump there is unmeasured and
+    #     disqualified whatever this list says;
+    #   - cargo-nextest-pin and cargo-llvm-cov-pin, whose Cargo.toml commits no
+    #     Cargo.lock beside it — a requirement edit there moves no manifest
+    #     depdelta reads, so nothing would check how far the version went;
+    #   - github-actions, which pins no dependency manifest at all.
+    paths:
+      - source/cli/go.mod
+      - source/cli/go.sum
+      - source/cli/internal/golang/go-pin/go.mod
+      - source/cli/internal/golang/go-pin/go.sum
+      - source/cli/internal/runner/gotestsum-pin/go.mod
+      - source/cli/internal/runner/gotestsum-pin/go.sum
+      - source/cli/internal/secrets/gitleaks-pin/go.mod
+      - source/cli/internal/secrets/gitleaks-pin/go.sum
+      - source/cli/internal/rust/cargo-audit-pin/Cargo.toml
+      - source/cli/internal/rust/cargo-audit-pin/Cargo.lock
+      - source/cli/internal/rust/cargo-deny-pin/Cargo.toml
+      - source/cli/internal/rust/cargo-deny-pin/Cargo.lock
+      - source/cli/internal/rust/cargo-semver-checks-pin/Cargo.toml
+      - source/cli/internal/rust/cargo-semver-checks-pin/Cargo.lock
+      - source/cli/internal/typescript/biome-pin/package.json
+      - source/cli/internal/typescript/biome-pin/package-lock.json
+      - source/cloud-services/**/package.json
+      - source/cloud-services/package-lock.json
+    versions: patch-and-minor
