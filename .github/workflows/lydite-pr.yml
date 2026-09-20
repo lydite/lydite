@@ -292,6 +292,10 @@ jobs:
         if: always()
         with:
           name: referral
+          # review wrote .lydite-reports under whichever tree --dir named
+          # above, and this job's own working directory holds two: head, the
+          # pull request's own checkout.
+          path: head
 
   scan:
     name: scan
