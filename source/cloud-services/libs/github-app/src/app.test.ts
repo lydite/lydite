@@ -52,15 +52,15 @@ describe("installationId", () => {
 
 describe("installationToken", () => {
   // Both narrowings are the point: the token is minted for one repository and
-  // one permission, so the worst a compromised relay request can do is write a
-  // comment.
-  it("asks for one repository and pull-request write and nothing else", async () => {
+  // two permissions, so the worst a compromised relay request can do is write
+  // a comment or a status.
+  it("asks for one repository and pull-request and status write and nothing else", async () => {
     let sent: Record<string, unknown> = {};
     await installationToken("jwt", 1, "lydite/proving-ground", async (_url, init) => {
       sent = JSON.parse(String(init?.body));
       return Response.json({ token: "ghs_x" });
     });
     expect(sent.repositories).toEqual(["proving-ground"]);
-    expect(sent.permissions).toEqual({ pull_requests: "write" });
+    expect(sent.permissions).toEqual({ pull_requests: "write", statuses: "write" });
   });
 });
