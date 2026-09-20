@@ -177,7 +177,17 @@ func Compare(ctx context.Context, req Request) Result {
 	}
 
 	env := isolatedEnv(req.Env.Check)
-	for _, tree := range trees(req) {
+	for at, tree := range trees(req) {
+		if !needsTree(compared, at) {
+			// A tree with nothing to read here needs no install and no build.
+			// The merge-base of a component this change introduces is exactly
+			// this shape: surfaces already tolerates it having no manifest at
+			// all, and a directory that does not exist would otherwise fail
+			// npm before that tolerance is ever reached, turning "every
+			// declaration is an addition" into "uncomputable" for every
+			// component a change adds.
+			continue
+		}
 		if reason := prepare(ctx, tree.dir, env, progress); reason != "" {
 			return Result{Reason: tree.what + ": " + reason, Skipped: skipped}
 		}
@@ -223,6 +233,20 @@ func partition(surfaces []surface) ([]surface, []string) {
 		compared = append(compared, s)
 	}
 	return compared, skipped
+}
+
+// needsTree reports whether the tree at index at names a declaration for at
+// least one compared package's subpath, which is the only reason its install
+// and its build have anything to contribute.
+func needsTree(compared []surface, at int) bool {
+	for _, s := range compared {
+		for _, subpath := range s.subpaths {
+			if s.entries[at][subpath].dts != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // tree is one side of the comparison, and what to call it when it is the side

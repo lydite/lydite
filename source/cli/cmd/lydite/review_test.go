@@ -1145,6 +1145,30 @@ func TestReviewNamesTheTypeScriptPackagesItSkipped(t *testing.T) {
 	}
 }
 
+// A component this change introduces has no merge-base tree at all to
+// install or build, and surfaces already tolerates a base with no readable
+// package.json: every declaration in the tree this change adds is an
+// addition. The comparison must not try to npm install a directory that does
+// not exist, which turns that tolerance into an uncomputable referral for
+// every component a change adds.
+func TestReviewPassesATypeScriptComponentThisChangeIntroduces(t *testing.T) {
+	npmStubs(t, ":")
+	base := webBase(webOptIn)
+	delete(base, "web/package.json")
+	delete(base, "web/surface.txt")
+
+	dir, baseSHA := reviewRepo(t, base,
+		map[string]string{"web/package.json": webPackageJSON, "web/surface.txt": webSurface})
+
+	out, err := runReview(t, dir, baseSHA)
+	if err != nil {
+		t.Fatalf("a component this change introduces must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
 // --publish with no --surfaces computes and publishes in the same process, so a
 // TypeScript component's comparison must not run there either: it installs and
 // builds both trees, which runs their own lifecycle scripts, and a credential
