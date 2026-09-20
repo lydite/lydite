@@ -299,8 +299,17 @@ func TestAnAmbiguousRootInstallsNothing(t *testing.T) {
 	}
 }
 
-// prepareVitest runs the TypeScript preparation step for a component at dir.
+// prepareVitest runs the TypeScript preparation step for a component at dir,
+// with no root of its own to hand down — the mutation-worker path, which
+// falls back to reading the bound off the tree.
 func prepareVitest(t *testing.T, dir string) error {
+	t.Helper()
+	return prepareVitestFrom(t, dir, "")
+}
+
+// prepareVitestFrom is prepareVitest with an explicit root, the ordinary run's
+// path: the bound is the caller's own, not read off the tree.
+func prepareVitestFrom(t *testing.T, dir, root string) error {
 	t.Helper()
 	r, ok := Lookup(Vitest)
 	if !ok {
@@ -310,7 +319,29 @@ func prepareVitest(t *testing.T, dir string) error {
 	if !ok {
 		t.Fatal("vitest builds no plain variant")
 	}
-	return r.Prepare(context.Background(), inv, dir, "", executil.Env{}, io.Discard)
+	return r.Prepare(context.Background(), inv, dir, root, "", executil.Env{}, io.Discard)
+}
+
+// A directory between a component and the scan root can hold a .lydite of its
+// own — a vendored subtree that is itself a lydite target — and an explicit
+// root is what keeps the walk from stopping there: only the caller with no
+// root of its own reads the bound off the tree, and a nested .lydite is
+// exactly the tree declarationRoot would stop at instead.
+func TestAnExplicitRootIsNotStoppedByANestedLyditeDirectory(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	touch(t, filepath.Join(root, "pnpm-lock.yaml"))
+	vendored := mkdirAll(t, root, "vendor", "other-project")
+	mkdirAll(t, vendored, config.Dir)
+	dir := mkdirAll(t, vendored, "packages", "ui")
+	cwd := stubManager(t, "pnpm")
+
+	if err := prepareVitestFrom(t, dir, root); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := readFile(t, cwd); got != root {
+		t.Errorf("pnpm ran in %q, want the explicit root %q — a nested .lydite must not stop the walk short", got, root)
+	}
 }
 
 // stubManager puts a program of the given name ahead of any real one on PATH,

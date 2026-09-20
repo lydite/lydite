@@ -109,7 +109,7 @@ func TestOnlyTheInvocationThatRunsTheWrapperInstallsIt(t *testing.T) {
 		if !ok {
 			t.Fatalf("go-test builds no %s variant", variant)
 		}
-		if err := plain.Prepare(context.Background(), inv, t.TempDir(), "", env, io.Discard); err != nil {
+		if err := plain.Prepare(context.Background(), inv, t.TempDir(), "", "", env, io.Discard); err != nil {
 			t.Errorf("the %s variant tried to install the wrapper it does not run: %v", variant, err)
 		}
 	}
@@ -121,7 +121,7 @@ func TestOnlyTheInvocationThatRunsTheWrapperInstallsIt(t *testing.T) {
 	if instrumented.Name != gotestsumName {
 		t.Fatalf("the instrumented variant runs %q, not the wrapper", instrumented.Name)
 	}
-	if err := plain.Prepare(context.Background(), instrumented, t.TempDir(), "", env, io.Discard); err == nil {
+	if err := plain.Prepare(context.Background(), instrumented, t.TempDir(), "", "", env, io.Discard); err == nil {
 		t.Error("the instrumented variant reported success without installing the wrapper it runs")
 	}
 }

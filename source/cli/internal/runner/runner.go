@@ -206,8 +206,11 @@ type Runner struct {
 	//
 	// It lives on the runner rather than in the command so the command layer
 	// carries no per-language branch — the thing this registry exists to
-	// remove. dir is the component's directory, override is
-	// typescript.install, and out is where a step's own output goes.
+	// remove. dir is the component's directory, root is the directory this
+	// dir was declared under — the scan root for an ordinary run, or empty
+	// when the caller has none to give and an upward walk should read the
+	// bound off the tree instead — override is typescript.install, and out
+	// is where a step's own output goes.
 	//
 	// It takes the invocation that is about to run, not the variant that
 	// named it, because what a runner needs is a property of the command
@@ -226,7 +229,7 @@ type Runner struct {
 	// through. Its plain variant is `go test`, which needs nothing — the
 	// toolchain fetches what a build needs on the way past — so this one is
 	// read off the invocation like the rest.
-	Prepare func(ctx context.Context, inv Invocation, dir, override string, env executil.Env, out io.Writer) error
+	Prepare func(ctx context.Context, inv Invocation, dir, root, override string, env executil.Env, out io.Writer) error
 }
 
 // registry is the whole set, keyed by declared name.
@@ -683,7 +686,7 @@ func NextestFilter(names []string) string {
 // outlives the run and, on a runner sharing ~/.cache/lydite, reaches other
 // repositories. A repository may say how its own code builds; it may not say
 // where lydite's tools come from.
-func installCargoTools(ctx context.Context, inv Invocation, _, _ string, env executil.Env, out io.Writer) error {
+func installCargoTools(ctx context.Context, inv Invocation, _, _, _ string, env executil.Env, out io.Writer) error {
 	if err := cargoNextest.Install(ctx, env.Install, out); err != nil {
 		return err
 	}
@@ -751,7 +754,7 @@ func stageNextestToolConfig(inv Invocation) error {
 // nothing the scanned repository declared — `go install` reads GOPROXY and
 // GOSUMDB, and the cache key names the version rather than where it came from,
 // so one substituted build outlives the run.
-func installGoTestsum(ctx context.Context, inv Invocation, _, _ string, env executil.Env, _ io.Writer) error {
+func installGoTestsum(ctx context.Context, inv Invocation, _, _, _ string, env executil.Env, _ io.Writer) error {
 	if inv.Name != gotestsumName {
 		return nil
 	}
@@ -803,20 +806,32 @@ func cargoBinDirs() []string {
 //
 // This is the opposite of installCargoTools below, and the difference is whose
 // software is being fetched.
-func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, env executil.Env, out io.Writer) error {
-	return nodedeps.Install(ctx, dir, declarationRoot(dir), override, env.Check, out)
+//
+// root is the caller's own answer to "what tree is dir under" — the scan root
+// for an ordinary run — and bounds the walk directly. Empty only when the
+// caller has no such answer to give, which is declarationRoot's case to cover.
+func installNodeDeps(ctx context.Context, _ Invocation, dir, root, override string, env executil.Env, out io.Writer) error {
+	if root == "" {
+		root = declarationRoot(dir)
+	}
+	return nodedeps.Install(ctx, dir, root, override, env.Check, out)
 }
 
-// declarationRoot is the directory the walk for a workspace root may not climb
-// above: the nearest ancestor of dir holding a .lydite directory, which is the
-// root whose declaration put a component at dir in the first place.
+// declarationRoot is the fallback bound for a caller with no scan root of its
+// own to hand down: the nearest ancestor of dir holding a .lydite directory.
 //
-// It is read off the tree rather than handed down, because the tree is the
-// only thing that knows which root this dir belongs to. A mutation worker runs
-// a component out of a copy of the scan root, so the root bounding its install
-// is the copy and not the repository it was copied from — and a caller passing
-// the repository would bound the walk by a directory the worker's dir is not
-// under.
+// A mutation worker runs a component out of a copy of the scan root, and the
+// copy is all that closure has — the outer run's own root would bound the
+// walk by a directory the worker's dir is not under, either stopping the walk
+// short inside the copy or letting it climb into the repository the copy came
+// from. The copy carries its own .lydite because it is a copy of everything
+// git tracks, so reading the bound off the tree the worker's dir actually
+// sits in resolves the copy's own root correctly — and only that closure asks
+// for this fallback; every other caller has the real scan root to hand down
+// directly, since a directory between a component and the true scan root can
+// hold a .lydite of its own — a vendored subtree that is itself a lydite
+// target — and stopping there would be exactly the silent under-install this
+// package exists to close.
 //
 // A dir under no declaration at all is its own bound, which is the install a
 // lockfile in the component directory alone resolves: nothing above a

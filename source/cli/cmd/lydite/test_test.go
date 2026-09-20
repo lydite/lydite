@@ -465,6 +465,16 @@ func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
 	}, config.Default()); ok {
 		t.Error("a Go component installs no node dependencies, so no lockfile is missing from it")
 	}
+	// A typescript.install override needs no root resolved for it — it
+	// replaces detection entirely — so a component with no lockfile anywhere
+	// still takes no row when one is configured.
+	cfg := config.Default()
+	cfg.TypeScript.Install = "true"
+	if _, ok := installNote(t.TempDir(), component.Component{
+		Name: "web", Dir: "web", Runner: runner.Vitest,
+	}, cfg); ok {
+		t.Error("typescript.install replaces detection, so a component with no lockfile still needs no row")
+	}
 }
 
 // nodeComponent is a JavaScript component whose suite is a command of its own,
@@ -499,7 +509,7 @@ func TestAGoComponentPreparesOnlyWhatItsInvocationRuns(t *testing.T) {
 	// `go` is on PATH or the component could not have been built at all, so
 	// the plain variant must prepare nothing — an install here is one mutation
 	// would pay for before every mutant.
-	if err := r.Prepare(context.Background(), plain, t.TempDir(), "", executil.Env{}, io.Discard); err != nil {
+	if err := r.Prepare(context.Background(), plain, t.TempDir(), "", "", executil.Env{}, io.Discard); err != nil {
 		t.Errorf("the plain variant ran a preparation step: %v", err)
 	}
 }
@@ -1661,7 +1671,7 @@ func flakyProbeRepo(t *testing.T) string {
 	if !ok {
 		t.Fatal("no go-test runner")
 	}
-	if err := r.Prepare(context.Background(), inv, filepath.Join(root, "probe"), "", executil.Env{}, io.Discard); err != nil {
+	if err := r.Prepare(context.Background(), inv, filepath.Join(root, "probe"), "", "", executil.Env{}, io.Discard); err != nil {
 		t.Skipf("the pinned test wrapper is not installed and could not be fetched: %v", err)
 	}
 	return root

@@ -720,7 +720,7 @@ func runComponent(ctx context.Context, root string, p componentPlan, cfg config.
 			return failure(label, log, err.Error(), "not runnable", ""), m
 		}
 	}
-	if prepared, ok := prepare(ctx, inv, dir, label, c, cfg, tc, log); !ok {
+	if prepared, ok := prepare(ctx, inv, dir, root, label, c, cfg, tc, log); !ok {
 		return prepared, m
 	}
 
@@ -1187,7 +1187,11 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 // tests rather than the absent dependencies, and a Rust one without its pinned
 // runner fails with `no such command` — the same misattribution a suite run
 // without its database produces, and the same reason to stop first.
-func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c component.Component, cfg config.Config, tc *toolchain.Env, log *componentLog) (ui.Row, bool) {
+//
+// root is the tree dir was declared under — the scan root for every caller
+// but one: the mutation worker's closure passes "" instead, because its dir
+// sits inside a copy of the scan root and not the scan root itself.
+func prepare(ctx context.Context, inv runner.Invocation, dir, root, label string, c component.Component, cfg config.Config, tc *toolchain.Env, log *componentLog) (ui.Row, bool) {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok || r.Prepare == nil {
 		return ui.Row{}, true
@@ -1196,7 +1200,7 @@ func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c co
 	// installed here: the repository's dependencies with what the repository
 	// declared, and lydite's pinned runners with lydite's toolchain alone.
 	env := executil.Env{Check: childEnv(tc, c, inv), Install: tc.Environ()}
-	if err := r.Prepare(ctx, inv, dir, cfg.TypeScript.Install, env, log.out); err != nil {
+	if err := r.Prepare(ctx, inv, dir, root, cfg.TypeScript.Install, env, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
 			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
