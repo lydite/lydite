@@ -357,6 +357,112 @@ func TestAPathIsNamedFromTheScanRoot(t *testing.T) {
 	}
 }
 
+func TestARelativeScanRootPlacesAnAbsolutePath(t *testing.T) {
+	// The root is a path lydite was handed, and a caller may hand a relative
+	// one. gitleaks names a file the way its target named it, and an absolute
+	// path relates to no relative root — so a root left as it was given places
+	// nothing the walk reported absolutely, and every claim is a leak lydite
+	// says it could not locate.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
+		t.Fatalf("making the subdirectory: %v", err)
+	}
+	write(t, filepath.Join(dir, "sub"), "app.py", "token = \"abcdef1234567890\"\n")
+	t.Chdir(dir)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", dir, err)
+	}
+	file := filepath.Join(resolved, "sub", "app.py")
+
+	cases := []struct {
+		name string
+		root string
+		want string
+	}{
+		{"the working directory itself", ".", "sub/app.py"},
+		{"a relative subdirectory", "sub", "app.py"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, unplaced := findings(tc.root, report{{RuleID: "r", File: file, StartLine: 1, StartColumn: 2}}, unscoped)
+			if len(got) != 1 || len(unplaced) != 0 {
+				t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+			}
+			if got[0].Path != tc.want {
+				t.Errorf("path = %q, want %q — named from the root made absolute", got[0].Path, tc.want)
+			}
+		})
+	}
+}
+
+func TestARootGivenThroughASymlinkPlacesAResolvedPath(t *testing.T) {
+	// The root lydite was given and the path a walk of it reports are the same
+	// file under two names whenever a link stands between them — darwin's own
+	// temporary directories are one — so the root is held resolved as well as
+	// literally, and a report naming the resolved form places against it.
+	link, resolved := symlinkedRoot(t)
+	got, unplaced := findings(link, report{{RuleID: "r", File: filepath.Join(resolved, "app.py"), StartLine: 1, StartColumn: 2}}, unscoped)
+	if len(got) != 1 || len(unplaced) != 0 {
+		t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+	}
+	if got[0].Path != "app.py" {
+		t.Errorf("path = %q, want it named from the root's resolved form", got[0].Path)
+	}
+}
+
+func TestAReportedPathIsResolvedAgainstTheRootToo(t *testing.T) {
+	// The link can stand on the other side as well: the report names the file
+	// through one and the root is the form that link resolves to. The path's own
+	// symlinks are a third candidate for exactly this, and it is the only one
+	// that places here.
+	link, resolved := symlinkedRoot(t)
+	cases := []struct {
+		name string
+		file string
+	}{
+		{"reported through a symlink to the root", filepath.Join(link, "app.py")},
+		{"reported in the form the root is already in", filepath.Join(resolved, "app.py")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, unplaced := findings(resolved, report{{RuleID: "r", File: tc.file, StartLine: 1, StartColumn: 2}}, unscoped)
+			if len(got) != 1 || len(unplaced) != 0 {
+				t.Fatalf("got %d claims and %d unplaced, want 1 and 0", len(got), len(unplaced))
+			}
+			if got[0].Path != "app.py" {
+				t.Errorf("path = %q, want it named from the scan root", got[0].Path)
+			}
+		})
+	}
+}
+
+// symlinkedRoot is a directory holding one file, named both through a symlink
+// to it and in its own fully resolved form.
+//
+// The two names are a different file to everything that compares paths as text,
+// which is what a claim reported under one and a root given as the other has to
+// survive. A platform that will not make the link is skipped rather than
+// asserted about.
+func symlinkedRoot(t *testing.T) (link, resolved string) {
+	t.Helper()
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatalf("making the target directory: %v", err)
+	}
+	write(t, target, "app.py", "token = \"abcdef1234567890\"\n")
+	link = filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this platform will not make a symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", link, err)
+	}
+	return link, resolved
+}
+
 func TestARootThatWillNotResolveStillPlacesTheRelativePaths(t *testing.T) {
 	// The root is a path lydite was handed and a directory the run does not
 	// own: it can be replaced or removed under the scan. A root whose symlinks
@@ -725,6 +831,26 @@ func TestResultSaysWhatItCouldNotLocate(t *testing.T) {
 	}
 	if !strings.Contains(failing.Detail, "generic-api-key") {
 		t.Errorf("Detail = %q, want the unplaced leak said whatever the status", failing.Detail)
+	}
+}
+
+func TestDetailSaysEachThingOnItsOwnLine(t *testing.T) {
+	// Detail is everything lydite itself has to say about the run and a failing
+	// row prints it whole, so two statements are two lines: a scope git could
+	// not be asked for, and a leak the report named that lydite could not place.
+	dir := t.TempDir()
+	write(t, dir, "report.json", `[{"RuleID":"generic-api-key","StartLine":3}]`)
+
+	got := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "report.json"), unscoped, errNoScope)
+	lines := strings.Split(got.Detail, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Detail = %q, want the two notes on a line each", got.Detail)
+	}
+	if !strings.Contains(lines[0], errNoScope.Error()) {
+		t.Errorf("first line = %q, want the reason nothing could be scoped", lines[0])
+	}
+	if !strings.Contains(lines[1], "generic-api-key") {
+		t.Errorf("second line = %q, want the leak lydite could not place", lines[1])
 	}
 }
 

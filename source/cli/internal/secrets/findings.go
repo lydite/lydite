@@ -676,8 +676,10 @@ func result(r executil.Result, dir, reportPath string, keep carried, scopeErr er
 		notes = append(notes, "gitleaks exited on something other than the leaks it reported, so the tree may not have been walked whole: "+r.Err.Error())
 	}
 	r.Err = verdict(r.Err, readErr, scopeErr, rep, unplaced, len(r.Findings))
-	if len(notes) > 0 {
-		r.Detail = strings.Join(notes, "\n")
-	}
+	// Assigned whole rather than only when there is something to say: the result
+	// arrives with no Detail of its own — executil.Run never writes one, and
+	// gitleaks prints its own findings — so joining nothing writes the empty
+	// Detail a run with nothing to say already has.
+	r.Detail = strings.Join(notes, "\n")
 	return r
 }
