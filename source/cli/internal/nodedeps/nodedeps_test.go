@@ -338,19 +338,26 @@ func TestASecondEnvironmentForOneRootIsAnError(t *testing.T) {
 	stubRecording(t, "pnpm", 0)
 
 	ui := mkdir(t, root, "packages", "ui")
-	if err := Install(context.Background(), ui, root, "", []string{"TOKEN=a"}, io.Discard); err != nil {
+	if err := Install(context.Background(), ui, root, "", []string{"TOKEN=a", "OTHER=x"}, io.Discard); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
+	// Order within the declaration must not matter: the same environment,
+	// spelled in a different order, is the same environment — a reordering
+	// a caller composing PATH, declared vars and toolchain vars in a
+	// different sequence could easily produce.
 	core := mkdir(t, root, "packages", "core")
-	if err := Install(context.Background(), core, root, "", []string{"TOKEN=b"}, io.Discard); err == nil {
+	if err := Install(context.Background(), core, root, "", []string{"OTHER=x", "TOKEN=a"}, io.Discard); err != nil {
+		t.Errorf("Install: %v, want the reordered environment accepted as the same one", err)
+	}
+
+	api := mkdir(t, root, "packages", "api")
+	if err := Install(context.Background(), api, root, "", []string{"TOKEN=b", "OTHER=x"}, io.Discard); err == nil {
 		t.Error("Install reported success for a root already installed under a different environment")
 	}
 
-	// Order within the declaration must not matter: the same environment,
-	// spelled in a different order, is the same environment.
 	web := mkdir(t, root, "packages", "web")
-	if err := Install(context.Background(), web, root, "", []string{"TOKEN=a", "OTHER=x"}, io.Discard); err == nil {
+	if err := Install(context.Background(), web, root, "", []string{"TOKEN=a", "OTHER=x", "THIRD=y"}, io.Discard); err == nil {
 		t.Error("Install reported success for an environment differing by an added variable")
 	}
 }
