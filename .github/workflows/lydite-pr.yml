@@ -216,10 +216,17 @@ jobs:
       # The same tags `.goreleaser.yml` builds a release with, matching
       # `setup`'s own build step — the binary this job runs is the base
       # commit's, not the pull request's.
+      # GOWORK=off, because base/source/cli sits under the pull request's own
+      # checkout (the step above, run first): without it, `go build` walks
+      # up looking for a go.work and would find one the pull request itself
+      # wrote at the workspace root, letting a `replace` directive there
+      # substitute a dependency — Cobra, say — with something that runs when
+      # this binary does, in the one job holding statuses: write.
       - name: build lydite from the base commit
         working-directory: base/source/cli
         env:
           LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+          GOWORK: "off"
         run: |
           mkdir -p "${RUNNER_TEMP}/lydite-bin"
           go build -tags "$LYDITE_BUILD_TAGS" -o "${RUNNER_TEMP}/lydite-bin/lydite" ./cmd/lydite
