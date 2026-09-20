@@ -183,16 +183,15 @@ jobs:
       # a referral while the matrix is still running (ADR 0015).
       statuses: write
     steps:
-      # First, deliberately: actions/checkout cleans its own target directory
-      # before checking out, and with no `path:` that target is the whole
-      # job workspace — so this step running *after* the base checkout below
-      # would delete it, and a same-repository pull request could then
-      # supply its own `base/.github/actions/...` at the now-empty path,
-      # right where the trusted local action below looks. Run first, there
-      # is nothing yet for it to delete; the base checkout after it adds a
-      # subdirectory of its own that nothing here cleans again.
+      # Both checkouts name a `path:`, so each cleans only its own
+      # subdirectory rather than the whole job workspace — the PR tree and
+      # the trusted base tree are separate siblings, neither able to
+      # overwrite or nest inside the other. `./base/.github/actions/...`
+      # below always resolves from the trusted checkout; nothing the pull
+      # request's own tree contains is on that lookup path.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: head
           fetch-depth: 0
           # This tree is read, never executed — exemptions, the diff, a
           # declared breaking change — but it still must not hold a
@@ -216,12 +215,12 @@ jobs:
       # The same tags `.goreleaser.yml` builds a release with, matching
       # `setup`'s own build step — the binary this job runs is the base
       # commit's, not the pull request's.
-      # GOWORK=off, because base/source/cli sits under the pull request's own
-      # checkout (the step above, run first): without it, `go build` walks
-      # up looking for a go.work and would find one the pull request itself
-      # wrote at the workspace root, letting a `replace` directive there
-      # substitute a dependency — Cobra, say — with something that runs when
-      # this binary does, in the one job holding statuses: write.
+      # GOWORK=off regardless: `go build` otherwise walks every ancestor of
+      # base/source/cli looking for a go.work, and the job workspace root is
+      # an ancestor of base/source/cli whether or not the pull request's own
+      # checkout lives beside it. A go.work at that root, from any source,
+      # could `replace` a dependency — Cobra, say — with something that runs
+      # when this binary does, in the one job holding statuses: write.
       - name: build lydite from the base commit
         working-directory: base/source/cli
         env:
@@ -253,15 +252,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           verdict=0
-          lydite review --dir . --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish || verdict=$?
+          lydite review --dir head --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish || verdict=$?
           if [ "$verdict" -gt 2 ]; then
             exit "$verdict"
           fi
 
       # From the base checkout above, the same reason the binary this job
       # runs is: a `./` action resolves from whatever this job's own
-      # workspace holds, and the default checkout above is the pull
-      # request's own head.
+      # workspace holds, and `base/` is the only checkout here the pull
+      # request's own tree does not share a directory with.
       - uses: ./base/.github/actions/lydite-reports
         if: always()
         with:
