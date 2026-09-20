@@ -207,11 +207,17 @@ func Compare(ctx context.Context, req Request) Result {
 			findings = append(findings, compare(reports[0], reports[1], pkg{rel: s.rel, name: s.name}, subpath, req)...)
 		}
 	}
-	outcome := Unbroken
+	return Result{Outcome: outcomeFor(findings), Findings: findings, Skipped: skipped}
+}
+
+// outcomeFor is Unbroken for no findings and Broken for at least one — the
+// only two outcomes a comparison that ran can reach, Unmeasurable being the
+// zero value a comparison that never ran leaves behind.
+func outcomeFor(findings []finding.Finding) Outcome {
 	if len(findings) > 0 {
-		outcome = Broken
+		return Broken
 	}
-	return Result{Outcome: outcome, Findings: findings, Skipped: skipped}
+	return Unbroken
 }
 
 // partition splits the packages that have a surface to compare from the ones
@@ -452,7 +458,7 @@ func writeConfig(pkgDir string, config []byte) (string, error) {
 		return "", err
 	}
 	path := file.Name()
-	if _, err := file.Write(config); err != nil {
+	if _, err := file.Write(config); err != nil { // [lydite:exclude_from_mutation][differs from the branch below only if Write or the second Close fails after CreateTemp has just opened this file, which needs a device error no test can provoke]
 		_ = file.Close()
 		return path, err
 	}

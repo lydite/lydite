@@ -240,6 +240,17 @@ func TestEntryPointResolutionOrder(t *testing.T) {
 			manifest: `{"name":"@probe/none","private":true}`,
 			want:     nil,
 		},
+		{
+			what: "several subpaths come back sorted, not in the map's own order",
+			manifest: `{"exports":{"./widgets":{"types":"./dist/widgets.d.ts"},"./aardvark":{"types":"./dist/aardvark.d.ts"},` +
+				`"./middle":{"types":"./dist/middle.d.ts"},"./zebra":{"types":"./dist/zebra.d.ts"}}}`,
+			want: []entry{
+				{subpath: "./aardvark", dts: "dist/aardvark.d.ts"},
+				{subpath: "./middle", dts: "dist/middle.d.ts"},
+				{subpath: "./widgets", dts: "dist/widgets.d.ts"},
+				{subpath: "./zebra", dts: "dist/zebra.d.ts"},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.what, func(t *testing.T) {
@@ -274,6 +285,19 @@ func TestWorkspaceGlobsInEitherShape(t *testing.T) {
 				t.Errorf("globs = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// workspaceMembers reads its matches out of a map, so two runs over the same
+// tree would return them in an arbitrary order without the sort: the union of
+// this fixture's four matches would come back shuffled from run to run rather
+// than reliably in the one order a diff can be read against.
+func TestWorkspaceMembersAreSorted(t *testing.T) {
+	dir := fixture.Tree(t, "testdata/workspace")
+	got := workspaceMembers(dir, []string{"packages/*"})
+	want := []string{"packages/core", "packages/legacy", "packages/stray", "packages/tool"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("workspaceMembers = %v, want %v", got, want)
 	}
 }
 

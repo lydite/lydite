@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
@@ -1056,6 +1057,56 @@ func npmStubs(t *testing.T, build string) {
 	write("api-extractor-stub", strings.ReplaceAll(apiExtractorStub, fencePlaceholder, "```"))
 	write("npm", fmt.Sprintf(npmStubScript, dir, build))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// Only Rust and TypeScript execute the tree under review to compare it. A Go
+// component's comparison loads the two trees with the Go tool and compiles
+// nothing the change wrote, so guardCredential must never refuse one.
+func TestUntrustedBuildNamesWhatOnlyRustAndTypeScriptExecute(t *testing.T) {
+	if got := untrustedBuild(component.Component{Runner: runner.GoTest}); got != "" {
+		t.Errorf("untrustedBuild(Go) = %q, want empty", got)
+	}
+	if got := untrustedBuild(component.Component{Runner: runner.CargoNextest}); got == "" {
+		t.Error("untrustedBuild(Rust) must name what it executes")
+	}
+	if got := untrustedBuild(component.Component{Runner: runner.Vitest}); got == "" {
+		t.Error("untrustedBuild(TypeScript) must name what it executes")
+	}
+}
+
+// A component with nothing skipped gets no note, so a row that compared every
+// package carries no stray detail line about one it never left out.
+func TestSkippedNoteNamesEveryPackageLeftOutAndNothingWhenNoneWas(t *testing.T) {
+	if got := skippedNote(nil); got != "" {
+		t.Errorf("skippedNote(nil) = %q, want empty", got)
+	}
+	want := "not compared, because it names no entry point: @probe/tools"
+	if got := skippedNote([]string{"@probe/tools"}); got != want {
+		t.Errorf("skippedNote = %q, want %q", got, want)
+	}
+}
+
+// detailOf renders exactly one line for a note, and no line at all — not an
+// empty one — for none: a row whose detail is a blank line says something
+// happened and then does not say what.
+func TestDetailOfIsNoLineForAnEmptyNote(t *testing.T) {
+	if got := detailOf(""); got != nil {
+		t.Errorf("detailOf(\"\") = %v, want nil", got)
+	}
+	if got := detailOf("x"); len(got) != 1 || got[0] != "x" {
+		t.Errorf("detailOf(\"x\") = %v, want [\"x\"]", got)
+	}
+}
+
+// withNote appends a note to a reason only when there is one, so a reason with
+// nothing to add is not left carrying a trailing separator.
+func TestWithNoteAppendsOnlyWhenThereIsOne(t *testing.T) {
+	if got := withNote("reason", ""); got != "reason" {
+		t.Errorf("withNote with no note = %q, want %q", got, "reason")
+	}
+	if got := withNote("reason", "note"); got != "reason; note" {
+		t.Errorf("withNote = %q, want %q", got, "reason; note")
+	}
 }
 
 // An undeclared break is a gate for a TypeScript component exactly as it is for

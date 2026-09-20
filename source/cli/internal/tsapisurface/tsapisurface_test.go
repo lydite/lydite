@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/finding"
 )
 
 // A Result nobody filled in says the surface was not compared, and never that
@@ -15,6 +17,18 @@ import (
 func TestTheZeroResultIsUnmeasurable(t *testing.T) {
 	if (Result{}).Outcome != Unmeasurable {
 		t.Errorf("the zero Result reports %v, want Unmeasurable", (Result{}).Outcome)
+	}
+}
+
+// A comparison that ran and found nothing is Unbroken, and one that found even
+// one finding is Broken — the boundary between them is exactly one finding,
+// not zero and not two.
+func TestOutcomeIsBrokenExactlyWhenThereIsAFinding(t *testing.T) {
+	if got := outcomeFor(nil); got != Unbroken {
+		t.Errorf("outcomeFor(nil) = %v, want Unbroken", got)
+	}
+	if got := outcomeFor([]finding.Finding{{}}); got != Broken {
+		t.Errorf("outcomeFor(one finding) = %v, want Broken", got)
 	}
 }
 

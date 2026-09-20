@@ -273,6 +273,10 @@ func TestDeclarationKeyReadsEachDeclarationForm(t *testing.T) {
 		{"export namespace outer {", "namespace outer"},
 		{"declare function bare(): void;", "function bare"},
 		{"retries?: number;", "retries"},
+		// A name-end character at the name's own first byte truncates it to
+		// nothing, which falls back to the whole line as the key — exactly as
+		// an unrecognised declaration does.
+		{"declare const : number;", "declare const : number;"},
 	}
 	for _, c := range cases {
 		if got := declarationKey(c.line, c.line); got != c.want {
