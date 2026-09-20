@@ -57,14 +57,14 @@ export async function installationId(
 }
 
 /**
- * Mints an installation token, narrowed to one repository and one permission.
+ * Mints an installation token, narrowed to one repository and two permissions.
  *
  * Both narrowings are deliberate. An installation token defaults to every
  * repository the installation covers and every permission the App holds; this
- * one can write pull-request comments on the single repository the verified
- * claims named. So the worst a request can do — including one from a job
- * running a pull request's own code — is write a wrong comment on its own pull
- * request.
+ * one can write pull-request comments and commit statuses on the single
+ * repository the verified claims named. So the worst a request can do —
+ * including one from a job running a pull request's own code — is write a
+ * wrong comment or a wrong status on its own pull request.
  *
  * The token is never stored and never logged. It lives for the one request
  * that mints it.
@@ -81,7 +81,7 @@ export async function installationToken(
     headers: { ...apiHeaders(`Bearer ${jwt}`), "content-type": "application/json" },
     body: JSON.stringify({
       repositories: repo ? [repo] : undefined,
-      permissions: { pull_requests: "write" },
+      permissions: { pull_requests: "write", statuses: "write" },
     }),
   });
   if (!response.ok) {

@@ -1,5 +1,7 @@
 import {
+  GITHUB_API,
   OPS_VERSION,
+  apiHeaders,
   appJwt,
   applyReview,
   installationId,
@@ -25,7 +27,29 @@ interface CommentRequest {
   body?: string;
 }
 
+/**
+ * The verdict a client asks to be recorded on a revision.
+ *
+ * The context is the client's, not lydite's to assume: a caller that names its
+ * own check is the one deciding which required check this satisfies. Nothing
+ * here is defaulted, because a status posted under a context or a state the
+ * caller did not ask for is a green tick nobody wrote.
+ */
+interface StatusRequest {
+  state?: string;
+  context?: string;
+  description?: string;
+  sha?: string;
+}
+
 const JWKS = "https://token.actions.githubusercontent.com/.well-known/jwks";
+
+const ROUTES = ["/comment", "/review", "/status"];
+
+// `lydite/lydite/internal/clearance.Context`. The one status a human
+// Clearance acts on, and the reason `/status` cannot yet accept it — see the
+// check below.
+const CLEARANCE_CONTEXT = "lydite/referral";
 
 /**
  * What the relay talks to.
@@ -55,15 +79,19 @@ const production: Deps = {
  * verified claims which repository and which pull request may be written to,
  * mints an installation token narrowed to exactly that, writes, and discards it.
  *
- * Two endpoints, and both write to one pull request and nothing else.
+ * Three endpoints, and each writes to one pull request and nothing else.
  * `POST /comment` upserts the standing comment; `POST /review` applies the
  * operations document `lydite threads` computed — the threads to open on the
- * change's own lines, the ones to answer, and the ones to take down. The delta
- * behind that document is the CLI's: this decides nothing about which thread
- * belongs to which finding, which is what keeps lydite's vocabulary in one
- * place rather than in a Worker one release behind it.
+ * change's own lines, the ones to answer, and the ones to take down; `POST
+ * /status` records a verdict on a revision of that pull request, so the check a
+ * repository requires is authored by the App rather than by whichever token the
+ * job happened to hold. The delta behind the review document is the CLI's, and
+ * so is the vocabulary of a status: this decides nothing about which thread
+ * belongs to which finding, nor what a state or a context means, which is what
+ * keeps lydite's vocabulary in one place rather than in a Worker one release
+ * behind it.
  *
- * That covers those two writes and nothing else. The coverage gate runs the
+ * That covers those three writes and nothing else. The coverage gate runs the
  * repository's own tests and its `setup`/`teardown` shell, and on a pull
  * request that code is the pull request's; with no writable token in the job,
  * the worst that code can do through the relay is provoke a wrong comment on
@@ -85,8 +113,8 @@ export default createRelay();
 
 async function handle(request: Request, env: Env, deps: Deps): Promise<Response> {
   const route = new URL(request.url).pathname;
-  if (request.method !== "POST" || (route !== "/comment" && route !== "/review")) {
-    return json(404, { error: "POST /comment or POST /review" });
+  if (request.method !== "POST" || !ROUTES.includes(route)) {
+    return json(404, { error: "POST /comment, POST /review or POST /status" });
   }
 
   const presented = bearer(request);
@@ -112,12 +140,18 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     return json(403, { error: "this run is not for a pull request, so there is nothing to write to" });
   }
 
-  const payload = (await request.json().catch(() => ({}))) as CommentRequest & ReviewOps;
+  const payload = (await request.json().catch(() => ({}))) as CommentRequest & ReviewOps & StatusRequest;
   if (payload.pull_request !== undefined && payload.pull_request !== fromRef) {
     return json(403, { error: "the pull request submitted is not the one this run is for" });
   }
   if (route === "/comment" && (!payload.body || !payload.marker)) {
     return json(400, { error: "a marker and a body are required" });
+  }
+  if (route === "/status") {
+    const error = statusPayloadError(payload);
+    if (error) {
+      return json(400, { error });
+    }
   }
   if (route === "/review" && payload.version !== OPS_VERSION) {
     // Refused whole rather than half-applied. A document from a newer lydite
@@ -153,6 +187,25 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
       return json(200, { repository: claims.repository, pull_request: fromRef, comment: outcome });
     }
 
+    if (route === "/status") {
+      // The pull request's head, not `claims.sha`: on a `pull_request` run
+      // that claim is the platform's synthetic merge commit, which exists on
+      // no branch and which no verdict is ever published against — the same
+      // reason `forge.PullRequestEvent` reads a head from the event payload
+      // rather than from `GITHUB_SHA`. Resolving it here, with the token
+      // rather than trusting the body, is what lets `sha` be checked at all.
+      const head = await pullRequestHeadSha(token, claims.repository, fromRef, deps.fetcher);
+      if (payload.sha !== head) {
+        return json(403, { error: "the sha submitted is not this pull request's head" });
+      }
+      await postStatus(token, claims.repository, payload, deps.fetcher);
+      return json(200, {
+        repository: claims.repository,
+        pull_request: fromRef,
+        status: "posted",
+      });
+    }
+
     // Every id the document names has to belong to this pull request, and
     // the whole request is refused if one does not. A comment id is a number
     // the caller supplies while `ref` is the one thing a run cannot choose,
@@ -174,7 +227,99 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     // The reason is deliberately not relayed. It is about lydite's own
     // credentials and GitHub's answers to them, neither of which is the
     // caller's to see.
-    return json(502, { error: route === "/comment" ? "the comment could not be posted" : "the review could not be applied" });
+    return json(502, { error: UNWRITTEN[route] });
+  }
+}
+
+// Each endpoint names its own write, so a reader of a job log is not told the
+// comment failed when the status did.
+const UNWRITTEN: Record<string, string> = {
+  "/comment": "the comment could not be posted",
+  "/review": "the review could not be applied",
+  "/status": "the status could not be posted",
+};
+
+/**
+ * What is wrong with a `/status` payload, or nothing.
+ *
+ * Everything checkable without a network call lives here — the fields the
+ * caller must supply, the namespace its `context` must stay inside, and the
+ * one context this relay does not yet accept at all. `sha` against the pull
+ * request's real head is not: that check needs the installation token, so it
+ * stays in `handle`, beside the write it gates.
+ */
+function statusPayloadError(payload: StatusRequest): string | undefined {
+  if (!payload.state || !payload.context || !payload.description || !payload.sha) {
+    return "a state, a context, a description and a sha are required";
+  }
+  if (!payload.context.startsWith("lydite/")) {
+    // A context is a check's name, and this is the App's identity to spend.
+    // Confined to lydite's own namespace, the worst a caller can do is author
+    // a wrong lydite check — never stand in for a check that belongs to
+    // another tool.
+    return "a status context must start with lydite/";
+  }
+  if (payload.context === CLEARANCE_CONTEXT) {
+    // The OIDC claim names a repository and a pull request, not a job — this
+    // relay cannot tell `referral-publish`, the one job isolated to hold
+    // `statuses: write`, from any other job in the same workflow that also
+    // holds `id-token: write` and runs the pull request's own code. Until a
+    // caller can be told apart from the code it is running, the one context a
+    // human Clearance acts on is refused here rather than trusted to whoever
+    // asks for it.
+    return `${CLEARANCE_CONTEXT} is not accepted through this relay yet`;
+  }
+  return undefined;
+}
+
+/**
+ * The pull request's current head, so a submitted `sha` can be checked
+ * against something GitHub itself says rather than the caller's own claim
+ * about it.
+ */
+async function pullRequestHeadSha(
+  token: string,
+  repository: string,
+  pull: number,
+  fetcher: typeof fetch,
+): Promise<string | undefined> {
+  const response = await fetcher(`${GITHUB_API}/repos/${repository}/pulls/${pull}`, {
+    headers: apiHeaders(`Bearer ${token}`),
+  });
+  if (!response.ok) {
+    throw new Error(`resolving the pull request's head answered ${response.status}`);
+  }
+  const pr = (await response.json()) as { head?: { sha?: string } };
+  return pr.head?.sha;
+}
+
+/**
+ * Records the verdict on the revision `handle` has already resolved and
+ * checked the caller's `sha` against, and under the `lydite/`-namespaced
+ * `context` it has already checked too — so by the time this runs, both the
+ * revision and the repository are ones the run is already for, and the check
+ * is one only lydite's own tooling could have named.
+ */
+async function postStatus(
+  token: string,
+  repository: string,
+  status: StatusRequest,
+  fetcher: typeof fetch,
+): Promise<void> {
+  const response = await fetcher(
+    `${GITHUB_API}/repos/${repository}/statuses/${encodeURIComponent(status.sha as string)}`,
+    {
+      method: "POST",
+      headers: { ...apiHeaders(`Bearer ${token}`), "content-type": "application/json" },
+      body: JSON.stringify({
+        state: status.state,
+        context: status.context,
+        description: status.description,
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`writing the status answered ${response.status}`);
   }
 }
 

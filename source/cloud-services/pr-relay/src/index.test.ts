@@ -26,6 +26,7 @@ function claims(overrides: Record<string, unknown> = {}) {
     exp: Math.floor(Date.now() / 1000) + 300,
     repository: "lydite/proving-ground",
     ref: "refs/pull/7/merge",
+    sha: "abc123",
     ...overrides,
   };
 }
@@ -154,7 +155,7 @@ describe("the relay's trust boundary", () => {
     expect((await post(token, {})).status).toBe(400);
   });
 
-  it("answers only the two endpoints it has", async () => {
+  it("answers only the endpoints it has", async () => {
     const relay = createRelay({ fetchJwks: keys.jwks, fetcher: githubStub() });
     const response = await relay.fetch(new Request("https://pr.lydite.org/"), env);
     expect(response.status).toBe(404);
@@ -294,5 +295,214 @@ describe("applying a review", () => {
     // of the job log is not told the comment failed when the review did.
     expect(body).toContain("review");
     expect(body).not.toContain("comment");
+  });
+});
+
+// Every status call the relay would make, answered locally. `written` collects
+// what reached the statuses endpoint, which is the only write this route makes.
+// `headSha` is what `GET /pulls/:n` answers with — the pull request's real
+// head, distinct in principle from the OIDC claim's own `sha`.
+function statusStub(
+  written: { url: string; init?: RequestInit }[] = [],
+  headSha = "abc123",
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    const target = String(url);
+    if (target.endsWith("/installation")) {
+      return Response.json({ id: 42 });
+    }
+    if (target.includes("/access_tokens")) {
+      return Response.json({ token: "ghs_test" });
+    }
+    if (target.endsWith("/pulls/7")) {
+      return Response.json({ head: { sha: headSha } });
+    }
+    if (target.includes("/statuses/")) {
+      written.push({ url: target, init });
+      return Response.json({ id: 1 });
+    }
+    throw new Error(`the relay called something unexpected: ${target}`);
+  }) as typeof fetch;
+}
+
+function postStatus(
+  token: string | undefined,
+  body: unknown,
+  fetcher: typeof fetch = statusStub(),
+): Promise<Response> {
+  const relay = createRelay({ fetchJwks: keys.jwks, fetcher });
+  return relay.fetch(
+    new Request("https://pr.lydite.org/status", {
+      method: "POST",
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+}
+
+const verdict = {
+  state: "pending",
+  context: "lydite/some-check",
+  description: "waiting on a reviewer",
+  sha: "abc123",
+};
+
+describe("recording a status", () => {
+  // The whole point of the endpoint: the status is authored by the App's own
+  // installation token, on the revision the client named.
+  it("posts the status with the app's token", async () => {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, verdict, statusStub(written));
+
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).toBe(
+      "https://api.github.com/repos/lydite/proving-ground/statuses/abc123",
+    );
+    expect(written[0]?.init?.method).toBe("POST");
+    expect((written[0]?.init?.headers as Record<string, string> | undefined)?.authorization).toBe(
+      "Bearer ghs_test",
+    );
+    expect(JSON.parse(String(written[0]?.init?.body))).toEqual({
+      state: "pending",
+      context: "lydite/some-check",
+      description: "waiting on a reviewer",
+    });
+  });
+
+  // The repository is the claim's, so a body naming another one changes
+  // nothing about where the status lands.
+  it("takes the repository from the claim, so the body cannot name another", async () => {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const token = await keys.sign(claims());
+    const response = await postStatus(
+      token,
+      { ...verdict, repository: "someone/else" },
+      statusStub(written),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      repository: "lydite/proving-ground",
+    });
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).not.toContain("someone/else");
+  });
+
+  // Nothing is defaulted. A state, a context or a description the caller did
+  // not send is a status saying something nobody wrote.
+  it("requires a state, a context, a description and a sha", async () => {
+    const token = await keys.sign(claims());
+    expect((await postStatus(token, {})).status).toBe(400);
+    for (const field of ["state", "context", "description", "sha"]) {
+      const partial: Record<string, unknown> = { ...verdict };
+      delete partial[field];
+      expect((await postStatus(token, partial)).status).toBe(400);
+    }
+  });
+
+  // The revision is the pull request's own head, resolved from GitHub rather
+  // than trusted from the body: naming any other commit must not sign a
+  // status onto it with the App's identity.
+  it("refuses a sha that is not the pull request's head", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(
+      token,
+      { ...verdict, sha: "someone-elses-sha" },
+      statusStub([], "abc123"),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  // On a pull_request run the OIDC claim's own `sha` is the platform's
+  // synthetic merge commit — a revision that exists on no branch and that no
+  // verdict is ever published against. A caller submitting the pull
+  // request's real head must still succeed even though it disagrees with
+  // `claims.sha`, which is exactly what a legitimate call looks like.
+  it("accepts the pull request's head even when it differs from the claim's own sha", async () => {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const token = await keys.sign(claims({ sha: "merge-commit-sha" }));
+    const response = await postStatus(
+      token,
+      { ...verdict, sha: "pr-head-sha" },
+      statusStub(written, "pr-head-sha"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).toContain("/statuses/pr-head-sha");
+  });
+
+  // A context is a check's name, and this is the App's identity to spend: it
+  // must not be asked to stand in for a check belonging to another tool.
+  it("refuses a context outside lydite's own namespace", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, { ...verdict, context: "some-other-tool/check" });
+    expect(response.status).toBe(400);
+  });
+
+  // The OIDC claim names a repository and a pull request, not a job: nothing
+  // here tells `referral-publish` — the one job isolated to hold
+  // `statuses: write` — apart from any other job in the same workflow that
+  // also holds `id-token: write` and runs the pull request's own code. Until
+  // a caller can be told apart from the code it is running, the one status a
+  // human Clearance acts on is refused outright, `lydite/` prefix or not.
+  it("refuses the clearance context even though it is in lydite's namespace", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, { ...verdict, context: "lydite/referral" });
+    expect(response.status).toBe(400);
+  });
+
+  // The same designed path the comment has: not installed is an answer, and
+  // the client's next move is its own token.
+  it("says the app is not installed rather than failing", async () => {
+    const notInstalled = (async (url: unknown) =>
+      String(url).endsWith("/installation")
+        ? new Response("no", { status: 404 })
+        : Response.json({})) as typeof fetch;
+
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, verdict, notInstalled);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      fallback: "post with the workflow's own token",
+    });
+  });
+
+  it("refuses a request presenting no token", async () => {
+    expect((await postStatus(undefined, verdict)).status).toBe(401);
+  });
+
+  it("refuses a token minted for another audience", async () => {
+    const token = await keys.sign(claims({ aud: "https://elsewhere" }));
+    expect((await postStatus(token, verdict)).status).toBe(401);
+  });
+
+  it("refuses an expired token", async () => {
+    const token = await keys.sign(claims({ exp: Math.floor(Date.now() / 1000) - 1 }));
+    expect((await postStatus(token, verdict)).status).toBe(401);
+  });
+
+  it("refuses a run that is not for a pull request", async () => {
+    const token = await keys.sign(claims({ ref: "refs/heads/main" }));
+    expect((await postStatus(token, verdict)).status).toBe(403);
+  });
+
+  it("says nothing about lydite's own credentials when the write fails", async () => {
+    const broken = (async (url: unknown) => {
+      const target = String(url);
+      if (target.endsWith("/installation")) return Response.json({ id: 42 });
+      if (target.includes("/access_tokens")) return Response.json({ token: "ghs_test" });
+      return new Response("upstream detail", { status: 500 });
+    }) as typeof fetch;
+
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, verdict, broken);
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(body).toContain("status");
   });
 });

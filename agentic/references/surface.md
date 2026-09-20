@@ -79,9 +79,22 @@ credential**. The job presents the GitHub Actions OIDC token; the relay verifies
 `iss`, a declared `aud` and `exp`, takes the repository from the `repository` claim and never
 from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge` and
 `refs/pull/<n>/head` both), mints an installation token narrowed to that one repository and to
-`pull_requests: write`, writes, and discards it. It stores nothing.
+`pull_requests: write` and `statuses: write`, writes, and discards it. It stores nothing.
 
-Two endpoints. `POST /comment` upserts the standing comment by its marker; `POST /review`
+Three endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
+records a verdict on a revision of that pull request — `{state, context, description, sha}`, with
+nothing defaulted — so the check is authored by the App rather than by whichever token the job
+held; the repository is the claim's, the revision has to equal the pull request's current head as
+`GET /pulls/:n` answers it — never `claims.sha`, which on a `pull_request` run is the platform's
+synthetic merge commit, the same revision `forge.PullRequestEvent` reads a head from the event
+payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it starts `lydite/`,
+so a caller can no more author a status on another commit or under another tool's check name than
+it can name another repository. `context` is refused outright when it is `clearance.Context`
+(`lydite/referral`) even so: the claim names a repository and a pull request, not a job, so
+nothing here tells `referral-publish` — the one job isolated to hold `statuses: write` — apart
+from `publish`, which also holds `id-token: write` and does run the pull request's own code.
+That exclusion lifts only once slice 2's job isolation makes the two tellable apart; the relay
+cannot make that call by itself. `POST /review`
 applies the operations document `lydite threads` computed. Before applying anything, `/review`
 lists the pull request's own review comments and **refuses the whole request if any `reply` or
 `delete` names an id outside that set** — a comment id is a number the caller supplies while
@@ -93,8 +106,9 @@ That takes the comment write out of the job that runs the repository's code: wit
 token there, the worst a pull request's own suite can provoke through the relay is a wrong comment
 on its own pull request. It **narrows [#49](https://github.com/lydite/lydite/issues/49) rather than
 closing it.** Recording a coverage baseline is a push to the `lydite` branch and needs
-`contents: write`; the relay mints `pull_requests: write` and has no endpoint that commits
-anything. `lydite test record` takes the coverage write out of the gating job the same way, and
+`contents: write`; the relay mints neither that nor anything else beyond `pull_requests: write`
+and `statuses: write`, and has no endpoint that commits anything. `lydite test record` takes the
+coverage write out of the gating job the same way, and
 neither closes the rest: a recording job holds a pushing token whatever command it runs, so it
 belongs on a tree that has already merged — which is where `lydite-baseline.yml` runs it.
 
@@ -126,6 +140,14 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
   repository. The `github-token` fallback above stays a supported path, not a temporary one, for
   any consumer without the relay configured or the App installed. No finding appears in both
   surfaces regardless of which path is live.
+- **`POST /status` is code, not yet a live route.** The deployed Worker predates it, so the
+  referral status is still published by the job's own token. **The grant comes before the
+  deploy**: an installation token can only narrow permissions the App already holds, so
+  `statuses: write` has to be granted to the `lydite` App in its own settings — in GitHub's UI,
+  outside this repository — before a Worker that asks for it can mint a token at all, comment
+  included. *Requiring* the check is a different grant again and gt's side of
+  [#34](https://github.com/lydite/lydite/issues/34): lydite makes the check attributable to the
+  App, and decides nothing about whether a repository requires it.
 
 ## The threads
 
