@@ -27,9 +27,8 @@ exemptions:
     # manifest here would let a Cargo.toml or package.json edit clear with the
     # lockfile beside it untouched. What a real Dependabot bump also edits —
     # the manifest — is therefore left off this list on purpose: that leg of
-    # the change is an uncovered path, so the pull request still refers, same
-    # as before this entry existed, rather than silently trusting a file this
-    # entry cannot measure.
+    # the change is an uncovered path, so the pull request is referred rather
+    # than silently trusting a file this entry cannot measure.
     #
     # Three further watched sets are deliberately absent, each a referral
     # rather than a silent pass:
