@@ -101,6 +101,51 @@ func TestAnUnexpectedConcernIsNotReportedMissing(t *testing.T) {
 	}
 }
 
+// A concern expected under a name this binary does not declare in the
+// concerns table still has to be named, not silently folded away for want of
+// a title lydite recognizes.
+func TestAnExpectedUndeclaredConcernIsNamed(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test", "coverage")
+
+	body := comment.Render()
+	if !strings.Contains(body, "coverage") {
+		t.Fatalf("the undeclared concern is absent from the comment:\n%s", body)
+	}
+	if !strings.Contains(body, "the run expected a `coverage` report") {
+		t.Errorf("the comment does not say what was missing:\n%s", body)
+	}
+	if comment.Headline == "every check passed" {
+		t.Errorf("the headline reads as a clean run: %q", comment.Headline)
+	}
+}
+
+// An undeclared concern that does arrive is rendered from what was found, not
+// also reported as missing because its name is absent from the concerns
+// table.
+func TestAnExpectedUndeclaredConcernThatArrivesIsNotAlsoReportedMissing(t *testing.T) {
+	dir := reportDirWith(t, "coverage", ui.Row{Status: ui.StatusPass, Label: "coverage(cli)", Value: "passed"})
+	comment := buildComment([]string{dir}, "", "coverage")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; the expected concern arrived", got)
+	}
+	if body := comment.Render(); strings.Contains(body, "the run expected a `coverage` report") {
+		t.Errorf("an expected concern that arrived is also reported missing:\n%s", body)
+	}
+}
+
+// A blank --expect entry names nothing, and must not itself render as a
+// concern the run expected.
+func TestABlankExpectEntryIsIgnored(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test", "", "  ")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; a blank --expect entry names no concern", got)
+	}
+}
+
 // A row naming a log that was not uploaded still has to render. The tail is a
 // convenience; losing it must not lose the row.
 func TestARowWhoseLogIsMissingStillRenders(t *testing.T) {
