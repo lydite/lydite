@@ -1,0 +1,14 @@
+--- base/report/surface.api.md
++++ head/report/surface.api.md
+@@ -5,7 +5,11 @@
+ ```ts
+ 
+ // @public
++export function added(n: number): number;
++
++// @public
+ export interface Config {
++    label?: string;
+     retries?: number;
+     timeout: number;
+ }

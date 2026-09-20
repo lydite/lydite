@@ -1,0 +1,7 @@
+/** An object a consumer constructs. */
+export interface Config {
+  /** How long to wait. */
+  timeout: number;
+  /** How many times to retry. */
+  retries: number;
+}

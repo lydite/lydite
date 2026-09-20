@@ -1,0 +1,124 @@
+What the TypeScript probe measured
+==================================
+
+This directory is the measurement ADR 0040's TypeScript amendment rests on. It holds a probe
+package whose public surface each shape changes in exactly one way, and `observed/` holds what
+each candidate mechanism said about each shape. The recorded output is the evidence, so a change
+to any of it is a change to what the amendment claims and has to be read rather than regenerated.
+
+The probe
+---------
+
+`base/` is the package: an entry point that re-exports two interfaces and declares four
+functions, plus `src/internal/helper.ts`, which is exported from its own module and named by no
+entry point. Every other directory is an overlay onto `base/` — one file replaced, which is the
+whole edit — and is the head tree of one shape:
+
+  removed-export            `removed` is gone from the entry point
+  narrowed-parameter        narrowed(value: string | number) becomes narrowed(value: string)
+  widened-return            widened(): string becomes widened(): string | null
+  removed-interface-member  Store.size() is gone
+  added-required-member     Store gains a required put()
+  optional-to-required      Config.retries? becomes Config.retries
+  compatible-addition       a new exported function and a new optional Config field
+  reexport-only             `export type { Store } from "./store"` becomes `export * from
+                            "./store"` — the same names, the same signatures, a different
+                            re-export form
+  generated-dts             the body of the one function whose return type is *inferred*
+                            changes, so the break exists only in the emitted declaration and
+                            nowhere in the entry point's text
+  version-bump              `removed` is gone *and* package.json's version goes 0.1.0 -> 1.0.0
+  base-does-not-typecheck   an overlay applied to the *base* tree, giving it a type error
+  noentry/                  its own base and head package: "private": true, no exports, no
+                            types, no main
+
+The fixtures carry a `.txt` suffix and are materialised through `internal/fixture`, for the
+reason that package states: committed TypeScript under its own extension is code this
+repository's own scanners walk.
+
+What each candidate said
+------------------------
+
+Measured against @microsoft/api-extractor 7.59.1 (which analyses with its own bundled TypeScript
+5.9.3) and TypeScript 5.9.3 for the builds, on node 26.7.0. Each tree is built with its own
+`tsc -p tsconfig.json`, and api-extractor is then run against `dist/index.d.ts` with an
+`api-extractor.json` written beside the package — apiReport enabled, docModel off, dtsRollup off
+— and the two reports compared as text.
+
+  shape                      api-extractor report diff | raw .d.ts text diff | compiler API | tree-sitter over source
+  removed export             the declaration, removed  | the declaration, removed | the symbol, removed | the declaration, removed
+  narrowed parameter         the signature, changed    | the signature, changed   | the type, changed   | the text, changed
+  widened return             the signature, changed    | the signature, changed   | the type, changed   | the text, changed
+  removed interface member   the member, removed       | the member, removed      | the member, removed | the text, changed
+  added required member      the member, added         | the member, added        | the member, added   | the text, changed
+  optional -> required       retries? -> retries       | retries? -> retries      | retries?: number | undefined -> retries: number | the text, changed
+  compatible addition        the additions, added      | the additions, added     | the additions, added | the text, changed
+  re-export only             NOTHING: byte-identical   | FIRES                    | nothing             | FIRES, and cannot tell this from a removal
+  generated .d.ts            { timeout: number } -> { timeout: string } | the same | the same           | INVISIBLE: the type is in no source text
+  version bump + removal     the removal, and nothing about the version | the removal | the removal     | the removal
+
+The last three rows are the whole decision.
+
+The re-export-only shape is the one that separates the candidates. api-extractor's report is a
+rollup: it resolves every re-export to the declaration it names, strips doc comments, and sorts
+the result alphabetically, so a change to how a name reaches the entry point is not a change to
+the report. A text diff of the emitted .d.ts files fires on it
+(observed/reexport-only.declaration.diff.txt), and so would anything reading the entry point's
+own text — which is the noise this gate is asked not to produce.
+
+The generated-.d.ts shape is the one that rules out reading source directly. `inferred()` has no
+written return type, so the break is { timeout: number } -> { timeout: string } in the emitted
+declaration and nothing at all in the source. No parser without a type checker can see it.
+`internal/treesitter` has no export detection to begin with (scope.go), so tree-sitter would
+need both a new export model and a type checker it will never have.
+
+The version bump changes nothing api-extractor reports. The report names the package and not its
+version, so version-bump.api-report.diff.txt and removed-export.api-report.diff.txt are
+identical. There is no --release-type to force, because there is no version-derived verdict to
+suppress: an author-controlled bump cannot silence a break here by construction.
+
+A compatible addition is reported like any other change. Unlike apidiff's `Change.Compatible`
+and unlike cargo-semver-checks' major/minor lint catalogue, api-extractor emits a surface, not a
+verdict. Whichever side classifies the diff is lydite's own: a report line present in the head
+and absent from the base is an addition and compatible; a line present in the base and absent
+from the head, or a line whose declaration changed, is a break.
+
+What the candidates cost
+------------------------
+
+@microsoft/api-extractor — a pinned npm tool, which internal/typescript's ensureNPMToolchain
+already installs generically from a package.json/package-lock.json pair. It carries its own
+TypeScript (5.9.3) as a locked dependency, so lydite drives no compiler of its own. It requires a
+.d.ts: pointing mainEntryPointFilePath at src/index.ts is rejected outright as "not a declaration
+file" (observed/missing-declaration.api-extractor.txt), so the component's own build must have
+run in both trees. Exit 0 with a report, exit 1 with a message, and warnings do not fail the run.
+
+tsc --declaration plus a differ lydite writes — a `typescript` pin, and a differ that has to
+recover the surface from declaration text that preserves source order, doc comments and
+re-export form. It fires on the re-export-only shape as a plain text diff, so the differ would
+have to reimplement the rollup api-extractor already performs.
+
+The compiler API via an embedded node script — measured, and as accurate as api-extractor on
+every shape here, including over sources with no build run at all (observed/compiler-api.txt).
+It costs a `typescript` pin, a JS script embedded in the Go binary — a shape this repository has
+no precedent for — and, permanently, lydite's own answer to what a class, an overload set, a
+generic constraint, a namespace or a merged declaration renders as. Every gap in that rendering
+is a break the gate silently misses. The script that produced the table above handles functions
+and interfaces and nothing else.
+
+tree-sitter over source — costs nothing and misses the two shapes that matter.
+
+Two facts hold for every candidate that resolves types, api-extractor included: an export whose
+type is inferred from a dependency degrades to `any` when node_modules is absent
+(observed/compiler-api.txt), and tsc emits declarations for a tree that does not typecheck
+(observed/base-does-not-typecheck.build.txt: exit 2 with dist/ written anyway). So the install's
+and the build's own exit codes — not the presence of a declaration, and not api-extractor's —
+are what say a tree could be measured.
+
+The choice
+----------
+
+@microsoft/api-extractor, as a pinned npm tool, its api.md report generated in each tree and the
+two reports compared by lydite. It is the only candidate that is silent on the re-export-only
+shape and loud on the generated-.d.ts shape without lydite owning a surface renderer of its own.
+See ADR 0040's TypeScript amendment for what follows from that.

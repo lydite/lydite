@@ -1,0 +1,9 @@
+/** An interface a consumer implements. */
+export interface Store {
+  /** Reads the stored value. */
+  get(key: string): string | undefined;
+  /** Counts what is stored. */
+  size(): number;
+  /** Writes the stored value. */
+  put(key: string, value: string): void;
+}

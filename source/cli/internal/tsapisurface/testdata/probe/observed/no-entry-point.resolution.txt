@@ -1,0 +1,12 @@
+package.json holds no "exports", no "types", no "typings" and no "main":
+
+  exports["."].types -> undefined
+  exports["."].default -> undefined
+  types -> undefined
+  typings -> undefined
+  main -> undefined
+  resolved entry point: <none>
+
+Both trees build (tsc exit 0) and both emit dist/main.d.ts, so there is a
+declaration on disk. Nothing names it as the package's surface, so there is
+nothing to point api-extractor at.

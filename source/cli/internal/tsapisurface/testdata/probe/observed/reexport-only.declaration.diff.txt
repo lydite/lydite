@@ -1,0 +1,13 @@
+--- base/dist/index.d.ts
++++ head/dist/index.d.ts
+@@ -2,8 +2,8 @@
+  * The package's entry point. Everything a consumer can reach is named here,
+  * directly or through a re-export.
+  */
+-export type { Store } from "./store";
+-export type { Config } from "./config";
++export * from "./store";
++export * from "./config";
+ /** A function a consumer calls. */
+ export declare function removed(n: number): number;
+ /** A function whose parameter type one shape narrows. */

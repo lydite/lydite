@@ -1,0 +1,4 @@
+/** Exported from its own module and named by no entry point. */
+export function hidden(n: number): number {
+  return n;
+}

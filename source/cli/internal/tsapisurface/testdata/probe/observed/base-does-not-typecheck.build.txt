@@ -1,0 +1,7 @@
+$ tsc -p tsconfig.json
+src/index.ts(11,3): error TS2322: Type 'string' is not assignable to type 'number'.
+exit 2
+
+tsc emits dist/index.d.ts regardless — noEmitOnError is off by default — and
+api-extractor then reads that declaration and exits 0 with a full report. The
+build's own exit code is the only thing that says the tree did not typecheck.

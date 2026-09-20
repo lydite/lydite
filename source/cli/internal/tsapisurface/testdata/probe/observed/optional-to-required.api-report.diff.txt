@@ -1,0 +1,11 @@
+--- base/report/surface.api.md
++++ head/report/surface.api.md
+@@ -6,7 +6,7 @@
+ 
+ // @public
+ export interface Config {
+-    retries?: number;
++    retries: number;
+     timeout: number;
+ }
+ 

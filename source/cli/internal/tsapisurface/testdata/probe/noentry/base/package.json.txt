@@ -1,0 +1,10 @@
+{
+  "name": "@lydite-probe/noentry",
+  "version": "0.1.0",
+  "description": "A package that names no entry point: no exports, no types, no main.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}
