@@ -301,15 +301,16 @@ func noComplexitySource(m measurement) string {
 // across every change to its instrument, which is the comparison the field
 // exists to prevent, and it would fail silently.
 //
-// The component's own directory, because a JavaScript workspace's runner and
-// coverage provider are its dependencies and are read out of the tree the
-// install produced — the same directory the suite ran in.
+// The component's own directory, or the workspace root above it when the
+// install hoisted there — a JavaScript workspace's runner and coverage
+// provider are its dependencies, and Producer reads them out of the same
+// tree Install actually wrote to.
 func producerOf(root string, c component.Component, tc *toolchain.Env) string {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok {
 		return ""
 	}
-	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), tc.Version())
+	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, tc.Version())
 }
 
 // coverageOptions is what the command decided about coverage before anything

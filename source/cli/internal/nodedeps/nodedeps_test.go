@@ -328,6 +328,33 @@ func TestAFailedInstallIsNotTakenAsDone(t *testing.T) {
 	}
 }
 
+// A second component naming a different environment for a root already
+// installed is an error, not a silent share of whichever declaration got
+// there first: the tree it imports from was written under one environment,
+// and the other component asked for a different one.
+func TestASecondEnvironmentForOneRootIsAnError(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	stubRecording(t, "pnpm", 0)
+
+	ui := mkdir(t, root, "packages", "ui")
+	if err := Install(context.Background(), ui, root, "", []string{"TOKEN=a"}, io.Discard); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	core := mkdir(t, root, "packages", "core")
+	if err := Install(context.Background(), core, root, "", []string{"TOKEN=b"}, io.Discard); err == nil {
+		t.Error("Install reported success for a root already installed under a different environment")
+	}
+
+	// Order within the declaration must not matter: the same environment,
+	// spelled in a different order, is the same environment.
+	web := mkdir(t, root, "packages", "web")
+	if err := Install(context.Background(), web, root, "", []string{"TOKEN=a", "OTHER=x"}, io.Discard); err == nil {
+		t.Error("Install reported success for an environment differing by an added variable")
+	}
+}
+
 // stubRecording puts a program of the given name ahead of any real one on
 // PATH, writing one file per invocation into the returned directory and
 // exiting with code. It sleeps long enough that a concurrent caller arrives

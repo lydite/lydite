@@ -565,7 +565,7 @@ func goProducer(t *testing.T, root string) string {
 	if !ok {
 		t.Fatal("no go-test runner")
 	}
-	return r.Producer(filepath.Join(root, "svc"), "")
+	return r.Producer(filepath.Join(root, "svc"), root, "")
 }
 
 // untested is a hit map covering the whole of a file and executing none of it,
