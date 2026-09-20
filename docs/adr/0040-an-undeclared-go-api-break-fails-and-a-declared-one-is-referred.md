@@ -523,7 +523,7 @@ the candidates not chosen.
 | interface member removed | the member, removed |
 | required interface member added | the member, added |
 | optional property made required | `retries?: number` → `retries: number` |
-| function and optional property added | both, added — and both additions |
+| function and optional property added | the function, added; the property's own interface, changed — an addition and a break |
 | re-export form changed, no signature touched | **nothing: the two reports are byte-identical** |
 | inferred return type changed | `inferred(): { timeout: number }` → `{ timeout: string }` |
 | export removed and version bumped to `1.0.0` | the removal, and nothing about the version |

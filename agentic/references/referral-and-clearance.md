@@ -6,7 +6,8 @@
 model itself is a failure: exemptions, disqualifiers and the isolation rule below emit pass or
 refer, and a malformed exemptions file or an unresolvable merge-base is an error, exit 1. `review`
 runs one check, a public-API diff for every component that opts in with `api_surface` —
-`internal/apisurface` for Go, `internal/rustapisurface` for Rust — (see
+`internal/apisurface` for Go, `internal/rustapisurface` for Rust, `internal/tsapisurface` for
+TypeScript — (see
 [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
 and its amendment, and [`components.md`](components.md)), and that check *can* fail: an undeclared break is a gate,
 because the author clears it by not breaking the API or by declaring the break, and both are work
@@ -118,9 +119,10 @@ the one way this command gives a confidently wrong answer.
 `review`'s `addAPISurfaceRows` (`cmd/lydite/review_apisurface.go`) is the one check in the
 command, and it renders three verdicts for a component that opted in with `api_surface`,
 whichever language it compares: the comparison itself is `internal/apisurface`'s
-`golang.org/x/exp/apidiff` for Go and `internal/rustapisurface`'s pinned `cargo-semver-checks`
-subprocess for Rust — see the ADR's amendment for that half — but the verdicts `addAPISurfaceRows`
-draws from either one's result are the same three:
+`golang.org/x/exp/apidiff` for Go, `internal/rustapisurface`'s pinned `cargo-semver-checks`
+subprocess for Rust, and `internal/tsapisurface`'s pinned `@microsoft/api-extractor` subprocess
+for TypeScript — see the ADR's amendments for those two halves — but the verdicts
+`addAPISurfaceRows` draws from any of the three results are the same three:
 
 - an undeclared incompatible change is `ui.StatusFail` — the author clears it by restoring the
   API or by declaring the break, and both are work they can do;
