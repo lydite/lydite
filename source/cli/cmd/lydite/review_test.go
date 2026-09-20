@@ -925,6 +925,29 @@ func TestReviewRefersEveryPackageInANewManifest(t *testing.T) {
 	}
 }
 
+// package-lock.json is the one manifest whose reader cannot tolerate empty
+// content the way go.mod, go.sum and Cargo.lock can: json.Unmarshal on nil or
+// empty bytes is an error, not an empty document. A manifest the merge-base
+// does not have must therefore never reach that reader at all — the absent
+// path has to short-circuit to the empty set before Extract is ever called,
+// and this is the one case that tells "short-circuited" apart from "called
+// with nil content".
+func TestReviewRefersEveryPackageInANewNPMManifest(t *testing.T) {
+	lock := `{"packages":{"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("package-lock.json")},
+		map[string]string{"package-lock.json": lock},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest with no base-side content adds everything in it:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) || !strings.Contains(out, "left-pad") {
+		t.Errorf("expected every package in the new manifest to be named, not reported as unmeasured, got:\n%s", out)
+	}
+}
+
 // A path that is no manifest is compared over by nothing, and the report says
 // nothing about it.
 func TestReviewComparesNoDependenciesForAPathThatIsNoManifest(t *testing.T) {
