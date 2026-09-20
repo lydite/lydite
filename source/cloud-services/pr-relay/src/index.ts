@@ -148,13 +148,6 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
   ) {
     return json(400, { error: "a state, a context, a description and a sha are required" });
   }
-  if (route === "/status" && payload.sha !== claims.sha) {
-    // The claim, not the body, says which revision this run is for — the same
-    // reason `pull_request` is checked against `ref` above. Without this, a
-    // sha is just a string the caller wrote, and the App's identity would
-    // sign a status onto any commit of the repository the run is already for.
-    return json(403, { error: "the sha submitted is not the one this run is for" });
-  }
   if (route === "/status" && !payload.context?.startsWith("lydite/")) {
     // A context is a check's name, and this is the App's identity to spend.
     // Confined to lydite's own namespace, the worst a caller can do is author
@@ -197,6 +190,16 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     }
 
     if (route === "/status") {
+      // The pull request's head, not `claims.sha`: on a `pull_request` run
+      // that claim is the platform's synthetic merge commit, which exists on
+      // no branch and which no verdict is ever published against — the same
+      // reason `forge.PullRequestEvent` reads a head from the event payload
+      // rather than from `GITHUB_SHA`. Resolving it here, with the token
+      // rather than trusting the body, is what lets `sha` be checked at all.
+      const head = await pullRequestHeadSha(token, claims.repository, fromRef, deps.fetcher);
+      if (payload.sha !== head) {
+        return json(403, { error: "the sha submitted is not this pull request's head" });
+      }
       await postStatus(token, claims.repository, payload, deps.fetcher);
       return json(200, {
         repository: claims.repository,
@@ -239,12 +242,32 @@ const UNWRITTEN: Record<string, string> = {
 };
 
 /**
- * Records the verdict on the revision the run's own claim named.
- *
- * `handle` has already checked that the caller's `sha` is `claims.sha` and
- * that its `context` is lydite's own, so by the time this runs both the
- * revision and the repository are the claim's, not the caller's — the only
- * status this can ever write is one the run is already for.
+ * The pull request's current head, so a submitted `sha` can be checked
+ * against something GitHub itself says rather than the caller's own claim
+ * about it.
+ */
+async function pullRequestHeadSha(
+  token: string,
+  repository: string,
+  pull: number,
+  fetcher: typeof fetch,
+): Promise<string | undefined> {
+  const response = await fetcher(`${GITHUB_API}/repos/${repository}/pulls/${pull}`, {
+    headers: apiHeaders(`Bearer ${token}`),
+  });
+  if (!response.ok) {
+    throw new Error(`resolving the pull request's head answered ${response.status}`);
+  }
+  const pr = (await response.json()) as { head?: { sha?: string } };
+  return pr.head?.sha;
+}
+
+/**
+ * Records the verdict on the revision `handle` has already resolved and
+ * checked the caller's `sha` against, and under the `lydite/`-namespaced
+ * `context` it has already checked too — so by the time this runs, both the
+ * revision and the repository are ones the run is already for, and the check
+ * is one only lydite's own tooling could have named.
  */
 async function postStatus(
   token: string,

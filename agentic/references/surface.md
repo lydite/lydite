@@ -84,10 +84,12 @@ from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge`
 Three endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
 records a verdict on a revision of that pull request — `{state, context, description, sha}`, with
 nothing defaulted — so the check is authored by the App rather than by whichever token the job
-held; the repository and the revision are both the claim's, `sha` refused unless it equals the
-run's own `claims.sha` and `context` refused unless it starts `lydite/`, so a caller can no more
-author a status on another commit or under another tool's check name than it can name another
-repository. `POST /review`
+held; the repository is the claim's, the revision has to equal the pull request's current head as
+`GET /pulls/:n` answers it — never `claims.sha`, which on a `pull_request` run is the platform's
+synthetic merge commit, the same revision `forge.PullRequestEvent` reads a head from the event
+payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it starts `lydite/`,
+so a caller can no more author a status on another commit or under another tool's check name than
+it can name another repository. `POST /review`
 applies the operations document `lydite threads` computed. Before applying anything, `/review`
 lists the pull request's own review comments and **refuses the whole request if any `reply` or
 `delete` names an id outside that set** — a comment id is a number the caller supplies while

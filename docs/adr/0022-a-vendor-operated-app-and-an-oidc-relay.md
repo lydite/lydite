@@ -251,15 +251,20 @@ from the same parts: the same claim verification, the same installation lookup,
 the same `409` *answer* where the App is not installed, the same `401` with no
 detail for a token that did not verify. It takes `{state, context, description,
 sha}` with nothing defaulted and posts to `/repos/:owner/:repo/statuses/:sha` —
-the repository from the verified claim, and the revision from the claim too:
-`sha` is refused unless it equals the run's own `claims.sha`, the way
-`pull_request` is refused unless it equals `ref`'s. A caller no more picks which
-commit gets the status than it picks which repository does. `context` is refused
-unless it starts `lydite/`, so the App's identity can only ever author a lydite
-check, never stand in for one belonging to another tool. The vocabulary of a
-status stays the CLI's within that boundary: the relay decides nothing about
-what a state or a context *means*, for the reason it decides nothing about which
-thread belongs to which finding.
+the repository from the verified claim, and the revision checked against
+GitHub's own answer for it rather than either side's say-so: `sha` is refused
+unless it equals the pull request's current head, resolved with the
+installation token from `GET /pulls/:n`, not from `claims.sha`. That claim is
+the platform's synthetic merge commit on a `pull_request` run — the same
+revision `forge.PullRequestEvent` reads a head from the event payload rather
+than from `GITHUB_SHA` to avoid — so requiring it to equal `sha` would refuse
+every legitimate call; resolving the head is the one extra round trip `/status`
+makes that its siblings do not need. `context` is refused unless it starts
+`lydite/`, so the App's identity can only ever author a lydite check, never
+stand in for one belonging to another tool. The vocabulary of a status stays
+the CLI's within that boundary: the relay decides nothing about what a state or
+a context *means*, for the reason it decides nothing about which thread
+belongs to which finding.
 
 **"The Apps configure nothing yet" is unchanged.** Posting a status and
 *requiring* one are different grants and different owners. Pinning a ruleset's

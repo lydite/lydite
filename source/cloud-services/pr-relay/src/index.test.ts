@@ -300,7 +300,12 @@ describe("applying a review", () => {
 
 // Every status call the relay would make, answered locally. `written` collects
 // what reached the statuses endpoint, which is the only write this route makes.
-function statusStub(written: { url: string; init?: RequestInit }[] = []): typeof fetch {
+// `headSha` is what `GET /pulls/:n` answers with — the pull request's real
+// head, distinct in principle from the OIDC claim's own `sha`.
+function statusStub(
+  written: { url: string; init?: RequestInit }[] = [],
+  headSha = "abc123",
+): typeof fetch {
   return (async (url: unknown, init?: RequestInit) => {
     const target = String(url);
     if (target.endsWith("/installation")) {
@@ -308,6 +313,9 @@ function statusStub(written: { url: string; init?: RequestInit }[] = []): typeof
     }
     if (target.includes("/access_tokens")) {
       return Response.json({ token: "ghs_test" });
+    }
+    if (target.endsWith("/pulls/7")) {
+      return Response.json({ head: { sha: headSha } });
     }
     if (target.includes("/statuses/")) {
       written.push({ url: target, init });
@@ -395,13 +403,36 @@ describe("recording a status", () => {
     }
   });
 
-  // The revision is the claim's, not the caller's: naming another repository's
-  // commit — or any commit but the one the run is for — must not sign a status
-  // onto it with the App's identity.
-  it("refuses a sha that is not the one the run is for", async () => {
+  // The revision is the pull request's own head, resolved from GitHub rather
+  // than trusted from the body: naming any other commit must not sign a
+  // status onto it with the App's identity.
+  it("refuses a sha that is not the pull request's head", async () => {
     const token = await keys.sign(claims());
-    const response = await postStatus(token, { ...verdict, sha: "someone-elses-sha" });
+    const response = await postStatus(
+      token,
+      { ...verdict, sha: "someone-elses-sha" },
+      statusStub([], "abc123"),
+    );
     expect(response.status).toBe(403);
+  });
+
+  // On a pull_request run the OIDC claim's own `sha` is the platform's
+  // synthetic merge commit — a revision that exists on no branch and that no
+  // verdict is ever published against. A caller submitting the pull
+  // request's real head must still succeed even though it disagrees with
+  // `claims.sha`, which is exactly what a legitimate call looks like.
+  it("accepts the pull request's head even when it differs from the claim's own sha", async () => {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const token = await keys.sign(claims({ sha: "merge-commit-sha" }));
+    const response = await postStatus(
+      token,
+      { ...verdict, sha: "pr-head-sha" },
+      statusStub(written, "pr-head-sha"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).toContain("/statuses/pr-head-sha");
   });
 
   // A context is a check's name, and this is the App's identity to spend: it
