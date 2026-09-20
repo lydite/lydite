@@ -1,5 +1,26 @@
 package referral
 
+// Evidence is what a caller measured, outside this package, for an
+// exemption's conditions to be tested against.
+//
+// It carries verdicts and never the material they were reached from. This
+// package runs no git, reads no report document and loads no component
+// declaration; the caller does that and hands back the answer, the same
+// separation an API break already has, where cmd/lydite builds both surfaces
+// and referral is given only the Disqualification. A condition evaluated in
+// here would make an exemption's meaning depend on what this package could
+// reach at the moment it ran.
+//
+// Its zero value is what a caller that measured nothing passes, and every
+// condition fails against it — the direction that refers.
+type Evidence struct {
+	// PatchAndMinor reports whether a versions: patch-and-minor exemption's
+	// condition holds: every version pair in every dependency manifest the
+	// change touches moved by a patch or a minor, and the licence and SCA
+	// rows for every component ran and passed.
+	PatchAndMinor bool
+}
+
 // Decision is the outcome of evaluating one change against the exemption
 // set.
 type Decision struct {
@@ -12,6 +33,13 @@ type Decision struct {
 	// Uncovered lists the changed paths no single exemption covered. Empty
 	// when an exemption matched, or when the change touched nothing.
 	Uncovered []string
+	// Unsatisfied names the exemptions that covered every changed path and
+	// whose condition the change did not meet. "nothing declares this shape"
+	// and "the shape is declared, conditionally, and the condition did not
+	// hold" are different things to act on, and a referral that named only
+	// the first would send the reader looking for a declaration already in
+	// the file.
+	Unsatisfied []string
 	// Disqualifications are the vetoes the change tripped.
 	Disqualifications []Disqualification
 	// Empty is true when the change touches no paths at all.
@@ -34,7 +62,11 @@ type Decision struct {
 // is covered, but only by two different exemptions between them, is referred:
 // the union of two declared shapes is a third shape nobody declared. See the
 // Exemption doc comment.
-func Decide(ch Change, file File) Decision {
+//
+// ev carries the conditions a caller measured outside this package. An
+// exemption declaring none ignores it entirely, so the zero Evidence is the
+// correct argument from a caller that measured nothing.
+func Decide(ch Change, file File, ev Evidence) Decision {
 	d := Decision{
 		Disqualifications: Disqualifications(ch, file.Disqualifiers),
 		Bundled:           bundledWithExemptions(ch.Paths),
@@ -52,10 +84,18 @@ func Decide(ch Change, file File) Decision {
 	}
 
 	for _, e := range file.Exemptions {
-		if e.Covers(ch.Paths) {
-			d.Exemption = e.Name
-			break
+		if !e.Covers(ch.Paths) {
+			continue
 		}
+		// The condition is asked after the cover, and of that exemption
+		// alone: a condition consulted first, across the whole file, would
+		// let one exemption's paths be cleared by another's condition.
+		if !e.satisfied(ev) {
+			d.Unsatisfied = append(d.Unsatisfied, e.Name)
+			continue
+		}
+		d.Exemption = e.Name
+		break
 	}
 	if d.Exemption == "" {
 		d.Uncovered = uncovered(ch.Paths, file.Exemptions)

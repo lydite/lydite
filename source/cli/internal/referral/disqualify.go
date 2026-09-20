@@ -28,12 +28,11 @@ type Disqualification struct {
 
 // Kinds a caller supplies rather than this package computing them.
 //
-// Both are read off a public-API diff and the author's own declaration —
-// two trees, a pull request title and the commits in the range, none of
-// which is the line-level diff evidence Disqualifications is given. The
-// caller that has them appends the Disqualification; the names live here so
-// the two sides spell the same label, and so a reader of this file sees
-// every kind a report can carry.
+// Each is read off something the line-level diff evidence Disqualifications
+// is given does not carry: a public-API diff, the author's own declaration,
+// the text of a manifest at two revisions. The caller that has it appends the
+// Disqualification; the names live here so the two sides spell the same
+// label, and so a reader of this file sees every kind a report can carry.
 const (
 	// DisqualificationAPIBreakDeclared is a change whose author declared a
 	// breaking API change. The claim may only ever add a referral, so it is
@@ -46,6 +45,20 @@ const (
 	// is not theirs to fix, and passing is a gate that could not run
 	// rendering as one that ran and found nothing.
 	DisqualificationAPISurfaceUncomputable = "api surface could not be compared"
+	// DisqualificationDependencyAdded is a change that pins a package the
+	// merge-base did not, direct or transitive. Adding a dependency is not
+	// wrong, which is why it refers rather than fails: there is no further
+	// work the author could do to clear it, and new untrusted code entering
+	// the tree is what an advisory database has nothing to say about (see
+	// docs/adr/0047).
+	DisqualificationDependencyAdded = "dependency added"
+	// DisqualificationDependencyDeltaUnmeasured is a manifest whose
+	// dependency set could not be built at one of the two sides — an
+	// ecosystem with no reader, or content that did not parse. "lydite does
+	// not know whether this change added a dependency" and "it did not" must
+	// not reach the same verdict, because the first is where a malformed or
+	// novel lockfile lands and the second is where routine maintenance does.
+	DisqualificationDependencyDeltaUnmeasured = "dependency delta could not be measured"
 )
 
 // suppressionTokens are annotations that turn a finding off.

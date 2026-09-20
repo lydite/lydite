@@ -6,7 +6,7 @@
 # release is the point — a dogfood against the last release tests the last
 # release.
 #
-#   referral ─► referral-publish ──┐   no other needs, so the status lands in seconds
+#   referral ─► referral-publish ──┐   also waits on scan, for its licence/SCA evidence
 #   scan ──────────────────────────┤   each job uploads its .lydite-reports/
 #   plan ─┬─► test (matrix) ───────► merge
 #         └─► mutation (matrix) ───► mutation-merge
@@ -173,14 +173,20 @@ jobs:
   # action from.
   referral-publish:
     name: referral publish
-    needs: referral
+    needs: [referral, scan]
+    # `success()`, the default a job-level `if` falls back to, requires every
+    # needed job to have succeeded — and `scan` skips on an edit that left the
+    # title alone, which would otherwise skip this job right along with it,
+    # when only referral's own surfaces and the title matter to what it
+    # publishes. This runs whenever `referral` succeeded, whatever `scan` did.
+    if: always() && needs.referral.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       # The verdict is the record a clearance acts on, and this job publishing
-      # it without waiting on scan or test is what lets a person start clearing
-      # a referral while the matrix is still running (ADR 0015).
+      # it without waiting on test or the matrices is what lets a person start
+      # clearing a referral while those are still running (ADR 0015).
       statuses: write
     steps:
       # Both checkouts name a `path:`, so each cleans only its own
@@ -236,6 +242,23 @@ jobs:
           name: referral-surfaces
           path: ${{ runner.temp }}
 
+      # Best-effort: an edit that left the title alone skips `scan`, and a
+      # `scan` that failed uploads nothing either. Either way this job still
+      # owes a verdict — it just decides the version-bump exemption's
+      # licence/SCA condition without evidence, which is exactly what a
+      # missing `--reports` argument does below.
+      - name: download the scan report
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lydite-reports-scan
+          path: scan-report
+
+      # --reports is the licence/SCA evidence a `versions:` exemption's
+      # condition reads; omitted when the download above found nothing, so
+      # the condition falls back to being unsatisfiable rather than reading a
+      # partial or absent document.
+      #
       # review exits 2 on a referral and 1 on the isolation gate, and both
       # are answers rather than malfunctions — the verdict is carried by the
       # status this step just published and by the report it wrote, so the
@@ -252,7 +275,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           verdict=0
-          lydite review --dir head --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish || verdict=$?
+          args=(--dir head --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish)
+          if [ -f scan-report/scan.json ]; then
+            args+=(--reports scan-report)
+          fi
+          lydite review "${args[@]}" || verdict=$?
           if [ "$verdict" -gt 2 ]; then
             exit "$verdict"
           fi

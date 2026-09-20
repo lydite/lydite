@@ -126,6 +126,29 @@ func TestReviewPassesWhenTheBaseDeclaresAMatchingExemption(t *testing.T) {
 	}
 }
 
+// An uncovered path and an unsatisfied condition are different things to act
+// on, and the referral must say which happened: a declared exemption that
+// simply does not cover the change must never be reported as one that
+// covered it and then failed its condition.
+func TestReviewNamesUncoveredPathsRatherThanAnUnsatisfiedCondition(t *testing.T) {
+	exemptions := "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n"
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: exemptions, "README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a path no exemption covers must refer:\n%s", out)
+	}
+	if strings.Contains(out, "conditional exemption covers the paths") {
+		t.Errorf("nothing declared covers this change, so no exemption's condition went unmet, got:\n%s", out)
+	}
+	if !strings.Contains(out, "path(s) covered by no exemption") || !strings.Contains(out, "src/auth.go") {
+		t.Errorf("the referral must name the uncovered path, got:\n%s", out)
+	}
+}
+
 // Day one: no file at all. Every change is referred, and the report says why
 // rather than leaving the reader to guess that the feature is broken.
 func TestReviewWithNoExemptionsFileRefersAndSaysSo(t *testing.T) {
@@ -1326,5 +1349,483 @@ func TestBaseWorktreeFailsOnAnUnknownCommit(t *testing.T) {
 	}
 	if root != "" {
 		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
+	}
+}
+
+// goSum renders a go.sum pinning each module at the version given, both the
+// module line and the go.mod line git would carry for it.
+func goSum(modules map[string]string) string {
+	var b strings.Builder
+	for name, version := range modules {
+		fmt.Fprintf(&b, "%s %s h1:aaaa=\n%s %s/go.mod h1:bbbb=\n", name, version, name, version)
+	}
+	return b.String()
+}
+
+// dependencyExemption covers the manifest paths outright, so what the run
+// reports about them is this check's verdict and not the absence of a
+// declaration.
+func dependencyExemption(paths ...string) string {
+	return "exemptions:\n  - name: dependency-maintenance\n    reason: lockfile maintenance\n    paths: [\"" +
+		strings.Join(paths, "\", \"") + "\"]\n"
+}
+
+// A package at HEAD the merge-base did not pin refers, and the evidence names
+// it: the gap an advisory database leaves is code nobody has looked at
+// entering the tree, which no clean SCA run says anything about.
+func TestReviewRefersAnAddedDependency(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{
+			"github.com/spf13/cobra":         "v1.10.1",
+			"github.com/google/licensecheck": "v0.3.1",
+		})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("an added dependency must be referred:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("expected the added-dependency veto, got:\n%s", out)
+	}
+	if !strings.Contains(out, "github.com/google/licensecheck") {
+		t.Errorf("the veto must name the package that arrived, got:\n%s", out)
+	}
+}
+
+// A version move on a name both sides pin is not an addition. It may still be
+// referred by other means; what it is never referred for is this.
+func TestReviewDoesNotReferAVersionBumpAsAnAddition(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a bump of a package already pinned adds nothing: %v\n%s", err, out)
+	}
+	if strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("a version move is not an addition, got:\n%s", out)
+	}
+	if !strings.Contains(out, gateDependencies+"(go.sum)") {
+		t.Errorf("a manifest that was compared must say so under its own name, got:\n%s", out)
+	}
+}
+
+// A removal is the opposite of new untrusted code arriving, and carries none
+// of the supply-chain risk the veto exists for.
+func TestReviewDoesNotReferARemovedDependency(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("go.sum"),
+			"go.sum": goSum(map[string]string{
+				"github.com/spf13/cobra":         "v1.10.1",
+				"github.com/google/licensecheck": "v0.3.1",
+			}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"})},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("dropping a dependency must not be referred: %v\n%s", err, out)
+	}
+	if strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("a removal is not an addition, got:\n%s", out)
+	}
+}
+
+// An ecosystem with no reader is a gap the report says out loud. "lydite does
+// not know whether this change added a dependency" must not reach the verdict
+// "it did not".
+func TestReviewRefersAManifestItCannotRead(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: dependencyExemption("yarn.lock"),
+			"yarn.lock":       "# yarn lockfile v1\nleft-pad@^1.0.0:\n  version \"1.0.0\"\n",
+		},
+		map[string]string{"yarn.lock": "# yarn lockfile v1\nleft-pad@^1.0.0:\n  version \"1.0.1\"\n"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest nothing here parses must be referred:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyDeltaUnmeasured) {
+		t.Errorf("expected the unmeasured-delta veto, got:\n%s", out)
+	}
+	if !strings.Contains(out, "yarn") {
+		t.Errorf("the veto must name the ecosystem that went unread, got:\n%s", out)
+	}
+}
+
+// A manifest the merge-base does not have pins nothing there, so every
+// package in it is arriving with this change.
+func TestReviewRefersEveryPackageInANewManifest(t *testing.T) {
+	cargoLock := "version = 4\n\n[[package]]\nname = \"anstyle\"\nversion = \"1.0.13\"\n"
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("Cargo.lock")},
+		map[string]string{"Cargo.lock": cargoLock},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest with no base-side content adds everything in it:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) || !strings.Contains(out, "anstyle") {
+		t.Errorf("expected every package in the new manifest to be named, got:\n%s", out)
+	}
+}
+
+// package-lock.json is the one manifest whose reader cannot tolerate empty
+// content the way go.mod, go.sum and Cargo.lock can: json.Unmarshal on nil or
+// empty bytes is an error, not an empty document. A manifest the merge-base
+// does not have must therefore never reach that reader at all — the absent
+// path has to short-circuit to the empty set before Extract is ever called,
+// and this is the one case that tells "short-circuited" apart from "called
+// with nil content".
+func TestReviewRefersEveryPackageInANewNPMManifest(t *testing.T) {
+	lock := `{"packages":{"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("package-lock.json")},
+		map[string]string{"package-lock.json": lock},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a manifest with no base-side content adds everything in it:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) || !strings.Contains(out, "left-pad") {
+		t.Errorf("expected every package in the new manifest to be named, not reported as unmeasured, got:\n%s", out)
+	}
+}
+
+// A path that is no manifest is compared over by nothing, and the report says
+// nothing about it.
+func TestReviewComparesNoDependenciesForAPathThatIsNoManifest(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: dependencyExemption("README.md"), "README.md": "hello"},
+		map[string]string{"README.md": "hello again"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("expected an unattended pass, got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, gateDependencies+"(") {
+		t.Errorf("no manifest was touched, so no manifest row belongs in the report:\n%s", out)
+	}
+}
+
+// bumpExemption covers the manifest paths on the condition ADR 0047 defines:
+// every version moves by a patch or a minor, with the licence and SCA rows
+// passing.
+func bumpExemption(paths ...string) string {
+	return "exemptions:\n  - name: dependency-bump\n    reason: routine version maintenance, no new dependency\n" +
+		"    versions: " + referral.VersionsPatchAndMinor + "\n    paths: [\"" +
+		strings.Join(paths, "\", \"") + "\"]\n"
+}
+
+// scanReports writes a report directory holding a scan document whose rows
+// carry the statuses given, keyed by label.
+func scanReports(t *testing.T, rows map[string]ui.Status) string {
+	t.Helper()
+	dir := t.TempDir()
+	type jsonRow struct {
+		Status ui.Status `json:"status"`
+		Label  string    `json:"label"`
+	}
+	doc := struct {
+		Command string    `json:"command"`
+		Verdict string    `json:"verdict"`
+		Rows    []jsonRow `json:"rows"`
+	}{Command: "scan", Verdict: "pass"}
+	for label, status := range rows {
+		doc.Rows = append(doc.Rows, jsonRow{Status: status, Label: label})
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, documentName("scan")), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// cleanScan is a Go component whose licence gate and advisory check both ran
+// and passed — the evidence a version-bump exemption's condition asks for.
+func cleanScan(t *testing.T) string {
+	t.Helper()
+	return scanReports(t, map[string]ui.Status{
+		"gosec(cli)":       ui.StatusPass,
+		"govulncheck(cli)": ui.StatusPass,
+		"licence(cli)":     ui.StatusPass,
+	})
+}
+
+// bumpRepo is a patch bump of one module already pinned, under an exemption
+// conditioned on patch-and-minor.
+func bumpRepo(t *testing.T) (string, string) {
+	t.Helper()
+	return reviewRepo(t,
+		map[string]string{
+			referral.FileName: bumpExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+}
+
+// The whole condition met: every version moved by a patch, and the licence and
+// SCA rows for every component ran and passed in the scan document.
+func TestReviewExemptsAPatchBumpWithPassingLicenceAndSCARows(t *testing.T) {
+	dir, base := bumpRepo(t)
+
+	out, err := runReview(t, dir, base, "--reports", cleanScan(t))
+	if err != nil {
+		t.Fatalf("expected an unattended pass, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "exempt: dependency-bump") {
+		t.Errorf("a pass must name the declaration that allowed it, got:\n%s", out)
+	}
+}
+
+// Without the evidence the condition cannot be met, so every local run — and
+// any CI job that does not pass the flag — refers the same change.
+func TestReviewRefersAVersionBumpWithNoReports(t *testing.T) {
+	dir, base := bumpRepo(t)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a condition with no evidence behind it must refer:\n%s", out)
+	}
+	if !strings.Contains(out, "dependency-bump covers these paths") {
+		t.Errorf("the referral must name the exemption whose condition went unmet, got:\n%s", out)
+	}
+	if strings.Contains(out, "exempt:") {
+		t.Errorf("an unmet condition grants nothing, got:\n%s", out)
+	}
+}
+
+// A clean SCA run says something about advisories and nothing about licences,
+// and the bump that introduces a copyleft dependency is precisely a
+// lockfile-only change with a clean SCA run.
+func TestReviewRefersAVersionBumpWhoseLicenceGateFailed(t *testing.T) {
+	dir, base := bumpRepo(t)
+	reports := scanReports(t, map[string]ui.Status{
+		"gosec(cli)":       ui.StatusPass,
+		"govulncheck(cli)": ui.StatusPass,
+		"licence(cli)":     ui.StatusFail,
+	})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a failing licence gate must not satisfy the condition:\n%s", out)
+	}
+	if strings.Contains(out, "exempt:") {
+		t.Errorf("an unmet condition grants nothing, got:\n%s", out)
+	}
+}
+
+// A component the scan document names with no licence row at all is a
+// component nothing measured, which must not read as one that passed.
+func TestReviewRefersAVersionBumpWithNoLicenceRowForAComponent(t *testing.T) {
+	dir, base := bumpRepo(t)
+	reports := scanReports(t, map[string]ui.Status{
+		"gosec(cli)":       ui.StatusPass,
+		"govulncheck(cli)": ui.StatusPass,
+		"licence(cli)":     ui.StatusPass,
+		"biome(web)":       ui.StatusPass,
+	})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a component with no licence row must not satisfy the condition:\n%s", out)
+	}
+}
+
+// A component whose advisory check is missing from the document is evidence
+// nobody took, and the condition asks for evidence.
+func TestReviewRefersAVersionBumpWithNoAdvisoryRowForAComponent(t *testing.T) {
+	dir, base := bumpRepo(t)
+	reports := scanReports(t, map[string]ui.Status{
+		"gosec(cli)":   ui.StatusPass,
+		"licence(cli)": ui.StatusPass,
+	})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a Go component with no govulncheck row must not satisfy the condition:\n%s", out)
+	}
+}
+
+// cliComponent declares one Go component named cli, rooted at the repository
+// root, so a run can be held to needing its licence and advisory rows even
+// where the scan document names it for nothing at all.
+const cliComponent = "components:\n  - name: cli\n    dir: .\n    runner: go-test\n"
+
+// A component switched off in .lydite/config.yml, or a scan that never ran,
+// carries no row of any kind — and that must not read the same as one whose
+// rows all passed.
+func TestReviewRefersAVersionBumpWithADeclaredComponentMissingFromTheScan(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName:  bumpExemption("go.sum"),
+			component.FileName: cliComponent,
+			"go.sum":           goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+	reports := scanReports(t, map[string]ui.Status{})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a declared component absent from the scan must not satisfy the condition:\n%s", out)
+	}
+}
+
+// A declared Go component's advisory row can be missing even where nothing
+// in the document hints at its language at all — no gosec row to infer from
+// — and the declaration is what has to catch it.
+func TestReviewRefersAVersionBumpWithADeclaredGoComponentMissingItsAdvisoryRow(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName:  bumpExemption("go.sum"),
+			component.FileName: cliComponent,
+			"go.sum":           goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+	)
+	reports := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusPass})
+
+	out, err := runReview(t, dir, base, "--reports", reports)
+	if err == nil {
+		t.Fatalf("a declared Go component with a passing licence row and no advisory row must not satisfy the condition:\n%s", out)
+	}
+}
+
+// A components.yml that will not parse is review's to refuse elsewhere, but
+// dependencyGatesPassed must fail its own half closed rather than let a load
+// error read as evidence.
+func TestDependencyGatesPassedFailsClosedOnAnUnreadableComponentsFile(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{
+			component.FileName: "components:\n  - name: cli\n    dir: .\n    runner: go-test\n    not_a_real_key: true\n",
+			"README.md":        "hello",
+		},
+	)
+	var warn bytes.Buffer
+	if dependencyGatesPassed(dir, []string{cleanScan(t)}, &warn) {
+		t.Fatal("an unreadable components.yml must fail the condition, not satisfy it")
+	}
+	if warn.Len() == 0 {
+		t.Error("a load that failed should warn, not fail silently")
+	}
+}
+
+// Two report directories naming one gate keep the worse of the two answers,
+// whichever order they are given in: a pass a later job's failure overturns
+// must not be forgotten because it was seen first.
+func TestDependencyGatesPassedKeepsTheWorseOfTwoReportsForOneGate(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{component.FileName: cliComponent, "README.md": "hello again"},
+	)
+	passing := scanReports(t, map[string]ui.Status{
+		"gosec(cli)":       ui.StatusPass,
+		"govulncheck(cli)": ui.StatusPass,
+		"licence(cli)":     ui.StatusPass,
+	})
+	failing := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusFail})
+
+	var warn bytes.Buffer
+	if dependencyGatesPassed(dir, []string{passing, failing}, &warn) {
+		t.Error("a passing report followed by a failing one for the same gate must not satisfy the condition")
+	}
+}
+
+// A label with no component at all — no "(" at all, or one opening at the
+// very first character, which names an empty gate rather than a missing
+// component — carries nothing this attributes, and is told apart from a
+// well-formed "gate(component)" label.
+func TestSplitGateLabel(t *testing.T) {
+	cases := []struct {
+		label           string
+		gate, component string
+		ok              bool
+	}{
+		{"licence(cli)", "licence", "cli", true},
+		{"cargo clippy(api)", "cargo clippy", "api", true},
+		{"scan", "", "", false},
+		{"(cli)", "", "", false},
+		{"licence()", "", "", false},
+		{"licence(cli", "", "", false},
+	}
+	for _, tc := range cases {
+		gate, component, ok := splitGateLabel(tc.label)
+		if gate != tc.gate || component != tc.component || ok != tc.ok {
+			t.Errorf("splitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.label, gate, component, ok, tc.gate, tc.component, tc.ok)
+		}
+	}
+}
+
+// A change patching one dependency and majoring another is not boring as a
+// whole, whatever the scan says about either.
+func TestReviewRefersAMajorBumpWithPassingRows(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: bumpExemption("go.sum"),
+			"go.sum": goSum(map[string]string{
+				"github.com/spf13/cobra":      "v1.10.1",
+				"github.com/go-git/go-git/v5": "v5.11.0",
+			}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{
+			"github.com/spf13/cobra":      "v1.10.2",
+			"github.com/go-git/go-git/v5": "v6.0.0",
+		})},
+	)
+
+	out, err := runReview(t, dir, base, "--reports", cleanScan(t))
+	if err == nil {
+		t.Fatalf("a major bump must not be covered by a patch-and-minor condition:\n%s", out)
+	}
+	if strings.Contains(out, "exempt:") {
+		t.Errorf("an unmet condition grants nothing, got:\n%s", out)
+	}
+}
+
+// A disqualifier vetoes any match, condition met or not: an added package is
+// new code entering the tree, and no version arithmetic and no clean scan says
+// anything about that.
+func TestReviewRefersAnAddedDependencyDespiteTheCondition(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: bumpExemption("go.sum"),
+			"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+		},
+		map[string]string{"go.sum": goSum(map[string]string{
+			"github.com/spf13/cobra":         "v1.10.2",
+			"github.com/google/licensecheck": "v0.3.1",
+		})},
+	)
+
+	out, err := runReview(t, dir, base, "--reports", cleanScan(t))
+	if err == nil {
+		t.Fatalf("an added dependency must be referred whatever the exemption says:\n%s", out)
+	}
+	if !strings.Contains(out, referral.DisqualificationDependencyAdded) {
+		t.Errorf("expected the added-dependency veto, got:\n%s", out)
 	}
 }

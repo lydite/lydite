@@ -169,6 +169,97 @@ loading a toolchain or adding a worktree once it finds no component asked, the s
 state" an absent `.lydite/exemptions.yml` gets above — nothing was asked for, so there is
 nothing here that could fail to run.
 
+## An added dependency refers
+
+`review`'s `measureDependencies` (`cmd/lydite/review_depdelta.go`) compares, for every
+dependency manifest the change touches, the packages the merge-base pins against the ones HEAD
+pins — both sides read with `git show <rev>:<path>`, never off the working tree or a worktree,
+since `internal/depdelta`'s readers only need a manifest's bytes. `addDependencyRows` turns
+that comparison into rows and disqualifications:
+
+- a package present at HEAD and absent at the base is `referral.DisqualificationDependencyAdded`,
+  direct or transitive alike — a version move on a name already present is not an addition, and
+  a removal never disqualifies on its own;
+- a manifest whose set could not be built at either side — an ecosystem with no reader (yarn,
+  pnpm, pip are named and not read) or content that did not parse — is
+  `referral.DisqualificationDependencyDeltaUnmeasured`, because "lydite does not know whether
+  this added a dependency" and "it did not" must not read as the same verdict;
+- a manifest compared and found to add nothing gets its own `dependencies(<path>)` pass row, so a
+  manifest the report is silent about is never confused with one nothing was measured over.
+
+Which paths are manifests is sniffed from the diff by `depdelta.Detect`, never from a
+component's declared lockfile: the question is "does this path name a manifest, and of what
+kind", which the path answers on its own, and reading component declarations would miss a
+manifest no component named. This check runs unconditionally on every `review`, with no
+per-component opt-in — unlike `api_surface`, every repository with a dependency manifest is
+covered from the day this shipped. See
+[ADR 0047](../../docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md).
+
+`measureDependencies` runs once per `review` invocation and its result, `[]manifestDelta`, feeds
+both the rows above and the `versions: patch-and-minor` condition below — one comparison
+answering two questions, so a manifest is never read off two trees twice for two different
+callers.
+
+## A version bump is exempt only on a condition
+
+An exemption may carry one condition, `versions: patch-and-minor`, and `patch-and-minor` is the
+only value it accepts — anything else is rejected by name at parse time, the stance
+`dec.KnownFields(true)` already takes toward an unknown key. Unset is no condition at all, which
+is the path-only behaviour every exemption written without one relies on. See
+[ADR 0047](../../docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md).
+
+**The condition is a further test one matched exemption must pass, never a term in a
+disjunction across several.** `Decide` asks `Covers` of a single exemption first and only then
+its condition, so an exemption requiring nothing and an exemption requiring `patch-and-minor`
+cannot be combined into a union that requires neither — the union rule the `Exemption` doc
+comment states, preserved by the ordering rather than by a second check. A covered change whose
+condition goes unmet lands exactly where an uncovered one lands, referred, and
+`Decision.Unsatisfied` names the exemption so the report can say which of the two happened:
+"nothing declares this shape" and "the shape is declared, conditionally" have different
+remedies.
+
+Two halves have to hold together, and `review.go` computes both:
+
+- **every version pair in every manifest the change touches moved by a patch or a minor**
+  (`versionsPatchAndMinor` over the `manifestDelta` values `measureDependencies` already built
+  for the added-dependency disqualifier, through `depdelta.Delta.PatchOrMinorEligible`). A
+  manifest that could not be measured fails it for the reason it also disqualifies, and a
+  `0.x` line is not boring the way a `1.x` one is — the classification lives in
+  `internal/depdelta`;
+- **the licence gate and the advisory check ran and passed for every component**
+  (`dependencyGatesPassed`), read out of the `scan.json` in each `--reports` directory. A clean
+  SCA run is evidence about advisories and nothing else, and the bump that introduces a
+  copyleft dependency is precisely a lockfile-only change with a clean SCA run, so the licence
+  gate must have **run and passed** rather than merely not failed.
+
+A scan document says what ran, not what a component is, so a row's label is taken apart into
+gate and component (`licence(cli)`, `govulncheck(cli)`) and the gates a component's rows carry
+are what name its language: `gosec` implies `govulncheck`, `cargo clippy` implies `cargo-audit`.
+TypeScript runs no advisory check, so an npm component's dependency evidence is its licence row
+alone — requiring one of it would make the condition unsatisfiable for every repository that has
+a TypeScript component.
+
+**Without `--reports` the condition can never be satisfied.** No directory, no `scan.json` in
+the ones given, and a document that will not parse are all the same answer: the flag can only
+ever supply evidence, so its absence is the absence of the exemption and the change is referred
+exactly as it was before the flag existed. Every local run is that case.
+
+`internal/referral` learns none of this. It takes a `referral.Evidence` — one boolean,
+`PatchAndMinor` — beside the change and the file, the same separation the API-break declaration
+has: `cmd/lydite` measures, and the package is handed only the verdict. A caller that measured
+nothing passes the zero value, under which every condition fails. Evaluating the condition
+inside the package would make an exemption's meaning depend on what that package could reach at
+the moment it ran, and would put git, report documents and component loading behind a function
+whose whole value is that it has none of them.
+
+**The `referral` job needs `scan` and reads its artifact.** `.github/workflows/lydite-pr.yml`'s
+`referral` job depends on `scan` and downloads its `lydite-reports-scan` artifact, passing
+`--reports` to `lydite review` when `scan.json` is actually there — `scan` skipping on a
+title-only edit, or failing outright, still lets `referral` publish a verdict, just without the
+licence and SCA evidence a `versions:` condition needs. This is added latency on every pull
+request (`referral` no longer answers as soon as `setup` does) and one more artifact dependency
+to keep correct, which ADR 0047 records as a cost asked about and approved before it was built.
+
 # Clearance: `/lydite clear`
 
 A referral is resolved by a person commenting on the pull request, never by the author
