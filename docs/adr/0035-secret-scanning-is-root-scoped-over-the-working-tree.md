@@ -24,10 +24,14 @@ asks of every scanner, and gitleaks satisfies it in one pass:
 gitleaks dir --no-banner --redact --verbose --report-format json --report-path <tmpfile> .
 ```
 
-run with the scan root as the working directory. Exit 1 is leaks found, exit 0 is clean, and
-**the exit status decides the row** — the report has no error array, so there is no Semgrep-style
-exception where the tool under-reports its own failure. A report that will not parse leaves the
-verdict to that status, as every other parser here does.
+run with the scan root as the working directory. Exit 1 is leaks found and exit 0 is clean, but
+the report carries no error array and no summary, so gitleaks exits 1 for a directory it could
+not walk exactly as it does for a leak it found. **The row follows the claims that survive
+scoping**, not that status; the status is read against the report to answer a different question,
+which is whether gitleaks walked at all. An unreadable report, an exit the report does not
+account for, a leak that names no line inside the scan root, and a scope git could not be asked
+for each fail the row with its reason in `Detail`. The amendment below states the scoping this
+verdict follows, and the limits of the four.
 
 Three flags are load-bearing and none is a preference. `--verbose` is what makes gitleaks print
 its findings at all; without it the run prints `leaks found: 61` and the author is told a count
@@ -263,3 +267,116 @@ gate's disqualifier resolves the reference itself.
   probe fixtures already are.
 - `internal/referral` must learn `gitleaks:allow`. Until it does, the suppression this gate is
   most likely to attract is the only one that clears a finding without a human.
+
+## Amendment (2026-09-20): a path `.gitignore` covers is not part of the working tree this gate reports on
+
+The scan is still root-scoped, still one pass over the working tree, and still not over history.
+What this amends is which files that working tree is taken to hold: a path `.gitignore` covers is
+not one of them for this gate's purposes, so a leak in it produces no claim.
+
+The title above packs two axes — whole-repo versus per-component, and current files versus git
+history — and this is a third, which is why nothing above rejects it: it was never raised, over a
+tree that carries no build output. A tree that carries some reads very differently. A warm Rust
+`target/` holds compiled-in test vectors that gitleaks' `private-key` and `generic-api-key` rules
+fire on by the dozen — 27 of them in one pilot, nearly all in
+`target/llvm-cov-target/debug/deps/*.rmeta` — and every one sits in a file git will not carry.
+
+### `[[allowlists]]` is the right instrument for a fixture and the wrong one for build output
+
+The section above settles how a false positive is answered — a `[[allowlists]]` block in the
+repository's own `.gitleaks.toml`, which lydite reaches by passing no `--config` — and that stays
+exactly as it is for a credential-shaped string in a committed fixture. Build output is not that.
+It is not a false positive in a file under review; it is a compiler cache, and answering it
+through the config would have every adopting repository enumerate the artefacts of its own
+toolchain to get a clean scan. A blanket `target/` path allowlist in every consumer's
+`.gitleaks.toml` is an adoption tax paid for lydite's failure to ask git a question git already
+answers. `.gitleaksignore` and `--baseline-path` remain rejected for the reason stated above, and
+that reason is sharper here: a fingerprint list keyed by `file:rule:line` over a regenerated
+`target/` lapses on every rebuild.
+
+**Rejected: generating a config to inject path allowlists.** It means passing `--config`, which
+takes the repository's own `.gitleaks.toml` away — the arrangement this ADR chose deliberately —
+and `[extend]`-merging it back is a translation problem, because `.gitignore` patterns are not
+regexes. It buys nothing the scoping below does not.
+
+### The walk cannot be scoped, so the claims are
+
+`gitleaks dir` (v8.30.1, `cmd/directory.go`) accepts exactly one path, and none of its global
+flags controls which paths are walked: there is no `.gitignore` integration, no exclude flag and
+no way to hand it a file list. Its only exclusion mechanisms are the three already named here —
+`.gitleaksignore` fingerprints, config allowlists, and inline `gitleaks:allow`.
+
+So the filter sits between the report and the findings. `gitdiff.Tracked` runs
+`git ls-files -z --cached --others --exclude-standard` and returns exactly the set this gate has a
+claim over: what git tracks, plus what is untracked and not ignored, minus everything
+`.gitignore` covers. Its paths are relative to the scan root and slash-separated, which is the
+shape a `Finding.Path` already carries, so the two compare as text.
+
+**The precedent is lydite's own, and it is not Semgrep.** `internal/mutation/worktree.go` calls
+`gitdiff.Tracked` to decide what to copy into a mutation worker, precisely so `target/`,
+`node_modules/`, `dist/` and `.git` stay out without lydite re-deriving a judgement `.gitignore`
+already states, and `internal/orphan` calls it for the same reason — keeping files that are
+untracked and not ignored in scope deliberately, since a newly authored, not-yet-added source
+file is the moment its author can most cheaply fix a finding. Semgrep's tracked-file behaviour is
+semgrep's own default and lydite passes nothing to request it, so there is no lydite code there
+to copy.
+
+**This is deliberately not a suppression.** `internal/referral`'s `suppressionMarkers` treats
+`gitleaks:allow` as one, and a suppression is a thing that *refers* — which is correct for an
+author writing a marker beside a finding and wrong for this. A gitignored path is not a
+suppressed finding; it is a file this gate has no claim over. Implemented as a suppression, every
+repository with a `target/` would be permanently referred, which is a worse failure than the one
+being fixed.
+
+### What it gives up, and why that is the right trade
+
+A real credential sitting in a gitignored file is not reported at all. That is the whole of the
+cost and it is stated rather than buried.
+
+The trade is right because the gate's claim is *rotate this credential* and its scope is what the
+repository could publish. A file git will not carry cannot be committed by accident — it takes a
+deliberate `git add -f` — so the leak this gate exists to catch is not reachable from there. An
+untracked file that is *not* ignored is one `git add .` from being published, and
+`--others --exclude-standard` keeps exactly those in scope. A developer's `.env` holding live
+credentials is the common shape of what is given up, and it is a shape that was never one commit
+from the default branch.
+
+### The verdict follows the claims, and a gate that could not run says so
+
+Scoping the claims makes the exit status unusable as the verdict: gitleaks exits 1 because it
+found something in `target/`, and a gate whose every claim was filtered away must not still fail.
+So the row follows the claims that survive, and what the status is still read for is whether
+gitleaks walked at all — a run that did not is the one thing an empty claim list cannot otherwise
+be told apart from a clean tree.
+
+Four outcomes are this gate failing rather than this gate's finding, and each fails the row with
+its reason in `Detail`: a report lydite could not read, an exit the report does not account for,
+a leak that could not be placed inside the scan root, and a scope git could not be asked for. The
+last of those reports every claim unscoped as well as failing: a scope lydite could not establish
+costs the row, never the claims, because a pass there is indistinguishable from a tree that was
+scoped and clean.
+
+Three limits of that are named rather than claimed away.
+
+- **A failing row is the strictest thing available here, not the precise one.** The grammar's own
+  status for a gate that could not run is the amber `StatusUnmeasured`
+  ([output-grammar.md](../../agentic/references/output-grammar.md)), and `executil.Result` carries
+  a verdict as an error or nothing, so `resultRows` has only pass and fail to render these as.
+  Red overstating a gate that could not run is the direction
+  [`a-gate-that-could-not-run-never-renders-as-one-that-passed`](../../agentic/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
+  asks for; a third status here is a change to `executil.Result`'s shape and to every caller of it.
+- **A partial walk that exits 1 with a non-empty report is indistinguishable from a finished
+  one.** gitleaks writes nothing that separates them. What it costs is a run whose surviving
+  claims were all filtered away passing on a walk that stopped early.
+- **`lydite scan --dir <a gitignored subtree>` reports clean.** `git ls-files` run inside an
+  ignored directory lists nothing, so every claim is filtered and the gate finds no leak in a
+  tree it may well have leaks in. The scan root is meant to be the repository root, where this
+  cannot arise; a root inside an ignored subtree is not detected as the degenerate case it is.
+
+### Known cost: the whole tree is still walked
+
+gitleaks reads every file under the scan root, ignored or not, so a repository with a
+multi-gigabyte `target/` pays the full walk for a report most of which is then filtered away.
+Scoping the claims buys correctness and no speed at all. A shadow tree of tracked files built to
+hand gitleaks a smaller walk is rejected: it is a second copy of the repository per scan, and the
+paths in the report would then name the copy rather than the tree a site is read from.
