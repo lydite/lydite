@@ -26,6 +26,7 @@ function claims(overrides: Record<string, unknown> = {}) {
     exp: Math.floor(Date.now() / 1000) + 300,
     repository: "lydite/proving-ground",
     ref: "refs/pull/7/merge",
+    sha: "abc123",
     ...overrides,
   };
 }
@@ -392,6 +393,23 @@ describe("recording a status", () => {
       delete partial[field];
       expect((await postStatus(token, partial)).status).toBe(400);
     }
+  });
+
+  // The revision is the claim's, not the caller's: naming another repository's
+  // commit — or any commit but the one the run is for — must not sign a status
+  // onto it with the App's identity.
+  it("refuses a sha that is not the one the run is for", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, { ...verdict, sha: "someone-elses-sha" });
+    expect(response.status).toBe(403);
+  });
+
+  // A context is a check's name, and this is the App's identity to spend: it
+  // must not be asked to stand in for a check belonging to another tool.
+  it("refuses a context outside lydite's own namespace", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, { ...verdict, context: "some-other-tool/check" });
+    expect(response.status).toBe(400);
   });
 
   // The same designed path the comment has: not installed is an answer, and

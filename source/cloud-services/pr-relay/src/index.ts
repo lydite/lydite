@@ -148,6 +148,20 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
   ) {
     return json(400, { error: "a state, a context, a description and a sha are required" });
   }
+  if (route === "/status" && payload.sha !== claims.sha) {
+    // The claim, not the body, says which revision this run is for — the same
+    // reason `pull_request` is checked against `ref` above. Without this, a
+    // sha is just a string the caller wrote, and the App's identity would
+    // sign a status onto any commit of the repository the run is already for.
+    return json(403, { error: "the sha submitted is not the one this run is for" });
+  }
+  if (route === "/status" && !payload.context?.startsWith("lydite/")) {
+    // A context is a check's name, and this is the App's identity to spend.
+    // Confined to lydite's own namespace, the worst a caller can do is author
+    // a wrong lydite check — never stand in for a check that belongs to
+    // another tool.
+    return json(400, { error: "a status context must start with lydite/" });
+  }
   if (route === "/review" && payload.version !== OPS_VERSION) {
     // Refused whole rather than half-applied. A document from a newer lydite
     // may mean something this does not know, and applying the operations it
@@ -225,11 +239,12 @@ const UNWRITTEN: Record<string, string> = {
 };
 
 /**
- * Records the verdict on the revision the client named.
+ * Records the verdict on the revision the run's own claim named.
  *
- * The revision is the client's and the repository is the claim's, so the worst
- * a wrong sha does is write a status onto another commit of the repository the
- * run is already for.
+ * `handle` has already checked that the caller's `sha` is `claims.sha` and
+ * that its `context` is lydite's own, so by the time this runs both the
+ * revision and the repository are the claim's, not the caller's — the only
+ * status this can ever write is one the run is already for.
  */
 async function postStatus(
   token: string,
