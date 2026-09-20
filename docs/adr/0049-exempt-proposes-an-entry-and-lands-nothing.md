@@ -45,6 +45,18 @@ hand-written entry, because the block reads as lydite's output. The reviewer who
 interrogated a glob a colleague typed will accept the same glob when a tool appears to have
 derived it.
 
+**A derived path is glob-escaped, because a filename is not a pattern.** The same widening
+arrives one level down without anybody typing anything: `paths` entries are `internal/pathmatch`
+patterns, and a changed file whose real name carries `*`, `?`, `[` or `]` becomes one when it is
+copied verbatim. `app/[slug]/page.tsx` — an ordinary Next.js route — proposes a character class
+covering `app/s/page.tsx` and missing the file that produced it, and a file git permits to be
+named `**` proposes the pattern covering every path in the repository, presented as the paths
+this change touches. So `escapeGlob` in `cmd/lydite/clearance.go` prefixes each of those
+characters, and the backslash itself, with a backslash before the entry is encoded: `path.Match`,
+which `pathmatch.Match` calls per segment, reads a backslash as escaping the rune after it.
+A `**` segment needs no exception — it escapes to `\*\*`, which is not the string
+`pathmatch` special-cases as the many-segments wildcard, so it stays two literal stars.
+
 **A fixed preset vocabulary was rejected** — `readme-only`, `docs-only`, and whatever else
 somebody enumerates. It does not generalise: the next boring change has a shape nobody named,
 and the verb then has nothing to say about precisely the case it was asked about. And it is

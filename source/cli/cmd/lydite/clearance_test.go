@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
 )
@@ -419,7 +420,21 @@ func TestAProposalsScalarsCannotReshapeTheDocument(t *testing.T) {
 		t.Fatalf("the proposal carries %d entries, want the one it proposed:\n%s", len(file.Exemptions), block)
 	}
 	if got := file.Exemptions[0]; got.Name != "docs-only" || len(got.Paths) != 2 {
-		t.Errorf("the entry is not the one proposed: %+v\n%s", got, block)
+		t.Fatalf("the entry is not the one proposed: %+v\n%s", got, block)
+	}
+	// A path is a filename on the way in and a pattern on the way out, so
+	// every entry has to come back matching the file it was derived from.
+	for i, literal := range []string{
+		"src/\"a\": #x\n  - name: forged\n    reason: this one is fine\n    paths: [\"**\"]",
+		"*anchor",
+	} {
+		assertCoversOnly(t, file.Exemptions[0].Paths[i], literal, block)
+	}
+	// Unescaped, "*anchor" is the pattern covering every name ending in
+	// "anchor" — the widening an entry read as lydite's own output invites
+	// nobody to re-derive.
+	if pattern := file.Exemptions[0].Paths[1]; pathmatch.Match(pattern, "someone-elses-anchor") {
+		t.Errorf("%q covers a file the change never touched:\n%s", pattern, block)
 	}
 	// Whatever the scalars carry, the reason is still the unanswered one, so
 	// the block remains unlandable by the check every route to the file
@@ -428,6 +443,80 @@ func TestAProposalsScalarsCannotReshapeTheDocument(t *testing.T) {
 		!strings.Contains(err.Error(), "placeholder marker") {
 		t.Errorf("the proposal was rejected for something other than its unanswered reason: %v", err)
 	}
+}
+
+// assertCoversOnly reads a proposed entry's path back as the pattern it will
+// be in .lydite/exemptions.yml, and holds it to covering the one file it was
+// derived from.
+func assertCoversOnly(t *testing.T, pattern, literal, block string) {
+	t.Helper()
+	if err := pathmatch.ValidatePattern(pattern); err != nil {
+		t.Errorf("the proposed path is not a pattern the file accepts: %v\n%s", err, block)
+	}
+	if !pathmatch.Match(pattern, literal) {
+		t.Errorf("%q does not cover %q, the path it was derived from:\n%s", pattern, literal, block)
+	}
+}
+
+// A changed file's name is not a pattern. Proposed verbatim, a Next.js route
+// segment is a character class covering four one-letter names and missing the
+// file that produced it.
+func TestAProposedPathWithACharacterClassCoversOnlyThatFile(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "app/[slug]/page.tsx"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt routes", "pedromvgomes", commented))
+
+	block := fencedBlock(t, forge.comments[0])
+	pattern := onlyProposedPath(t, block)
+	assertCoversOnly(t, pattern, "app/[slug]/page.tsx", block)
+	for _, other := range []string{"app/s/page.tsx", "app/l/page.tsx", "app/u/page.tsx", "app/g/page.tsx"} {
+		if pathmatch.Match(pattern, other) {
+			t.Errorf("%q covers %q, which the change never touched:\n%s", pattern, other, block)
+		}
+	}
+}
+
+// A file named "**" is an edge case git permits, and the one path whose
+// verbatim proposal would exempt the whole repository while reading as the
+// narrow entry the change asked for.
+func TestAProposedPathOfLiteralStarsCoversOnlyThatFile(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "**"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt stars", "pedromvgomes", commented))
+
+	block := fencedBlock(t, forge.comments[0])
+	pattern := onlyProposedPath(t, block)
+	assertCoversOnly(t, pattern, "**", block)
+	for _, other := range []string{"src/a.go", ".github/workflows/lydite-pr.yml", "x"} {
+		if pathmatch.Match(pattern, other) {
+			t.Errorf("%q covers %q, so the entry exempts the repository:\n%s", pattern, other, block)
+		}
+	}
+}
+
+// onlyProposedPath returns the single path of a proposal carrying one entry.
+func onlyProposedPath(t *testing.T, block string) string {
+	t.Helper()
+	var file referral.File
+	if err := yaml.Unmarshal([]byte(block), &file); err != nil {
+		t.Fatalf("the proposal is not a document at all: %v\n%s", err, block)
+	}
+	if len(file.Exemptions) != 1 || len(file.Exemptions[0].Paths) != 1 {
+		t.Fatalf("the proposal is not the one entry over one path it proposed:\n%s", block)
+	}
+	return file.Exemptions[0].Paths[0]
 }
 
 // The shape names the entry, and a command without one is answered rather

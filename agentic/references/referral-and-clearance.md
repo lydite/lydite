@@ -345,6 +345,16 @@ README — and it is worse here than in a hand-written entry, because the block 
 lydite's output and the reviewer who would have interrogated a colleague's glob accepts
 the same glob from a tool.
 
+**A derived path is glob-escaped too**, because a `paths:` entry is a `pathmatch` pattern
+and a filename is not. `cmd/lydite/clearance.go`'s `escapeGlob` prefixes `\`, `*`, `?`, `[`
+and `]` with a backslash in every path before `proposalYAML` encodes it, so an entry matches
+exactly the file it was derived from: without it, `app/[slug]/page.tsx` proposes a character
+class covering `app/s/page.tsx` and missing its own file, and a file named `**` proposes the
+pattern covering the whole repository under a headline saying it covers what the change
+touched. `path.Match` — which `pathmatch.Match` calls per segment — reads `\` as escaping the
+rune after it, and a `**` segment escapes to `\*\*`, which is not the string `pathmatch`
+special-cases as the many-segments wildcard.
+
 **The `reason` is a question, and the marker in it is reserved.**
 `referral.ReasonPlaceholderMarker` is the literal `TODO(lydite):`, and
 `Exemption.validate` rejects any reason carrying it *anywhere* — a reason that keeps the

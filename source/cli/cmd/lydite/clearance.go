@@ -254,6 +254,31 @@ type proposalEntry struct {
 	Paths  []string `yaml:"paths"`
 }
 
+// escapeGlob turns a real filename into the pathmatch pattern matching that
+// name and nothing else.
+//
+// An entry's paths are patterns, and a filename is not: `app/[slug]/page.tsx`
+// is an ordinary routing convention and a character class at once, so proposed
+// verbatim it covers `app/s/page.tsx` and misses the file it was derived from,
+// while a file named `**` proposes the pattern covering every path in the
+// repository. path.Match — which pathmatch.Match calls per segment — reads a
+// backslash as escaping the rune after it, so prefixing every character it
+// would otherwise treat as syntax makes the segment literal. A `**` segment
+// escapes to `\*\*`, which is not the string pathmatch special-cases as the
+// many-segments wildcard and so stays two literal stars.
+func escapeGlob(p string) string {
+	var b strings.Builder
+	b.Grow(len(p))
+	for _, r := range p {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // proposalYAML encodes the draft entry.
 //
 // The encoder is what quotes and escapes every scalar. A name or a path
@@ -262,10 +287,14 @@ type proposalEntry struct {
 // and add a second entry, with a reason that answers itself, to something
 // lydite posts under its own identity.
 func proposalYAML(name string, paths []string) ([]string, error) {
+	patterns := make([]string, len(paths))
+	for i, p := range paths {
+		patterns[i] = escapeGlob(p)
+	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	entry := proposalEntry{Name: name, Reason: proposalReason, Paths: paths}
+	entry := proposalEntry{Name: name, Reason: proposalReason, Paths: patterns}
 	if err := enc.Encode(proposalFile{Exemptions: []proposalEntry{entry}}); err != nil {
 		return nil, err
 	}
