@@ -18,7 +18,6 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/rust"
-	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
@@ -943,6 +942,246 @@ func TestReviewComparesNothingForARustComponentThatDidNotOptIn(t *testing.T) {
 	}
 }
 
+// A TypeScript package whose public API the gate compares, the declaration
+// that opts it in, and the surface each tree declares.
+//
+// surface.txt is what the stub api-extractor below reads out of a tree, in
+// place of the declarations a real one reads out of that tree's build. The
+// config keeps provisioning out of the run, so no Node toolchain is downloaded
+// to find out what the surface is.
+const (
+	webPackageJSON = "{\n  \"name\": \"@probe/web\",\n  \"version\": \"0.1.0\",\n  \"types\": \"dist/index.d.ts\"\n}\n"
+	webSurface     = "export declare function doThing(n: number): number;\n"
+	webOptIn       = "components:\n  - name: web\n    dir: web\n    runner: vitest\n    api_surface: {}\n"
+)
+
+func webBase(componentsYML string) map[string]string {
+	return map[string]string{
+		"README.md":        "hello",
+		component.FileName: componentsYML,
+		config.FileName:    noProvisioning,
+		"web/package.json": webPackageJSON,
+		"web/surface.txt":  webSurface,
+		referral.FileName:  "exemptions:\n  - name: web-source\n    reason: ordinary source edits\n    paths: [\"web/**\"]\n",
+	}
+}
+
+// fencePlaceholder stands where the report's own fence goes: a Go raw string
+// cannot hold a backtick, and the stub has to write the fence api-extractor
+// writes or the report holds no declarations at all.
+const fencePlaceholder = "@@FENCE@@"
+
+// apiExtractorStub is the stand-in api-extractor: it writes the surface.txt of
+// whichever tree it was pointed at as that tree's API report.
+//
+// It stands in for the tool, not for its output — what is under test here is
+// the verdict a pair of reports reaches, and internal/tsapisurface's own tests
+// tie the reading of a report to ones recorded from the real tool.
+const apiExtractorStub = `#!/bin/sh
+config=
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--config" ]; then config=$2; fi
+  shift
+done
+field() { sed -n "s|.*\"$1\":\"\([^\"]*\)\".*|\1|p" "$config"; }
+project=$(field projectFolder)
+report="$(field reportFolder)/$(field reportFileName)"
+{ printf '%s\n' '@@FENCE@@ts'; cat "$project/surface.txt"; printf '%s\n' '@@FENCE@@'; } > "$report"
+`
+
+// npmStubScript is the stand-in npm: it installs the pinned api-extractor by
+// putting the stub above where the real install would put the binary, and does
+// whatever the test asked of a build. Its first argument is the directory
+// holding the stubs, and its second the body of the `run` case.
+const npmStubScript = `#!/bin/sh
+case "$1" in
+  ci|install)
+    if grep -q api-extractor package.json 2>/dev/null; then
+      mkdir -p node_modules/.bin
+      cp "%[1]s/api-extractor-stub" node_modules/.bin/api-extractor
+    fi
+    ;;
+  run)
+    %[2]s
+    ;;
+esac
+exit 0
+`
+
+// npmBuildRefuses is a build that does not complete, which is a tree whose
+// declarations are not the ones it declares.
+const npmBuildRefuses = "echo 'error: tsc refused: TS2307 cannot find module' >&2; exit 1"
+
+// npmStubs puts the two stubs first on PATH and points the tool cache at a
+// directory of this test's own, so the comparison is a real invocation with
+// nothing installed, nothing fetched and no node on the machine involved.
+func npmStubs(t *testing.T, build string) {
+	t.Helper()
+	home := t.TempDir()
+	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
+	// $HOME/Library/Caches on macOS, and the pinned api-extractor is installed
+	// under whichever it answers.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	dir := t.TempDir()
+	write := func(name, script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
+			t.Fatalf("writing the %s stub: %v", name, err)
+		}
+	}
+	write("api-extractor-stub", strings.ReplaceAll(apiExtractorStub, fencePlaceholder, "```"))
+	write("npm", fmt.Sprintf(npmStubScript, dir, build))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// An undeclared break is a gate for a TypeScript component exactly as it is for
+// a Go or Rust one: the author clears it by restoring the declaration or by
+// declaring the break, and both are work they can do.
+func TestReviewFailsAnUndeclaredTypeScriptAPIBreak(t *testing.T) {
+	npmStubs(t, ":")
+	dir, base := reviewRepo(t, webBase(webOptIn),
+		map[string]string{"web/surface.txt": "export declare function other(): void;\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "web/package.json") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The same break, declared, reaches a person instead. The declaration decides
+// which verdict a break gets and never whether it is reported at all: the break
+// is still the row a reader reviews, so a title can add a referral and can
+// never make the break disappear.
+func TestReviewRefersADeclaredTypeScriptAPIBreak(t *testing.T) {
+	npmStubs(t, ":")
+	dir, base := reviewRepoSaying(t, webBase(webOptIn),
+		map[string]string{"web/surface.txt": "export declare function other(): void;\n"},
+		"feat(web)!: drop doThing")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration it read, got:\n%s", out)
+	}
+	if strings.Contains(out, "undeclared") {
+		t.Errorf("a declared break must not also fire the gate:\n%s", out)
+	}
+	if !strings.Contains(out, gateAPISurface+"(web)") || !strings.Contains(out, ", declared") {
+		t.Errorf("the per-component row naming the declared break is missing, got:\n%s", out)
+	}
+}
+
+// Ordinary growth, undeclared, is the one combination that merges unattended:
+// the comparison ran, and an added declaration is not a break.
+func TestReviewPassesAnAdditiveTypeScriptAPIChange(t *testing.T) {
+	npmStubs(t, ":")
+	dir, base := reviewRepo(t, webBase(webOptIn),
+		map[string]string{"web/surface.txt": webSurface + "\nexport declare function also(): void;\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("an additive change must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// A tree whose build did not complete is neither pass nor fail. The
+// declarations api-extractor would read there are not the ones the tree
+// declares, so passing would be a comparison that never happened rendering as
+// one that happened and found nothing.
+func TestReviewRefersATypeScriptSurfaceItCouldNotCompare(t *testing.T) {
+	npmStubs(t, npmBuildRefuses)
+	dir, base := reviewRepo(t, webBase(webOptIn),
+		map[string]string{"web/surface.txt": "export declare function other(): void;\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an uncomputable surface must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "web") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "TS2307") {
+		t.Errorf("the referral must carry the tool's own account, got:\n%s", out)
+	}
+}
+
+// A package naming no entry point declares no surface a consumer can reach, so
+// it is left out — and said out loud. A component reported as compared and
+// clean, whose packages were half of them never read, reads exactly like one
+// where every package was.
+func TestReviewNamesTheTypeScriptPackagesItSkipped(t *testing.T) {
+	npmStubs(t, ":")
+	base := webBase(webOptIn)
+	delete(base, "web/package.json")
+	delete(base, "web/surface.txt")
+	base["web/package.json"] = "{\n  \"name\": \"@probe/web\",\n  \"workspaces\": [\"packages/*\"]\n}\n"
+	base["web/packages/api/package.json"] = webPackageJSON
+	base["web/packages/api/surface.txt"] = webSurface
+	base["web/packages/tools/package.json"] = "{\n  \"name\": \"@probe/tools\",\n  \"private\": true\n}\n"
+	dir, baseSHA := reviewRepo(t, base,
+		map[string]string{"web/packages/api/surface.txt": webSurface + "\nexport declare function also(): void;\n"})
+
+	out, err := runReview(t, dir, baseSHA)
+	if err != nil {
+		t.Fatalf("an additive change must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+	if !strings.Contains(out, "names no entry point") || !strings.Contains(out, "@probe/tools") {
+		t.Errorf("a package that was never compared must be named, got:\n%s", out)
+	}
+}
+
+// --publish with no --surfaces computes and publishes in the same process, so a
+// TypeScript component's comparison must not run there either: it installs and
+// builds both trees, which runs their own lifecycle scripts, and a credential
+// this process holds is reachable from a same-user descendant. The stubs here
+// would answer the comparison, so a run that reached them would pass instead.
+func TestReviewPublishWithoutSurfacesRefusesToRunATypeScriptComparison(t *testing.T) {
+	npmStubs(t, ":")
+	dir, base := reviewRepo(t, webBase(webOptIn),
+		map[string]string{"web/surface.txt": "export declare function other(): void;\n"})
+
+	forge := &fakeForge{}
+	forge.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+	payload := map[string]any{
+		"number":       41,
+		"pull_request": map[string]any{"title": "docs: nothing breaking", "head": map[string]any{"sha": head}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(event, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a TypeScript comparison refused under --publish must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "must not happen in the same process") {
+		t.Errorf("the referral must say why the comparison did not run, got:\n%s", out)
+	}
+}
+
 // review compare and review --surfaces reach the exact verdict a single
 // review invocation would, without --surfaces ever running the comparison
 // again: the stub is removed before that step runs, so a second invocation
@@ -1272,18 +1511,21 @@ func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
 	}
 }
 
-// component.Load refuses api_surface on every language but Go and Rust, so a
-// component reaching compareSurface under a third language is a defensive
-// path rather than one reachable through review — this exercises it directly
-// against a TypeScript runner, which resolves to neither.
-func TestCompareSurfaceHasNoComparisonForAThirdLanguage(t *testing.T) {
-	c := component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}
-	findings, uncomputable := compareSurface(context.Background(), newReviewCmd(), c, t.TempDir(), t.TempDir(), toolchain.Envs(nil))
+// component.Load refuses api_surface on a component that declares no language,
+// so a component reaching compareSurface without one is a defensive path rather
+// than one reachable through review — this exercises it directly against a
+// command-invoked component, which resolves to no language at all.
+func TestCompareSurfaceHasNoComparisonForALanguagelessComponent(t *testing.T) {
+	c := component.Component{Name: "tools", Dir: "tools", Command: []string{"make", "test"}}
+	findings, skipped, uncomputable := compareSurface(context.Background(), newReviewCmd(), c, t.TempDir(), t.TempDir(), toolchain.Envs(nil))
 	if findings != nil {
 		t.Errorf("findings = %+v, want none", findings)
 	}
-	if uncomputable != "no public-API comparison exists for this component's language" {
-		t.Errorf("uncomputable = %q, want the language named as having no comparison", uncomputable)
+	if skipped != nil {
+		t.Errorf("skipped = %v, want none — nothing was selected to compare in the first place", skipped)
+	}
+	if uncomputable != "no public-API comparison exists for a component that declares no language" {
+		t.Errorf("uncomputable = %q, want the missing language named as the reason", uncomputable)
 	}
 }
 
