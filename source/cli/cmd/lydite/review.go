@@ -17,7 +17,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, baseBranch, eventPath string
+	var dir, base, baseBranch, eventPath, surfacesPath string
 	var asJSON, noColor, doPublish bool
 	var reports []string
 	cmd := &cobra.Command{
@@ -39,24 +39,75 @@ A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
 It runs two checks. For each component that declares api_surface, the exported
-API of its Go module is compared against the merge-base. A break this change
-did not declare fails, and a declared one is referred. For each dependency
-manifest the change touches, the packages pinned at the merge-base and at HEAD
-are compared. A package the merge-base did not pin is referred, and so is a
-manifest whose dependencies could not be read at all.
+API of its Go module or its Rust crate is compared against the merge-base. A
+break this change did not declare fails, and a declared one is referred. For
+each dependency manifest the change touches, the packages pinned at the
+merge-base and at HEAD are compared. A package the merge-base did not pin is
+referred, and so is a manifest whose dependencies could not be read at all.
 
 An exemption declaring ` + "`versions: " + referral.VersionsPatchAndMinor + "`" + ` covers a change only when every
 version it moves moved by a patch or a minor, and the licence and SCA rows for
 every component ran and passed in a scan document under --reports. Without
---reports that condition is never met, and such a change is referred.`,
+--reports that condition is never met, and such a change is referred.
+
+--surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
+here. A component's own comparison executes its own code — a Rust crate's
+build.rs, a proc-macro — so the job that publishes with a credential should
+not also be the job that ran it: compute in one job with none, decide and
+publish in another that never runs the change's own code.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
 
+			// The base is always resolved here, never taken from --surfaces's
+			// document: that document crosses from a job that ran the
+			// change's own code — a Rust component's build.rs, a proc-macro
+			// — to this one, which is about to publish with a credential,
+			// and a base claimed equal to HEAD is exactly the kind of thing
+			// that code could forge to make the diff this run reads look
+			// empty. Trusting it would be trusting the code under review to
+			// say what it was compared against.
 			baseSHA, err := resolveReviewBase(ctx, dir, base, baseBranch)
 			if err != nil {
 				return err
 			}
+
+			var surfaces []surfaceComparison
+			if surfacesPath != "" {
+				doc, readErr := readSurfaces(surfacesPath)
+				switch readErr {
+				case nil:
+					// reconcileSurfaces checks the document's base against
+					// baseSHA above and requires a result for every
+					// component this tree says opted in — neither is taken
+					// on the document's own word.
+					surfaces, err = reconcileSurfaces(dir, baseSHA, doc)
+					if err != nil {
+						return err
+					}
+				default:
+					// Unreadable, not absent: a run that could not read what
+					// review compare wrote must still refer rather than exit
+					// quietly under 2 and publish nothing — exit 1 here
+					// would read to the caller as "an answer", and the
+					// workflow step that only re-fails a job past 2 would
+					// let this pass with no status posted at all.
+					surfaces, err = uncomputableSurfaces(dir, "the comparison document could not be read: "+readErr.Error())
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				// Guarded exactly when this invocation will also publish:
+				// that is the one combination where a Rust comparison would
+				// run inside the process about to use a publishing
+				// credential.
+				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA, doPublish)
+				if err != nil {
+					return err
+				}
+			}
+
 			file, err := loadExemptionsAt(ctx, dir, baseSHA)
 			if err != nil {
 				return err
@@ -87,9 +138,7 @@ every component ran and passed in a scan document under --reports. Without
 			// surface nothing could be compared are both referrals, and they
 			// reach the report through the same disqualification the verdict
 			// line is derived from.
-			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
-				return err
-			}
+			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath, surfaces)
 			addDependencyRows(report, &decision, deltas, baseSHA)
 			addDecisionRows(report, decision, len(file.Exemptions))
 
@@ -124,11 +173,13 @@ every component ran and passed in a scan document under --reports. Without
 	// by accident nor appear to have posted when it did not.
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
+	cmd.Flags().StringVar(&surfacesPath, "surfaces", "", "read a comparison 'review compare' already made instead of running it here, and decide from that instead")
 	// Evidence only, never a gate of its own: an exemption conditioned on
 	// `versions: patch-and-minor` needs a scan that ran, and a run given no
 	// directory refers exactly as it does without the flag.
 	cmd.Flags().StringSliceVar(&reports, "reports", nil,
 		"a "+runner.ReportDir+" directory whose scan document supplies the licence and SCA evidence a conditional exemption needs; repeatable")
+	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
 }
 

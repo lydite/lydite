@@ -1,0 +1,10 @@
+
+--- failure function_missing: pub fn removed or renamed ---
+
+Description:
+A publicly-visible function cannot be imported by its prior path. A `pub use` may have been removed, or the function itself may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_missing.ron
+
+Failed in:
+  function probe::removed, previously in file $BASE/src/lib.rs:4

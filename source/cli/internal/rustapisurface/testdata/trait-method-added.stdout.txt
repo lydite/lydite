@@ -1,0 +1,10 @@
+
+--- failure trait_method_added: pub trait method added ---
+
+Description:
+A non-sealed public trait added a new method without a default implementation, which breaks downstream implementations of the trait
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#trait-new-item-no-default
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/trait_method_added.ron
+
+Failed in:
+  trait method probe::Store::put in file $HEAD/src/lib.rs:19
