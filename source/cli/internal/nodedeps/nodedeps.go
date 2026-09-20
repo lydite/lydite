@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"lydite/lydite/internal/executil"
 )
@@ -218,24 +219,65 @@ func Commands(root, override string) []Command {
 // and a repository that authored one said where it meant it to run by
 // declaring the component there.
 //
+// One root is installed once: every component resolving it shares the single
+// install the first of them runs, and one arriving while that runs waits for
+// it rather than starting its own.
+//
 // Whether a failure is fatal is the caller's to decide, and the two callers
 // answer differently: the coverage gate omits a package it cannot measure,
 // while a test run that proceeds after a failed install reports import errors
 // naming the tests rather than the missing dependencies.
 func Install(ctx context.Context, dir, scanRoot, override string, env []string, out io.Writer) error {
-	root := dir
+	root := filepath.Clean(dir)
 	if override == "" {
 		var ok bool
 		if root, ok = WorkspaceRoot(dir, scanRoot); !ok {
 			return nil
 		}
 	}
+	if _, done := installed.Load(root); done {
+		return nil
+	}
+	unlock := lockRoot(root)
+	defer unlock()
+	// Re-checked under the lock: the install this one waited for is the one it
+	// was about to do, over the same node_modules tree.
+	if _, done := installed.Load(root); done {
+		return nil
+	}
 	for _, cmd := range Commands(root, override) {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
 		res := executil.RunOutput(ctx, root, env, out, cmd.Argv[0], cmd.Argv[1:]...)
 		if !res.Ok() && !cmd.Optional {
+			// Only success is recorded, so the next component resolving this
+			// root installs again: a root whose install failed has no tree to
+			// share, and skipping would hand it a second failure it cannot
+			// explain.
 			return fmt.Errorf("%s: %w", strings.Join(cmd.Argv, " "), res.Err)
 		}
 	}
+	installed.Store(root, struct{}{})
 	return nil
+}
+
+// installLocks serialises installs of one workspace root within this process,
+// and installed names the roots an install has already completed for.
+//
+// In-process only, and that is the whole of what it claims: two lydite
+// processes installing the same workspace still race. What it closes is the
+// case this process creates for itself by preparing components concurrently —
+// a frozen install run from inside a workspace package installs the *whole*
+// workspace, so every component resolving one root writes one node_modules
+// tree, and internal/scheduler locks a component's own declared directory and
+// the ports it publishes, never a root above them all.
+var (
+	installLocks sync.Map
+	installed    sync.Map
+)
+
+func lockRoot(root string) func() {
+	v, _ := installLocks.LoadOrStore(root, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }

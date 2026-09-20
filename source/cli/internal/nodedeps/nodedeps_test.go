@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -277,6 +279,80 @@ func TestTheOverrideRunsInTheComponentDirectory(t *testing.T) {
 	if got := read(t, cwd); got != dir {
 		t.Errorf("the override ran in %q, want the component directory %q", got, dir)
 	}
+}
+
+// A frozen install run from inside a workspace package installs the whole
+// workspace, so several components resolving one root would each rewrite the
+// node_modules tree the others are reading from — a directory no component
+// declares and the scheduler therefore locks nothing for.
+func TestOneWorkspaceRootIsInstalledOnce(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	runs := stubRecording(t, "pnpm", 0)
+
+	var wg sync.WaitGroup
+	for _, pkg := range []string{"ui", "core", "api", "web"} {
+		dir := mkdir(t, root, "packages", pkg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Install(context.Background(), dir, root, "", nil, io.Discard); err != nil {
+				t.Errorf("Install: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := invocations(t, runs); got != 1 {
+		t.Errorf("pnpm ran %d times, want one install for the shared root", got)
+	}
+}
+
+// A root whose install failed has no tree to share, so the next component
+// resolving it installs again rather than inheriting a failure it cannot
+// explain.
+func TestAFailedInstallIsNotTakenAsDone(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	runs := stubRecording(t, "pnpm", 1)
+
+	for _, pkg := range []string{"ui", "core"} {
+		dir := mkdir(t, root, "packages", pkg)
+		if err := Install(context.Background(), dir, root, "", nil, io.Discard); err == nil {
+			t.Fatalf("%s: Install reported success for a failing manager", pkg)
+		}
+	}
+
+	if got := invocations(t, runs); got != 2 {
+		t.Errorf("pnpm ran %d times, want each caller to retry a failed install", got)
+	}
+}
+
+// stubRecording puts a program of the given name ahead of any real one on
+// PATH, writing one file per invocation into the returned directory and
+// exiting with code. It sleeps long enough that a concurrent caller arrives
+// while it is running, so a test counting invocations counts a race that
+// actually happened.
+func stubRecording(t *testing.T, name string, code int) string {
+	t.Helper()
+	bin := t.TempDir()
+	runs := mkdir(t, t.TempDir(), "runs")
+	script := "#!/bin/sh\nmktemp " + filepath.Join(runs, "run.XXXXXX") + " >/dev/null\nsleep 0.2\nexit " + strconv.Itoa(code) + "\n"
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil { // #nosec G306 -- a stub that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return runs
+}
+
+// invocations counts the files stubRecording's program left behind.
+func invocations(t *testing.T, runs string) int {
+	t.Helper()
+	entries, err := os.ReadDir(runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
 }
 
 // stubManager puts a program of the given name ahead of any real one on PATH,
