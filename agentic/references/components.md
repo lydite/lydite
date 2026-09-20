@@ -222,10 +222,28 @@ lockfiles resolves to nothing rather than a guessed priority order, and
 deliberately **no key naming the package manager**: the lockfile already states it,
 and a second statement could only drift.
 
+**The install runs from the workspace root, not the component's own directory.**
+`nodedeps.WorkspaceRoot` walks up from the component's `dir` to the nearest
+ancestor holding a recognised lockfile, bounded by the scan root, and installs
+there — a package of a workspace declares its dependencies nowhere; the lockfile
+that resolves them sits at the root above it, and a component at `packages/ui`
+in a repository whose only `pnpm-lock.yaml` is at the root installs from that
+root rather than installing nothing. `typescript.install` is unaffected by this
+walk: the override still replaces detection entirely and still runs in the
+component's own directory, since a repository that authored one said where it
+meant it to run by declaring the component there. Several components resolving
+the same root share one install: the first to reach it runs the frozen install,
+and every other one waits and then finds it already done, rather than each
+mutating the same `node_modules` tree on its own schedule.
+
 An install that fails stops the suite, with a row saying so. A JavaScript suite run
 without its dependencies fails at import, naming the tests rather than what is
 actually missing — the same misattribution a suite run without its database
-produces.
+produces. A component for which no workspace root resolves — no single lockfile
+between its `dir` and the scan root, and no `typescript.install` override — gets
+its own `install(<name>)` row instead: unmeasured, not a pass or a fail, because
+no package manager ran and the run must say so rather than read like one that
+installed the workspace it was pointed at.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
