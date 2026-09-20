@@ -343,7 +343,7 @@ function postStatus(
 
 const verdict = {
   state: "pending",
-  context: "lydite/referral",
+  context: "lydite/some-check",
   description: "waiting on a reviewer",
   sha: "abc123",
 };
@@ -362,12 +362,12 @@ describe("recording a status", () => {
       "https://api.github.com/repos/lydite/proving-ground/statuses/abc123",
     );
     expect(written[0]?.init?.method).toBe("POST");
-    expect((written[0]?.init?.headers as Record<string, string>).authorization).toBe(
+    expect((written[0]?.init?.headers as Record<string, string> | undefined)?.authorization).toBe(
       "Bearer ghs_test",
     );
     expect(JSON.parse(String(written[0]?.init?.body))).toEqual({
       state: "pending",
-      context: "lydite/referral",
+      context: "lydite/some-check",
       description: "waiting on a reviewer",
     });
   });
@@ -440,6 +440,18 @@ describe("recording a status", () => {
   it("refuses a context outside lydite's own namespace", async () => {
     const token = await keys.sign(claims());
     const response = await postStatus(token, { ...verdict, context: "some-other-tool/check" });
+    expect(response.status).toBe(400);
+  });
+
+  // The OIDC claim names a repository and a pull request, not a job: nothing
+  // here tells `referral-publish` — the one job isolated to hold
+  // `statuses: write` — apart from any other job in the same workflow that
+  // also holds `id-token: write` and runs the pull request's own code. Until
+  // a caller can be told apart from the code it is running, the one status a
+  // human Clearance acts on is refused outright, `lydite/` prefix or not.
+  it("refuses the clearance context even though it is in lydite's namespace", async () => {
+    const token = await keys.sign(claims());
+    const response = await postStatus(token, { ...verdict, context: "lydite/referral" });
     expect(response.status).toBe(400);
   });
 

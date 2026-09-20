@@ -46,6 +46,11 @@ const JWKS = "https://token.actions.githubusercontent.com/.well-known/jwks";
 
 const ROUTES = ["/comment", "/review", "/status"];
 
+// `lydite/lydite/internal/clearance.Context`. The one status a human
+// Clearance acts on, and the reason `/status` cannot yet accept it — see the
+// check below.
+const CLEARANCE_CONTEXT = "lydite/referral";
+
 /**
  * What the relay talks to.
  *
@@ -154,6 +159,16 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     // a wrong lydite check — never stand in for a check that belongs to
     // another tool.
     return json(400, { error: "a status context must start with lydite/" });
+  }
+  if (route === "/status" && payload.context === CLEARANCE_CONTEXT) {
+    // The OIDC claim names a repository and a pull request, not a job — this
+    // relay cannot tell `referral-publish`, the one job isolated to hold
+    // `statuses: write`, from any other job in the same workflow that also
+    // holds `id-token: write` and runs the pull request's own code. Until a
+    // caller can be told apart from the code it is running, the one context a
+    // human Clearance acts on is refused here rather than trusted to whoever
+    // asks for it.
+    return json(400, { error: `${CLEARANCE_CONTEXT} is not accepted through this relay yet` });
   }
   if (route === "/review" && payload.version !== OPS_VERSION) {
     // Refused whole rather than half-applied. A document from a newer lydite

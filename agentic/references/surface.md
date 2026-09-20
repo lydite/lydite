@@ -89,7 +89,12 @@ held; the repository is the claim's, the revision has to equal the pull request'
 synthetic merge commit, the same revision `forge.PullRequestEvent` reads a head from the event
 payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it starts `lydite/`,
 so a caller can no more author a status on another commit or under another tool's check name than
-it can name another repository. `POST /review`
+it can name another repository. `context` is refused outright when it is `clearance.Context`
+(`lydite/referral`) even so: the claim names a repository and a pull request, not a job, so
+nothing here tells `referral-publish` — the one job isolated to hold `statuses: write` — apart
+from `publish`, which also holds `id-token: write` and does run the pull request's own code.
+That exclusion lifts only once slice 2's job isolation makes the two tellable apart; the relay
+cannot make that call by itself. `POST /review`
 applies the operations document `lydite threads` computed. Before applying anything, `/review`
 lists the pull request's own review comments and **refuses the whole request if any `reply` or
 `delete` names an id outside that set** — a comment id is a number the caller supplies while

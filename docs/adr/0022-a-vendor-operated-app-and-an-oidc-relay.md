@@ -261,9 +261,20 @@ than from `GITHUB_SHA` to avoid — so requiring it to equal `sha` would refuse
 every legitimate call; resolving the head is the one extra round trip `/status`
 makes that its siblings do not need. `context` is refused unless it starts
 `lydite/`, so the App's identity can only ever author a lydite check, never
-stand in for one belonging to another tool. The vocabulary of a status stays
-the CLI's within that boundary: the relay decides nothing about what a state or
-a context *means*, for the reason it decides nothing about which thread
+stand in for one belonging to another tool — **with one further exclusion,
+found in review.** The OIDC claim names a repository and a pull request, not a
+job: nothing here tells `referral-publish` — the one job this workflow
+isolates to hold `statuses: write`, by building from a separate base checkout
+so the job that can write a status never runs the pull request's own code —
+apart from any other job in the same workflow that also holds `id-token:
+write` and does run that code (`publish` is exactly such a job today). Until a
+caller can be told apart from the code it is running, `POST /status` refuses
+`clearance.Context` (`lydite/referral`) outright, `lydite/` prefix or not.
+Lifting that exclusion is conditioned on the job-isolation work slice 2 does
+in `.github/workflows/`, not on anything this endpoint can enforce alone. The
+vocabulary of a status stays the CLI's within that boundary: the relay decides
+nothing about what a state or a context *means*, for the reason it decides
+nothing about which thread
 belongs to which finding.
 
 **"The Apps configure nothing yet" is unchanged.** Posting a status and
