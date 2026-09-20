@@ -214,3 +214,55 @@ rather than a stopgap, the App is still genuinely optional, a repository that
 installed nothing still gets the whole surface, and the marker is still what lets
 the two paths hand a standing comment over. What changes is only that a consumer
 who configured the relay and got it wrong is told so.
+
+## Amendment (2026-09-20): `statuses: write` is real, and the relay posts the status
+
+The summary above says the `lydite` App "holds `pull-requests: write` and
+`statuses: write` and is the visible identity on every comment and status". The
+second permission is the half of that sentence the code did not carry: a token
+narrowed to `pull_requests: write` alone, and no endpoint that writes a status,
+leaves the referral check published by whichever token the publishing job holds.
+This discharges it. It is an amendment rather than an ADR of its own because no
+decision is restated — the two-App split, the OIDC exchange, the four claim
+checks, the repository coming from the claim and never from the body, the
+per-Worker secrets and the fallback ladder all carry over word for word. Only
+*what a minted token may write* widens, and only by the one permission the
+summary already named.
+
+`installationToken` requests `{ pull_requests: "write", statuses: "write" }`, so
+two sentences above narrow. "mints a token narrowed to that one repository and to
+`pull_requests: write`" now reads *and to `pull_requests: write` and
+`statuses: write`*, and the worst a pull request's own code can achieve through
+the relay is a wrong comment or a wrong status on its own pull request —
+addressed, either way, to the person who wrote it. The baseline paragraph's
+conclusion is untouched and is worth stating so: `statuses: write` is not
+`contents: write`, the relay still has no endpoint that commits anything, and a
+job that records a baseline still holds a pushing token of its own.
+
+**Requesting a permission does not confer it.** An installation token narrows
+what the App was granted and can never exceed it, so `statuses: write` has to be
+granted to the `lydite` App in its own settings — in GitHub's UI, outside this
+repository — before a Worker asking for it can mint a token at all, the comment's
+included. That grant is the one ordering constraint this carries, it precedes the
+deploy rather than following it, and it is not made yet.
+
+`POST /status` is the third endpoint, beside `/comment` and `/review` and built
+from the same parts: the same claim verification, the same installation lookup,
+the same `409` *answer* where the App is not installed, the same `401` with no
+detail for a token that did not verify. It takes `{state, context, description,
+sha}` with nothing defaulted and posts to
+`/repos/:owner/:repo/statuses/:sha` — the repository from the verified claim, the
+revision from the client, so a wrong `sha` writes a status onto another commit of
+the repository the run is already for and nowhere else. The vocabulary of a
+status stays the CLI's: the relay decides nothing about what a state or a context
+means, for the reason it decides nothing about which thread belongs to which
+finding.
+
+**"The Apps configure nothing yet" is unchanged.** Posting a status and
+*requiring* one are different grants and different owners. Pinning a ruleset's
+required check to the App's identity needs `administration: write`, which neither
+App requests, and it is gt's side of
+[#34](https://github.com/lydite/lydite/issues/34) rather than lydite's — this
+repository is agnostic to whether a consumer requires the check. What changes is
+only that the check, when it is posted, is attributable to the App that published
+it.

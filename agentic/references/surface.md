@@ -79,9 +79,13 @@ credential**. The job presents the GitHub Actions OIDC token; the relay verifies
 `iss`, a declared `aud` and `exp`, takes the repository from the `repository` claim and never
 from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge` and
 `refs/pull/<n>/head` both), mints an installation token narrowed to that one repository and to
-`pull_requests: write`, writes, and discards it. It stores nothing.
+`pull_requests: write` and `statuses: write`, writes, and discards it. It stores nothing.
 
-Two endpoints. `POST /comment` upserts the standing comment by its marker; `POST /review`
+Three endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
+records a verdict on a revision of that pull request — `{state, context, description, sha}`, with
+nothing defaulted — so the check is authored by the App rather than by whichever token the job
+held; the repository is still the claim's and only the revision is the caller's, so a wrong `sha`
+writes onto another commit of the repository the run is already for and nowhere else. `POST /review`
 applies the operations document `lydite threads` computed. Before applying anything, `/review`
 lists the pull request's own review comments and **refuses the whole request if any `reply` or
 `delete` names an id outside that set** — a comment id is a number the caller supplies while
@@ -93,8 +97,9 @@ That takes the comment write out of the job that runs the repository's code: wit
 token there, the worst a pull request's own suite can provoke through the relay is a wrong comment
 on its own pull request. It **narrows [#49](https://github.com/lydite/lydite/issues/49) rather than
 closing it.** Recording a coverage baseline is a push to the `lydite` branch and needs
-`contents: write`; the relay mints `pull_requests: write` and has no endpoint that commits
-anything. `lydite test record` takes the coverage write out of the gating job the same way, and
+`contents: write`; the relay mints neither that nor anything else beyond `pull_requests: write`
+and `statuses: write`, and has no endpoint that commits anything. `lydite test record` takes the
+coverage write out of the gating job the same way, and
 neither closes the rest: a recording job holds a pushing token whatever command it runs, so it
 belongs on a tree that has already merged — which is where `lydite-baseline.yml` runs it.
 
@@ -126,6 +131,14 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
   repository. The `github-token` fallback above stays a supported path, not a temporary one, for
   any consumer without the relay configured or the App installed. No finding appears in both
   surfaces regardless of which path is live.
+- **`POST /status` is code, not yet a live route.** The deployed Worker predates it, so the
+  referral status is still published by the job's own token. **The grant comes before the
+  deploy**: an installation token can only narrow permissions the App already holds, so
+  `statuses: write` has to be granted to the `lydite` App in its own settings — in GitHub's UI,
+  outside this repository — before a Worker that asks for it can mint a token at all, comment
+  included. *Requiring* the check is a different grant again and gt's side of
+  [#34](https://github.com/lydite/lydite/issues/34): lydite makes the check attributable to the
+  App, and decides nothing about whether a repository requires it.
 
 ## The threads
 
