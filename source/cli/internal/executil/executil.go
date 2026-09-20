@@ -196,6 +196,39 @@ func RunQuietEnv(ctx context.Context, dir string, extraEnv []string, name string
 	return res
 }
 
+// RunQuietIsolatedEnv is RunQuiet with the child's environment being env
+// entirely, rather than env layered onto this process's own the way every
+// other Run* function here does.
+//
+// It exists for a subprocess that builds and executes code the tree under
+// scan controls — a Rust crate's build.rs, a proc-macro — where the calling
+// process's own environment may carry a credential that code must never
+// reach. Every other Run* function inherits this process's environment
+// because the tools they invoke are lydite's own, running in a directory the
+// scanned repository does not get to execute anything in; this one exists
+// because api_surface's Rust comparison is the first invocation in this
+// package that does.
+func RunQuietIsolatedEnv(ctx context.Context, dir string, env []string, name string, args ...string) Result {
+	cmd := exec.CommandContext(ctx, resolve(dir, name, env), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name is a hardcoded tool name at every call site and args are passed as argv, never shell-interpreted
+	cmd.Dir = dir
+	// A nil Env means os/exec inherits this process's own — the one thing this
+	// function exists to refuse — so a caller passing none gets an empty
+	// environment rather than every one of this process's variables.
+	cmd.Env = env
+	if cmd.Env == nil {
+		cmd.Env = []string{}
+	}
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	res := Result{Name: name, Args: args, Output: out.String(), Stderr: errBuf.String(), Err: err}
+	if cmd.ProcessState != nil {
+		res.MaxRSS = peakRSS(cmd.ProcessState.SysUsage())
+	}
+	return res
+}
+
 // resolve finds name on the PATH the child is being given, rather than on the
 // one this process happens to have.
 //

@@ -1,0 +1,3 @@
+error: no crates with library targets selected, nothing to semver-check
+note: only library targets contain an API surface that can be checked for semver
+note: skipped the following crates since they have no library target: probebin

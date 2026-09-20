@@ -16,7 +16,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, baseBranch, eventPath string
+	var dir, base, baseBranch, eventPath, surfacesPath string
 	var asJSON, noColor, doPublish bool
 	cmd := &cobra.Command{
 		Use: "review",
@@ -37,16 +37,67 @@ A referral names no defect. With no exemptions declared, every change is
 referred — including a correct one.
 
 It runs one check: for each component that declares api_surface, the exported
-API of its Go module is compared against the merge-base. A break this change
-did not declare fails, and a declared one is referred.`,
+API of its Go module or its Rust crate is compared against the merge-base. A
+break this change did not declare fails, and a declared one is referred.
+
+--surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
+here. A component's own comparison executes its own code — a Rust crate's
+build.rs, a proc-macro — so the job that publishes with a credential should
+not also be the job that ran it: compute in one job with none, decide and
+publish in another that never runs the change's own code.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
 
+			// The base is always resolved here, never taken from --surfaces's
+			// document: that document crosses from a job that ran the
+			// change's own code — a Rust component's build.rs, a proc-macro
+			// — to this one, which is about to publish with a credential,
+			// and a base claimed equal to HEAD is exactly the kind of thing
+			// that code could forge to make the diff this run reads look
+			// empty. Trusting it would be trusting the code under review to
+			// say what it was compared against.
 			baseSHA, err := resolveReviewBase(ctx, dir, base, baseBranch)
 			if err != nil {
 				return err
 			}
+
+			var surfaces []surfaceComparison
+			if surfacesPath != "" {
+				doc, readErr := readSurfaces(surfacesPath)
+				switch readErr {
+				case nil:
+					// reconcileSurfaces checks the document's base against
+					// baseSHA above and requires a result for every
+					// component this tree says opted in — neither is taken
+					// on the document's own word.
+					surfaces, err = reconcileSurfaces(dir, baseSHA, doc)
+					if err != nil {
+						return err
+					}
+				default:
+					// Unreadable, not absent: a run that could not read what
+					// review compare wrote must still refer rather than exit
+					// quietly under 2 and publish nothing — exit 1 here
+					// would read to the caller as "an answer", and the
+					// workflow step that only re-fails a job past 2 would
+					// let this pass with no status posted at all.
+					surfaces, err = uncomputableSurfaces(dir, "the comparison document could not be read: "+readErr.Error())
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				// Guarded exactly when this invocation will also publish:
+				// that is the one combination where a Rust comparison would
+				// run inside the process about to use a publishing
+				// credential.
+				surfaces, err = computeAPISurfaces(ctx, cmd, dir, baseSHA, doPublish)
+				if err != nil {
+					return err
+				}
+			}
+
 			file, err := loadExemptionsAt(ctx, dir, baseSHA)
 			if err != nil {
 				return err
@@ -68,9 +119,7 @@ did not declare fails, and a declared one is referred.`,
 			// surface nothing could be compared are both referrals, and they
 			// reach the report through the same disqualification the verdict
 			// line is derived from.
-			if err := addAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath); err != nil {
-				return err
-			}
+			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath, surfaces)
 			addDecisionRows(report, decision, len(file.Exemptions))
 
 			// Published after the rows are added and from the report's own
@@ -104,6 +153,8 @@ did not declare fails, and a declared one is referred.`,
 	// by accident nor appear to have posted when it did not.
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
+	cmd.Flags().StringVar(&surfacesPath, "surfaces", "", "read a comparison 'review compare' already made instead of running it here, and decide from that instead")
+	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
 }
 

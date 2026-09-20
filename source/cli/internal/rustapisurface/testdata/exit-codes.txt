@@ -1,0 +1,10 @@
+removed-function 100
+changed-signature 100
+trait-method-added 100
+removed-struct-field 100
+compatible-addition 0
+unreachable-change 0
+version-bump 100
+version-bump-derived 0
+base-does-not-build 101
+no-library-target 101

@@ -6,11 +6,20 @@
 # release is the point — a dogfood against the last release tests the last
 # release.
 #
-#   referral ──────────────────────┐   no needs, so the status lands in seconds
+#   referral ─► referral-publish ──┐   no other needs, so the status lands in seconds
 #   scan ──────────────────────────┤   each job uploads its .lydite-reports/
 #   plan ─┬─► test (matrix) ───────► merge
 #         └─► mutation (matrix) ───► mutation-merge
 #                                  └─► publish   needs all, if: always()
+#
+# referral only compares — an opted-in Rust component's api_surface
+# comparison builds and executes the head tree's own build.rs and
+# proc-macros — and holds no credential. referral-publish decides and
+# publishes from referral's raw result and its own separate checkout,
+# holding the one credential that can write a commit status and running
+# none of the change's own code: it never re-derives anything referral
+# already computed, and never trusts anything referral's own process tree
+# could have written after that comparison ran.
 #
 # `plan` groups the declared components into shards — the sets that must run in
 # one process, because they publish a host port in common or are rooted at
@@ -99,9 +108,72 @@ jobs:
           path: ${{ runner.temp }}/lydite
           retention-days: 1
 
+  # Compares every opted-in component's public API against the merge-base,
+  # and nothing else: no token, no statuses:write, no exemptions read, no
+  # decision made. An opted-in Rust component's comparison builds and runs
+  # the head tree's own build.rs and proc-macros — code the change under
+  # review controls — so the job that runs it must hold no credential worth
+  # forging a status with, and must not be trusted to have decided anything
+  # honestly either: referral-publish, below, holds the one credential and
+  # makes the one decision, from this job's raw result and its own,
+  # separate checkout — never from anything this job could have tampered
+  # with after computing it.
   referral:
     name: referral
     needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The comparison runs against <merge-base>..HEAD, so the history
+          # reaching that merge-base has to be present. A shallow checkout
+          # resolves no merge-base and the run fails rather than comparing
+          # against a tree that describes something else.
+          fetch-depth: 0
+          # actions/checkout embeds github.token into this tree's own git
+          # config by default (an http.extraheader), readable by anything with
+          # filesystem access to it — which an opted-in Rust component's own
+          # build.rs has. This job holds no such token in its own environment
+          # either, but the checkout must not hand the checked-out tree one on
+          # its own.
+          persist-credentials: false
+
+      - uses: ./.github/actions/lydite-binary
+
+      # Runs from the repository root: --dir locates .lydite/components.yml.
+      # review compare makes no decision and reads no exemptions, so unlike
+      # the single `review` invocation this replaces, its own exit code is
+      # always a real failure — there is no verdict here to answer with one.
+      - name: compare every opted-in component's public API
+        run: lydite review compare --dir . --write-surfaces "${RUNNER_TEMP}/referral-surfaces.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: referral-surfaces
+          path: ${{ runner.temp }}/referral-surfaces.json
+          retention-days: 1
+
+  # Decides from referral's raw result and publishes the verdict. It checks
+  # the change out to read its exemptions, its diff and its declared breaking
+  # changes — text, never executed — but runs no build, no test and no
+  # comparison: referral, above, already made the one comparison that would
+  # run the change's own code.
+  #
+  # It also runs no binary the change under review could have influenced.
+  # `uses:` does not evaluate `${{ }}` expressions, so a remote reference
+  # pinned at a computed SHA is not something Actions accepts at all — and
+  # even a working version of that idea would only have protected the
+  # composite actions' own YAML, not the actual `lydite` binary, which
+  # `setup`'s artifact builds from the pull request's own checkout. Both are
+  # closed the same way: a separate checkout of the base commit, built here,
+  # is this job's only source for anything it executes or reads a local
+  # action from.
+  referral-publish:
+    name: referral publish
+    needs: referral
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -111,24 +183,64 @@ jobs:
       # a referral while the matrix is still running (ADR 0015).
       statuses: write
     steps:
+      # Both checkouts name a `path:`, so each cleans only its own
+      # subdirectory rather than the whole job workspace — the PR tree and
+      # the trusted base tree are separate siblings, neither able to
+      # overwrite or nest inside the other. `./base/.github/actions/...`
+      # below always resolves from the trusted checkout; nothing the pull
+      # request's own tree contains is on that lookup path.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The referral is computed from <merge-base>..HEAD, so the history
-          # reaching that merge-base has to be present. A shallow checkout
-          # resolves no merge-base and the run fails rather than deciding from
-          # a diff that describes something else.
+          path: head
           fetch-depth: 0
+          # This tree is read, never executed — exemptions, the diff, a
+          # declared breaking change — but it still must not hold a
+          # credential a compromised read (a malicious .lydite/exemptions.yml
+          # is still just YAML, but nothing about this checkout should have
+          # to be the reason that stays true).
+          persist-credentials: false
 
-      - uses: ./.github/actions/lydite-binary
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
 
-      # Runs from the repository root: --dir locates the exemptions file, and
-      # the diff a referral reads covers the whole repository regardless.
-      #
-      # `review` exits 2 on a referral and 1 on the isolation gate, and both
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: base/source/cli/go.mod
+          cache: true
+          cache-dependency-path: base/source/cli/go.sum
+
+      # The same tags `.goreleaser.yml` builds a release with, matching
+      # `setup`'s own build step — the binary this job runs is the base
+      # commit's, not the pull request's.
+      # GOWORK=off regardless: `go build` otherwise walks every ancestor of
+      # base/source/cli looking for a go.work, and the job workspace root is
+      # an ancestor of base/source/cli whether or not the pull request's own
+      # checkout lives beside it. A go.work at that root, from any source,
+      # could `replace` a dependency — Cobra, say — with something that runs
+      # when this binary does, in the one job holding statuses: write.
+      - name: build lydite from the base commit
+        working-directory: base/source/cli
+        env:
+          LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+          GOWORK: "off"
+        run: |
+          mkdir -p "${RUNNER_TEMP}/lydite-bin"
+          go build -tags "$LYDITE_BUILD_TAGS" -o "${RUNNER_TEMP}/lydite-bin/lydite" ./cmd/lydite
+          echo "${RUNNER_TEMP}/lydite-bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: referral-surfaces
+          path: ${{ runner.temp }}
+
+      # review exits 2 on a referral and 1 on the isolation gate, and both
       # are answers rather than malfunctions — the verdict is carried by the
-      # status this step just published and by the report it wrote, so the step
-      # must not fail the job over one. Anything above 2 is lydite failing to
-      # reach an answer, which must still fail the job.
+      # status this step just published and by the report it wrote, so the
+      # step must not fail the job over one. Anything above 2 is lydite
+      # failing to reach an answer, which must still fail the job.
       #
       # The exit code is captured with `|| verdict=$?` rather than read from
       # `$?` on the next line, because the runner invokes this with `bash -e`:
@@ -140,12 +252,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           verdict=0
-          lydite review --dir . --publish || verdict=$?
+          lydite review --dir head --surfaces "${RUNNER_TEMP}/referral-surfaces.json" --publish || verdict=$?
           if [ "$verdict" -gt 2 ]; then
             exit "$verdict"
           fi
 
-      - uses: ./.github/actions/lydite-reports
+      # From the base checkout above, the same reason the binary this job
+      # runs is: a `./` action resolves from whatever this job's own
+      # workspace holds, and `base/` is the only checkout here the pull
+      # request's own tree does not share a directory with.
+      - uses: ./base/.github/actions/lydite-reports
         if: always()
         with:
           name: referral
@@ -572,7 +688,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [setup, referral, scan, merge, mutation-merge]
+    needs: [setup, referral-publish, scan, merge, mutation-merge]
     # Runs whatever the others did. A comment that only appears when everything
     # passed is a comment nobody needs: the run that failed is the one whose
     # reader wants to know why. The title condition beside always() matches

@@ -11,11 +11,15 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -716,6 +720,547 @@ func TestPullRequestTitleWarnsOnAMalformedEvent(t *testing.T) {
 	}
 }
 
+// A Rust crate whose public API the gate compares, the declaration that opts
+// it in, and the config that keeps provisioning out of the run: the comparison
+// is the stub below, so nothing here needs a rustup channel and none is
+// downloaded to find that out.
+const (
+	crateCargoToml = "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+	crateAPI       = "pub fn do_thing(n: i32) -> i32 {\n    n\n}\n"
+	crateOptIn     = "components:\n  - name: probe\n    dir: probe\n    runner: cargo-nextest\n    api_surface: {}\n"
+	cratePlain     = "components:\n  - name: probe\n    dir: probe\n    runner: cargo-nextest\n"
+	noProvisioning = "toolchain:\n  enabled: false\n"
+)
+
+func crateBase(componentsYML string) map[string]string {
+	return map[string]string{
+		"README.md":        "hello",
+		component.FileName: componentsYML,
+		config.FileName:    noProvisioning,
+		"probe/Cargo.toml": crateCargoToml,
+		"probe/src/lib.rs": crateAPI,
+		referral.FileName:  "exemptions:\n  - name: probe-source\n    reason: ordinary source edits\n    paths: [\"probe/**\"]\n",
+	}
+}
+
+// The three answers cargo-semver-checks gives, as the stub that gives them.
+//
+// Each is the exit code and the stdout shape internal/rustapisurface reads,
+// which that package's own tests tie to runs recorded from the real tool. What
+// these stand in for here is the tool, not its output: what is under test is
+// the verdict each answer reaches.
+const (
+	// semverChecksBroken reports one removed function, located in the baseline
+	// tree the invocation names — which is what makes the finding a removal,
+	// and its line the merge-base's.
+	semverChecksBroken = `#!/bin/sh
+base=
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--baseline-root" ]; then base=$2; fi
+  shift
+done
+printf '%s\n' "--- failure function_missing: pub fn removed or renamed ---" "" "Failed in:" "  function probe::do_thing, previously in file $base/src/lib.rs:1"
+exit 100
+`
+	semverChecksUnbroken = "#!/bin/sh\nexit 0\n"
+	// semverChecksRefused is the crate with no library target: exit 101, and
+	// the tool's own account of why on stderr.
+	semverChecksRefused = "#!/bin/sh\necho 'error: no crates with library targets selected, nothing to semver-check' >&2\nexit 101\n"
+)
+
+// semverChecksStub puts a stand-in cargo-semver-checks in the version-keyed
+// tool cache, so the comparison is a real invocation with nothing installed,
+// nothing fetched and no cargo on the machine involved.
+func semverChecksStub(t *testing.T, script string) {
+	t.Helper()
+	// rustup keeps its channels under RUSTUP_HOME, which defaults to a
+	// directory beneath $HOME. Read before the home below replaces it: the
+	// toolchain probe asks rustup which channel the component resolves to, and
+	// pointed at an empty home rustup answers by downloading a whole toolchain.
+	rustupHome := os.Getenv("RUSTUP_HOME")
+	if rustupHome == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			rustupHome = filepath.Join(home, ".rustup")
+		}
+	}
+	home := t.TempDir()
+	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
+	// $HOME/Library/Caches on macOS.
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	if rustupHome != "" {
+		t.Setenv("RUSTUP_HOME", rustupHome)
+	}
+	bin, err := (cargotool.Tool{Name: "cargo-semver-checks", Version: rust.CargoSemverChecksVersion}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(bin), 0o750); err != nil {
+		t.Fatalf("creating the cache directory: %v", err)
+	}
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
+		t.Fatalf("writing the stub: %v", err)
+	}
+}
+
+// removeSemverChecksStub deletes the stub semverChecksStub installed, so a
+// test can prove a later step never runs cargo-semver-checks again: with
+// nothing left to execute, a step that tried would fail outright.
+func removeSemverChecksStub(t *testing.T) {
+	t.Helper()
+	bin, err := (cargotool.Tool{Name: "cargo-semver-checks", Version: rust.CargoSemverChecksVersion}).Binary()
+	if err != nil {
+		t.Fatalf("locating the cached binary: %v", err)
+	}
+	if err := os.Remove(bin); err != nil {
+		t.Fatalf("removing the stub: %v", err)
+	}
+}
+
+// An undeclared break is a gate for a Rust component exactly as it is for a Go
+// one: the author clears it by restoring the API or by declaring the break,
+// and both are work they can do.
+func TestReviewFailsAnUndeclaredRustAPIBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "probe/src/lib.rs") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The same break, declared, reaches a person instead. The declaration decides
+// which verdict a break gets and never whether it is reported at all: the
+// break is still named, and the run is still not one that may merge unread.
+func TestReviewRefersADeclaredRustAPIBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepoSaying(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"},
+		"feat(probe)!: drop do_thing")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declared break must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration it read, got:\n%s", out)
+	}
+	if strings.Contains(out, "undeclared") {
+		t.Errorf("a declared break must not also fire the gate:\n%s", out)
+	}
+	// The claim adds a referral and removes nothing: the break itself is still
+	// the row a reader reviews, located at its merge-base declaration. A
+	// declaration that made the break disappear from the report would be the
+	// author clearing a gate by writing a title.
+	if !strings.Contains(out, gateAPISurface+"(probe)") || !strings.Contains(out, ", declared") {
+		t.Errorf("the per-component row naming the declared break is missing, got:\n%s", out)
+	}
+	if !strings.Contains(out, "merge-base probe/src/lib.rs:1") {
+		t.Errorf("a removed symbol must be located at its merge-base declaration, got:\n%s", out)
+	}
+}
+
+// A declaration with no break behind it is not free. It is honoured on its own
+// evidence — the author's — and the component that was compared says what the
+// comparison found, which is nothing.
+func TestReviewRefersARustDeclarationWithNoBreak(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepoSaying(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": crateAPI + "\npub fn also() {}\n"},
+		"feat(probe)!: say it breaks")
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a declaration with nothing behind it must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPIBreakDeclared) {
+		t.Errorf("the referral must name the declaration, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// Ordinary growth, undeclared, is the one combination that merges unattended:
+// the comparison ran, and it found nothing.
+func TestReviewPassesAnAdditiveRustAPIChange(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": crateAPI + "\npub fn also() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("an additive change must merge unattended, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "no incompatible change") {
+		t.Errorf("a compared component must say it was compared, got:\n%s", out)
+	}
+}
+
+// A run the tool would not make is neither pass nor fail. Failing is a gate
+// the author cannot clear, and passing is a comparison that never happened
+// rendering as one that happened and found nothing.
+func TestReviewRefersARustSurfaceItCouldNotCompare(t *testing.T) {
+	semverChecksStub(t, semverChecksRefused)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an uncomputable surface must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing to semver-check") {
+		t.Errorf("the referral must carry the tool's own account, got:\n%s", out)
+	}
+}
+
+// Nil means not measured, for Rust as for Go. A component that did not ask has
+// its API compared by nothing — the stub here would report a break, and is
+// never run.
+func TestReviewComparesNothingForARustComponentThatDidNotOptIn(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(cratePlain),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a component that did not opt in must not be gated, got %v:\n%s", err, out)
+	}
+	if strings.Contains(out, gateAPISurface) {
+		t.Errorf("nothing asked for a comparison, so nothing may be reported about one:\n%s", out)
+	}
+}
+
+// review compare and review --surfaces reach the exact verdict a single
+// review invocation would, without --surfaces ever running the comparison
+// again: the stub is removed before that step runs, so a second invocation
+// would fail outright rather than silently repeat the answer.
+func TestReviewCompareAndSurfacesReachTheSameVerdictAsOneInvocation(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	compare := newReviewCompareCmd()
+	var compareOut bytes.Buffer
+	compare.SetOut(&compareOut)
+	compare.SetErr(&compareOut)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, compareOut.String())
+	}
+
+	// Proves --surfaces never re-runs the comparison: the stub that would
+	// answer it is gone, so a second invocation has nothing to execute.
+	removeSemverChecksStub(t)
+
+	out, err := runReview(t, dir, base, "--surfaces", surfacesPath)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("an undeclared break must still fail (exit 1), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, "undeclared") || !strings.Contains(out, "probe/src/lib.rs") {
+		t.Errorf("the failure must name the break and where it was, got:\n%s", out)
+	}
+}
+
+// The document review compare writes names the base it actually compared
+// against, so review --surfaces answers against that commit rather than
+// re-resolving "auto" and risking a different answer if origin's default
+// branch moved between the two invocations.
+func TestReviewCompareRecordsTheBaseItResolved(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\npub fn also() {}\n"})
+
+	compare := newReviewCompareCmd()
+	var compareOut bytes.Buffer
+	compare.SetOut(&compareOut)
+	compare.SetErr(&compareOut)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, compareOut.String())
+	}
+
+	doc, err := readSurfaces(surfacesPath)
+	if err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+	if doc.Base != base {
+		t.Errorf("recorded base = %q, want %q", doc.Base, base)
+	}
+	if len(doc.Results) != 1 || doc.Results[0].Component != "probe" {
+		t.Errorf("results = %+v, want one result for probe", doc.Results)
+	}
+}
+
+// review compare is reached through `review`'s own command tree, not only by
+// constructing it directly the way the tests above do: without it wired in,
+// `lydite review compare` has no --write-surfaces flag of its own to parse,
+// and this fails before RunE ever runs.
+func TestReviewCompareRunsAsASubcommandOfReview(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	review := newReviewCmd()
+	var out bytes.Buffer
+	review.SetOut(&out)
+	review.SetErr(&out)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	review.SetArgs([]string{"compare", "--dir", dir, "--base", base, "--write-surfaces", surfacesPath})
+	if err := review.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, out.String())
+	}
+	if _, err := readSurfaces(surfacesPath); err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+}
+
+// --base-branch is the only way to name the branch "review compare --base
+// auto" resolves the merge-base against: the origin below has neither a
+// main nor a master branch, so auto-discovery has nothing to fall back to
+// and this only succeeds because --base-branch names "trunk" directly.
+func TestReviewCompareAutoBaseUsesBaseBranch(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	ctx := context.Background()
+	run := func(d string, args ...string) {
+		t.Helper()
+		r := executil.RunQuiet(ctx, d, "git", args...)
+		if !r.Ok() {
+			t.Fatalf("git %v (in %s): %v\n%s", args, d, r.Err, r.Output)
+		}
+	}
+	origin := t.TempDir()
+	run(origin, "init", "--quiet", "--bare")
+	run(dir, "remote", "add", "origin", "file://"+origin)
+	run(dir, "push", "--quiet", "origin", base+":refs/heads/trunk")
+
+	compare := newReviewCompareCmd()
+	var out bytes.Buffer
+	compare.SetOut(&out)
+	compare.SetErr(&out)
+	surfacesPath := filepath.Join(t.TempDir(), "surfaces.json")
+	compare.SetArgs([]string{"--dir", dir, "--base", "auto", "--base-branch", "trunk", "--write-surfaces", surfacesPath})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v: %s", err, out.String())
+	}
+
+	doc, err := readSurfaces(surfacesPath)
+	if err != nil {
+		t.Fatalf("readSurfaces: %v", err)
+	}
+	if doc.Base != base {
+		t.Errorf("recorded base = %q, want %q", doc.Base, base)
+	}
+}
+
+// A --surfaces document that cannot be read at all — missing, or the job
+// that would have written it never ran — must still be referred, not answer
+// with a bare error: main.go maps any error that is not a ui.ExitError to
+// exit 1, indistinguishable from a gate the author can clear, and a workflow
+// step that only re-fails a job past exit 2 would then let this pass with
+// referral-publish's own credential having posted nothing at all.
+func TestReviewWithAnUnreadableSurfacesDocumentRefers(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	out, err := runReview(t, dir, base, "--surfaces", filepath.Join(t.TempDir(), "does-not-exist.json"))
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("an unreadable surfaces document must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "the comparison document could not be read") {
+		t.Errorf("the referral must say why, got:\n%s", out)
+	}
+}
+
+// A comparison document is exactly what the change under review's own code
+// could have written — a Rust component's build.rs runs inside the job that
+// produces it — so a base claiming HEAD, which would make the diff this run
+// reads look empty, must be refused rather than trusted, even though the
+// document is otherwise well-formed and readable.
+func TestReviewRefersAForgedBaseInTheSurfacesDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+
+	forged := filepath.Join(t.TempDir(), "surfaces.json")
+	if err := writeSurfaces(forged, head, nil); err != nil {
+		t.Fatalf("writeSurfaces: %v", err)
+	}
+
+	out, err := runReview(t, dir, base, "--surfaces", forged)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a base that does not match what this run resolved must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "a different commit") {
+		t.Errorf("the referral must say the base did not match, got:\n%s", out)
+	}
+}
+
+// A comparison document naming the right base but carrying no result for a
+// component this tree says opted in is exactly what an empty-results forgery
+// looks like — and exactly what a comparison that silently failed to run for
+// one component looks like too. Both must be referred, never rendered as
+// "nothing to report".
+func TestReviewRefersAMissingResultInTheSurfacesDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+
+	missing := filepath.Join(t.TempDir(), "surfaces.json")
+	if err := writeSurfaces(missing, base, nil); err != nil {
+		t.Fatalf("writeSurfaces: %v", err)
+	}
+
+	out, err := runReview(t, dir, base, "--surfaces", missing)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a missing result for an opted-in component must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "carries no result") {
+		t.Errorf("the referral must say the result was missing, got:\n%s", out)
+	}
+}
+
+// A result's Dir is this tree's own component directory, never whatever the
+// document claims for it: Dir decides where a finding's path is rebased and
+// rendered, and the document is exactly what a malicious build script could
+// have written.
+func TestReconcileSurfacesTakesDirFromTheTreeNotTheDocument(t *testing.T) {
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"README.md": "hello again"})
+
+	doc := surfaceDocument{
+		Base: base,
+		Results: []surfaceComparison{
+			{Component: "probe", Dir: "somewhere/else/entirely"},
+		},
+	}
+	got, err := reconcileSurfaces(dir, base, doc)
+	if err != nil {
+		t.Fatalf("reconcileSurfaces: %v", err)
+	}
+	if len(got) != 1 || got[0].Dir != "probe" {
+		t.Errorf("reconcileSurfaces = %+v, want Dir %q from the tree's own component", got, "probe")
+	}
+}
+
+// A document that opens fine but decodes into nothing readable, or names no
+// base commit, is exactly as unreadable as a missing file: readSurfaces
+// refuses both rather than handing review a document with nothing in it.
+func TestReadSurfacesRejectsAMalformedDocument(t *testing.T) {
+	for name, raw := range map[string]string{
+		"invalid json": `{not json`,
+		"no base":      `{"results":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "surfaces.json")
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readSurfaces(path); err == nil {
+				t.Errorf("readSurfaces(%s) was accepted, want it refused", raw)
+			}
+		})
+	}
+}
+
+// writeSurfaces reports the underlying failure rather than losing it: a path
+// under a directory that does not exist cannot be created, and the caller
+// needs that reason, not a silent success.
+func TestWriteSurfacesReportsAnUnwritablePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist", "surfaces.json")
+	if err := writeSurfaces(path, "deadbeef", nil); err == nil {
+		t.Error("writeSurfaces under a missing directory was accepted")
+	}
+}
+
+// review compare with no destination has nowhere to put what it computed,
+// so it refuses before running any comparison rather than doing the work
+// and discarding the result.
+func TestReviewCompareNeedsAWriteSurfacesFlag(t *testing.T) {
+	cmd := newReviewCompareCmd()
+	cmd.SetArgs([]string{"--dir", t.TempDir()})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.Execute(); err == nil {
+		t.Error("review compare with no --write-surfaces was accepted")
+	}
+}
+
+// --publish with no --surfaces computes and publishes in the same process, so
+// a Rust component's comparison must not run there at all: RunQuietIsolatedEnv
+// keeps a credential out of the comparison's own child environment, not out
+// of this process's, and a same-user descendant can still reach the latter.
+// The stub that would answer the comparison is removed before this runs, so
+// an invocation that tried would fail outright rather than silently succeed.
+func TestReviewPublishWithoutSurfacesRefusesToRunARustComparison(t *testing.T) {
+	semverChecksStub(t, semverChecksBroken)
+	dir, base := reviewRepo(t, crateBase(crateOptIn),
+		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
+	removeSemverChecksStub(t)
+
+	forge := &fakeForge{}
+	forge.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+	payload := map[string]any{
+		"number":       40,
+		"pull_request": map[string]any{"title": "docs: nothing breaking", "head": map[string]any{"sha": head}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(event, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("a Rust comparison refused under --publish must be referred (exit 2), got %v:\n%s", err, out)
+	}
+	if !strings.Contains(out, referral.DisqualificationAPISurfaceUncomputable) || !strings.Contains(out, "probe") {
+		t.Errorf("the referral must name the component and why, got:\n%s", out)
+	}
+	if !strings.Contains(out, "must not happen in the same process") {
+		t.Errorf("the referral must say why the comparison did not run, got:\n%s", out)
+	}
+	if len(forge.published) != 1 {
+		t.Fatalf("published %d statuses, want 1", len(forge.published))
+	}
+}
+
 // A finding the loader could not place carries no path, and locate must
 // report its message on its own rather than joining an empty path onto the
 // component's directory, which would point at the directory as though it
@@ -724,6 +1269,21 @@ func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
 	got := locate([]finding.Finding{{Message: "Removed: removed"}}, "sdk")
 	if len(got) != 1 || got[0] != "Removed: removed" {
 		t.Errorf("locate = %v, want the bare message", got)
+	}
+}
+
+// component.Load refuses api_surface on every language but Go and Rust, so a
+// component reaching compareSurface under a third language is a defensive
+// path rather than one reachable through review — this exercises it directly
+// against a TypeScript runner, which resolves to neither.
+func TestCompareSurfaceHasNoComparisonForAThirdLanguage(t *testing.T) {
+	c := component.Component{Name: "web", Dir: "web", Runner: runner.Vitest}
+	findings, uncomputable := compareSurface(context.Background(), newReviewCmd(), c, t.TempDir(), t.TempDir(), toolchain.Envs(nil))
+	if findings != nil {
+		t.Errorf("findings = %+v, want none", findings)
+	}
+	if uncomputable != "no public-API comparison exists for this component's language" {
+		t.Errorf("uncomputable = %q, want the language named as having no comparison", uncomputable)
 	}
 }
 

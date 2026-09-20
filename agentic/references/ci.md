@@ -19,6 +19,39 @@ costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `
 keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
 merge gate still covers.
 
+**`referral` only compares and holds no credential; `referral-publish` decides and publishes,
+and runs a binary the change under review could not have written.** A component that opts a
+Rust crate into `api_surface` has its public API compared via a real `cargo semver-checks`
+build, which compiles and runs that crate's own `build.rs` and proc-macros — code the pull
+request controls. The job that posts `lydite/referral` carries `statuses: write`, so it must
+never itself run that code, and the `lydite` binary it runs must not be one the pull request
+could have edited either — `setup`'s own `lydite-binary` artifact is built from the pull
+request's checkout, so `referral-publish` checks out the base commit into `base/` and builds
+its own binary there, and reads its one local action (`lydite-reports`) from that same trusted
+tree rather than from the head checkout it also holds for reading exemptions and the diff.
+
+What this split protects is the credential and the binary, not the api-surface result itself.
+`referral` writes the raw per-component comparison to an artifact via
+`lydite review compare --write-surfaces`, and `referral-publish` (never re-running the
+comparison) checks that document's base against the one it resolves itself and requires a
+result named for every component this tree's own `components.yml` says opted in —
+`reconcileSurfaces` refers rather than trusts a base or a component list the document only
+claims. It does **not** verify a claimed-clean result's own content: a process a malicious
+`build.rs` leaves running past its own subprocess call could still overwrite the artifact
+with a well-formed document naming the right base and every opted-in component, each with an
+empty finding list, before the upload step captures it — and `referral-publish` has no way to
+tell that apart from a real clean comparison without re-running it, which would put the
+credential back in the same process as the untrusted code. This residual gap is open and
+tracked, not closed by this split.
+
+Anything that runs a scanned repository's own code and reaches a job holding a write credential
+needs the same environment and binary separation; see
+[`give-untrusted-build-scripts-no-inherited-environment.md`](../rules/give-untrusted-build-scripts-no-inherited-environment.md).
+`lydite review --publish` also refuses to run a Rust comparison in its own process when invoked
+without `--surfaces`, referring it as uncomputable instead — the same credential-in-process risk
+`RunQuietIsolatedEnv` cannot close on its own applies to any caller of the single-invocation
+form, not only to this workflow.
+
 **A mutant is bounded in time and not in memory, and that is a real limit.** `--timeout` (and the
 derived three-times-baseline default) says how long a mutant's suite may run; nothing says how much
 it may allocate. A mutant that turns a bounded loop into an unbounded one takes the machine down

@@ -20,6 +20,9 @@ import (
 	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/rustapisurface"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -28,9 +31,173 @@ import (
 // rendered under.
 const gateAPISurface = "api surface"
 
-// addAPISurfaceRows decides what this change's effect on the exported API of
-// every component that opted in means, and folds the answer into the report
-// and into the decision.
+// surfaceComparison is one component's comparison, computed and separated
+// from any decision so it can cross a job boundary: see computeAPISurfaces
+// and renderAPISurfaceRows.
+type surfaceComparison struct {
+	Component    string            `json:"component"`
+	Dir          string            `json:"dir"`
+	Findings     []finding.Finding `json:"findings,omitempty"`
+	Uncomputable string            `json:"uncomputable,omitempty"`
+}
+
+// computeAPISurfaces runs the comparison for every component that opted into
+// api_surface, and only that: no report, no decision, no exemptions, no
+// declaration. It is the one function in this file that runs a component's
+// own code — building rustdoc for a Rust component's head tree runs that
+// crate's own build.rs and proc-macros — and nothing past it does, which is
+// why it returns data for a caller to render rather than rendering anything
+// itself: the caller may be a job that must never hold a publishing
+// credential, or one that must never run this comparison again to get it.
+//
+// guardCredential refuses to run a Rust component's comparison at all,
+// reporting it uncomputable instead: it is set exactly when this same
+// process is about to publish with a credential, because
+// executil.RunQuietIsolatedEnv keeps that credential out of the comparison's
+// own child environment but not out of this process's — a same-user
+// descendant can still reach it another way (see
+// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md).
+// review compare, which never publishes, always passes false.
+func computeAPISurfaces(ctx context.Context, cmd *cobra.Command, dir, base string, guardCredential bool) ([]surfaceComparison, error) {
+	opted, err := optedInComponents(dir)
+	if err != nil {
+		return nil, err
+	}
+	// A repository where nothing opted in pays none of what follows, and says
+	// nothing about it. Nothing was asked for, so there is no gate here that
+	// could not run.
+	if len(opted) == 0 {
+		return nil, nil
+	}
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	// The same resolution `scan` and `test` do, for the same reason: the
+	// module is loaded by the `go` its own directory declares, not by
+	// whichever one the PATH leads to.
+	envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(opted))
+	if err != nil {
+		return nil, err
+	}
+
+	root, remove, err := baseWorktree(ctx, dir, base)
+	if err != nil {
+		// No tree, so no component's surface can be compared. Each one that
+		// asked says so under its own name, since a component missing from
+		// the result is indistinguishable from one that was compared and
+		// found clean.
+		results := make([]surfaceComparison, 0, len(opted))
+		for _, c := range opted {
+			results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: err.Error()})
+		}
+		return results, nil
+	}
+	defer remove()
+
+	results := make([]surfaceComparison, 0, len(opted))
+	for _, c := range opted {
+		if guardCredential && langOf(c) == runner.Rust {
+			results = append(results, surfaceComparison{
+				Component: c.Name, Dir: c.Dir,
+				Uncomputable: "a Rust component's comparison runs the head tree's own build.rs and proc-macros, which must not happen in the same process that is about to publish with a credential — run `review compare` and `review --surfaces` as two separate invocations instead",
+			})
+			continue
+		}
+		findings, uncomputable := compareSurface(ctx, cmd, c, root, dir, envs)
+		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Findings: findings, Uncomputable: uncomputable})
+	}
+	return results, nil
+}
+
+// optedInComponents is every component this tree declares api_surface for.
+func optedInComponents(dir string) ([]component.Component, error) {
+	file, err := component.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	var opted []component.Component
+	for _, c := range file.Components {
+		if c.APISurface != nil {
+			opted = append(opted, c)
+		}
+	}
+	return opted, nil
+}
+
+// uncomputableSurfaces reports every component that opted into api_surface as
+// uncomputable for the given reason, without running any comparison.
+//
+// Used when the document review compare wrote could not be read at all: a
+// missing or corrupted artifact is not evidence the change is clean, and
+// returning early with a plain error here would exit 1 before any
+// disqualification is added — a workflow step that treats exit codes at or
+// under 2 as an answer rather than a malfunction would then publish nothing
+// at all, which is worse than a referral it can at least act on.
+func uncomputableSurfaces(dir, reason string) ([]surfaceComparison, error) {
+	opted, err := optedInComponents(dir)
+	if err != nil {
+		return nil, err
+	}
+	var results []surfaceComparison
+	for _, c := range opted {
+		results = append(results, surfaceComparison{Component: c.Name, Dir: c.Dir, Uncomputable: reason})
+	}
+	return results, nil
+}
+
+// reconcileSurfaces validates a comparison document against what this
+// invocation independently determines to be true, rather than trusting
+// either the base or the result set the document itself claims.
+//
+// The document crosses from a job that ran the change's own code — a Rust
+// component's build.rs, a proc-macro — to one that is about to publish with
+// a credential, so both fields it carries are exactly what that code could
+// forge: a base equal to HEAD makes the diff this run reads look empty, and
+// an empty result set skips every gate silently. Neither is accepted at
+// face value. base is what this invocation resolved itself, never the
+// document's own claim, and a mismatch refers every opted-in component
+// rather than trusting a comparison that ran against some other commit. The
+// opted-in component list is read fresh from this tree, and any one of them
+// missing from the document's results — forged, or simply never written —
+// is its own uncomputable row rather than a silent absence a reader cannot
+// tell apart from "found nothing".
+func reconcileSurfaces(dir, base string, doc surfaceDocument) ([]surfaceComparison, error) {
+	opted, err := optedInComponents(dir)
+	if err != nil {
+		return nil, err
+	}
+	if doc.Base != base {
+		return uncomputableSurfaces(dir, fmt.Sprintf(
+			"the comparison document names %s as its base, but this run resolved %s — a comparison against a different commit cannot be trusted",
+			shortSHA(doc.Base), shortSHA(base)))
+	}
+	byName := make(map[string]surfaceComparison, len(doc.Results))
+	for _, r := range doc.Results {
+		byName[r.Component] = r
+	}
+	results := make([]surfaceComparison, 0, len(opted))
+	for _, c := range opted {
+		r, ok := byName[c.Name]
+		if !ok {
+			r = surfaceComparison{Uncomputable: "the comparison document carries no result for this component"}
+		}
+		// Component and Dir come from this tree's own component list, never
+		// from the document: they name where a finding's path is rebased
+		// and rendered, and the document is exactly what a malicious build
+		// script could have written.
+		r.Component, r.Dir = c.Name, c.Dir
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// renderAPISurfaceRows decides what results computeAPISurfaces already made
+// mean, and folds the answer into the report and into the decision. It runs
+// no comparison and executes no component's own code: reading the
+// declaration is the only thing here that touches the change under review,
+// and it reads text — a title, a commit message — never runs any of it.
 //
 // Three verdicts, and which one a break gets is decided by the declaration
 // alone (see docs/adr/0040):
@@ -47,7 +214,7 @@ const gateAPISurface = "api surface"
 // was compared. That is the one-way ratchet the marker is only safe under —
 // the claim can add a referral and can never remove one, so spelling `feat!:`
 // rather than `feat:` never makes anything greener.
-func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, eventPath string) error {
+func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, eventPath string, results []surfaceComparison) {
 	where := breakDeclaration(ctx, cmd.ErrOrStderr(), dir, base, eventPath)
 	if where != "" {
 		refer(d, referral.Disqualification{
@@ -56,59 +223,12 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 		})
 	}
 
-	file, err := component.Load(dir)
-	if err != nil {
-		return err
-	}
-	var opted []component.Component
-	for _, c := range file.Components {
-		if c.APISurface != nil {
-			opted = append(opted, c)
-		}
-	}
-	// A repository where nothing opted in pays none of what follows, and says
-	// nothing about it. Nothing was asked for, so there is no gate here that
-	// could not run.
-	if len(opted) == 0 {
-		return nil
-	}
-
-	cfg, err := config.Load(dir)
-	if err != nil {
-		return err
-	}
-	// The same resolution `scan` and `test` do, for the same reason: the
-	// module is loaded by the `go` its own directory declares, not by
-	// whichever one the PATH leads to.
-	envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(opted))
-	if err != nil {
-		return err
-	}
-
-	root, remove, err := baseWorktree(ctx, dir, base)
-	if err != nil {
-		// No tree, so no component's surface can be compared. Each one that
-		// asked says so under its own name, since a component missing from
-		// the report is indistinguishable from one that was compared and
-		// found clean.
-		for _, c := range opted {
-			referUncomputable(d, c, err.Error())
-		}
-		return nil
-	}
-	defer remove()
-
-	for _, c := range opted {
-		findings, err := apisurface.Compare(
-			filepath.Join(root, filepath.FromSlash(c.Dir)),
-			filepath.Join(dir, filepath.FromSlash(c.Dir)),
-			gateAPISurface, c.Name, envs.For(c.Name).Environ())
+	for _, res := range results {
+		c := component.Component{Name: res.Component, Dir: res.Dir}
 		switch {
-		case errors.Is(err, apisurface.ErrModulePathChanged):
-			referUncomputable(d, c, "the module path changed between the merge-base and this change")
-		case err != nil:
-			referUncomputable(d, c, err.Error())
-		case len(findings) == 0:
+		case res.Uncomputable != "":
+			referUncomputable(d, c, res.Uncomputable)
+		case len(res.Findings) == 0:
 			report.Add(ui.Row{
 				Status: ui.StatusPass,
 				Label:  gateAPISurface + "(" + c.Name + ")",
@@ -121,20 +241,73 @@ func addAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Repor
 			report.Add(ui.Row{
 				Status: ui.StatusRefer,
 				Label:  gateAPISurface + "(" + c.Name + ")",
-				Value:  fmt.Sprintf("%s, declared", incompatible(len(findings))),
-				Detail: capped(locate(findings, c.Dir)),
+				Value:  fmt.Sprintf("%s, declared", incompatible(len(res.Findings))),
+				Detail: capped(locate(res.Findings, c.Dir)),
 			})
 		default:
 			report.Add(ui.Row{
 				Status: ui.StatusFail,
 				Label:  gateAPISurface + "(" + c.Name + ")",
-				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(findings))),
-				Detail: append(capped(locate(findings, c.Dir)),
+				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(res.Findings))),
+				Detail: append(capped(locate(res.Findings, c.Dir)),
 					"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer"),
 			})
 		}
 	}
-	return nil
+}
+
+// compareSurface compares one component's public API against the merge-base
+// with the comparison its language has, and names what stopped it when the
+// comparison could not be made at all.
+//
+// Both trees are prepared here rather than in either comparison package: the
+// merge-base is materialised with git, and neither internal/apisurface nor
+// internal/rustapisurface does any — each takes two directories and returns
+// findings.
+//
+// The two languages differ only in which tool makes the comparison. What a
+// break means, and what a surface that could not be compared means, is one rule
+// for both: see renderAPISurfaceRows.
+func compareSurface(ctx context.Context, cmd *cobra.Command, c component.Component, root, dir string, envs toolchain.Envs) ([]finding.Finding, string) {
+	base := filepath.Join(root, filepath.FromSlash(c.Dir))
+	head := filepath.Join(dir, filepath.FromSlash(c.Dir))
+	tc := envs.For(c.Name)
+	switch langOf(c) {
+	case runner.Go:
+		findings, err := apisurface.Compare(base, head, gateAPISurface, c.Name, tc.Environ())
+		switch {
+		case errors.Is(err, apisurface.ErrModulePathChanged):
+			return nil, "the module path changed between the merge-base and this change"
+		case err != nil:
+			return nil, err.Error()
+		}
+		return findings, ""
+	case runner.Rust:
+		// The two environments every other Rust check runs under, composed the
+		// same way: the component's own toolchain and declaration build the two
+		// trees, and lydite's own provisions the pinned cargo-semver-checks.
+		res := rustapisurface.Compare(ctx, rustapisurface.Request{
+			BaseDir:   base,
+			HeadDir:   head,
+			Gate:      gateAPISurface,
+			Component: c.Name,
+			Env: executil.Env{
+				Check:   childEnv(tc, c, runner.Invocation{}),
+				Install: tc.Environ(),
+			},
+			Progress: cmd.ErrOrStderr(),
+		})
+		if res.Outcome == rustapisurface.Unmeasurable {
+			return nil, res.Reason
+		}
+		return res.Findings, ""
+	default:
+		// component.Load refuses api_surface on every other language, so a
+		// component reaching here has none lydite can compare. Said out loud,
+		// because a comparison that never happened must not render as one that
+		// found nothing.
+		return nil, "no public-API comparison exists for this component's language"
+	}
 }
 
 // refer adds a disqualification and states the verdict that follows from it.
@@ -243,7 +416,9 @@ func pullRequestTitle(warn io.Writer, eventPath string) string {
 // returns the scan root inside it, with the removal the caller must run.
 //
 // A real tree on disk, because `go/packages` loads a module by running the Go
-// tool over one and `git show <base>:<path>` cannot supply that.
+// tool over one and `cargo-semver-checks` takes its baseline as a checked-out
+// source root it builds rustdoc from; `git show <base>:<path>` cannot supply
+// either.
 //
 // The scan root may sit below the repository root, so the worktree is entered
 // at the same prefix --dir sits at. Comparing at the worktree root instead

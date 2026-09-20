@@ -73,12 +73,14 @@ dependency and an edge naming nothing silently stops doing that while the depend
 rather than opt-out** — the reverse of `mutation` — because most components declared here are
 binaries and services nobody imports, and a surface diff over one is pure noise. It is an object
 rather than a boolean: presence alone (`api_surface: {}`) is the opt-in, and the empty shape
-leaves room for a field a later language needs — a Rust crate root, a TypeScript entry point —
-to arrive additively instead of as a breaking change to this one's own shape. It carries nothing
-today because Go needs nothing named: `internal/` is already the language's own public/private
-boundary. Setting it on a component whose `Lang()` is not Go is a load-time error, not a row
-reported `unmeasured`: a load error is unmissable and correct on the day another language lands,
-where a silent row is something a reader learns to scroll past — see
+leaves room for a field a later language needs to arrive additively instead of as a breaking
+change to this one's own shape. It carries nothing for Go or for Rust, because neither needs
+anything named: Go's `internal/` is already the language's own public/private boundary, and a
+Rust component's own `Cargo.toml` `[lib]` already names its public root the same way
+`internal/rust`'s other checks already resolve the component from its `dir`. Setting it on a
+component whose `Lang()` is neither is a load-time error, not a row reported `unmeasured`: a
+load error is unmissable and correct on the day that language lands, where a silent row is
+something a reader learns to scroll past — see
 [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md).
 
 ## Runners: three invocations of one suite
