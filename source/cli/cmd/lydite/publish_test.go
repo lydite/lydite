@@ -62,6 +62,45 @@ func TestADirectoryHoldingNoDocumentIsReported(t *testing.T) {
 	}
 }
 
+// A job that dies before it uploads leaves no artifact, so the directory it
+// would have been downloaded into is never there to be named — the concern
+// reaches the comment as nothing at all rather than as something unreadable.
+// The run says which concerns it expected, and one that arrived in no
+// directory is a section rather than a silence.
+func TestAConcernExpectedFromNoDirectoryAtAllIsNamed(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "review", "test")
+
+	body := comment.Render()
+	if !strings.Contains(body, "referral") {
+		t.Fatalf("the concern that produced no report is absent from the comment:\n%s", body)
+	}
+	if !strings.Contains(body, "the run expected a `review` report") {
+		t.Errorf("the comment does not say what was missing:\n%s", body)
+	}
+	if comment.Headline == "every check passed" {
+		t.Errorf("the headline reads as a clean run: %q", comment.Headline)
+	}
+	if !strings.Contains(comment.Headline, "no verdict came from referral") {
+		t.Errorf("the headline does not name the concern that went unmeasured: %q", comment.Headline)
+	}
+}
+
+// A concern nobody expected is still considered only if a document for it
+// arrives. A run that legitimately does not run a command must not be told it
+// is missing one.
+func TestAnUnexpectedConcernIsNotReportedMissing(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; nothing was missing that the run asked for", got)
+	}
+	if body := comment.Render(); strings.Contains(body, "referral") {
+		t.Errorf("a concern the run never expected is reported as missing:\n%s", body)
+	}
+}
+
 // A row naming a log that was not uploaded still has to render. The tail is a
 // convenience; losing it must not lose the row.
 func TestARowWhoseLogIsMissingStillRenders(t *testing.T) {

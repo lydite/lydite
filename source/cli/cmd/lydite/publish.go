@@ -46,6 +46,7 @@ var concerns = []struct {
 func newPublishCmd() *cobra.Command {
 	var (
 		reports []string
+		expect  []string
 		out     string
 		base    string
 	)
@@ -55,17 +56,22 @@ func newPublishCmd() *cobra.Command {
 		Long: "Render the standing pull-request comment from the report documents lydite wrote.\n\n" +
 			"Each --reports directory is a " + runner.ReportDir + " directory: one per job that ran a\n" +
 			"lydite command, or one for every command when they shared a scan root. Nothing is\n" +
-			"posted — the markdown goes to --out, and posting it is a separate step.",
+			"posted — the markdown goes to --out, and posting it is a separate step.\n\n" +
+			"--expect names the commands this run was supposed to produce a report for. One that\n" +
+			"reaches no --reports directory at all renders as an unmeasured section naming it,\n" +
+			"rather than being absent from the comment.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if len(reports) == 0 {
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
-			comment := buildComment(reports, base)
+			comment := buildComment(reports, base, expect...)
 			return writeComment(cmd.OutOrStdout(), out, comment.Render())
 		},
 	}
 	cmd.Flags().StringSliceVar(&reports, "reports", nil,
 		"a "+runner.ReportDir+" directory to read; repeatable")
+	cmd.Flags().StringSliceVar(&expect, "expect", nil,
+		"a command this run expected a report from; repeatable, and unmeasured when none arrived")
 	cmd.Flags().StringVar(&out, "out", "-", `file to write the comment to ("-" is stdout)`)
 	cmd.Flags().StringVar(&base, "base", "", "commit the change was measured against, for the footer")
 	return cmd
@@ -78,7 +84,17 @@ func newPublishCmd() *cobra.Command {
 // that quietly disappears is indistinguishable from a concern that passed,
 // which is the wardnet#957 failure: a pull request read green while the gate
 // that would have failed it had never run.
-func buildComment(dirs []string, base string) ui.Comment {
+//
+// Naming a directory is not enough to catch that failure on its own. A job
+// that dies before it uploads leaves no artifact, so the directory it would
+// have been downloaded into never exists and the caller's glob never names it
+// — the concern reaches this function as nothing at all rather than as
+// something that could not be read. expect is what closes that: a command
+// named there and found in no directory renders as unmeasured in its declared
+// place, exactly as an unreadable directory does. A command not named there is
+// considered only if a document for it arrives, which is what lets a run that
+// legitimately skips a concern say nothing about it.
+func buildComment(dirs []string, base string, expect ...string) ui.Comment {
 	found := map[string][]section{}
 	var missing []string
 	for _, dir := range dirs {
@@ -96,17 +112,35 @@ func buildComment(dirs []string, base string) ui.Comment {
 		}
 	}
 
+	expected := map[string]bool{}
+	for _, command := range expect {
+		if command = strings.TrimSpace(command); command != "" {
+			expected[command] = true
+		}
+	}
+
 	comment := ui.Comment{Standing: true, Version: version, Base: shortSHA(base)}
 	for _, concern := range concerns {
 		for _, s := range found[concern.command] {
 			comment.Sections = append(comment.Sections, s.render(concern.title))
 		}
+		if len(found[concern.command]) == 0 && expected[concern.command] {
+			comment.Sections = append(comment.Sections, absentConcern(concern.command, concern.title))
+		}
 		delete(found, concern.command)
+		delete(expected, concern.command)
 	}
 	for _, command := range sortedKeys(found) {
 		for _, s := range found[command] {
 			comment.Sections = append(comment.Sections, s.render(command))
 		}
+		delete(expected, command)
+	}
+	// A command expected under a name this binary does not declare renders
+	// after the declared concerns, under its own name — the rule a document
+	// naming an undeclared command already follows.
+	for _, command := range sortedNames(expected) {
+		comment.Sections = append(comment.Sections, absentConcern(command, command))
 	}
 	if len(missing) > 0 {
 		comment.Sections = append(comment.Sections, ui.CommentSection{
@@ -119,6 +153,23 @@ func buildComment(dirs []string, base string) ui.Comment {
 	comment.Verdict = verdictOf(comment.Sections)
 	comment.Headline = headline(comment.Sections, comment.Verdict)
 	return comment
+}
+
+// absentConcern is the section a concern gets when the run expected it and no
+// directory the comment was rendered from holds its document.
+//
+// Unmeasured, and titled as the concern itself rather than folded into the
+// missing-reports section, because what a reader has to be told is which
+// concern reached no verdict — the directory it would have been in is the
+// caller's bookkeeping and may never have existed to be named.
+func absentConcern(command, title string) ui.CommentSection {
+	return ui.CommentSection{
+		Status:  ui.StatusUnmeasured,
+		Title:   title,
+		Summary: "nothing reported",
+		Items: []string{fmt.Sprintf(
+			"the run expected a `%s` report and none of its inputs holds one", command)},
+	}
 }
 
 // section is one document, and where it was read from — which is what a row's
@@ -453,6 +504,15 @@ func reason(err error) string {
 		return "no such directory, so nothing from it is in this comment"
 	}
 	return err.Error()
+}
+
+func sortedNames(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sortedKeys(m map[string][]section) []string {
