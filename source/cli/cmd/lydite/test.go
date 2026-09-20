@@ -30,6 +30,7 @@ import (
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
+	"lydite/lydite/internal/nodedeps"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
@@ -416,6 +417,11 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	}
 
 	rows := make([]ui.Row, len(plans))
+	// notes[i] is the row about the component's install, present only when
+	// there was nothing for the install to run. Resolved here, before anything
+	// runs, because it is a question about the tree: which lockfile declares
+	// this component's dependencies, which no install of it changes.
+	notes := make([]ui.Row, len(plans))
 	measured := make([]measurement, len(plans))
 	for i, p := range plans {
 		measured[i] = unmeasuredComponent(p.c, "the component did not run")
@@ -426,6 +432,9 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 		if !p.ready {
 			rows[i] = p.row
 			continue
+		}
+		if note, ok := installNote(root, p.c, cfg); ok {
+			notes[i] = note
 		}
 		// Pre-filled, so a component the run never reached reports that it
 		// did not run rather than being dropped. A truncated run that simply
@@ -503,9 +512,18 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	}
 
 	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
+	// A component's install row sits immediately above the component it is
+	// about, so the two are read together rather than as two reports of
+	// different things.
+	emit := func(i int) {
+		if notes[i].Label != "" {
+			rep.Add(notes[i])
+		}
+		rep.Add(rows[i])
+	}
 	if len(skipped) == 0 {
-		for _, r := range rows {
-			rep.Add(r)
+		for i := range rows {
+			emit(i)
 		}
 		return measured
 	}
@@ -513,17 +531,17 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	// where its author wrote it rather than ahead of every component that
 	// ran. Two runs over one declaration already produce the same document;
 	// this is what makes that document read in the order the file does.
-	byName := make(map[string]ui.Row, len(rows))
-	for _, r := range rows {
-		byName[r.Label] = r
+	byName := make(map[string]int, len(rows))
+	for i, r := range rows {
+		byName[r.Label] = i
 	}
 	for _, c := range ordered {
 		if r, ok := skipped[c.Name]; ok {
 			rep.Add(r)
 			continue
 		}
-		if r, ok := byName[testLabel(c.Name)]; ok {
-			rep.Add(r)
+		if i, ok := byName[testLabel(c.Name)]; ok {
+			emit(i)
 		}
 	}
 	return measured
@@ -1186,6 +1204,49 @@ func prepare(ctx context.Context, inv runner.Invocation, dir, label string, c co
 		return row, false
 	}
 	return ui.Row{}, true
+}
+
+// installLabel is how every row about one component's install is named.
+//
+// Labelled the way testLabel is, and for the same reason: a component called
+// `install` must not be able to take this row, and a consumer keying rows by
+// label would silently lose one of the two.
+func installLabel(name string) string { return "install(" + name + ")" }
+
+// installNote is the row a component whose install has no workspace root to
+// run in takes, and false for one whose dependencies lydite installs.
+//
+// Resolving no root is not an install that succeeded. No package manager ran,
+// so whatever node_modules the tree already held is what the suite imports
+// from — and a run saying nothing about it reads exactly like one that
+// installed the workspace it was pointed at.
+//
+// Unmeasured and not a failure, and the suite still runs: a component whose
+// dependencies are in place by some other means passes, and this row claims
+// only that lydite did not put them there.
+func installNote(root string, c component.Component, cfg config.Config) (ui.Row, bool) {
+	r, ok := runner.Lookup(c.Runner)
+	if !ok || r.Prepare == nil || r.Lang != runner.TypeScript {
+		return ui.Row{}, false
+	}
+	// typescript.install replaces detection entirely and runs in the
+	// component's own directory, so it needs no root resolved for it.
+	if cfg.TypeScript.Install != "" {
+		return ui.Row{}, false
+	}
+	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+	if _, ok := nodedeps.WorkspaceRoot(dir, root); ok {
+		return ui.Row{}, false
+	}
+	return ui.Row{
+		Status: ui.StatusUnmeasured,
+		Label:  installLabel(c.Name),
+		Value:  "not installed",
+		Detail: []string{
+			"no single " + strings.Join(nodedeps.Managers(), "/") + " lockfile between " + c.Dir + " and the scan root, so no install ran",
+			"Set typescript.install in " + config.FileName + " if this component installs differently.",
+		},
+	}, true
 }
 
 // invocation is the plain variant of a component's suite: the fast path, and

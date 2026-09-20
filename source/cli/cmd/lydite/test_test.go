@@ -371,6 +371,112 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	}
 }
 
+// An install that resolved no workspace root ran nothing at all, and a report
+// that mentioned it only by staying silent is indistinguishable from one whose
+// workspace was installed.
+func TestAComponentWhoseInstallResolvedNoRootIsUnmeasured(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "web/package.json", `{"name":"web"}`)
+	rep := ui.NewReport("test")
+	runComponents(context.Background(), root, []component.Component{nodeComponent()}, nil, nil,
+		config.Default(), nil, 1, false, false, rep)
+
+	note := rowByLabel(t, rep, "install(web)")
+	if note.Status != ui.StatusUnmeasured || note.Value != "not installed" {
+		t.Errorf("row = %+v, want an unmeasured install rather than the silence of one that ran", note)
+	}
+	if !strings.Contains(strings.Join(note.Detail, " "), "lockfile") {
+		t.Errorf("detail = %v, want what was looked for and not found", note.Detail)
+	}
+	// The suite runs anyway: a component whose dependencies are in place by
+	// some other means passes, and the row claims only that lydite did not put
+	// them there.
+	if suite := rowByLabel(t, rep, "test(web)"); suite.Status != ui.StatusPass {
+		t.Errorf("row = %+v, want the suite to have run", suite)
+	}
+
+	var text bytes.Buffer
+	if err := rep.WriteText(&text, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "install(web)") {
+		t.Errorf("report = %q, want the install named in the text grammar too", text.String())
+	}
+	// Anything automated reads the document and never the terminal.
+	var doc bytes.Buffer
+	if err := rep.WriteJSON(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if got := jsonRowByLabel(t, doc.String(), "install(web)"); got.Status != string(ui.StatusUnmeasured) {
+		t.Errorf("status = %q, want %q", got.Status, ui.StatusUnmeasured)
+	}
+}
+
+// An install that had a root to run in is reported by the component's own row
+// and takes none of its own, whether it succeeded or failed — a second row per
+// JavaScript component on every healthy run is how a diagnostic earns a reader
+// who skims past the ones that matter.
+func TestAnInstallThatRanTakesNoRowOfItsOwn(t *testing.T) {
+	// The install is the typescript.install override, so what each case
+	// exercises is lydite's attribution rather than any package manager's
+	// behaviour — internal/nodedeps covers the detection.
+	for _, tc := range []struct {
+		name, install, value string
+		status               ui.Status
+	}{
+		{name: "succeeds", install: "true", value: "passed", status: ui.StatusPass},
+		{name: "fails", install: "exit 3", value: "not prepared", status: ui.StatusFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRepo(t, "components: []\n")
+			write(t, root, "web/package.json", `{"name":"web"}`)
+			cfg := config.Default()
+			cfg.TypeScript.Install = tc.install
+
+			rep := ui.NewReport("test")
+			runComponents(context.Background(), root, []component.Component{nodeComponent()}, nil, nil,
+				cfg, nil, 1, false, false, rep)
+
+			for _, r := range rep.Rows() {
+				if strings.HasPrefix(r.Label, "install(") {
+					t.Errorf("row = %+v, want no install row: the install ran", r)
+				}
+			}
+			if suite := rowByLabel(t, rep, "test(web)"); suite.Status != tc.status || suite.Value != tc.value {
+				t.Errorf("row = %+v, want %q %q", suite, tc.status, tc.value)
+			}
+		})
+	}
+}
+
+// The note is about the install, so a component nodedeps never installs takes
+// none — including the JavaScript one whose workspace root resolves.
+func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, root, "packages/ui/package.json", `{"name":"ui"}`)
+	if _, ok := installNote(root, component.Component{
+		Name: "ui", Dir: "packages/ui", Runner: runner.Vitest,
+	}, config.Default()); ok {
+		t.Error("a component under a workspace root is installed from it, so there is nothing to report")
+	}
+	if _, ok := installNote(root, component.Component{
+		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
+	}, config.Default()); ok {
+		t.Error("a Go component installs no node dependencies, so no lockfile is missing from it")
+	}
+}
+
+// nodeComponent is a JavaScript component whose suite is a command of its own,
+// so a row about its install is not also a row about whether a package manager
+// is on the machine running these tests.
+func nodeComponent() component.Component {
+	return component.Component{
+		Name: "web", Dir: "web", Runner: runner.Vitest,
+		Command: []string{"sh", "-c", "exit 0"},
+	}
+}
+
 // A Go component's preparation is read off the invocation, not off the variant
 // that named it, so the plain suite mutation runs once per mutant installs
 // nothing while the instrumented one fetches the wrapper it goes through.
