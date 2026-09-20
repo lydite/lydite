@@ -462,12 +462,16 @@ consume, and a published package that names nothing has none. A component in whi
 resolves an entry point is not skipped: it opted in and there is nothing to compare, so it is
 uncomputable and refers.
 
-### Both trees are installed and built, and their exit codes are what say the tree was measurable
+### Each tree that has anything to read is installed and built, and its exit codes are what say it was measurable
 
 api-extractor reads a `.d.ts` and nothing else. Pointing `mainEntryPointFilePath` at a `.ts` is
 rejected outright as "not a declaration file", so the component's own install and its own build
-must have run in **both** trees — the base worktree `cmd/lydite/coverage.go`'s `measureBaseTree`
-materialises, exactly as the Rust slice uses it.
+must have run in whichever of the two trees a compared package resolves a declaration —
+ordinarily both, since a change ordinarily touches a package that already existed. A component
+this change introduces resolves nothing at all in the base worktree `cmd/lydite/coverage.go`'s
+`measureBaseTree` materialises, so the base side of that comparison runs neither step and every
+declaration in the head tree is an addition; installing and building a directory the base tree
+never had would fail before the comparison ever reached that answer.
 
 The exit codes of those two steps are the contract, not the presence of a declaration and not
 api-extractor's own. `tsc` emits declarations for a tree that does not typecheck — the probe's
