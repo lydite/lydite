@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	"lydite/lydite/internal/cargotool"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gotool"
 	"lydite/lydite/internal/nodedeps"
@@ -788,8 +789,9 @@ func cargoBinDirs() []string {
 	return dirs
 }
 
-// installNodeDeps runs the install internal/nodedeps resolves from the
-// component root's lockfile, or from the typescript.install override.
+// installNodeDeps runs the install internal/nodedeps resolves from the nearest
+// lockfile at or above the component directory, or from the typescript.install
+// override.
 //
 // Doing nothing is not a failure: a root no single lockfile identifies has
 // nothing lydite can install without guessing, and guessing writes a lockfile
@@ -802,7 +804,33 @@ func cargoBinDirs() []string {
 // This is the opposite of installCargoTools below, and the difference is whose
 // software is being fetched.
 func installNodeDeps(ctx context.Context, _ Invocation, dir, override string, env executil.Env, out io.Writer) error {
-	return nodedeps.Install(ctx, dir, override, env.Check, out)
+	return nodedeps.Install(ctx, dir, declarationRoot(dir), override, env.Check, out)
+}
+
+// declarationRoot is the directory the walk for a workspace root may not climb
+// above: the nearest ancestor of dir holding a .lydite directory, which is the
+// root whose declaration put a component at dir in the first place.
+//
+// It is read off the tree rather than handed down, because the tree is the
+// only thing that knows which root this dir belongs to. A mutation worker runs
+// a component out of a copy of the scan root, so the root bounding its install
+// is the copy and not the repository it was copied from — and a caller passing
+// the repository would bound the walk by a directory the worker's dir is not
+// under.
+//
+// A dir under no declaration at all is its own bound, which is the install a
+// lockfile in the component directory alone resolves: nothing above a
+// directory lydite was pointed at is ever installed from.
+func declarationRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	for d := dir; ; d = filepath.Dir(d) {
+		if info, err := os.Stat(filepath.Join(d, config.Dir)); err == nil && info.IsDir() {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			return dir
+		}
+	}
 }
 
 // buildVitest runs through the package manager's own binary directory rather

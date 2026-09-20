@@ -1,12 +1,19 @@
 package runner
 
 import (
+	"context"
+	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/executil"
 )
 
 // argv is the whole assertion this package can make: nothing here executes a
@@ -220,6 +227,129 @@ func TestJestVariants(t *testing.T) {
 			t.Errorf("%s: %q, want %q", tc.variant, got, tc.want)
 		}
 	}
+}
+
+// A workspace package holds no lockfile of its own, so the install a
+// TypeScript component needs runs in the root above it — and a component
+// installed from its own directory installs nothing at all.
+func TestAWorkspacePackageIsInstalledFromItsRoot(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	touch(t, filepath.Join(root, "pnpm-lock.yaml"))
+	dir := mkdirAll(t, root, "packages", "ui")
+	cwd := stubManager(t, "pnpm")
+
+	if err := prepareVitest(t, dir); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := readFile(t, cwd); got != root {
+		t.Errorf("pnpm ran in %q, want the workspace root %q", got, root)
+	}
+}
+
+// A component's own lockfile is the root, walked to or not.
+func TestAComponentsOwnLockfileIsWhereItInstalls(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	dir := mkdirAll(t, root, "packages", "ui")
+	touch(t, filepath.Join(dir, "pnpm-lock.yaml"))
+	cwd := stubManager(t, "pnpm")
+
+	if err := prepareVitest(t, dir); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := readFile(t, cwd); got != dir {
+		t.Errorf("pnpm ran in %q, want the component directory %q", got, dir)
+	}
+}
+
+// The walk stops at the root whose declaration named the component. A lockfile
+// above that root belongs to a tree this run was never pointed at.
+func TestTheInstallNeverClimbsPastTheDeclaringRoot(t *testing.T) {
+	above := t.TempDir()
+	touch(t, filepath.Join(above, "pnpm-lock.yaml"))
+	root := mkdirAll(t, above, "repo")
+	mkdirAll(t, root, config.Dir)
+	dir := mkdirAll(t, root, "packages", "ui")
+	cwd := stubManager(t, "pnpm")
+
+	if err := prepareVitest(t, dir); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := os.Stat(cwd); err == nil {
+		t.Errorf("an install ran from %q, above the root that declared the component", readFile(t, cwd))
+	}
+}
+
+// An ancestor holding two lockfiles is no root: installing with the wrong
+// manager writes a lockfile the repository does not use.
+func TestAnAmbiguousRootInstallsNothing(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	touch(t, filepath.Join(root, "pnpm-lock.yaml"))
+	touch(t, filepath.Join(root, "yarn.lock"))
+	dir := mkdirAll(t, root, "packages", "ui")
+	cwd := stubManager(t, "pnpm")
+
+	if err := prepareVitest(t, dir); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := os.Stat(cwd); err == nil {
+		t.Error("an install ran for a root two lockfiles name")
+	}
+}
+
+// prepareVitest runs the TypeScript preparation step for a component at dir.
+func prepareVitest(t *testing.T, dir string) error {
+	t.Helper()
+	r, ok := Lookup(Vitest)
+	if !ok {
+		t.Fatal("no vitest runner")
+	}
+	inv, ok := r.Build(Plain, nil)
+	if !ok {
+		t.Fatal("vitest builds no plain variant")
+	}
+	return r.Prepare(context.Background(), inv, dir, "", executil.Env{}, io.Discard)
+}
+
+// stubManager puts a program of the given name ahead of any real one on PATH,
+// recording the directory it was run in at the returned path. A test that runs
+// a real package manager tests the machine it runs on.
+func stubManager(t *testing.T, name string) string {
+	t.Helper()
+	bin := t.TempDir()
+	cwd := filepath.Join(bin, "cwd")
+	if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\npwd > "+cwd+"\n"), 0o700); err != nil { // #nosec G306 -- a stub that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return cwd
+}
+
+func mkdirAll(t *testing.T, root string, parts ...string) string {
+	t.Helper()
+	dir := filepath.Join(append([]string{root}, parts...)...)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func touch(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path) // #nosec G304 -- a path this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // Every runner supplies all three, or mutation cannot tell an unviable
