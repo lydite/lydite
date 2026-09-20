@@ -69,7 +69,12 @@ whenever `--diff-base` is given, and this job gives none. A `mutate` matrix job 
 the merge commit is its own merge-base against the default branch, which is why `measure`'s
 unconditional, unaffected run has no equivalent scoping need and `mutate`'s explicit one does —
 and `record` folds its `mutants.json` documents into the ledger alongside `measure`'s
-measurements and `scan`'s findings.
+measurements and `scan`'s findings. It invokes `lydite mutation --no-gate`: a survivor on the merge
+commit is recorded, not gated, so it no longer turns `lydite-baseline` red — the branch is gone by
+the time anyone could act on it, and the remedy belongs to the pull request the survivor came from.
+`lydite-pr.yml`'s own `mutation` matrix is unchanged and still gates; the gate belongs before the
+merge, not after it. See
+[ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md).
 
 Each shard uploads its report directory under `lydite-shard-<name>`, not `lydite-reports-<name>`:
 `publish` reads the latter, and a shard's document rendered as a `test` section of its own would put

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1793,5 +1794,197 @@ func TestSomethingUnrelatedIsBroken(t *testing.T) {
 	})
 	if strings.Contains(quiet, "app |") {
 		t.Errorf("a run that was not asked to stream mirrored anyway:\n%s", quiet)
+	}
+}
+
+// After the merge a survivor is history rather than a verdict: the branch is
+// gone and the remedy the row prints belongs to a pull request that no longer
+// exists. Under --no-gate the component is measured and recorded in full, and
+// the run stays green.
+func TestASurvivorUnderNoGateIsRecordedAndDoesNotVote(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
+	Deeper("a/b", "a")
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a survivor failed a run that gates nothing: %v\n%+v", err, doc.Rows)
+	}
+	if doc.Verdict != ui.VerdictPass {
+		t.Errorf("verdict is %q, want a pass: nothing here was gated", doc.Verdict)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("no row for the component: %+v", doc.Rows)
+	}
+	if row.Status != ui.StatusContext {
+		t.Fatalf("row = %+v, want %q", row, ui.StatusContext)
+	}
+	// Measured and recorded is the whole point of the run, so the numbers and
+	// the survivor are on the row a reader acts on.
+	if !strings.Contains(row.Value, "survived") {
+		t.Errorf("value = %q, want it to say what survived", row.Value)
+	}
+	if detail := strings.Join(row.Detail, "\n"); !strings.Contains(detail, "paths/paths.go:") {
+		t.Errorf("the survivor is not located: %v", row.Detail)
+	}
+	// The finding anchors to a line in the commit that was measured, which on
+	// the default branch is a commit that exists and does not move. A count
+	// with no locations is what the ledger would otherwise inherit.
+	if len(doc.Findings) == 0 {
+		t.Error("a recorded survivor produced no finding")
+	}
+	for _, f := range doc.Findings {
+		if f.Gate != "mutation" || f.Line == 0 {
+			t.Errorf("finding = %+v, want a located mutation claim", f)
+		}
+	}
+}
+
+// StatusContext and never StatusPass. Nothing was gated, so a component that
+// killed every mutant would otherwise render the ✓ of a gate that examined it
+// and cleared it — indistinguishable from the run that did gate.
+func TestACleanRunUnderNoGateRendersContextAndNeverPass(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestDeeper(t *testing.T) {
+	if !Deeper("a/b", "a") {
+		t.Error("a/b is deeper than a")
+	}
+	if Deeper("a", "a") {
+		t.Error("a is not deeper than itself")
+	}
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a suite that kills every mutant failed: %v\n%+v", err, doc.Rows)
+	}
+	row, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok {
+		t.Fatalf("no row for the component: %+v", doc.Rows)
+	}
+	if row.Status == ui.StatusPass {
+		t.Fatalf("a component nothing gated rendered a pass: %+v", row)
+	}
+	if row.Status != ui.StatusContext {
+		t.Fatalf("row = %+v, want %q", row, ui.StatusContext)
+	}
+	if !strings.Contains(row.Value, "mutant(s) killed") {
+		t.Errorf("value = %q, want the kill count", row.Value)
+	}
+}
+
+// Nothing can be concluded about tests that were not passing before the
+// mutation, whichever way the run votes: the flag decides what a completed
+// measurement is worth, and this is not one.
+func TestABaselineThatDidNotPassIsUnmeasuredUnderNoGateToo(t *testing.T) {
+	root := goModuleRepo(t, deeper, `
+func TestSomethingUnrelatedIsBroken(t *testing.T) {
+	Deeper("a/b", "a")
+	t.Fatal("this suite was already red")
+}
+`)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--no-gate")
+	if err != nil {
+		t.Fatalf("a red baseline failed the run: %v", err)
+	}
+	row, _ := rowNamed(doc, mutationLabel("app"))
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("row = %+v, want unmeasured — a red baseline measured nothing", row)
+	}
+	if !strings.Contains(row.Value, "baseline suite did not pass") {
+		t.Errorf("value = %q, want it to name the cause", row.Value)
+	}
+}
+
+// A component that could not run is not a measurement, so the flag that stops
+// a survivor voting leaves it failing. Swallowing this is what a
+// `continue-on-error` on the workflow step would have done, and it is the
+// family --no-gate exists to keep apart from a survivor.
+func TestAComponentThatCouldNotRunFailsUnderNoGateToo(t *testing.T) {
+	root := t.TempDir()
+	c := component.Component{Name: "app", Dir: ".", Runner: runner.GoTest}
+	inv, err := invocation(c, runner.Instrumented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A coverage report the run cannot clear: what it read back afterwards
+	// would be the last run's, so the component never starts.
+	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(inv.CoverageReport), "held"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	plan := componentPlan{c: c, log: testLog(t)}
+	row, out := mutateComponent(t.Context(), plan, config.Config{}, nil, nil,
+		mutationOptions{root: root, changed: map[string][]int{"paths/paths.go": {4}}})
+	if row.Status != ui.StatusFail {
+		t.Fatalf("row = %+v, want a failure", row)
+	}
+	if out.ran {
+		t.Error("a component that never started is recorded as having run")
+	}
+}
+
+// The flag the post-merge workflow passes, spelled as the negation of a
+// default: mutation gates unless a caller says otherwise, and a run that
+// forgot the flag gates exactly as it does today.
+func TestMutationGatesUnlessNoGateIsPassed(t *testing.T) {
+	flag := newMutationCmd().Flags().Lookup("no-gate")
+	if flag == nil {
+		t.Fatal("mutation declares no --no-gate, so the post-merge run has no way to record without gating")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--no-gate defaults to %q, want a run that gates unless asked otherwise", flag.DefValue)
+	}
+}
+
+// The default is byte-identical: a gating run's row is the one mutationRow
+// built, status and value and detail alike.
+func TestAGatingRunKeepsTheRowItMeasured(t *testing.T) {
+	survivor := []mutation.Result{{
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}}
+	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 4, Survived: 1}, survivor, nil, 12*time.Second)
+	if got := completedRow(failing, false); !reflect.DeepEqual(got, failing) {
+		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, failing)
+	}
+	if completedRow(failing, false).Status != ui.StatusFail {
+		t.Error("a survivor stopped failing a run that gates")
+	}
+	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 4}, nil, nil, 12*time.Second)
+	if got := completedRow(passing, false); !reflect.DeepEqual(got, passing) {
+		t.Errorf("a gating run rendered %+v, want the row it measured, %+v", got, passing)
+	}
+	// A denominator of zero says nothing about the suite either way: --no-gate
+	// has nothing to add to a row that was never voting.
+	empty, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 2}, nil, nil, 12*time.Second)
+	for _, noGate := range []bool{true, false} {
+		if got := completedRow(empty, noGate); got.Status != ui.StatusUnmeasured {
+			t.Errorf("an empty denominator is %q under no-gate=%v, want unmeasured", got.Status, noGate)
+		}
+	}
+}
+
+// A teardown that failed left state behind for the next run to inherit, and
+// --no-gate does not excuse it: the flag is about what the mutants said, and a
+// teardown is a command that did not run. It still never masks a reason the
+// component could not be measured, nor a survivor a gating run is failing on.
+func TestATeardownFailureTakesOverAMeasurementAndNothingElse(t *testing.T) {
+	for _, c := range []struct {
+		status ui.Status
+		want   bool
+	}{
+		{ui.StatusPass, true},
+		{ui.StatusContext, true},
+		{ui.StatusFail, false},
+		{ui.StatusUnmeasured, false},
+	} {
+		if got := teardownFailureReplaces(c.status); got != c.want {
+			t.Errorf("a teardown failure over a %q row = %v, want %v", c.status, got, c.want)
+		}
 	}
 }
