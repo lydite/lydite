@@ -18,9 +18,21 @@ exemptions:
       seven-day cooldown in .github/dependabot.yml is the other half: by the
       time the pull request exists the upstream release has been public long
       enough for a yank or a compromised publisher to have surfaced.
-    # Every manifest .github/dependabot.yml watches whose ecosystem
-    # internal/depdelta can read. Three watched sets are deliberately absent,
-    # and each is a referral rather than a silent pass:
+    # Only the lockfiles internal/depdelta actually reads a comparison from,
+    # never the manifests beside them (Cargo.toml, package.json). depdelta.Detect
+    # names Cargo.lock and package-lock.json as manifests and leaves Cargo.toml
+    # and package.json unrecognised, so a path it does not name is not reported
+    # as unmeasured — it is skipped outright, and versionsPatchAndMinor would
+    # pass vacuously over a change that touched only the manifest. Listing the
+    # manifest here would let a Cargo.toml or package.json edit clear with the
+    # lockfile beside it untouched. What a real Dependabot bump also edits —
+    # the manifest — is therefore left off this list on purpose: that leg of
+    # the change is an uncovered path, so the pull request still refers, same
+    # as before this entry existed, rather than silently trusting a file this
+    # entry cannot measure.
+    #
+    # Three further watched sets are deliberately absent, each a referral
+    # rather than a silent pass:
     #
     #   - the two pip manifests (internal/semgrep, proving-ground-pyyaml) —
     #     depdelta has no pip reader, so a bump there is unmeasured and
@@ -38,14 +50,9 @@ exemptions:
       - source/cli/internal/runner/gotestsum-pin/go.sum
       - source/cli/internal/secrets/gitleaks-pin/go.mod
       - source/cli/internal/secrets/gitleaks-pin/go.sum
-      - source/cli/internal/rust/cargo-audit-pin/Cargo.toml
       - source/cli/internal/rust/cargo-audit-pin/Cargo.lock
-      - source/cli/internal/rust/cargo-deny-pin/Cargo.toml
       - source/cli/internal/rust/cargo-deny-pin/Cargo.lock
-      - source/cli/internal/rust/cargo-semver-checks-pin/Cargo.toml
       - source/cli/internal/rust/cargo-semver-checks-pin/Cargo.lock
-      - source/cli/internal/typescript/biome-pin/package.json
       - source/cli/internal/typescript/biome-pin/package-lock.json
-      - source/cloud-services/**/package.json
       - source/cloud-services/package-lock.json
     versions: patch-and-minor
