@@ -119,6 +119,13 @@ mutate. See [ADR 0043](../../docs/adr/0043-mutation-reaches-the-ledger-from-a-po
 resolving [#112](https://github.com/lydite/lydite/issues/112) and the shape [#49](https://github.com/lydite/lydite/issues/49)
 settled for it.
 
+**Recording never read the exit code, so `--no-gate` changes nothing about what reaches the
+ledger.** The `mutate` matrix job in `lydite-baseline.yml` invokes `lydite mutation --no-gate`, and
+its `mutants.json` feeds `lydite test record` exactly as it would bare — a survivor is recorded
+either way. What the flag changes is the workflow around that recording: a survivor on the merge
+commit no longer turns `lydite-baseline` red, since nothing there gates on it any more. See
+[ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md).
+
 **A finding count is per gate, and that is not a refinement of "per component" — it is the only
 shape that can say what there is to say.** A gate has a third state the other scalars do not: it can
 apply and have found nothing, or not apply to this component's language at all. A key present at `0`
