@@ -106,14 +106,15 @@ required is a person's judgement. So the placeholder states what the person has 
 ```yaml
 exemptions:
   - name: docs-only
-    reason: TODO — why is a change touching only these paths safe to merge unread? State what
-      this entry's paths guarantee, and nothing the schema does not check.
+    reason: "TODO(lydite): why is a change touching only these paths safe to merge unread?
+      State what this entry's paths guarantee, and nothing the schema does not check."
     paths:
       - docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md
       - docs/release-notes/0.2.0.md
 ```
 
-The block is valid YAML and parses; it is the `reason` that is unfinished, and visibly so.
+The block is valid YAML, and it is not yet an exemption: the `reason` is unfinished, visibly to
+a reader and — by the subsection below — to `Parse`.
 
 **A templated real-sounding reason was rejected**, and this is the decision with the most
 weight behind it. "Changes touching only `docs/**` are documentation-only and carry no runtime
@@ -133,9 +134,44 @@ generated text is good enough to pass for having been thought about.
 **Leaving `reason` empty was rejected too**, though it is the honest failure: the entry fails
 `validate` the moment anybody tries to use it, which is the right outcome. It just teaches
 nobody anything. A question-shaped placeholder fails the same way while saying what the author
-is expected to supply, and it makes the omission legible in review — an unanswered `TODO —
-why…` in a diff is a thing a reviewer blocks on, where an absent key is a thing they may read as
-a schema they have half-remembered.
+is expected to supply, and it makes the omission legible in review — an unanswered
+`TODO(lydite):` in a diff is a thing a reviewer blocks on, where an absent key is a thing they
+may read as a schema they have half-remembered.
+
+### The marker is reserved, and the schema rejects it
+
+A placeholder is only not-paste-ready if something says so. `Exemption.validate` tests
+`Reason == ""` and nothing else, so a generated question is a non-empty string and the file
+parses: the block above, landed unedited, would be a live exemption. That is the same failure
+this ADR spends its opening refusing — a proposal that acts on its own — arriving through the
+one field meant to guarantee a person was involved.
+
+So the placeholder's opening literal is reserved. The generator emits exactly `TODO(lydite):`
+at the head of the `reason` it writes, and `validate` rejects any exemption whose `reason`
+carries that marker anywhere in it, naming why:
+
+> reason still carries lydite's own placeholder marker — an exemption needs a person's
+> judgement, not a generated question
+
+Anywhere rather than only at the head, because a reason that keeps the question and prefixes a
+sentence to it has answered nothing; and a literal a person would not write by accident, so the
+check never fires on a reason somebody meant.
+
+**The check belongs in `internal/referral`, not in the code that generates the comment.** The
+generator is one route from a proposal to `.lydite/exemptions.yml` and it is not a route
+lydite controls: the block is copied by hand into a pull request, or pasted by whatever the
+author's editor or agent does with a fenced code block. `validate` is the one place every route
+already passes through — a hand-written file, a generated one, and any future producer nobody
+has thought of — so it is the only place that can veto a leftover placeholder regardless of how
+it arrived.
+
+**Relying on the wording alone was rejected.** It makes the whole protection a hoped-for norm:
+a reviewer skims a field that already reads like a sentence, or an author copies the block,
+deletes the marker and leaves "why is a change touching only these paths safe
+to merge unread?" standing verbatim as though it were the answer. Both produce a valid file and
+a green run. The enforcement is what turns leaving the reason exactly as generated into a hard
+failure at parse time, which is the only form of "somebody must actually write this" that does
+not depend on somebody actually reading it.
 
 ## No `versions:` in a proposal
 
@@ -206,6 +242,10 @@ this whole design is arranged to prevent.
   computation in-process, which `internal/referral` has to expose rather than keeping to itself.
   Where `clear` and `explain` read a status and decide, `exempt` computes the same coverage
   question `review` does, over a path list rather than a diff.
+- `internal/referral.Exemption.validate` gains a check for the reserved `TODO(lydite):` marker,
+  beside the `name`, `reason`, `paths` and `versions` checks already there. It is the only
+  addition here that constrains a hand-written exemptions file as well as a generated one, and
+  that reach is the point of putting it there.
 - A referred change whose paths are covered by several exemptions but by none alone gets a
   refusal with an explanation rather than a proposal. That is the ADR 0014 union case surfacing
   at the comment surface, and it stays visible there rather than being rounded off.
