@@ -122,6 +122,29 @@ func TestReviewPassesWhenTheBaseDeclaresAMatchingExemption(t *testing.T) {
 	}
 }
 
+// An uncovered path and an unsatisfied condition are different things to act
+// on, and the referral must say which happened: a declared exemption that
+// simply does not cover the change must never be reported as one that
+// covered it and then failed its condition.
+func TestReviewNamesUncoveredPathsRatherThanAnUnsatisfiedCondition(t *testing.T) {
+	exemptions := "exemptions:\n  - name: readme-only\n    reason: prose changes nothing executable\n    paths: [\"README.md\"]\n"
+	dir, base := reviewRepo(t,
+		map[string]string{referral.FileName: exemptions, "README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	out, err := runReview(t, dir, base)
+	if err == nil {
+		t.Fatalf("a path no exemption covers must refer:\n%s", out)
+	}
+	if strings.Contains(out, "conditional exemption covers the paths") {
+		t.Errorf("nothing declared covers this change, so no exemption's condition went unmet, got:\n%s", out)
+	}
+	if !strings.Contains(out, "path(s) covered by no exemption") || !strings.Contains(out, "src/auth.go") {
+		t.Errorf("the referral must name the uncovered path, got:\n%s", out)
+	}
+}
+
 // Day one: no file at all. Every change is referred, and the report says why
 // rather than leaving the reader to guess that the feature is broken.
 func TestReviewWithNoExemptionsFileRefersAndSaysSo(t *testing.T) {
@@ -1124,6 +1147,53 @@ func TestDependencyGatesPassedFailsClosedOnAnUnreadableComponentsFile(t *testing
 	}
 	if warn.Len() == 0 {
 		t.Error("a load that failed should warn, not fail silently")
+	}
+}
+
+// Two report directories naming one gate keep the worse of the two answers,
+// whichever order they are given in: a pass a later job's failure overturns
+// must not be forgotten because it was seen first.
+func TestDependencyGatesPassedKeepsTheWorseOfTwoReportsForOneGate(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{component.FileName: cliComponent, "README.md": "hello again"},
+	)
+	passing := scanReports(t, map[string]ui.Status{
+		"gosec(cli)":       ui.StatusPass,
+		"govulncheck(cli)": ui.StatusPass,
+		"licence(cli)":     ui.StatusPass,
+	})
+	failing := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusFail})
+
+	var warn bytes.Buffer
+	if dependencyGatesPassed(dir, []string{passing, failing}, &warn) {
+		t.Error("a passing report followed by a failing one for the same gate must not satisfy the condition")
+	}
+}
+
+// A label with no component at all — no "(" at all, or one opening at the
+// very first character, which names an empty gate rather than a missing
+// component — carries nothing this attributes, and is told apart from a
+// well-formed "gate(component)" label.
+func TestSplitGateLabel(t *testing.T) {
+	cases := []struct {
+		label           string
+		gate, component string
+		ok              bool
+	}{
+		{"licence(cli)", "licence", "cli", true},
+		{"cargo clippy(api)", "cargo clippy", "api", true},
+		{"scan", "", "", false},
+		{"(cli)", "", "", false},
+		{"licence()", "", "", false},
+		{"licence(cli", "", "", false},
+	}
+	for _, tc := range cases {
+		gate, component, ok := splitGateLabel(tc.label)
+		if gate != tc.gate || component != tc.component || ok != tc.ok {
+			t.Errorf("splitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.label, gate, component, ok, tc.gate, tc.component, tc.ok)
+		}
 	}
 }
 

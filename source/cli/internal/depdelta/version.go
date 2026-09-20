@@ -97,7 +97,10 @@ func canonical(version string) (string, bool) {
 		v = "v" + v
 	}
 	if !semver.IsValid(v) {
-		return "", false
+		return "", false // [lydite:exclude_from_mutation][the string beside a
+		// false second value is read by nobody: both callers discard it and
+		// return early on the bool alone, so no caller can be shown a
+		// different one]
 	}
 	return v, true
 }
