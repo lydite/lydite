@@ -1,0 +1,9 @@
+{
+  "name": "lydite-api-extractor-pin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Version pin for @microsoft/api-extractor, the comparison behind a TypeScript component's api_surface opt-in. Not a package lydite builds or publishes: it exists so Dependabot can see this version and open bump PRs, and so `npm ci` installs it deterministically. api-extractor carries its own TypeScript as a locked dependency, so the compiler that reads a declaration is pinned here too. See internal/tsapisurface.",
+  "dependencies": {
+    "@microsoft/api-extractor": "7.59.1"
+  }
+}
