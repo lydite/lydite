@@ -930,6 +930,77 @@ func TestALeakUnderANestedRepositoryIsInScope(t *testing.T) {
 	}
 }
 
+func TestGitlinksReadsOnlyAnEntryGitWroteAsOne(t *testing.T) {
+	// A prefix out of this list is one every claim beneath it is kept against,
+	// so an entry not in the shape `git ls-files --stage` writes names nothing
+	// to keep rather than whatever text happened to follow the mode.
+	const object = "0000000000000000000000000000000000000000"
+	cases := []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{"a gitlink", gitlinkMode + " " + object + " 0\tsub", []string{"sub/"}},
+		{"an ordinary file", "100644 " + object + " 0\tapp.py", nil},
+		{"the split's trailing empty element", gitlinkMode + " " + object + " 0\tsub\x00", []string{"sub/"}},
+		{"an entry with no path at all", gitlinkMode + " " + object + " 0", nil},
+		{"an entry whose path is empty", gitlinkMode + " " + object + " 0\t", nil},
+		{"no output", "", nil},
+		{"two gitlinks", gitlinkMode + " " + object + " 0\tsub\x00" + gitlinkMode + " " + object + " 0\tvendor/dep", []string{"sub/", "vendor/dep/"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gitlinks(tc.output); !slices.Equal(got, tc.want) {
+				t.Errorf("gitlinks = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNestedRepositoriesFailsWhereGitWillNotAnswer(t *testing.T) {
+	// The prefixes are half the scope, and a half lydite did not get is not an
+	// empty one: reporting no nested repository for a tree git refused to list
+	// drops every claim under a submodule in silence.
+	got, err := nestedRepositories(t.Context(), t.TempDir(), nil)
+	if err == nil {
+		t.Fatalf("nestedRepositories = %q, want the reason git could not be asked", got)
+	}
+	if !strings.Contains(err.Error(), "git ls-files --stage") {
+		t.Errorf("err = %v, want the command that would not answer named", err)
+	}
+}
+
+func TestAnAbsolutePathIsUnplaceableAgainstARootThatIsNot(t *testing.T) {
+	// A root whose absolute form lydite never got is one no absolute path can
+	// be related to. Empty is what says so, and the caller reports the leak as
+	// one it could not place rather than filing it under a path nothing
+	// anchors.
+	root := scanRoot{dir: "relative-root", resolved: "relative-root"}
+	if got := root.rel(filepath.Join(t.TempDir(), "config.yml")); got != "" {
+		t.Errorf("rel = %q, want empty — an absolute path relates to no relative root", got)
+	}
+}
+
+func TestALeakBesideACleanExitIsNotAPass(t *testing.T) {
+	// gitleaks contradicting itself — a report naming a leak beside the status
+	// of a tree with none — is a row the leak has to survive: the claim is in
+	// the document, and a passing row beside it reads as a scanned, clean tree.
+	dir := t.TempDir()
+	write(t, dir, "app.py", "token = \"abcdef1234567890abcdef1234567890\"\n")
+	write(t, dir, "report.json", `[{"RuleID":"generic-api-key","File":"app.py","StartLine":1,"StartColumn":9}]`)
+
+	got := result(executil.Result{Name: Gate}, dir, filepath.Join(dir, "report.json"), unscoped, nil)
+	if got.Ok() {
+		t.Error("Ok() = true beside a report naming a leak")
+	}
+	if !strings.Contains(got.Err.Error(), "gitleaks reported a leak") {
+		t.Errorf("Err = %v, want the leak named as the row's reason", got.Err)
+	}
+	if len(got.Findings) != 1 {
+		t.Errorf("Findings = %d, want the leak the report names", len(got.Findings))
+	}
+}
+
 // carriedBy is what git would carry out of the materialised probe tree, with
 // the tree made a repository first: the .gitignore and one source file added,
 // and the draft left untracked so the "--others --exclude-standard" half of

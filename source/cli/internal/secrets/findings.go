@@ -138,8 +138,20 @@ func nestedRepositories(ctx context.Context, dir string, paths []string) ([]stri
 	if !res.Ok() {
 		return nil, fmt.Errorf("git ls-files --stage: %w", res.Err)
 	}
-	for _, entry := range strings.Split(res.Output, "\x00") {
-		// <mode> SP <object> SP <stage> TAB <path>
+	return append(out, gitlinks(res.Output)...), nil
+}
+
+// gitlinks is every gitlink path in `git ls-files -z --stage` output, each with
+// its trailing slash.
+//
+// An entry is <mode> SP <object> SP <stage> TAB <path>. Anything not in that
+// shape — the trailing empty element the split leaves, a line a future git
+// writes differently — names no path to keep and is passed over rather than
+// guessed at, because the guess would be a prefix every claim beneath it is
+// kept against.
+func gitlinks(output string) []string {
+	var out []string
+	for _, entry := range strings.Split(output, "\x00") {
 		mode, rest, ok := strings.Cut(entry, " ")
 		if !ok || mode != gitlinkMode {
 			continue
@@ -150,7 +162,7 @@ func nestedRepositories(ctx context.Context, dir string, paths []string) ([]stri
 		}
 		out = append(out, p+"/")
 	}
-	return out, nil
+	return out
 }
 
 // unscoped holds every path, for a root git could not be asked about. The
