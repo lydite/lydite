@@ -120,18 +120,6 @@ func (c *Client) PostStatus(ctx context.Context, repo Repo, s Status) error {
 	return nil
 }
 
-// PublishStatus records a verdict named by its parts, under the referral
-// context.
-func (c *Client) PublishStatus(ctx context.Context, repo Repo, sha string, state clearance.State, description, targetURL string) error {
-	return c.PostStatus(ctx, repo, Status{
-		State:       state,
-		Context:     clearance.Context,
-		Description: description,
-		TargetURL:   targetURL,
-		SHA:         sha,
-	})
-}
-
 // ChangedPaths lists the file names a pull request touches.
 //
 // This is metadata the platform holds about the pull request, and not its

@@ -103,7 +103,7 @@ func TestCanWriteAcceptsOnlyPushingPermissions(t *testing.T) {
 	}
 }
 
-func TestPublishStatusSendsTheContextAndState(t *testing.T) {
+func TestPostStatusSendsTheContextAndState(t *testing.T) {
 	var body map[string]string
 	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -112,7 +112,8 @@ func TestPublishStatusSendsTheContextAndState(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		w.WriteHeader(http.StatusCreated)
 	})
-	if err := client.PublishStatus(context.Background(), repo, "abc123", clearance.StatePending, "referred", ""); err != nil {
+	status := Status{State: clearance.StatePending, Context: clearance.Context, Description: "referred", SHA: "abc123"}
+	if err := client.PostStatus(context.Background(), repo, status); err != nil {
 		t.Fatal(err)
 	}
 	if body["context"] != clearance.Context || body["state"] != "pending" {
@@ -122,14 +123,15 @@ func TestPublishStatusSendsTheContextAndState(t *testing.T) {
 
 // The platform counts a description in characters and rejects an over-long
 // one, so a verdict carrying a long path must still publish.
-func TestPublishStatusKeepsTheDescriptionInsideTheLimit(t *testing.T) {
+func TestPostStatusKeepsTheDescriptionInsideTheLimit(t *testing.T) {
 	var body map[string]string
 	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		w.WriteHeader(http.StatusCreated)
 	})
 	long := strings.Repeat("é", 400)
-	if err := client.PublishStatus(context.Background(), repo, "abc", clearance.StateFailure, long, ""); err != nil {
+	status := Status{State: clearance.StateFailure, Context: clearance.Context, Description: long, SHA: "abc"}
+	if err := client.PostStatus(context.Background(), repo, status); err != nil {
 		t.Fatal(err)
 	}
 	if n := len([]rune(body["description"])); n > 140 {
@@ -200,7 +202,8 @@ func TestAnAPIErrorCarriesThePlatformsMessage(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
 	})
-	err := client.PublishStatus(context.Background(), repo, "abc", clearance.StatePending, "referred", "")
+	err := client.PostStatus(context.Background(), repo,
+		Status{State: clearance.StatePending, Context: clearance.Context, Description: "referred", SHA: "abc"})
 	if err == nil || !strings.Contains(err.Error(), "not accessible") {
 		t.Fatalf("err = %v, want the platform's message", err)
 	}

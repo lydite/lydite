@@ -6,9 +6,19 @@ import (
 )
 
 // Context is the commit status a referral is published under. It is the
-// record: a clearance is a state change on this context at one commit, and
-// nothing else stores it.
+// record: a referral stands on this context at one commit, nothing else
+// stores it, and it is the status a clearance is a decision about.
 const Context = "lydite/referral"
+
+// ClearanceContext is the commit status a clearance is published under.
+//
+// A clearance is its own status rather than a state change on Context,
+// because the two are written under different authority: a job that may
+// publish a verdict may not clear one, and a job that may clear may not
+// publish a verdict. One context both could write is authority neither can
+// be scoped to — the relay trusts each allowlisted workflow ref for exactly
+// one of these two names.
+const ClearanceContext = "lydite/clearance"
 
 // State is a commit status state.
 type State string

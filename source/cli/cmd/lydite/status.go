@@ -176,6 +176,42 @@ func publish(ctx context.Context, out, eventPath string, d referral.Decision, ve
 		referralStatus(pullRequestRef{SHA: target.SHA, Number: target.Number}, d, verdict))
 }
 
+// clearanceStatus is a clearance as the document both routes carry, so the
+// status a step posts and the one this process would have posted itself are
+// one derivation rather than two.
+//
+// It names the pull request for the same reason the referral document does,
+// and for one more: a clearance run is an issue_comment run, whose own claims
+// name a branch rather than a pull ref, so the conversation is in the document
+// or nowhere.
+func clearanceStatus(ref pullRequestRef, description string) forge.Status {
+	return forge.Status{
+		State:       clearance.StateSuccess,
+		Context:     clearance.ClearanceContext,
+		Description: description,
+		TargetURL:   runURL(),
+		SHA:         ref.SHA,
+		PullRequest: ref.Number,
+	}
+}
+
+// recordClearance records the clearance: posted here with the job's own
+// token, or rendered at out for a step that posts it under lydite's App
+// identity.
+//
+// The two are alternatives the caller chooses between, not a ladder, for the
+// same reason publish's are: a repository that has not adopted the reusable
+// workflows posts directly and keeps every property of the status, and
+// neither route is attempted after the other. A document that cannot be
+// written fails the run — a clearance nothing recorded leaves the referral
+// standing while the job that answered the comment reports success.
+func recordClearance(ctx context.Context, client *forge.Client, repo forge.Repo, out string, s forge.Status) error {
+	if out != "" {
+		return forge.WriteStatus(out, s)
+	}
+	return client.PostStatus(ctx, repo, s)
+}
+
 // statusOutFlag names the flag that renders the status instead of posting it.
 const statusOutFlag = "--status-out"
 
