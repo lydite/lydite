@@ -471,12 +471,13 @@ func historyComponents(doc measurementsDoc, perComponent map[string]map[string]i
 	for name, counts := range mutants {
 		c := out[name]
 		c.Mutation = &ledger.Mutation{
-			Killed:       counts.Killed,
-			TimedOut:     counts.TimedOut,
-			OutOfMemory:  counts.OutOfMemory,
-			Survived:     counts.Survived,
-			Unviable:     counts.Unviable,
-			Acknowledged: counts.Acknowledged,
+			Killed:         counts.Killed,
+			TimedOut:       counts.TimedOut,
+			OutOfMemory:    counts.OutOfMemory,
+			Survived:       counts.Survived,
+			Unviable:       counts.Unviable,
+			Acknowledged:   counts.Acknowledged,
+			ElapsedSeconds: counts.ElapsedSeconds,
 		}
 		out[name] = c
 	}

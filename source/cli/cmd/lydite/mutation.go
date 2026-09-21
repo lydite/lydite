@@ -348,7 +348,7 @@ type componentMutation struct {
 // above runs under. Every failure warns and none of them fails the command: the
 // mutants ran, their verdict is in the report, and losing the byproduct is not
 // a reason to discard it.
-func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]mutation.Summary) {
+func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]componentMutation) {
 	tree, err := gitstate.TreeSHA(context.WithoutCancel(ctx), dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so the mutant counts were not written: %v\n", err)
@@ -377,7 +377,7 @@ func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[
 // `lydite test`. Two independent bounds would multiply into components times
 // mutants, which is the quadratic oversubscription defaultConcurrency is a
 // constant rather than NumCPU to avoid.
-func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]mutation.Summary {
+func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]componentMutation {
 	plans := planComponents(ctx, opts.root, selected, "mutation", opts.stream)
 	for _, p := range plans {
 		defer p.log.Close()
@@ -429,15 +429,15 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	// component's mutants were generated and executed to a summary — including
 	// the run withdrawInterrupted took back, which resets the result and with it
 	// that flag.
-	var ran map[string]mutation.Summary
+	var ran map[string]componentMutation
 	for i, p := range plans {
 		if !results[i].ran {
 			continue
 		}
 		if ran == nil {
-			ran = map[string]mutation.Summary{}
+			ran = map[string]componentMutation{}
 		}
-		ran[p.c.Name] = results[i].summary
+		ran[p.c.Name] = results[i]
 	}
 	return ran
 }
@@ -1021,10 +1021,11 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 		return detailed(unmeasuredRow(label, fmt.Sprintf(
 			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log), nil
 	}
-	// The elapsed time is in the value rather than under the row, because it
-	// is what a later runtime budget would be a multiple of and the fold has
-	// no other channel to read it from — mutants.json carries what became of
-	// each mutant, not how long the component took to say so.
+	// The elapsed time is in the value rather than under the row, because a
+	// reader deciding whether this component is worth mutating on every pull
+	// request reads it beside the score it bought. It is prose for that reader
+	// alone: mutants.json carries the same span as a number, and the fold and
+	// the ledger both take it from there rather than from this sentence.
 	row := ui.Row{Status: ui.StatusPass, Label: label, Log: log.Rel,
 		Value: fmt.Sprintf("%d of %d mutant(s) killed in %s", killed, total, elapsed.Round(time.Second))}
 	if a := aside(s); a != "" {

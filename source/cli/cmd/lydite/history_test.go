@@ -403,11 +403,14 @@ func TestTheMutantCountsReachTheComponentTheyWereTakenFor(t *testing.T) {
 		},
 	}
 	got := historyComponents(doc, nil, map[string]mutantCounts{
-		"measured": {Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5},
+		"measured": {Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5, ElapsedSeconds: 90},
 		"carried":  {Killed: 1},
 	})
 
-	want := ledger.Mutation{Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5}
+	// The time the run cost travels with the counts it bought: a mutation run
+	// cannot be recomputed after the merge, so a cost this recording drops is
+	// one nothing can ever measure again.
+	want := ledger.Mutation{Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5, ElapsedSeconds: 90}
 	if c := got["measured"]; c.Mutation == nil || *c.Mutation != want {
 		t.Errorf("measured = %+v, want %+v", c.Mutation, want)
 	}
@@ -438,7 +441,8 @@ func TestARecordingThatReadNoCountsRecordsNoMutation(t *testing.T) {
 }
 
 // The whole path, through the command: a run's counts sit beside its
-// measurements, and the record the branch holds carries the six numbers.
+// measurements, and the record the branch holds carries the six numbers and the
+// time they cost.
 func TestARecordedEntryCarriesTheMutantCounts(t *testing.T) {
 	root := gateRepo(t)
 	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
@@ -446,7 +450,7 @@ func TestARecordedEntryCarriesTheMutantCounts(t *testing.T) {
 	}
 	if err := writeMutants(root, mutantsDoc{
 		Tree:       treeOf(t, root),
-		Components: map[string]mutantCounts{"svc": {Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1}},
+		Components: map[string]mutantCounts{"svc": {Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1, ElapsedSeconds: 42.5}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +467,7 @@ func TestARecordedEntryCarriesTheMutantCounts(t *testing.T) {
 	if m == nil {
 		t.Fatalf("the record carries no mutation: %+v", recs[0].Components["svc"])
 	}
-	want := ledger.Mutation{Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1}
+	want := ledger.Mutation{Killed: 7, Survived: 0, Unviable: 2, Acknowledged: 1, ElapsedSeconds: 42.5}
 	if *m != want {
 		t.Errorf("mutation = %+v, want %+v", *m, want)
 	}

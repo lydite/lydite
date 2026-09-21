@@ -417,6 +417,60 @@ func TestAnAbsentMutationIsNotAZeroedOne(t *testing.T) {
 	}
 }
 
+// What a mutation run cost is recorded beside what it bought, because nothing
+// can measure it again: the pins move, and after a squash merge the diff those
+// mutants came from is gone. Sub-second precision survives the append, the span
+// being the one a runtime budget is argued from rather than the one a row
+// rounded for a reader.
+func TestAMutationRecordCarriesTheTimeItCost(t *testing.T) {
+	root := t.TempDir()
+	rec := entry("a", "", "main", "2026-03-15T10:00:00Z")
+	rec.Components = map[string]Component{"svc": {Mutation: &Mutation{Killed: 4, ElapsedSeconds: 90.5}}}
+	if _, _, err := Append(root, []Record{rec}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got := lines(t, root, "history/v1/2026-03.ndjson")[0].Components["svc"].Mutation
+	if got == nil {
+		t.Fatal("the record carries no mutation at all")
+	}
+	if got.ElapsedSeconds != 90.5 {
+		t.Errorf("the run took %v seconds in the record, want 90.5", got.ElapsedSeconds)
+	}
+}
+
+// A record written before the elapsed time carries none, and reads back at
+// nought. Nought is what "nobody recorded this" looks like here — a run that
+// happened cannot produce it, since a baseline suite and a mutant after it take
+// a measurable time — so a reader plotting the series skips the point rather
+// than drawing a run that cost nothing.
+func TestAMutationRecordWithNoTimeReadsBackAsUnrecorded(t *testing.T) {
+	var rec Record
+	line := `{"kind":"entry","commit":"a","branch":"main","timestamp":"2026-03-15T10:00:00Z",` +
+		`"components":{"svc":{"mutation":{"killed":4,"survived":0,"unviable":2,"acknowledged":1}}}}`
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("a record written before the elapsed time would not read: %v", err)
+	}
+	m := rec.Components["svc"].Mutation
+	if m == nil {
+		t.Fatal("the record's mutation was dropped")
+	}
+	if m.Killed != 4 || m.Unviable != 2 {
+		t.Errorf("the counts read back as %+v, want the run's own", m)
+	}
+	if m.ElapsedSeconds != 0 {
+		t.Errorf("a record carrying no elapsed time reported %v seconds", m.ElapsedSeconds)
+	}
+	// And a record holding no time writes none back out, so a reader cannot
+	// tell a re-encoded old record from the original.
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "elapsed_seconds") {
+		t.Errorf("an unrecorded time was written back as a measured one: %s", data)
+	}
+}
+
 func write(t *testing.T, root, path, content string) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(path))

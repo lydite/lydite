@@ -156,13 +156,14 @@ func readShardMutants(dir string, row *ui.Row) (mutantsDoc, bool) {
 // killedOf reads a component row's score back out of its value.
 //
 // It is how the fold reads a shard that wrote no mutants.json — an older
-// lydite, or one whose document did not parse — and it is how every shard's
-// elapsed time is read, because the counts document carries what became of each
-// mutant and not how long the component took to say so. A row whose value does
-// not match contributes nothing, and the summary says how many components it
-// covers, so a value this stops recognising shows up as a summary over fewer
-// components rather than as a wrong number.
-var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived) in (.+)$`)
+// lydite, or one whose document did not parse — and nothing else: the elapsed
+// time the row states is not captured, because the counts document carries that
+// span as a number and a fold reading it out of a sentence is one wording change
+// away from a wrong total. A row whose value does not match contributes nothing,
+// and the summary says how many components it covers, so a value this stops
+// recognising shows up as a summary over fewer components rather than as a wrong
+// number.
+var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived) in .+$`)
 
 // foldedMutationRow sums the shards' scores.
 //
@@ -177,18 +178,17 @@ var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived)
 // survived == 0 for the repository, so a gating row here could only restate the
 // conjunction of the rows above it — and each of those has already failed the
 // run if it had a survivor.
+//
+// The elapsed time is the sum over the components that recorded one, which is
+// machine time and not wall-clock: shards run beside each other, so no clock
+// ever read this, and it is the same quantity an unsharded run's own summary
+// reports for the same declaration. A component whose counts carried no time —
+// a shard with no document, or one an older lydite wrote — is left out of it,
+// and the row says how many contributed rather than counting them at nought.
 func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.File) ui.Row {
-	killed, total, covered := 0, 0, 0
+	killed, total, covered, timed := 0, 0, 0, 0
 	var elapsed time.Duration
 	for _, c := range decl.Components {
-		rows := rowsFor(inputs, mutationLabel(c.Name))
-		for _, row := range rows {
-			if m := killedOf.FindStringSubmatch(row.Value); m != nil {
-				if d, err := time.ParseDuration(m[4]); err == nil {
-					elapsed += d
-				}
-			}
-		}
 		if s, ok := counts.Components[c.Name]; ok {
 			// Every component the document holds ran, including one whose
 			// mutants said nothing about the suite — its row is `unmeasured`
@@ -196,9 +196,13 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			// folded run report the component count an unsharded one does.
 			n, of := s.summary().Score()
 			killed, total, covered = killed+n, total+of, covered+1
+			if d, ok := s.elapsed(); ok {
+				elapsed += d
+				timed++
+			}
 			continue
 		}
-		for _, row := range rows {
+		for _, row := range rowsFor(inputs, mutationLabel(c.Name)) {
 			m := killedOf.FindStringSubmatch(row.Value)
 			if m == nil {
 				continue
@@ -214,6 +218,19 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 	if covered == 0 {
 		return ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "no component was mutated"}
 	}
-	return ui.Row{Status: ui.StatusContext, Label: "mutation",
-		Value: fmt.Sprintf("%d of %d mutant(s) killed across %d component(s) in %s", killed, total, covered, elapsed)}
+	row := ui.Row{Status: ui.StatusContext, Label: "mutation",
+		Value: fmt.Sprintf("%d of %d mutant(s) killed across %d component(s)", killed, total, covered)}
+	switch {
+	case timed == covered:
+		row.Value += " in " + elapsed.Round(time.Second).String()
+	case timed > 0:
+		row.Value += fmt.Sprintf(" in %s, from the %d that recorded a time",
+			elapsed.Round(time.Second), timed)
+	default:
+		// Said rather than rendered as `in 0s`: a total nothing measured is
+		// indistinguishable from a run that took no time, and the shard that
+		// recorded none is the one a reader has to go and look at.
+		row.Detail = []string{"no shard recorded how long its components took"}
+	}
+	return row
 }
