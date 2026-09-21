@@ -30,15 +30,21 @@ file is not special-cased for the same reason: recognising one means reading it,
 gate that starts reading files has to be right about every language it meets. The
 exclude is where a repository says so.
 
-**A file counts only when it is written in a language lydite has a runner for.** The
-extension set lives beside the `Lang` constants in `internal/runner`, so the two cannot
-come apart — a language that gains a runner and no extensions is one the gate is blind
-to, and `TestEveryLangHasSourceExts` refuses it. A `README.md`, a `LICENSE`, a
-`Makefile`, an OpenAPI document and a shell script are not code any component could
-claim, so requiring an exclude for one is paperwork for a question lydite cannot act on
-either way — and a gate that fires on ordinary work is one that gets switched off. The
-proving ground is the calibration: six files there sit under no component and exactly
-one, `scripts/seed.ts`, must fire.
+**A file counts only when its extension is one lydite recognises as source**: the
+`internal/runner` `Lang` constants' extension sets, which include `.py`, `.sh` and `.bash`
+(`runner.Python`, `runner.Shell`) beside Go, Rust and TypeScript. Whether a runner exists for a
+language (`runner.Runs`) is a separate question: whether a component claims a file is a path
+question that needs no runner. A component declaring a raw `command:` claims every file under its
+directory like any other component, and a recognised file no component claims is an orphan,
+cleared by a component covering it or an `excludes` entry. A runner whose language has no
+extensions leaves the gate blind to that language while it reports a clean pass, and
+`TestEveryRunnersLangHasSourceExts` refuses it. A `README.md`, a `LICENSE`, a `Makefile` and an
+OpenAPI document are not source in any recognised language, so requiring an exclude for one is
+paperwork for a question lydite cannot act on either way — and a gate that fires on ordinary work
+is one that gets switched off. A repository with scripts under no component starts seeing them as
+orphans; the escape hatch is an exclude. `orphan.Unscanned` skips languages with no runner, so the
+per-language scan gap set is unchanged. What a raw-command component gets from each gate is in
+[Components](components.md#what-a-raw-command-component-gets).
 
 **A language disabled in `.lydite/config.yml` is still checked.** `rust.enabled: false`
 says which checks run over a repository's Rust; it does not say that no component should

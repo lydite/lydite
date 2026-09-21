@@ -360,6 +360,224 @@ func TestNestedDirectoriesSerialise(t *testing.T) {
 	}
 }
 
+// A path an item declares it occupies is a lock exactly as its root is. Two
+// items rooted apart that both write into one generated tree are two writes to
+// that tree, and nothing lydite reads can see it — a setup command is opaque
+// shell, so the declaration is the only evidence there is.
+//
+// A third item sharing nothing runs alongside the first, so the run is shown
+// to be keeping two apart while things are genuinely running at once rather
+// than to have gone sequential.
+func TestOccupiedPathSerialises(t *testing.T) {
+	items := []Item{
+		{Name: "ui", Dir: "packages/ui", Occupies: []string{"packages/tokens"}},
+		{Name: "storybook", Dir: "apps/storybook", Occupies: []string{"packages/tokens"}},
+		{Name: "api", Dir: "go/api"},
+	}
+	got := Conflicts(items)
+	if len(got) != 1 || got[0].On != "directory packages/tokens" {
+		t.Fatalf("Conflicts = %v, want the two on the tree they both write into", got)
+	}
+
+	var mu sync.Mutex
+	var log []string
+	release := make(chan struct{})
+	entered := map[string]chan struct{}{
+		"ui": make(chan struct{}), "storybook": make(chan struct{}), "api": make(chan struct{}),
+	}
+	done, out := runAsync(items, len(items), func(_ context.Context, i int) {
+		name := items[i].Name
+		mu.Lock()
+		log = append(log, name+":enter")
+		mu.Unlock()
+		close(entered[name])
+		// Every item waits, the held-back one included: a run that never
+		// blocks it cannot be told from one that serialised it.
+		<-release
+		mu.Lock()
+		log = append(log, name+":exit")
+		mu.Unlock()
+	})
+	waitFor(t, "ui to start", entered["ui"])
+	waitFor(t, "api to start alongside it", entered["api"])
+	close(release)
+	waitFor(t, "the run to finish", done)
+
+	a, b := interval(t, log, "ui"), interval(t, log, "storybook")
+	if a.start < b.end && b.start < a.end {
+		t.Fatalf("ui %v and storybook %v overlap, but both occupy packages/tokens: %v", a, b, log)
+	}
+	if out.Started != len(items) {
+		t.Fatalf("Started = %d, want %d: a lock that is never released stalls the queue", out.Started, len(items))
+	}
+	if out.MaxConcurrent < 2 {
+		t.Fatalf("MaxConcurrent = %d: nothing ran at once, so the lock was never contended", out.MaxConcurrent)
+	}
+}
+
+// An occupied path locks a tree, so containment decides it in every direction:
+// a root inside another item's occupied path, an occupied path inside another
+// item's root, and two occupied paths one of which contains the other are all
+// one pair writing into one tree.
+func TestOccupiedPathsConflictByContainment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b Item
+		on   string
+	}{
+		{
+			name: "a root inside the other's occupied path",
+			a:    Item{Name: "a", Dir: "packages/tokens/dist"},
+			b:    Item{Name: "b", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			on:   "directory packages/tokens",
+		},
+		{
+			name: "an occupied path inside the other's root",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens/dist"}},
+			b:    Item{Name: "b", Dir: "packages/tokens"},
+			on:   "directory packages/tokens",
+		},
+		{
+			name: "one occupied path inside another",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			b:    Item{Name: "b", Dir: "apps/docs", Occupies: []string{"packages/tokens/dist"}},
+			on:   "directory packages/tokens",
+		},
+		{
+			name: "the same occupied path",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			b:    Item{Name: "b", Dir: "apps/docs", Occupies: []string{"packages/tokens"}},
+			on:   "directory packages/tokens",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Conflicts([]Item{tc.a, tc.b})
+			if len(got) != 1 || got[0].On != tc.on {
+				t.Errorf("Conflicts = %v, want one on %q", got, tc.on)
+			}
+		})
+	}
+
+	// Trees nobody shares leave the pair parallel: an occupied path costs
+	// parallelism only where it is actually written into twice.
+	for _, tc := range []struct {
+		name string
+		a, b Item
+	}{
+		{
+			name: "disjoint occupied paths",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			b:    Item{Name: "b", Dir: "apps/docs", Occupies: []string{"packages/icons"}},
+		},
+		{
+			name: "a prefix that is not a path boundary",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			b:    Item{Name: "b", Dir: "apps/docs", Occupies: []string{"packages/tokensx"}},
+		},
+		{
+			name: "an occupied path beside the other's root",
+			a:    Item{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens"}},
+			b:    Item{Name: "b", Dir: "packages/icons"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Conflicts([]Item{tc.a, tc.b}); len(got) != 0 {
+				t.Errorf("Conflicts = %v, want none", got)
+			}
+		})
+	}
+}
+
+// Several overlaps between one pair are one tree and one line in the report,
+// and one pair the scheduler serialises.
+func TestOverlappingOccupiedPathsCollapseToTheOuterTree(t *testing.T) {
+	got := Conflicts([]Item{
+		{Name: "a", Dir: "apps/web", Occupies: []string{"packages/tokens", "packages/tokens/dist"}},
+		{Name: "b", Dir: "apps/docs", Occupies: []string{"packages/tokens/dist", "packages/tokens/src"}},
+	})
+	if len(got) != 1 || got[0].On != "directory packages/tokens" {
+		t.Fatalf("Conflicts = %v, want one on the outermost tree they share", got)
+	}
+	if n := Pairs(got); n != 1 {
+		t.Fatalf("Pairs = %d, want 1", n)
+	}
+}
+
+// A sibling whose name extends an ancestor's with a byte that sorts below '/'
+// lands between the ancestor and its descendants, and the descendant is still
+// covered by the ancestor rather than reported as a tree of its own.
+func TestASiblingSortingBetweenAnAncestorAndItsDescendantDoesNotHideTheAncestor(t *testing.T) {
+	paths := []string{"packages/tokens", "packages/tokens-x", "packages/tokens/dist"}
+	got := Conflicts([]Item{
+		{Name: "a", Occupies: paths},
+		{Name: "b", Occupies: paths},
+	})
+	if len(got) != 2 ||
+		got[0].On != "directory packages/tokens" ||
+		got[1].On != "directory packages/tokens-x" {
+		t.Fatalf("Conflicts = %v, want packages/tokens and packages/tokens-x only", got)
+	}
+}
+
+// The trees a pair shares come out ancestor-first and in sorted order however
+// many there are. They are gathered from a map, so a chain of nested paths that
+// was not sorted would be pruned against a descendant seen before its ancestor
+// and a report would reorder itself from run to run.
+func TestSharedTreesAreReportedSortedAndPrunedToTheirOutermostPath(t *testing.T) {
+	paths := []string{
+		"z",
+		"a/b/c/d/e/f/g/h",
+		"p/q",
+		"a/b/c/d/e/f/g",
+		"a/b/c/d/e/f",
+		"a/b/c/d/e",
+		"a/b/c/d",
+		"m/n",
+		"a/b/c",
+		"a/b",
+	}
+	got := Conflicts([]Item{
+		{Name: "a", Occupies: paths},
+		{Name: "b", Occupies: paths},
+	})
+	want := []string{"a/b", "m/n", "p/q", "z"}
+	if len(got) != len(want) {
+		t.Fatalf("Conflicts = %v, want one per tree in %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].On != "directory "+w {
+			t.Fatalf("Conflicts[%d] = %q, want %q (all: %v)", i, got[i].On, "directory "+w, got)
+		}
+	}
+}
+
+// An occupied path costs parallelism only where the tree is actually written
+// into twice. Items whose paths are disjoint all run at once, forced by a
+// barrier none of them can pass alone.
+func TestDisjointOccupiedPathsStayParallel(t *testing.T) {
+	const n = 4
+	items := make([]Item, n)
+	for i := range items {
+		items[i] = Item{Name: string(rune('a' + i)), Occupies: []string{"packages/" + string(rune('a'+i))}}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	arrived := make(chan struct{})
+	go func() { wg.Wait(); close(arrived) }()
+
+	done, out := runAsync(items, n, func(context.Context, int) {
+		wg.Done()
+		<-arrived
+	})
+	waitFor(t, "all items to be running at once", arrived)
+	waitFor(t, "the run to finish", done)
+
+	if out.MaxConcurrent != n {
+		t.Fatalf("MaxConcurrent = %d, want %d", out.MaxConcurrent, n)
+	}
+}
+
 // A directory lock is released when its item finishes, like a port. Two nested
 // components run one after the other and both run.
 func TestNestedDirectoryLockIsReleased(t *testing.T) {

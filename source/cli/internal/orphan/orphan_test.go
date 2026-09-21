@@ -27,20 +27,19 @@ func TestAnUndeclaredDirectoryIsOrphaned(t *testing.T) {
 	}
 }
 
-// Only a language lydite has a runner for. A file no component could ever
-// claim is not a question the gate can act on either way, and demanding an
-// exclude for one is paperwork that trains people to stop reading the list.
-func TestOnlySourceOfALanguageLyditeRunsCounts(t *testing.T) {
+// Only a language lydite recognises as source. Prose, a licence, a build
+// file and a data document are not code any component claims, and demanding
+// an exclude for one is paperwork that trains people to stop reading the list.
+func TestOnlySourceOfALanguageLyditeRecognisesCounts(t *testing.T) {
 	root := repo(t, map[string]string{
-		"cli/main.go":        "package main\n",
-		"README.md":          "# hi\n",
-		"LICENSE":            "MIT\n",
-		"VERSION":            "1.0.0\n",
-		"Makefile":           "all:\n",
-		"docs/openapi.json":  "{}\n",
-		"scripts/install.sh": "#!/bin/sh\n",
-		"assets/logo.svg":    "<svg/>\n",
-		".github/ci.yml":     "on: push\n",
+		"cli/main.go":       "package main\n",
+		"README.md":         "# hi\n",
+		"LICENSE":           "MIT\n",
+		"VERSION":           "1.0.0\n",
+		"Makefile":          "all:\n",
+		"docs/openapi.json": "{}\n",
+		"assets/logo.svg":   "<svg/>\n",
+		".github/ci.yml":    "on: push\n",
 	})
 	res := find(t, root, component.File{Components: []component.Component{{Name: "cli", Dir: "cli"}}})
 	if len(res.Orphans) != 0 {
@@ -48,6 +47,53 @@ func TestOnlySourceOfALanguageLyditeRunsCounts(t *testing.T) {
 	}
 	if res.Scanned != 1 {
 		t.Errorf("scanned = %d, want 1", res.Scanned)
+	}
+}
+
+// A component declaring a raw command claims the files under its directory
+// whatever they are written in, so a script it covers is nobody's orphan —
+// and the suite that command runs is the only thing lydite could have asked
+// about it either way.
+func TestACommandComponentClaimsAScriptItCovers(t *testing.T) {
+	root := repo(t, map[string]string{
+		"tools/build.py":   "print('x')\n",
+		"tools/release.sh": "#!/bin/sh\n",
+		"tools/lib.bash":   "true\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "tools", Dir: "tools", Command: []string{"make", "check"}},
+	}}
+	res := find(t, root, f)
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans = %v, want none — the component covers all three", res.Orphans)
+	}
+	if res.Scanned != 3 {
+		t.Errorf("scanned = %d, want 3 — a .py, a .sh and a .bash are source", res.Scanned)
+	}
+}
+
+// A script under no component and no exclude is the gate's own case: code
+// tested by nobody, in a repository whose every run still reports green. The
+// author clears it by declaring the component that runs it or by writing the
+// exclude that says nothing does.
+func TestAnUnclaimedScriptIsOrphaned(t *testing.T) {
+	root := repo(t, map[string]string{
+		"cli/main.go":          "package main\n",
+		"scripts/release.py":   "print('x')\n",
+		"scripts/install.sh":   "#!/bin/sh\n",
+		"scripts/helpers.bash": "true\n",
+	})
+	f := component.File{Components: []component.Component{{Name: "cli", Dir: "cli"}}}
+	res := find(t, root, f)
+	want := []string{"scripts/helpers.bash", "scripts/install.sh", "scripts/release.py"}
+	if !equal(res.Orphans, want) {
+		t.Errorf("orphans = %v, want %v", res.Orphans, want)
+	}
+
+	// And an exclude clears them, exactly as it clears any other source file.
+	f.Excludes = []string{"scripts/**"}
+	if res := find(t, root, f); len(res.Orphans) != 0 {
+		t.Errorf("orphans = %v, want none once the exclude covers them", res.Orphans)
 	}
 }
 

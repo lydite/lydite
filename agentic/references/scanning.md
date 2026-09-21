@@ -26,8 +26,14 @@ carry, so a scan row and a test row about one component are greppable together. 
 at the command and not in each language package, so one rule covers all three rather than three
 that agree until one is changed.
 
-**A component declaring a raw `command:` gets an `unmeasured` row** saying its language cannot be
-derived. Skipping it silently would read as a component that was scanned and found clean. This is
+**A component whose language is not Go, Rust or TypeScript gets three `unmeasured` rows**, one per
+gate that has nothing to run: `scan(<name>)`, `licence(<name>)` and `findings(<name>)`, each with its
+own reason (no linter, vulnerability or SAST check; no dependency set to read licences from; no
+finding count). A raw `command:` implies no language, so it is the usual case. Skipping it silently
+would read as a component that was scanned and found clean. Semgrep and gitleaks are root-scoped, so
+they still cover the component's source. See
+[Components](components.md#what-a-raw-command-component-gets).
+This is
 deliberately not the treatment a **disabled** language gets: `rust.enabled: false` produces no rows
 at all, because that is an opt-out the repository stated rather than a check that could not run,
 and a row per opted-out component trains readers to ignore the tag that exists to be noticed.

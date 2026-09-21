@@ -58,17 +58,44 @@ func TestGoTestDefaultsToTheWholePackageTree(t *testing.T) {
 	}
 }
 
+// effectiveCoverpkg is the -coverpkg `go test` acts on: flag parsing takes the
+// last occurrence of a repeated flag, so the last one in the argv is the scope
+// the measurement actually has. Asserting only that some -coverpkg is present
+// passes just as happily with a second one appended or the ordering flipped,
+// which is the failure these tests exist to catch.
+func effectiveCoverpkg(args []string) string {
+	for i := len(args) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(args[i], "-coverpkg="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // Without -coverpkg, Go instruments only the package under test, so code
 // exercised solely through another package's tests reads as uncovered — a
 // pull request whose new code is fully exercised from its caller fails the
 // patch gate on correct, tested work.
 func TestGoInstrumentedCarriesCoverpkg(t *testing.T) {
 	inv := argv(t, GoTest, Instrumented)
-	if !slices.Contains(inv.Args, "-coverpkg=./...") {
-		t.Errorf("instrumented go-test = %v, want -coverpkg=./...", inv.Args)
+	if got := effectiveCoverpkg(inv.Args); got != "./..." {
+		t.Errorf("instrumented go-test = %v, effective -coverpkg %q, want ./...", inv.Args, got)
 	}
 	if inv.CoverageReport == "" {
 		t.Error("the instrumented variant must name where its report lands")
+	}
+}
+
+// lydite's -coverpkg=./... is a default, not a ceiling: a component whose tree
+// holds generated or vendored packages narrows its coverage denominator by
+// declaring its own -coverpkg, which wins because lydite's sits ahead of the
+// declared args. Flip that order and the declared scope is discarded in
+// silence — the component's coverage is then measured against a tree it said
+// it did not mean.
+func TestGoInstrumentedLetsADeclaredCoverpkgWin(t *testing.T) {
+	inv := argv(t, GoTest, Instrumented, "-coverpkg=./internal/...", "-race", "./...")
+	if got := effectiveCoverpkg(inv.Args); got != "./internal/..." {
+		t.Errorf("instrumented go-test = %v, effective -coverpkg %q, want ./internal/...", inv.Args, got)
 	}
 }
 
@@ -525,7 +552,11 @@ func TestNextestLinuxTargetsAreStatic(t *testing.T) {
 // A language with a runner and no source extensions is one the orphan gate
 // cannot see, so its files would go undeclared while the gate reported a
 // clean pass — the declared list failing open, one level down.
-func TestEveryLangHasSourceExts(t *testing.T) {
+//
+// The implication runs this way only. A language in the table without a
+// runner is the deliberate case: lydite reads a .py or a .sh as source a
+// component has to claim, and runs nothing over either.
+func TestEveryRunnersLangHasSourceExts(t *testing.T) {
 	for _, r := range registry {
 		if len(sourceExts[r.Lang]) == 0 {
 			t.Errorf("runner %q is %q, which has no source extensions", r.Name, r.Lang)
@@ -596,6 +627,28 @@ func TestInstrumentationIsInstalledForWhatActuallyRunsIt(t *testing.T) {
 		if got := runsLLVMCov(inv); got != tc.want {
 			t.Errorf("runsLLVMCov(%s/%s) = %v, want %v — the command is %q",
 				tc.name, tc.variant, got, tc.want, line(inv))
+		}
+	}
+}
+
+// Runs separates the languages lydite has a runner for from the ones it only
+// recognises, and it is read off the registry so the two cannot drift. A
+// caller resolving a suite, a coverage report or a language's scanners asks
+// this first: those all reach a Lang through a runner, and a language with
+// none would resolve to nothing there while still being a file the orphan
+// gate sees.
+func TestRunsIsTrueForExactlyTheRunnersLanguages(t *testing.T) {
+	for _, r := range registry {
+		if !Runs(r.Lang) {
+			t.Errorf("runner %q is %q, which Runs reports lydite does not run", r.Name, r.Lang)
+		}
+	}
+	for _, l := range []Lang{Python, Shell} {
+		if Runs(l) {
+			t.Errorf("%s has no runner in the registry, so Runs must say so", l)
+		}
+		if len(sourceExts[l]) == 0 {
+			t.Errorf("%s has no source extensions, so the orphan gate cannot see its files", l)
 		}
 	}
 }

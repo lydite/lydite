@@ -68,9 +68,9 @@ const (
 	Jest Name = "jest"
 )
 
-// Lang is the language a runner implies. It is derived, never declared: a
-// component naming cargo-nextest can only be Rust, and a second statement of
-// that could only disagree with the first.
+// Lang is the language a source file is written in. A runner implies one and
+// never declares it: a component naming cargo-nextest can only be Rust, and a
+// second statement of that could only disagree with the first.
 type Lang string
 
 // The languages lydite runs.
@@ -83,22 +83,59 @@ const (
 	TypeScript Lang = "typescript"
 )
 
+// The languages lydite recognises as source and runs nothing for. No runner
+// implies one, so nothing that resolves a suite, a coverage report, a
+// toolchain or a language's scanners ever meets one — those all reach a Lang
+// through a runner. What does meet one is a question asked of a path alone:
+// whether some component claims the file.
+const (
+	// Python is a .py file, which lydite reads as source and runs no tool
+	// over.
+	Python Lang = "python"
+	// Shell is a shell script, which lydite reads as source and runs no tool
+	// over.
+	Shell Lang = "shell"
+)
+
 // sourceExts is the file extensions each language's source is written in.
 //
 // The orphan gate reads this to decide whether a file is code some component
-// ought to be testing, which is a question lydite can only ask about a
-// language it has a runner for: a Python file is not code any component could
-// claim, so demanding an exclude for one is paperwork for a question lydite
-// cannot act on either way.
+// ought to be testing, and that question is worth asking of a language lydite
+// runs nothing for: a component declaring a raw command claims the files under
+// its directory whatever they are written in, so a script under no component
+// and no exclude is code tested by nobody — exactly what the gate exists to
+// name. An extension no language here claims stays out, because demanding an
+// exclude for a README or a Makefile is paperwork for a question lydite cannot
+// act on either way.
 //
 // It lives beside the Lang constants so the two cannot come apart. A language
-// that gains a runner and no extensions is one whose files the gate is blind
-// to, and TestEveryLangHasSourceExts refuses that.
+// with a runner and no extensions is one whose files the gate is blind to, and
+// TestEveryRunnersLangHasSourceExts refuses that.
 var sourceExts = map[Lang][]string{
 	Go:         {".go"},
 	Rust:       {".rs"},
 	TypeScript: {".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"},
+	Python:     {".py"},
+	Shell:      {".sh", ".bash"},
 }
+
+// Runs reports whether lydite has a runner for the language, which is what a
+// caller asks before resolving anything a runner is the source of — a suite,
+// an instrumented variant, a language's scanners. A Lang answering false is
+// one a file's extension resolves to and nothing beyond a path question reads.
+//
+// Read off the registry, so a language that gains or loses a runner cannot
+// leave a second list of which languages have one behind.
+func Runs(l Lang) bool { return runLangs[l] }
+
+// runLangs is the set of languages the registry's runners imply.
+var runLangs = func() map[Lang]bool {
+	out := map[Lang]bool{}
+	for _, r := range registry {
+		out[r.Lang] = true
+	}
+	return out
+}()
 
 // SourceExtsFor returns the extensions one language's source is written in,
 // or nothing for a component whose runner implies no language. It is what
@@ -112,7 +149,8 @@ func SourceExtsFor(l Lang) []string {
 // LangForExt returns the language a source file's extension belongs to, and
 // whether it belongs to one at all. It reads the same table SourceExtsFor
 // does, so a language that gains an extension gains it in both directions at
-// once.
+// once. The answer may be a language lydite runs nothing for, which Runs is
+// what separates.
 //
 // Built once into a reverse map rather than ranging over the table, so the
 // answer cannot depend on map iteration order. No extension belongs to two
@@ -137,8 +175,10 @@ var langByExt = func() map[string]Lang {
 	return out
 }()
 
-// SourceExts returns every extension the languages lydite runs are written
-// in, lowercase and dot-prefixed, sorted.
+// SourceExts returns every extension the languages lydite recognises are
+// written in, lowercase and dot-prefixed, sorted. It is the whole table,
+// runners or not: it answers what counts as source, which is a question about
+// the file rather than about what lydite would run over it.
 func SourceExts() []string {
 	var out []string
 	for _, exts := range sourceExts {
@@ -305,6 +345,16 @@ func goTestArgs(args []string) []string {
 // patch gate. The build-only variant is `go build`, not `go vet` or a
 // compile-only test flag, because what it has to answer is whether the
 // package compiles at all.
+//
+// That -coverpkg is a default and not a ceiling. The coverage flags are placed
+// before the component's declared args and `go test` honours the last
+// occurrence of a repeated flag, so a component that declares its own
+// -coverpkg narrows what its coverage is measured against — the tree lydite
+// would instrument is a guess at the one the component means, and the
+// component is the side that knows. It is the opposite choice from GoRerun,
+// which appends -run and -count=1 after the declared args so a declared
+// duplicate cannot win; there the filter is the whole point of the invocation
+// and a component may not overrule it.
 func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	pkgs := goTestArgs(args)
 	switch variant {
