@@ -374,42 +374,130 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 // An install that resolved no workspace root ran nothing at all, and a report
 // that mentioned it only by staying silent is indistinguishable from one whose
 // workspace was installed.
+// Both shapes lydite installs for: the component that named a JavaScript
+// runner, and the one that named a raw command from a directory holding a
+// package.json.
 func TestAComponentWhoseInstallResolvedNoRootIsUnmeasured(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	write(t, root, "web/package.json", `{"name":"web"}`)
-	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, []component.Component{nodeComponent()}, nil, nil,
-		config.Default(), nil, 1, false, false, rep)
+	for _, tc := range []struct {
+		name string
+		c    component.Component
+	}{
+		{name: "runner", c: nodeComponent()},
+		{name: "command", c: nodeCommandComponent()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRepo(t, "components: []\n")
+			write(t, root, "web/package.json", `{"name":"web"}`)
+			rep := ui.NewReport("test")
+			runComponents(context.Background(), root, []component.Component{tc.c}, nil, nil,
+				config.Default(), nil, 1, false, false, rep)
 
-	note := rowByLabel(t, rep, "install(web)")
-	if note.Status != ui.StatusUnmeasured || note.Value != "not installed" {
-		t.Errorf("row = %+v, want an unmeasured install rather than the silence of one that ran", note)
-	}
-	if !strings.Contains(strings.Join(note.Detail, " "), "lockfile") {
-		t.Errorf("detail = %v, want what was looked for and not found", note.Detail)
-	}
-	// The suite runs anyway: a component whose dependencies are in place by
-	// some other means passes, and the row claims only that lydite did not put
-	// them there.
-	if suite := rowByLabel(t, rep, "test(web)"); suite.Status != ui.StatusPass {
-		t.Errorf("row = %+v, want the suite to have run", suite)
-	}
+			note := rowByLabel(t, rep, "install(web)")
+			if note.Status != ui.StatusUnmeasured || note.Value != "not installed" {
+				t.Errorf("row = %+v, want an unmeasured install rather than the silence of one that ran", note)
+			}
+			if !strings.Contains(strings.Join(note.Detail, " "), "lockfile") {
+				t.Errorf("detail = %v, want what was looked for and not found", note.Detail)
+			}
+			// The suite runs anyway: a component whose dependencies are in place
+			// by some other means passes, and the row claims only that lydite did
+			// not put them there.
+			if suite := rowByLabel(t, rep, "test(web)"); suite.Status != ui.StatusPass {
+				t.Errorf("row = %+v, want the suite to have run", suite)
+			}
 
-	var text bytes.Buffer
-	if err := rep.WriteText(&text, false); err != nil {
+			var text bytes.Buffer
+			if err := rep.WriteText(&text, false); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(text.String(), "install(web)") {
+				t.Errorf("report = %q, want the install named in the text grammar too", text.String())
+			}
+			// Anything automated reads the document and never the terminal.
+			var doc bytes.Buffer
+			if err := rep.WriteJSON(&doc); err != nil {
+				t.Fatal(err)
+			}
+			if got := jsonRowByLabel(t, doc.String(), "install(web)"); got.Status != string(ui.StatusUnmeasured) {
+				t.Errorf("status = %q, want %q", got.Status, ui.StatusUnmeasured)
+			}
+		})
+	}
+}
+
+// A package manager asked to run a script in an uninstalled workspace installs
+// that workspace itself, racing lydite's own install of the same root over one
+// node_modules tree. The component that named a command goes through the same
+// coalescing as the one that named a runner, so the root is installed once for
+// both.
+func TestACommandComponentSharesOneInstallWithItsRunnerSibling(t *testing.T) {
+	brand := component.Component{Name: "brand", Dir: "brand", Command: []string{"sh", "-c", "exit 0"}}
+	for _, tc := range []struct {
+		name       string
+		components []component.Component
+		suites     []string
+	}{
+		{name: "alone", components: []component.Component{brand}, suites: []string{"test(brand)"}},
+		{
+			name:       "beside a runner",
+			components: []component.Component{nodeComponent(), brand},
+			suites:     []string{"test(web)", "test(brand)"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fixtureRepo(t, "components: []\n")
+			write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+			write(t, root, "web/package.json", `{"name":"web"}`)
+			write(t, root, "brand/package.json", `{"name":"brand"}`)
+			runs := recordingStub(t, "pnpm")
+
+			rep := ui.NewReport("test")
+			runComponents(context.Background(), root, tc.components, nil, nil,
+				config.Default(), nil, 2, false, false, rep)
+
+			if got := stubRuns(t, runs); got != 1 {
+				t.Errorf("pnpm ran %d times, want one install for the root every component resolves", got)
+			}
+			for _, label := range tc.suites {
+				if suite := rowByLabel(t, rep, label); suite.Status != ui.StatusPass {
+					t.Errorf("row = %+v, want the suite to have run", suite)
+				}
+			}
+			// The install ran, so no component takes a row about one that did not.
+			for _, r := range rep.Rows() {
+				if strings.HasPrefix(r.Label, "install(") {
+					t.Errorf("row = %+v, want no install row: the install ran", r)
+				}
+			}
+		})
+	}
+}
+
+// recordingStub puts a program of the given name ahead of any real one on
+// PATH, leaving one file per invocation in the returned directory. Nothing
+// here runs a real package manager: an install that reaches the network tests
+// the machine it runs on.
+func recordingStub(t *testing.T, name string) string {
+	t.Helper()
+	bin, runs := t.TempDir(), t.TempDir()
+	// The sleep holds the first install open long enough for a concurrent
+	// second one to reach the lock rather than find the work already done.
+	script := "#!/bin/sh\nmktemp " + filepath.Join(runs, "run.XXXXXX") + " >/dev/null\nsleep 0.2\n"
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
 		t.Fatal(err)
 	}
-	if !strings.Contains(text.String(), "install(web)") {
-		t.Errorf("report = %q, want the install named in the text grammar too", text.String())
-	}
-	// Anything automated reads the document and never the terminal.
-	var doc bytes.Buffer
-	if err := rep.WriteJSON(&doc); err != nil {
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return runs
+}
+
+// stubRuns counts the files recordingStub's program left behind.
+func stubRuns(t *testing.T, runs string) int {
+	t.Helper()
+	entries, err := os.ReadDir(runs)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := jsonRowByLabel(t, doc.String(), "install(web)"); got.Status != string(ui.StatusUnmeasured) {
-		t.Errorf("status = %q, want %q", got.Status, ui.StatusUnmeasured)
-	}
+	return len(entries)
 }
 
 // An install that had a root to run in is reported by the component's own row
@@ -465,6 +553,20 @@ func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
 	}, config.Default()); ok {
 		t.Error("a Go component installs no node dependencies, so no lockfile is missing from it")
 	}
+	// A raw command names no language, so the package.json in its own
+	// directory is what decides. `mod` sits under the same workspace root and
+	// holds none: whatever it builds, it is not one of that workspace's
+	// packages, and an install it never asked for is not withheld from it.
+	if _, ok := installNote(root, component.Component{
+		Name: "fixture", Dir: "mod", Command: []string{"go", "build", "./..."},
+	}, config.Default()); ok {
+		t.Error("a command component with no package.json installs nothing, so there is no install to report on")
+	}
+	if _, ok := installNote(root, component.Component{
+		Name: "ui", Dir: "packages/ui", Command: []string{"pnpm", "run", "build"},
+	}, config.Default()); ok {
+		t.Error("a command component under a workspace root is installed from it, so there is nothing to report")
+	}
 	// A typescript.install override needs no root resolved for it — it
 	// replaces detection entirely — so a component with no lockfile anywhere
 	// still takes no row when one is configured.
@@ -483,6 +585,16 @@ func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
 func nodeComponent() component.Component {
 	return component.Component{
 		Name: "web", Dir: "web", Runner: runner.Vitest,
+		Command: []string{"sh", "-c", "exit 0"},
+	}
+}
+
+// nodeCommandComponent is the same package driven by a raw command instead of
+// a runner: it names no language, and the package.json its directory holds is
+// what says its dependencies are lydite's to install.
+func nodeCommandComponent() component.Component {
+	return component.Component{
+		Name: "web", Dir: "web",
 		Command: []string{"sh", "-c", "exit 0"},
 	}
 }
