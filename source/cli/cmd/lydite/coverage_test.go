@@ -202,6 +202,44 @@ func TestAComponentIsGatedAgainstItsOwnBaseline(t *testing.T) {
 	}
 }
 
+// A producer mismatch that is only a component narrowing its own coverage
+// scope says so plainly, rather than making a reader who just changed
+// -coverpkg decode two otherwise identical toolchain strings to find out why
+// their baseline reset.
+func TestAScopeChangeNamesItselfRatherThanTheTwoProducers(t *testing.T) {
+	base := gitstate.Baseline{"api": {LineCount: lines(80, 100), Producer: "go 1.26.6"}}
+	m := measured("api", runner.Go, 90, 100)
+	m.Producer = "go 1.26.6, scope -coverpkg=./internal/foo/... ./..."
+
+	row := componentRow(m, base, 0.1)
+	if row.Status != ui.StatusNew {
+		t.Errorf("row = %+v, want new", row)
+	}
+	if strings.Contains(row.Value, "measured by") {
+		t.Errorf("value = %q, want the scope change named instead of the two producers", row.Value)
+	}
+	if !strings.Contains(row.Value, "scope") {
+		t.Errorf("value = %q, want it to name the scope change", row.Value)
+	}
+}
+
+// A producer mismatch that moved the toolchain — not the scope — keeps the
+// existing wording: two versions of the same instrument are a fact a reader
+// can act on as stated, and inventing a scope story for them would mislead.
+func TestAToolchainChangeKeepsTheExistingWording(t *testing.T) {
+	base := gitstate.Baseline{"api": {LineCount: lines(80, 100), Producer: "go 1.26.5"}}
+	m := measured("api", runner.Go, 90, 100)
+	m.Producer = "go 1.26.6"
+
+	row := componentRow(m, base, 0.1)
+	if row.Status != ui.StatusNew {
+		t.Errorf("row = %+v, want new", row)
+	}
+	if !strings.Contains(row.Value, "measured by go 1.26.6, baseline by go 1.26.5") {
+		t.Errorf("value = %q, want the existing measured-by wording", row.Value)
+	}
+}
+
 // A component that could not be measured names why, and says when the figures
 // above it are carrying its baseline forward. A carried number that says
 // nothing about itself is one a reader takes for a measurement.
