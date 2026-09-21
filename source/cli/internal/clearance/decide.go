@@ -51,6 +51,17 @@ type Request struct {
 	CommentAt time.Time
 }
 
+// Uncover answers which of the change's paths no declared exemption covers.
+//
+// It is a function rather than a field on Request because answering it needs
+// the exemptions file and a list of what the pull request touched, while this
+// package is a pure function of a payload and the statuses standing on a
+// commit — cmd/lydite is where the two meet. Decide calls it from the one
+// branch that needs the answer and nowhere else, so a command refused for
+// permission, a stale revision, a missing verdict or a moved head never pays
+// for the read and the API call behind it.
+type Uncover func() ([]string, error)
+
 // Kind is what the caller should do.
 type Kind int
 
@@ -61,6 +72,9 @@ const (
 	KindClear
 	// KindExplain restates the standing verdict.
 	KindExplain
+	// KindExempt answers with a proposed exemptions-file entry, and changes
+	// nothing. Landing it is a pull request somebody opens.
+	KindExempt
 	// KindRefuse answers without changing any status.
 	KindRefuse
 )
@@ -90,6 +104,20 @@ const (
 	ReasonNotReferred Reason = "not-referred"
 	// ReasonAlreadyPassing is a revision that already merges unattended.
 	ReasonAlreadyPassing Reason = "already-passing"
+	// ReasonNothingToPropose is a referred change every one of whose paths
+	// some declared exemption already covers, so there is nothing left to
+	// name: no path list would add coverage. Which of the things that can
+	// refer it anyway is doing so is not knowable from here — the paths may
+	// split across exemptions that together cover them where no single one
+	// does, or a disqualifier this computation never sees may be vetoing
+	// the match. Either way there is no entry to propose.
+	ReasonNothingToPropose Reason = "nothing-to-propose"
+	// ReasonCouldNotDerive is an exempt request whose uncovered set could
+	// not be answered at all — an unreadable exemptions file, a changed-path
+	// list the platform would not hand over whole. It is refused out loud
+	// rather than left as an error nobody replies to: a command that fails
+	// in silence is indistinguishable from one that was accepted.
+	ReasonCouldNotDerive Reason = "could-not-derive"
 )
 
 // Action is the decision.
@@ -99,6 +127,11 @@ type Action struct {
 	SHA string
 	// Reason is set when Kind is KindRefuse.
 	Reason Reason
+	// Name and Paths are the proposed entry, set when Kind is KindExempt.
+	// Name is the commenter's; Paths is derived from the change, and is
+	// the whole of what the entry would cover.
+	Name  string
+	Paths []string
 }
 
 // Decide answers one request.
@@ -108,7 +141,14 @@ type Action struct {
 // it, from someone with push permission. Every other shape is refused and
 // says which, because a clearance that quietly does not happen is
 // indistinguishable from one that did.
-func Decide(r Request) Action {
+//
+// KindExempt passes the same ladder, and there is no shortcut for it being
+// the verb that changes nothing: a proposal derived from a head the commenter
+// never read names the wrong paths, which is clearing code nobody saw
+// delivered as a suggestion. uncover is consulted past the last of those
+// gates and nowhere earlier, so the ladder is what decides whether the work
+// behind it happens at all.
+func Decide(r Request, uncover Uncover) Action {
 	if r.Command.Verb == VerbNone {
 		return Action{Kind: KindIgnore}
 	}
@@ -147,6 +187,19 @@ func Decide(r Request) Action {
 	}
 	switch r.Status.State {
 	case StatePending:
+		if r.Command.Verb == VerbExempt {
+			uncovered, err := uncover()
+			if err != nil {
+				return Action{Kind: KindRefuse, Reason: ReasonCouldNotDerive}
+			}
+			// Nothing to propose is its own answer rather than an empty
+			// entry: every changed path is already covered by something,
+			// so no path list would make this change exempt.
+			if len(uncovered) == 0 {
+				return Action{Kind: KindRefuse, Reason: ReasonNothingToPropose}
+			}
+			return Action{Kind: KindExempt, SHA: r.HeadSHA, Name: r.Command.Shape, Paths: uncovered}
+		}
 		return Action{Kind: KindClear, SHA: r.HeadSHA}
 	case StateSuccess:
 		return Action{Kind: KindRefuse, Reason: ReasonAlreadyPassing}

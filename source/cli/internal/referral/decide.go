@@ -98,7 +98,7 @@ func Decide(ch Change, file File, ev Evidence) Decision {
 		break
 	}
 	if d.Exemption == "" {
-		d.Uncovered = uncovered(ch.Paths, file.Exemptions)
+		d.Uncovered = Uncovered(ch.Paths, file.Exemptions)
 		d.Referred = true
 		return d
 	}
@@ -147,7 +147,7 @@ func bundledWithExemptions(paths []string) []string {
 	return others
 }
 
-// uncovered reports the paths that no exemption covered, so a referral can
+// Uncovered reports the paths that no exemption covered, so a referral can
 // name what stood in the way rather than only that something did.
 //
 // A path is listed when *no* exemption matches it. That is a weaker test than
@@ -156,7 +156,11 @@ func bundledWithExemptions(paths []string) []string {
 // A change whose paths are each covered by some exemption, but by no single
 // one, therefore lists nothing here — and the report says so in those words
 // rather than showing an empty list.
-func uncovered(paths []string, exemptions []Exemption) []string {
+//
+// It takes a path list rather than a Change so that a caller holding only
+// names can ask it — `/lydite exempt` derives a proposal's paths from the
+// forge's own list of what the pull request touched, and never from a diff.
+func Uncovered(paths []string, exemptions []Exemption) []string {
 	var out []string
 	for _, p := range paths {
 		matched := false

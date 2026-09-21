@@ -11,7 +11,10 @@
 // them without a network. See docs/adr/0015-clearance-binds-to-a-commit.md.
 package clearance
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Prefix is what addresses a comment to lydite. A comment not starting with
 // it is not for us, and is not an error either — most comments on a pull
@@ -28,6 +31,10 @@ const (
 	VerbClear Verb = "clear"
 	// VerbExplain restates the standing verdict.
 	VerbExplain Verb = "explain"
+	// VerbExempt proposes an exemptions-file entry and lands nothing. It
+	// resolves no referral: what it answers with is text addressed to a
+	// person, who opens the pull request that declares it.
+	VerbExempt Verb = "exempt"
 	// VerbUnknown is a comment addressed to lydite naming something else.
 	// It is answered rather than ignored: silence is indistinguishable from
 	// a broken workflow, and the one thing a person must never conclude
@@ -42,10 +49,27 @@ type Command struct {
 	// Naming one is the difference between "clear what is there now" and
 	// "clear what I read", which matters when a push lands in between.
 	SHA string
+	// Shape is the name a proposed exemption is to carry, empty for every
+	// verb but exempt. It is the one thing a commenter contributes to a
+	// proposal: the paths are derived from the change, because a name a
+	// person chose cannot widen what the entry covers and a pattern they
+	// typed can.
+	Shape string
 	// Word is what was written where a verb belongs, kept so an unknown
 	// verb can be quoted back.
 	Word string
 }
+
+// shapePattern is what an exemption name may be made of: a letter or a digit,
+// then letters, digits and the three separators a name is written with, up to
+// 64 characters.
+//
+// The shape is the one part of a proposal a stranger writes, and it is
+// rendered into a comment lydite posts under its own identity — inside a
+// <summary> element, where markup is markup. An allowlist this narrow carries
+// nothing a renderer treats as syntax, and bounds a name that has to be
+// recognisable back to the person who asked for it.
+var shapePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // Parse reads the first line of a comment body.
 //
@@ -72,6 +96,23 @@ func Parse(body string) Command {
 		cmd.Verb = VerbClear
 	case "explain":
 		cmd.Verb = VerbExplain
+	case "exempt":
+		// The shape is required, and a bare `/lydite exempt` is unknown
+		// rather than ignored: the entry has to be named by the person
+		// asking for it, and nothing lydite could pick instead would be
+		// their name for it.
+		//
+		// A shape outside shapePattern is refused rather than escaped or
+		// trimmed into one that fits: a name somebody cannot recognise back
+		// is not the name they asked for, and answering with it would put
+		// a stranger's text into a comment lydite signs.
+		if len(fields) < 3 || !shapePattern.MatchString(fields[2]) {
+			cmd.Verb = VerbUnknown
+			return cmd
+		}
+		cmd.Verb = VerbExempt
+		cmd.Shape = fields[2]
+		return cmd
 	default:
 		cmd.Verb = VerbUnknown
 		return cmd
