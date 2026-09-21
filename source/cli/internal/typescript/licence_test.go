@@ -37,7 +37,8 @@ func rejected(t *testing.T, set licence.Set) map[string]licence.Dependency {
 // not in the set at all, and one stating a licence it does not hold is, under
 // the licence the lockfile stated.
 func TestLicenceSetReadsTheLockfileLicenceField(t *testing.T) {
-	set, err := LicenceSet(context.Background(), npmprobe(t), licence.NewPolicy(permissive))
+	dir := npmprobe(t)
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -59,7 +60,8 @@ func TestLicenceSetReadsTheLockfileLicenceField(t *testing.T) {
 // A nested duplicate is named by the segment after the last `node_modules/`,
 // not by the whole install path.
 func TestLicenceSetNamesANestedDuplicateByItsPackage(t *testing.T) {
-	set, err := LicenceSet(context.Background(), npmprobe(t), licence.NewPolicy(permissive))
+	dir := npmprobe(t)
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -92,7 +94,7 @@ func TestLockfileDependenciesPicksTheVersionDeterministically(t *testing.T) {
 
 	var versions []string
 	for range 20 {
-		set, err := LicenceSet(context.Background(), dir, licence.NewPolicy([]string{"MIT"}))
+		set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy([]string{"MIT"}))
 		if err != nil {
 			t.Fatalf("LicenceSet: %v", err)
 		}
@@ -115,7 +117,8 @@ func TestLockfileDependenciesPicksTheVersionDeterministically(t *testing.T) {
 // A `licenses` array composes through licence.Expression: each type is one term
 // of an OR, sorted, so the pair a reordering produces is the same pair.
 func TestLicenceSetComposesALicensesArray(t *testing.T) {
-	set, err := LicenceSet(context.Background(), npmprobe(t), licence.NewPolicy([]string{"ISC"}))
+	dir := npmprobe(t)
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy([]string{"ISC"}))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -132,7 +135,8 @@ func TestLicenceSetComposesALicensesArray(t *testing.T) {
 // dependency dropped because its licence could not be read is one the gate
 // silently allowed.
 func TestLicenceSetReportsAnEntryStatingNoLicence(t *testing.T) {
-	set, err := LicenceSet(context.Background(), npmprobe(t), licence.NewPolicy(permissive))
+	dir := npmprobe(t)
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -150,7 +154,8 @@ func TestLicenceSetReportsAnEntryStatingNoLicence(t *testing.T) {
 // Both state no licence, so a pass that kept them would report the repository's
 // own code as an unknown-licence dependency.
 func TestLicenceSetExcludesTheWorkspacesOwnPackages(t *testing.T) {
-	set, err := LicenceSet(context.Background(), npmprobe(t), licence.NewPolicy(permissive))
+	dir := npmprobe(t)
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -210,7 +215,7 @@ func TestLicenceFindingsSiteIsThePair(t *testing.T) {
 // every dependency conforms, which is a pass nothing measured.
 func TestLicenceSetWithoutAnInstalledTreeIsAnError(t *testing.T) {
 	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
-	if _, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive)); err == nil {
+	if _, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive)); err == nil {
 		t.Fatal("yarnprobe has no node_modules and yarn.lock states no licence, want an error")
 	}
 }
@@ -226,7 +231,7 @@ func TestLicenceSetReadsAnInstalledTree(t *testing.T) {
 	install(t, dir, "typescript", `{"name":"typescript","version":"7.0.2","license":"Apache-2.0"}`)
 	link(t, dir, "@lydite/pr-relay", filepath.Join(dir, "pr-relay"))
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -253,7 +258,7 @@ func TestLicenceSetReadsAPnpmStoreSymlink(t *testing.T) {
 	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
 	pnpmInstall(t, dir, "lightningcss", "1.33.0", `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`)
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -317,13 +322,81 @@ func link(t *testing.T, dir, name, target string) {
 	}
 }
 
+// A component nested under a workspace root declares no lockfile of its own,
+// and its licences are read from the root that resolves them. Reading the
+// component's own directory finds nothing there and answers `unmeasured` for a
+// lockfile sitting one directory up.
+func TestLicenceSetReadsTheWorkspaceRootsLockfile(t *testing.T) {
+	root := t.TempDir()
+	lockfile := `{
+  "name": "workspace",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "workspace", "version": "0.0.0"},
+    "packages/ui": {"name": "ui", "version": "0.0.0"},
+    "node_modules/ui": {"resolved": "packages/ui", "link": true},
+    "node_modules/lightningcss": {"version": "1.33.0", "license": "MPL-2.0"},
+    "node_modules/typescript": {"version": "7.0.2", "license": "Apache-2.0"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), []byte(lockfile), 0o600); err != nil {
+		t.Fatalf("writing package-lock.json: %v", err)
+	}
+	member := filepath.Join(root, "packages", "ui")
+	if err := os.MkdirAll(member, 0o750); err != nil {
+		t.Fatalf("creating the workspace member: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(member, "package.json"), []byte(`{"name":"ui"}`), 0o600); err != nil {
+		t.Fatalf("writing the member's package.json: %v", err)
+	}
+
+	set, err := LicenceSet(context.Background(), member, root, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet: %v", err)
+	}
+	pairs := rejected(t, set)
+	d, held := pairs["lightningcss"]
+	if !held {
+		t.Fatalf("lightningcss is MPL-2.0 in the root lockfile, want it in the set, got %v", set.Dependencies())
+	}
+	if d.Version != "1.33.0" {
+		t.Errorf("lightningcss = %q, want version 1.33.0", d.Version)
+	}
+	if _, held := pairs["typescript"]; held {
+		t.Error("typescript is Apache-2.0, which the allow-list holds")
+	}
+	if _, held := pairs["ui"]; held {
+		t.Error("ui is the workspace's own package, want it out of the set entirely")
+	}
+}
+
+// A component under no lockfile at all, its own or any ancestor's up to the
+// scan root, is the error that renders `unmeasured` — never the empty set that
+// reads as every dependency conforming to a policy nothing was measured
+// against.
+func TestLicenceSetUnderNoWorkspaceRootIsAnError(t *testing.T) {
+	root := t.TempDir()
+	member := filepath.Join(root, "packages", "ui")
+	if err := os.MkdirAll(member, 0o750); err != nil {
+		t.Fatalf("creating the workspace member: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(member, "package.json"), []byte(`{"name":"ui"}`), 0o600); err != nil {
+		t.Fatalf("writing the member's package.json: %v", err)
+	}
+
+	_, err := LicenceSet(context.Background(), member, root, licence.NewPolicy(permissive))
+	if err == nil || !strings.Contains(err.Error(), "no single package manager") {
+		t.Fatalf("no lockfile between the component and the scan root names a manager, got %v", err)
+	}
+}
+
 // A directory naming no single package manager — no lockfile at all, or two of
 // them — is an error rather than an empty set, for the reason nodedeps.Manager
 // reports false: which manager resolved the tree is not guessable, and a gate
 // that could not run never renders as one that passed.
 func TestLicenceSetWithoutASingleManagerIsAnError(t *testing.T) {
 	bare := t.TempDir()
-	_, err := LicenceSet(context.Background(), bare, licence.NewPolicy(permissive))
+	_, err := LicenceSet(context.Background(), bare, bare, licence.NewPolicy(permissive))
 	if err == nil || !strings.Contains(err.Error(), "no single package manager") {
 		t.Fatalf("a directory with no lockfile names no package manager, got %v", err)
 	}
@@ -338,7 +411,7 @@ func TestLicenceSetWithoutASingleManagerIsAnError(t *testing.T) {
 	// guessed at failed to find: the error reaches an `unmeasured` row, and a
 	// row saying node_modules is missing sends a reader to install a tree that
 	// would not have been read either.
-	_, err = LicenceSet(context.Background(), ambiguous, licence.NewPolicy(permissive))
+	_, err = LicenceSet(context.Background(), ambiguous, ambiguous, licence.NewPolicy(permissive))
 	if err == nil || !strings.Contains(err.Error(), "no single package manager") {
 		t.Fatalf("two lockfiles name two managers, want an error naming that rather than a guess, got %v", err)
 	}
@@ -352,7 +425,7 @@ func TestLicenceSetOnAnUnreadableLockfileIsAnError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte("{\"packages\": ["), 0o600); err != nil {
 		t.Fatalf("writing package-lock.json: %v", err)
 	}
-	if _, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive)); err == nil {
+	if _, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive)); err == nil {
 		t.Fatal("want an error over a lockfile that does not parse")
 	}
 }
@@ -388,7 +461,7 @@ func TestInstalledDependenciesSkipsDottedEntries(t *testing.T) {
 	}
 	install(t, dir, "typescript", `{"name":"typescript","version":"7.0.2","license":"Apache-2.0"}`)
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -492,7 +565,7 @@ func TestInstalledDependenciesSkipsAnUnreadableScope(t *testing.T) {
 	}
 	install(t, dir, "typescript", `{"name":"typescript","version":"7.0.2","license":"Apache-2.0"}`)
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -517,7 +590,7 @@ func TestInstalledDependenciesReadsABrokenSymlinkAsUnknown(t *testing.T) {
 		t.Fatalf("linking broken-pkg: %v", err)
 	}
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}
@@ -538,7 +611,7 @@ func TestInstalledDependencyOnAMalformedManifestIsUnknown(t *testing.T) {
 	dir := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
 	install(t, dir, "garbled", `{"license": `)
 
-	set, err := LicenceSet(context.Background(), dir, licence.NewPolicy(permissive))
+	set, err := LicenceSet(context.Background(), dir, dir, licence.NewPolicy(permissive))
 	if err != nil {
 		t.Fatalf("LicenceSet: %v", err)
 	}

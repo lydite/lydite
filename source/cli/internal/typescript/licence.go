@@ -120,7 +120,7 @@ func licenceText(raw json.RawMessage) string {
 // for a rejected pair would then change between two scans of the identical
 // lockfile, even though the verdict itself would not.
 func lockfileDependencies(dir string) ([]licence.Dependency, error) {
-	data, err := os.ReadFile(filepath.Join(dir, npmLockFile)) // #nosec G304 -- dir is a declared component's directory
+	data, err := os.ReadFile(filepath.Join(dir, npmLockFile)) // #nosec G304 -- dir is the workspace root resolved for a declared component
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", npmLockFile, err)
 	}
@@ -292,7 +292,7 @@ func workspaceLocal(resolvedRoot, path string) bool {
 // gate silently allowed.
 func installedDependency(root, name string) licence.Dependency {
 	d := licence.Dependency{Package: name, Licence: licence.Unknown}
-	// #nosec G304 -- root is a declared component's node_modules and name is a directory entry read out of it
+	// #nosec G304 -- root is a resolved workspace root's node_modules and name is a directory entry read out of it
 	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name), packageJSONFile))
 	if err != nil {
 		return d
@@ -311,26 +311,42 @@ func installedDependency(root, name string) licence.Dependency {
 // It is only ever the non-conforming ones and never a full inventory, which is
 // what makes recomputing it at the merge-base affordable.
 //
+// The lockfile and the installed tree are read at the workspace root
+// nodedeps.WorkspaceRoot resolves for dir, bounded by scanRoot, because a
+// member of a workspace declares neither: both sit at the root that resolves
+// the whole workspace, and reading dir alone answers a nested component
+// `unmeasured` for a lockfile that exists one directory up. A component whose
+// own directory holds the lockfile resolves to itself, and a component under no
+// resolvable root is the error the row reports as `unmeasured` — never an empty
+// set, which is every dependency conforming to a policy nothing was read
+// against.
+//
+// The set a nested component gets is its whole workspace's, since one root
+// lockfile resolves every member's dependencies together.
+//
 // No install is run, for either manager and on either side of the comparison.
 // npm's lockfile states every dependency's licence outright, and under the
 // frozen install lydite's runner performs it states what an install is required
 // to produce; yarn and pnpm state none, and an error here is the row saying so.
 // See docs/adr/0042.
-func LicenceSet(ctx context.Context, dir string, policy licence.Policy) (licence.Set, error) {
-	manager, ok := nodedeps.Manager(dir)
+func LicenceSet(ctx context.Context, dir, scanRoot string, policy licence.Policy) (licence.Set, error) {
+	root, ok := nodedeps.WorkspaceRoot(dir, scanRoot)
 	if !ok {
-		return licence.Set{}, fmt.Errorf("no single package manager in %s: exactly one lockfile of %s names one", dir, strings.Join(nodedeps.Managers(), ", "))
+		return licence.Set{}, fmt.Errorf("no single package manager for %s: exactly one lockfile of %s names one, in the component's own directory or in a workspace root above it", dir, strings.Join(nodedeps.Managers(), ", "))
 	}
+	// WorkspaceRoot ends its walk only at a directory naming exactly one
+	// manager, so this lookup cannot disagree with it.
+	manager, _ := nodedeps.Manager(root)
 	if manager == "npm" {
-		deps, err := lockfileDependencies(dir)
+		deps, err := lockfileDependencies(root)
 		if err != nil {
 			return licence.Set{}, err
 		}
 		return policy.Reject(deps), nil
 	}
-	deps, err := installedDependencies(ctx, dir)
+	deps, err := installedDependencies(ctx, root)
 	if err != nil {
-		return licence.Set{}, fmt.Errorf("%s states no dependency licence and %s in %s is unreadable, and this scan runs no install to produce one: %w", manager, nodeModulesDir, dir, err)
+		return licence.Set{}, fmt.Errorf("%s states no dependency licence and %s in %s is unreadable, and this scan runs no install to produce one: %w", manager, nodeModulesDir, root, err)
 	}
 	return policy.Reject(deps), nil
 }
