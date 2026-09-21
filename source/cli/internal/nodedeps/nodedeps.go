@@ -221,7 +221,10 @@ func Commands(root, override string) []Command {
 //
 // One root is installed once: every component resolving it shares the single
 // install the first of them runs, and one arriving while that runs waits for
-// it rather than starting its own.
+// it rather than starting its own. That install runs under one component's
+// environment, so a second component naming a different one is an error
+// rather than a silent share of whichever declaration got there first — see
+// installedUnder.
 //
 // Whether a failure is fatal is the caller's to decide, and the two callers
 // answer differently: the coverage gate omits a package it cannot measure,
@@ -235,15 +238,15 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 			return nil
 		}
 	}
-	if _, done := installed.Load(root); done {
-		return nil
+	if v, done := installed.Load(root); done {
+		return installedUnder(root, v.([]string), env)
 	}
 	unlock := lockRoot(root)
 	defer unlock()
 	// Re-checked under the lock: the install this one waited for is the one it
 	// was about to do, over the same node_modules tree.
-	if _, done := installed.Load(root); done {
-		return nil
+	if v, done := installed.Load(root); done {
+		return installedUnder(root, v.([]string), env)
 	}
 	for _, cmd := range Commands(root, override) {
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
@@ -256,12 +259,50 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 			return fmt.Errorf("%s: %w", strings.Join(cmd.Argv, " "), res.Err)
 		}
 	}
-	installed.Store(root, struct{}{})
+	installed.Store(root, env)
 	return nil
 }
 
+// installedUnder reports the environment a root's shared install actually ran
+// under, and an error when this call names a different one.
+//
+// A workspace root's install is one process, so it runs under exactly one
+// environment — the first component that reaches it. A second component
+// declaring a different one is not a case coalescing can honour silently:
+// installing under either component's environment could write dependencies,
+// tokens or a registry the other did not ask for into the tree it also
+// imports from, and picking one at random by scheduling order is worse than
+// saying so.
+func installedUnder(root string, installed, env []string) error {
+	if envEqual(installed, env) {
+		return nil
+	}
+	return fmt.Errorf("%s: installed under a different environment than this component declares — "+
+		"components sharing a workspace root must declare the same env, since the install runs once for all of them", root)
+}
+
+// envEqual compares two `KEY=value` environments regardless of order: what a
+// component declares and what its toolchain adds can compose in either
+// order, and two installs asking for the same environment must not be told
+// they differ because of it.
+func envEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as, bs := append([]string{}, a...), append([]string{}, b...)
+	sort.Strings(as)
+	sort.Strings(bs)
+	for i := range as {
+		if as[i] != bs[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // installLocks serialises installs of one workspace root within this process,
-// and installed names the roots an install has already completed for.
+// and installed names the roots an install has already completed for, with
+// the environment that install ran under.
 //
 // In-process only, and that is the whole of what it claims: two lydite
 // processes installing the same workspace still race. What it closes is the

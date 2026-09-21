@@ -328,7 +328,7 @@ func TestFoldingKeepsAShardsReason(t *testing.T) {
 // know what such a run would invoke, let alone what wrote a report.
 func TestAComponentWithARawCommandHasNoProducer(t *testing.T) {
 	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "docs"}}
-	if got := producerOf(t.TempDir(), c, nil); got != "" {
+	if got := producerOf(t.TempDir(), c, config.Default(), nil); got != "" {
 		t.Errorf("producer = %q, want nothing for a component lydite does not invoke", got)
 	}
 }

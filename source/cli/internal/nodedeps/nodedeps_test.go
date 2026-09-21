@@ -328,6 +328,51 @@ func TestAFailedInstallIsNotTakenAsDone(t *testing.T) {
 	}
 }
 
+// A second component naming a different environment for a root already
+// installed is an error, not a silent share of whichever declaration got
+// there first: the tree it imports from was written under one environment,
+// and the other component asked for a different one.
+func TestASecondEnvironmentForOneRootIsAnError(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	stubRecording(t, "pnpm", 0)
+
+	ui := mkdir(t, root, "packages", "ui")
+	if err := Install(context.Background(), ui, root, "", []string{"TOKEN=a", "OTHER=x"}, io.Discard); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	api := mkdir(t, root, "packages", "api")
+	if err := Install(context.Background(), api, root, "", []string{"TOKEN=b", "OTHER=x"}, io.Discard); err == nil {
+		t.Error("Install reported success for a root already installed under a different environment")
+	}
+
+	web := mkdir(t, root, "packages", "web")
+	if err := Install(context.Background(), web, root, "", []string{"TOKEN=a", "OTHER=x", "THIRD=y"}, io.Discard); err == nil {
+		t.Error("Install reported success for an environment differing by an added variable")
+	}
+}
+
+// envEqual sorts both sides before comparing, so order within either
+// declaration must not matter. Each side is unsorted here, and in a
+// different order from the other — the two-element case a reordered
+// component naturally produces can leave one side already coincidentally in
+// the other's sorted order, silently masking a comparison that never sorted
+// it at all.
+func TestEnvEqualSortsBothSidesIndependently(t *testing.T) {
+	a := []string{"X=1", "A=2", "M=3"}
+	b := []string{"M=3", "X=1", "A=2"}
+	if !envEqual(a, b) {
+		t.Errorf("envEqual(%v, %v) = false, want true — same set, different order on each side", a, b)
+	}
+	if !envEqual(b, a) {
+		t.Errorf("envEqual(%v, %v) = false, want true — order of the arguments must not matter either", b, a)
+	}
+	if envEqual(a, []string{"X=1", "A=2", "N=3"}) {
+		t.Error("envEqual reported two different sets as equal")
+	}
+}
+
 // stubRecording puts a program of the given name ahead of any real one on
 // PATH, writing one file per invocation into the returned directory and
 // exiting with code. It sleeps long enough that a concurrent caller arrives
