@@ -308,6 +308,28 @@ through a second, static reporting profile lydite's staged tool config declares
 `target/nextest/default/junit.xml` rather than over it.
 
 
+### What a raw command component gets
+
+A component declaring `command:` names no language and no runner, so lydite derives no variants
+from it. Each gate either measures it, renders it `unmeasured` with a reason, or does not apply.
+
+| Gate | For a raw `command:` component |
+|---|---|
+| `lydite test` | measured: the command runs and its exit status is the row |
+| orphan | measured: it claims the files under its directory like any component; an unclaimed `.py`, `.sh` or `.bash` file elsewhere is an orphan, cleared by an exclude |
+| Semgrep, gitleaks | measured: root-scoped, so they cover the component's source |
+| `scan(<name>)` | unmeasured: the component declares a raw command, which implies no language, so no linter, vulnerability or SAST check runs over it |
+| `licence(<name>)` | unmeasured: same reason, so there is no dependency set to read licences from |
+| `findings(<name>)` | unmeasured: same reason, so no gate reports a finding count for it |
+| coverage | unmeasured: the component declares a raw command, which has no instrumented variant |
+| complexity (CRAP) | unmeasured: the language is unstated, so there is no source to walk |
+| mutation | unmeasured: lydite cannot derive the build-only and plain variants a mutant needs |
+| flaky | unmeasured: a raw command opts out of the derived variants, so there is no invocation to filter to a set of test names and no report to read a first outcome from |
+
+Every `unmeasured` row leaves the verdict `pass` and is never rendered as a gate that passed. A
+language with a runner but no scanner gets the same three scan rows with a reason naming that
+language.
+
 ## Output: captured, not streamed
 
 **`.lydite-reports/` disowns itself**, by holding a `.gitignore` that ignores
