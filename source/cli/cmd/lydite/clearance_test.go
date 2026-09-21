@@ -309,6 +309,50 @@ func TestExemptReadsTheExemptionsFileUnderTheScanRoot(t *testing.T) {
 	}
 }
 
+// referral.RootRelative names a path from the repository root, and opening
+// the file by joining that onto the root is only right when the process's
+// own directory already is the root. Run from inside the scan root itself —
+// --dir . from source/ — and the file has to be found relative to dir, not
+// relative to a repository root nothing here is standing in.
+func TestExemptReadsTheExemptionsFileFromInsideTheScanRoot(t *testing.T) {
+	dir := t.TempDir()
+	if r := executil.RunQuiet(context.Background(), dir, "git", "init", "--quiet", "-b", "main"); !r.Ok() {
+		t.Fatalf("git init: %v\n%s", r.Err, r.Output)
+	}
+	file := filepath.Join(dir, "source", referral.FileName)
+	if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	exemptions := "exemptions:\n  - name: docs\n    reason: prose only\n    paths: [\"source/docs/**\"]\n"
+	if err := os.WriteFile(file, []byte(exemptions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(dir, "source"))
+
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed: []map[string]any{
+			{"filename": "source/docs/one.md"},
+			{"filename": "source/src/a.go"},
+		},
+	}
+	forge.start(t)
+
+	runClearanceCmdIn(t, ".", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 {
+		t.Fatalf("posted %d comments, want 1", len(forge.comments))
+	}
+	body := forge.comments[0]
+	if strings.Contains(body, "source/docs/one.md") {
+		t.Errorf("the declarations were not found from inside the scan root, so a covered path was proposed:\n%s", body)
+	}
+	if !strings.Contains(body, "source/src/a.go") {
+		t.Errorf("the uncovered path is missing from the proposal:\n%s", body)
+	}
+}
+
 // The block a reader pastes is indented the two spaces `.lydite/exemptions.yml`
 // is written in. yaml.v3 indents four unless told otherwise, and a block that
 // has to be re-indented before it lands is one a reader edits by hand — which

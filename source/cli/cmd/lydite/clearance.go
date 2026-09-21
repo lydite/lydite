@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -220,9 +221,13 @@ func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, 
 	if err != nil {
 		return nil, err
 	}
+	// repoPath is repository-root-relative, for the parse label and any
+	// error a person reads; opening the file has to go through dir instead,
+	// since the process's own directory is not necessarily the repository
+	// root and a path.Join with prefix would then name the wrong file.
 	repoPath := path.Join(prefix, referral.FileName)
 	var file referral.File
-	data, err := os.ReadFile(repoPath)
+	data, err := os.ReadFile(filepath.Join(dir, referral.FileName))
 	switch {
 	case err == nil:
 		if file, err = referral.Parse(data, repoPath); err != nil {
