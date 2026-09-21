@@ -270,13 +270,18 @@ decision; `internal/forge` is the only thing that talks to the platform. See
 [ADR 0015](../../docs/adr/0015-clearance-binds-to-a-commit.md).
 
 `review --publish` records the verdict as the **`lydite/referral` commit status** and as
-the pull request's standing comment. The status is the whole record: a clearance is a
-state change on that context at one commit, and nothing else stores it.
+the pull request's standing comment. The status is the whole record of the verdict: it
+stands on that context at one commit, and nothing else stores it. A clearance is its own status,
+**`lydite/clearance`** (`clearance.ClearanceContext`), written under different authority from the
+verdict; it does not change `lydite/referral`, and `clearance.Decide` reads the referral status to
+decide whether there is anything to clear. `--status-out <file>` on `review --publish` and on
+`clearance` renders either status as a `forge.Status` document instead of posting it; a document
+that cannot be written fails the run.
 
 `review --surfaces <path>` reads a comparison `review compare` already made — the raw
 per-component findings, and the base they were measured against — instead of running it
 again, and decides and publishes from that document through the same `publish`/
-`stateFor`/`describe` (`cmd/lydite/status.go`) as a single, ordinary invocation would.
+`stateFor`/`describe` (`cmd/lydite/status.go`, with `referralStatus` building the document) as a single, ordinary invocation would.
 See [ci.md](ci.md)'s `referral`/`referral-publish` split: `review compare` is the only
 half of this that runs a component's own code, and it computes no exemption match, no
 declaration and no verdict — the decision is made afterward, in a job that never ran

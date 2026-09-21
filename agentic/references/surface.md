@@ -127,11 +127,18 @@ be pasted. Consumers pin the floating major tag and this repository pins an exac
 be allowlisted. A ref in both lists holds neither authority and is refused.
 
 Each ref is trusted for one context. A referral ref may post `lydite/referral` only, and a
-clearance ref `lydite/clearance` only. The relay accepts the clearance status only under
-`lydite/clearance`, while `clearance.Context` in `internal/clearance/decide.go` emits
-`lydite/referral` — a context the clearance allowlist's own ref may not post — so the CLI's
-clearance status is refused by the relay until `clearance.Context` is `lydite/clearance`, and
-nothing posts a status through the relay until it is.
+clearance ref `lydite/clearance` only. The CLI emits the two under
+those names: the referral verdict is `clearance.Context` (`lydite/referral`) and a clearance is
+`clearance.ClearanceContext` (`lydite/clearance`), both in `internal/clearance/decide.go`, so each
+status is one the relay admits for the ref that carries it.
+
+`lydite review --publish --status-out <file>` and `lydite clearance --status-out <file>` render the
+status as a `forge.Status` document (state, context, description, target_url, sha, pull_request)
+instead of posting it, for a step that posts it through the relay. Posting directly with the job's
+own token remains the path for a repository that has not adopted the reusable workflows; the two
+are alternatives, and neither is attempted after the other. A document that cannot be written
+fails the run. `clearance` does not require `--status-out`, and a comment that clears nothing
+writes no document.
 
 **A clearance run names its pull request in the body.** `lydite-clearance.yml` runs on
 `issue_comment` from the default branch, so its OIDC `ref` is not a pull ref. A job holds

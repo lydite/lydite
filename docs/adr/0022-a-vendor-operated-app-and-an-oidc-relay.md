@@ -330,3 +330,11 @@ a Go build per run, a pin bump when lydite changes what the workflows call, and 
 commit's exact ref. Not closed: the `referral` job's artifact still carries a claimed-clean result
 that is not independently verified, and a pull request can swap the pinned ref for any other
 allowlisted ref, so refs of superseded commits must be pruned on each release.
+
+## Note (2026-09-21): the CLI's clearance status is `lydite/clearance`
+
+`clearance.ClearanceContext` is `lydite/clearance`, and a clearance is its own status rather than a
+state change on `lydite/referral`, so the relay admits it for a clearance ref. `lydite review
+--publish --status-out <file>` and `lydite clearance --status-out <file>` render the status as a
+document for a step that posts it through the relay; the direct post remains for repositories that
+have not adopted the reusable workflows. The two are alternatives, not a ladder.
