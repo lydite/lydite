@@ -14,6 +14,7 @@ components:
     runner: go-test                # implies the language
     args: ["-race", "./..."]
     watch: ["Makefile", "VERSION"] # paths outside dir that invalidate this component
+    occupies: [packages/tokens]    # further trees this writes into, relative to the scan root
     depends_on: [sdk]              # declared, because the edge is not always derivable
     env:
       FOO: bar
@@ -69,6 +70,29 @@ scan root, `depends_on` that resolves to declared components, and no cycles. A d
 rejected rather than dropped, because the edge exists to make a dependent run on a change to its
 dependency and an edge naming nothing silently stops doing that while the dependent keeps passing.
 
+**`occupies:` names the further directories a component writes into while it runs**, beyond its
+own `dir` — a sibling package its `setup:` builds, a generated tree two components share. The
+scheduler holds each one for the length of the run, so two components occupying one path never
+run at once and `lydite test plan` puts them in one shard. It is declared rather than derived
+because a `setup:` line is opaque shell handed to `sh -c`: two components running the identical
+line are two writes to one tree lydite cannot recognise as the same work. It orders nothing —
+the pair runs in sequence, in no declared order — and it is not `watch:`, which says "a change
+here invalidates me" and is read only by `internal/affected`. See
+[ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md) and
+[Services and the scheduler](services-and-scheduling.md).
+
+Entries are **relative to the scan root**, like `watch:` and unlike `compose.file:`, which is
+relative to the component root: the scheduler compares one component's declaration against
+another's, and two component-relative paths are not comparable without resolving both first.
+(`Component.Dir`'s doc comment says every path the component declares is relative to it. That
+is true of `compose.file`, `setup:`'s working directory and the runner's; it is not true of
+`watch:` or `occupies:`.) Each entry is cleaned at parse time, so `./tokens`, `tokens/` and
+`tokens` are one directory rather than three locks; an absolute path, a `~` prefix and a path
+escaping the scan root are refused, and so is a path the same component declares twice. Unlike
+`dir`, an occupied path **need not exist** — the tree a `setup:` builds is absent on the cold
+checkout the collision actually happens on, and over-declaring costs a pair of components their
+concurrency and nothing else.
+
 **`api_surface` opts a component into a public-API diff against the merge-base, and is opt-in
 rather than opt-out** — the reverse of `mutation` — because most components declared here are
 binaries and services nobody imports, and a surface diff over one is pure noise. It is an object
@@ -108,6 +132,18 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   exercised solely through another package's tests reads as uncovered and a pull request whose new
   code is fully exercised from its caller fails the patch gate on correct work
   ([#36](https://github.com/lydite/lydite/issues/36)).
+
+  `-coverpkg=./...` is a default, not a ceiling: a component can narrow the denominator its
+  coverage is measured against by declaring its own `-coverpkg` in `args:`. lydite places the
+  coverage flags before the declared args, and `go test` honours the last occurrence of a
+  repeated flag, so the declared one wins — a component author never has to touch `internal/runner`
+  to get there. A repository wants this when `./...` pulls in a package that skews the number
+  lydite would otherwise report, such as a bare `func main()` with nothing left to exercise;
+  filed as [#185](https://github.com/lydite/lydite/issues/185) by a repository wanting
+  `-coverpkg=./internal/...`. **The narrowing is part of the producer**: `Runner.Producer` names
+  the declared scope beside the Go toolchain, so a component that narrows is reported `new` for one
+  change rather than having the smaller denominator scored as a regression or an improvement — see
+  [`coverage.md`](coverage.md).
 - `cargo-nextest` — instrumented is `cargo llvm-cov nextest --lcov`. Build-only is `cargo build
   --all-targets`, because `cargo build` alone never compiles the test targets and a test-only
   compilation error is exactly what separates an unviable mutant from a killed one.
@@ -142,6 +178,14 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
 The producer is read as `pytest X, coverage Y` by asking `python3 -I` for the installed versions
 through `importlib.metadata`, under lydite's own environment: a `PATH` declared in `env:` is not
 honoured, and the producer is empty when either package cannot be identified.
+
+**Only `go-test` carries its declared scope into its producer.** The other runners take arguments
+that move a denominator just as `-coverpkg` does — vitest's `--coverage.include` and
+`--coverage.exclude`, jest's `--collectCoverageFrom`, cargo-llvm-cov's `-p` and its nextest filter
+expressions, pytest-cov's own `--cov=<path>` beside the `--cov=.` the instrumented variant
+carries — and declaring one of those in `args:` changes what the figure is a proportion of
+without changing the producer the baseline compares, so the change reads as coverage movement.
+See [`coverage.md`](coverage.md).
 
 **Coverage is written under `.lydite-reports/coverage/`, never at `.lydite-reports/` itself**, and
 vitest is additionally told `--coverage.clean=false`. Vitest empties its reports directory before a

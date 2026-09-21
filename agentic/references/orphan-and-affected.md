@@ -85,6 +85,14 @@ file is orphaned, and a gate it never saw would be the failure it exists to catc
 takes no baseline and reads the same on the default branch as on a pull request, for
 the reason `coverage.floor` does: a file is under a component or it is not.
 
+**The question can be asked without running a suite.** The gate answers from the declaration
+(`.lydite/components.yml`) and the tracked-file list alone, never from a suite's output.
+`lydite test plan` asks it and runs nothing — no toolchain, container or suite — so an orphan
+makes `plan` exit non-zero, and outside a git repository the gate is `unmeasured` and passes (see
+[`plan` can fail](shards-and-the-fold.md#shards-lydite-test-plan-and-the-responsibility-set)).
+`lydite test` still asks it before selection, through the same `orphanRow`, so both commands
+report one verdict.
+
 **It does not catch a forgotten `depends_on` edge**, because there both components exist
 and no file is orphaned. Pushes to the default branch running every component is what
 covers that.

@@ -351,6 +351,16 @@ func goTestArgs(args []string) []string {
 // patch gate. The build-only variant is `go build`, not `go vet` or a
 // compile-only test flag, because what it has to answer is whether the
 // package compiles at all.
+//
+// That -coverpkg is a default and not a ceiling. The coverage flags are placed
+// before the component's declared args and `go test` honours the last
+// occurrence of a repeated flag, so a component that declares its own
+// -coverpkg narrows what its coverage is measured against — the tree lydite
+// would instrument is a guess at the one the component means, and the
+// component is the side that knows. It is the opposite choice from GoRerun,
+// which appends -run and -count=1 after the declared args so a declared
+// duplicate cannot win; there the filter is the whole point of the invocation
+// and a component may not overrule it.
 func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	pkgs := goTestArgs(args)
 	switch variant {
@@ -1384,9 +1394,16 @@ func pythonInstall(dir, root string) (string, []string, bool) {
 // is the component's directory, root is the scan root — the same one Install
 // resolves a workspace root against, so a hoisted package is found where the
 // install actually wrote it, unless override names typescript.install, which
-// Install runs in dir itself regardless of any lockfile above it — and lang
-// is the resolved language toolchain — the Go toolchain that wrote a profile,
-// or the Rust toolchain whose LLVM wrote an lcov.
+// Install runs in dir itself regardless of any lockfile above it — lang is the
+// resolved language toolchain — the Go toolchain that wrote a profile, or the
+// Rust toolchain whose LLVM wrote an lcov — and args are the component's
+// declared arguments, the same ones Build hands the invocation, because a
+// component may declare a narrower package set for its coverage to be measured
+// over and two figures taken over different denominators do not compare.
+//
+// args are opaque here: a runner reads them the way the invocation it builds
+// does. internal/component imports this package, so a typed scope travelling
+// the other way is not available.
 //
 // An empty answer means lydite could not identify the instrument, which is
 // possible for a language whose measuring tool lydite deliberately does not
@@ -1395,11 +1412,16 @@ func pythonInstall(dir, root string) (string, []string, bool) {
 // pytest and coverage.py are whatever the repository's own install put in the
 // interpreter. Both are read back out of what actually ran, and both answer
 // empty for exactly one reason — either half of the pair is unidentifiable.
-func (r Runner) Producer(dir, root, override, lang string) string {
+func (r Runner) Producer(dir, root, override, lang string, args ...string) string {
 	switch r.Name {
 	case GoTest:
 		// The profile is the toolchain's own output; nothing else is
-		// involved, so there is no second version to name.
+		// involved, so there is no second version to name — but the package
+		// set it was taken over is part of the instrument, and a component
+		// is free to narrow it.
+		if scope := goScope(args); scope != "" {
+			return both(join("go", lang), scope)
+		}
 		return join("go", lang)
 	case CargoNextest, CargoLLVMCovNextest:
 		// Both instrumented variants run through cargo-llvm-cov, and its
@@ -1419,6 +1441,57 @@ func (r Runner) Producer(dir, root, override, lang string) string {
 	default:
 		return ""
 	}
+}
+
+// goScope names the package set a Go component's coverage is measured over, or
+// nothing at all when that is lydite's own default.
+//
+// Only what moves the denominator belongs in a producer. Two arguments do:
+// buildGoTest places -coverpkg=./... ahead of the declared args and `go test`
+// honours the last occurrence of a repeated flag, so a declared -coverpkg is
+// the effective one; and the declared package patterns decide which packages
+// are built and tested at all. Everything else a component declares — a
+// -timeout, a -race — leaves the measured tree alone, and folding it in would
+// report a component as newly measured for an edit that changed no figure.
+//
+// The default scope renders as nothing rather than as its own spelling. It is
+// the scope every component that declares none already measured through, so
+// naming it would say the instrument changed where it did not. Every other
+// scope renders as the arguments themselves, which no two scopes spell alike.
+//
+// Scanning stops at -args: `go test` passes everything after it to the test
+// binary, so a bare word there is an argument to a test and not a package.
+func goScope(args []string) string {
+	coverpkg := "./..."
+	pkgs := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-args" || a == "--args" {
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			pkgs = append(pkgs, a)
+			continue
+		}
+		name, value, ok := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if !ok && goTestValueFlags[name] && i+1 < len(args) {
+			value, ok = args[i+1], true
+			i++
+		}
+		if name == "coverpkg" && ok {
+			coverpkg = value
+		}
+	}
+	// A component declaring flags but no pattern tests the component
+	// directory alone, the way `go test` with no package argument does;
+	// only one declaring nothing at all falls back to goTestArgs' ./....
+	if len(pkgs) == 0 && len(args) > 0 {
+		pkgs = []string{"."}
+	}
+	if coverpkg == "./..." && (len(pkgs) == 0 || (len(pkgs) == 1 && pkgs[0] == "./...")) {
+		return ""
+	}
+	return "scope -coverpkg=" + coverpkg + " " + strings.Join(pkgs, " ")
 }
 
 // jsProducer names the installed runner and, where one is separate, the

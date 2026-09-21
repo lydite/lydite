@@ -93,23 +93,29 @@ func (c *Client) ReferralStatus(ctx context.Context, repo Repo, sha string) (*cl
 	return nil, nil
 }
 
-// PublishStatus records a verdict on a revision.
+// PostStatus records one status document on the revision it names.
+//
+// The document is what a caller decided; this writes it and reads nothing back
+// into the decision. The pull request it also names places the verdict for a
+// step that posts under the App's identity, and is not part of a commit status
+// the REST API takes — a status belongs to a revision.
 //
 // The description is what a reader sees beside a yellow dot that otherwise
 // looks like a job still running, so it names what is being waited for
 // rather than restating the state.
-func (c *Client) PublishStatus(ctx context.Context, repo Repo, sha string, state clearance.State, description, targetURL string) error {
+func (c *Client) PostStatus(ctx context.Context, repo Repo, s Status) error {
+	s = s.clipped()
 	body := map[string]string{
-		"state":       string(state),
-		"context":     clearance.Context,
-		"description": truncate(description, 140),
+		"state":       string(s.State),
+		"context":     s.Context,
+		"description": s.Description,
 	}
-	if targetURL != "" {
-		body["target_url"] = targetURL
+	if s.TargetURL != "" {
+		body["target_url"] = s.TargetURL
 	}
-	path := fmt.Sprintf("/repos/%s/%s/statuses/%s", escape(repo.Owner), escape(repo.Name), escape(sha))
+	path := fmt.Sprintf("/repos/%s/%s/statuses/%s", escape(repo.Owner), escape(repo.Name), escape(s.SHA))
 	if err := c.do(ctx, "POST", path, body, nil); err != nil {
-		return fmt.Errorf("publishing %s on %s: %w", state, short(sha), err)
+		return fmt.Errorf("publishing %s on %s: %w", s.State, short(s.SHA), err)
 	}
 	return nil
 }

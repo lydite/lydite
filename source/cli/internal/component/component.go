@@ -95,11 +95,21 @@ type Component struct {
 	// language is never declared: cargo-nextest can only be Rust, and a
 	// second statement of it could only disagree.
 	Runner runner.Name `yaml:"runner"`
-	// Args are passed through to the runner, ahead of anything a variant
-	// adds. Every repository's test invocation is bespoke at the edges —
-	// tagged builds, workspace filters, custom profiles — and this is where
-	// that belongs. lydite decides where, when, how many at once and what
-	// the result means; it does not learn to run anyone's tests.
+	// Args are passed through to the runner. Every repository's test
+	// invocation is bespoke at the edges — tagged builds, workspace filters,
+	// custom profiles — and this is where that belongs. lydite decides
+	// where, when, how many at once and what the result means; it does not
+	// learn to run anyone's tests.
+	//
+	// Placement relative to what a variant adds is not uniform, and a
+	// declared arg can win or lose depending on which. Go's instrumented
+	// variant places its own -coverpkg=./... default before these args, so
+	// a declared -coverpkg overrides it — go test honours the last
+	// occurrence of a repeated flag, and the component is the side that
+	// knows its own package tree. GoRerun does the opposite: it appends its
+	// -run and -count=1 after these args, so a declared duplicate cannot
+	// overrule the filter that rerun exists to apply. See buildGoTest and
+	// GoRerun in internal/runner for the reasoning behind each.
 	Args []string `yaml:"args,omitempty"`
 	// Command is the escape hatch: a whole invocation, run instead of a
 	// runner. A component using it opts out of the derived variants, so it
@@ -111,6 +121,21 @@ type Component struct {
 	// exist because real repositories have them and no tool can see the
 	// edge.
 	Watch []string `yaml:"watch,omitempty"`
+	// Occupies are further directories, relative to the scan root, that the
+	// component writes into while it runs — a sibling package its setup
+	// builds, a generated tree two components share. The scheduler holds
+	// each one while the component runs, so two components occupying one
+	// path never run at once.
+	//
+	// It is declared because nothing lydite reads can see it: a setup
+	// command is opaque shell, and two components running the identical line
+	// are two writes to one tree lydite cannot recognise as the same work.
+	//
+	// It is not Watch. A watch pattern says "a change here invalidates me",
+	// which is an invalidation edge internal/affected reads; this says "this
+	// subtree is mine while I run". It orders nothing either: two components
+	// sharing a path run in sequence, in no declared order.
+	Occupies []string `yaml:"occupies,omitempty"`
 	// DependsOn names components this one is invalidated by. Declared for
 	// the same reason components are, and because the edge is not always
 	// derivable at all: a Go client generated from an OpenAPI document has
@@ -299,6 +324,9 @@ func (f File) validate(source string, strict bool) error {
 		if err := validateWatch(where, c.Watch); err != nil {
 			return err
 		}
+		if err := validateOccupies(where, c.Occupies); err != nil {
+			return err
+		}
 		if err := validateAPISurface(where, c, strict); err != nil {
 			return err
 		}
@@ -401,6 +429,48 @@ func validateWatch(where string, watch []string) error {
 		if err := pathmatch.ValidatePattern(w); err != nil {
 			return fmt.Errorf("%s: %w", at, err)
 		}
+	}
+	return nil
+}
+
+// validateOccupies rejects an occupied path that is not a plain relative path
+// inside the scan root, and rewrites each one to its cleaned form so the
+// scheduler compares directories rather than spellings: `./tokens`, `tokens/`
+// and `tokens` are one directory, and a lock keyed on the text as written
+// would hold three.
+//
+// An occupied path is not required to exist in the tree, unlike dir. The
+// directory a setup step builds is absent on a cold checkout — which is the
+// state the collision this key prevents actually happens in — so holding the
+// declaration to an existing path would refuse it on precisely the run that
+// needs it. What each failure costs is the rest of the asymmetry: a dir that
+// is not there is a component nothing runs, with the build still green, while
+// a path nothing is at costs one pair of components their concurrency and
+// nothing else.
+//
+// A path declared twice is refused rather than folded away. It locks nothing
+// more than once, so the second entry is either a mistake or two spellings of
+// one directory read as two statements, and neither is something to accept
+// silently.
+func validateOccupies(where string, occupies []string) error {
+	seen := map[string]bool{}
+	for i, o := range occupies {
+		at := fmt.Sprintf("%s: occupies[%d]", where, i)
+		if o == "" {
+			return fmt.Errorf("%s: is empty", at)
+		}
+		if path.IsAbs(o) || filepath.IsAbs(o) || strings.HasPrefix(o, "~") {
+			return fmt.Errorf("%s: %q must be relative to the scan root", at, o)
+		}
+		clean := path.Clean(o)
+		if clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("%s: %q escapes the scan root", at, o)
+		}
+		if seen[clean] {
+			return fmt.Errorf("%s: %q is already occupied by this component", at, o)
+		}
+		seen[clean] = true
+		occupies[i] = clean
 	}
 	return nil
 }

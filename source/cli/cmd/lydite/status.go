@@ -20,6 +20,12 @@ type publishTarget struct {
 	Number int
 }
 
+// pullRequestRef is the revision and the conversation a verdict is about.
+type pullRequestRef struct {
+	SHA    string
+	Number int
+}
+
 // resolveTarget reads the platform's environment on behalf of what names
 // itself in `what` — a flag, or a command.
 //
@@ -28,12 +34,6 @@ type publishTarget struct {
 // failure it hides — no token, no permission, the wrong event — is exactly the
 // failure that leaves a pull request with no verdict on it while the job
 // reports success.
-//
-// One implementation for every command that writes to a pull request, so a
-// verdict and the threads under it can never be about two different
-// revisions: the head is read from the event payload and not from the
-// checkout, which on a pull_request event is a merge commit that exists on no
-// branch.
 func resolveTarget(what, eventPath string) (publishTarget, error) {
 	token := firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
 	if token == "" {
@@ -47,25 +47,45 @@ func resolveTarget(what, eventPath string) (publishTarget, error) {
 	if err != nil {
 		return publishTarget{}, fmt.Errorf("GITHUB_REPOSITORY: %w", err)
 	}
-	if eventPath == "" {
-		eventPath = os.Getenv("GITHUB_EVENT_PATH")
-	}
-	if eventPath == "" {
-		return publishTarget{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
-	}
-	event, err := forge.LoadPullRequestEvent(eventPath)
+	ref, err := resolvePullRequest(what, eventPath)
 	if err != nil {
 		return publishTarget{}, err
-	}
-	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
-		return publishTarget{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", eventPath, what)
 	}
 	return publishTarget{
 		Client: forge.New(token),
 		Repo:   repo,
-		SHA:    event.PullRequest.Head.SHA,
-		Number: event.Number,
+		SHA:    ref.SHA,
+		Number: ref.Number,
 	}, nil
+}
+
+// resolvePullRequest reads the revision and the conversation out of the
+// platform's event payload.
+//
+// One implementation for every command that writes to a pull request, so a
+// verdict and the threads under it can never be about two different
+// revisions: the head is read from the event payload and not from the
+// checkout, which on a pull_request event is a merge commit that exists on no
+// branch.
+//
+// It asks for no credential, because a run that renders a status document for
+// another step to post holds none — the whole point of computing a verdict in
+// a job with no token. What names the pull request is the event either way.
+func resolvePullRequest(what, eventPath string) (pullRequestRef, error) {
+	if eventPath == "" {
+		eventPath = os.Getenv("GITHUB_EVENT_PATH")
+	}
+	if eventPath == "" {
+		return pullRequestRef{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
+	}
+	event, err := forge.LoadPullRequestEvent(eventPath)
+	if err != nil {
+		return pullRequestRef{}, err
+	}
+	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
+		return pullRequestRef{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", eventPath, what)
+	}
+	return pullRequestRef{SHA: event.PullRequest.Head.SHA, Number: event.Number}, nil
 }
 
 // stateFor maps a run's verdict onto a commit status state.
@@ -107,7 +127,29 @@ func describe(d referral.Decision, verdict ui.Verdict) string {
 	}
 }
 
-// publish records the verdict as the `lydite/referral` commit status.
+// referralStatus is the verdict as the document both routes carry, so the
+// status a step posts and the one this process would have posted itself are
+// one derivation rather than two.
+func referralStatus(ref pullRequestRef, d referral.Decision, verdict ui.Verdict) forge.Status {
+	return forge.Status{
+		State:       stateFor(verdict),
+		Context:     clearance.Context,
+		Description: describe(d, verdict),
+		TargetURL:   runURL(),
+		SHA:         ref.SHA,
+		PullRequest: ref.Number,
+	}
+}
+
+// publish records the verdict as the `lydite/referral` commit status: posted
+// here with the job's own token, or rendered at out for a step that posts it
+// under lydite's App identity.
+//
+// The two are alternatives the caller chooses between, not a ladder. A
+// repository that has not adopted the reusable workflows posts directly and
+// keeps every property of the status; neither route is attempted after the
+// other, because a verdict published twice under two identities is the mixed
+// record the App identity exists to end.
 //
 // The status and nothing else. It is the whole record a clearance acts on, and
 // it has to land early — a person can start clearing a referral while the test
@@ -118,10 +160,79 @@ func describe(d referral.Decision, verdict ui.Verdict) string {
 // every other command's results take: the report document this run wrote.
 // Rendering it here as well would be a second derivation of one answer, and
 // the two would drift.
-func publish(ctx context.Context, target publishTarget, d referral.Decision, verdict ui.Verdict) error {
-	return target.Client.PublishStatus(ctx, target.Repo, target.SHA,
-		stateFor(verdict), describe(d, verdict), runURL())
+func publish(ctx context.Context, out, eventPath string, d referral.Decision, verdict ui.Verdict) error {
+	if out != "" {
+		ref, err := resolvePullRequest(statusOutFlag, eventPath)
+		if err != nil {
+			return err
+		}
+		return forge.WriteStatus(out, referralStatus(ref, d, verdict))
+	}
+	target, err := resolveTarget("--publish", eventPath)
+	if err != nil {
+		return err
+	}
+	return target.Client.PostStatus(ctx, target.Repo,
+		referralStatus(pullRequestRef{SHA: target.SHA, Number: target.Number}, d, verdict))
 }
+
+// clearanceStatus is a clearance as the document both routes carry, so the
+// status a step posts and the one this process would have posted itself are
+// one derivation rather than two.
+//
+// It names the pull request for the same reason the referral document does,
+// and for one more: a clearance run is an issue_comment run, whose own claims
+// name a branch rather than a pull ref, so the conversation is in the document
+// or nowhere.
+func clearanceStatus(ref pullRequestRef, description string) forge.Status {
+	return forge.Status{
+		State:       clearance.StateSuccess,
+		Context:     clearance.ClearanceContext,
+		Description: description,
+		TargetURL:   runURL(),
+		SHA:         ref.SHA,
+		PullRequest: ref.Number,
+	}
+}
+
+// recordClearance records the clearance: posted here with the job's own
+// token, or rendered at out for a step that posts it under lydite's App
+// identity.
+//
+// The two are alternatives the caller chooses between, not a ladder, for the
+// same reason publish's are, and they are not the same write.
+//
+// The rendered route writes the one document a clearance ref is trusted with,
+// `lydite/clearance`. The relay admits a clearance ref to that context only,
+// so a document for `lydite/referral` could never be posted by it, and the
+// referral is not resolved on this route.
+//
+// The direct route keeps every property a repository that has not adopted the
+// reusable workflows relies on: it posts `lydite/clearance` and then resolves
+// `lydite/referral` to success on the same head, so a required check on the
+// referral unblocks and a second `/lydite clear` reads the referral as passing.
+// The clearance goes first: if the second post fails, the run fails loudly and
+// the pull request holds a clearance record beside a referral still standing,
+// which a repeated comment repairs. The other order could leave a green
+// referral with nothing recording who cleared it.
+//
+// A document that cannot be written, or a post that fails, fails the run — a
+// clearance nothing recorded leaves the referral standing while the job that
+// answered the comment reports success.
+func recordClearance(ctx context.Context, client *forge.Client, repo forge.Repo, out string, s forge.Status) error {
+	if out != "" {
+		return forge.WriteStatus(out, s)
+	}
+	if err := client.PostStatus(ctx, repo, s); err != nil {
+		return err
+	}
+	resolved := s
+	resolved.Context = clearance.Context
+	return client.PostStatus(ctx, repo, resolved)
+}
+
+// statusOutFlag names the flag that renders the status instead of posting it.
+const statusOutFlag = "--status-out"
 
 // runURL points the status at the job that produced it, so a reader can
 // reach the reasoning behind a one-line description.

@@ -29,15 +29,32 @@ The rule buys the property everything else rests on: **every declared component 
 across the shards.** So "did a shard die" is a question about the declaration and the documents, and
 needs no third input to answer.
 
-**`plan` is pure.** It reads `.lydite/components.yml` and each component's compose file, and nothing
-else — no git, no network, no process — so it runs on a shallow checkout, on a fork, and on a machine
-with no container runtime. That is also why it cannot narrow by `--affected`: the shards narrow
-instead. A compose file it cannot read is an error rather than a component with no ports, because a
-matrix built on unknown ports can put two components that contend for one port into different jobs,
-which is the single thing the planner exists to prevent.
+**`plan` reads three things**: `.lydite/components.yml`, each component's compose file, and the
+tracked-file list the orphan gate holds that declaration against. No network, no suite, no
+toolchain, no container runtime — and `orphan.Find` shells out for a `git ls-files` read of the
+index rather than of history, so the plan runs on a shallow checkout and on a fork. That is still
+why it cannot narrow by `--affected`, which needs a merge-base and the history a shallow checkout
+does not have: the shards narrow instead. A compose file it cannot read is an error rather than a
+component with no ports, because a matrix built on unknown ports can put two components that
+contend for one port into different jobs, which is the single thing the planner exists to prevent.
+
+**`plan` can fail, and it is the earliest place the orphan gate fires.** An orphan exits non-zero,
+and every shard depends on the plan, so an incomplete declaration blocks the whole matrix before
+any suite runs — the verdict does not depend on which components a run selects or on how they were
+sharded, and the plan is where it is cheapest to reach. Outside a git repository the row is
+`unmeasured` and the plan still passes, the shape `orphanRow` has for a gate that could not run. A
+declaration with no components is a hard error raised before any report exists, so the orphan
+verdict is not rendered at all in that case; the exit is non-zero either way.
+
+`lydite test` calls the same `orphanRow` for itself rather than trusting the plan to have run,
+because a local run happens without one. One predicate with two callers is what keeps the two
+verdicts from drifting.
 
 **A shard is a conflict group**: the transitive closure of `scheduler.Conflicts` — components sharing
-a published host port, or rooted at overlapping directories. `internal/scheduler` owns that predicate
+a published host port, or writing into one tree, whether that is their roots overlapping or a path
+either of them declares it `occupies:`
+([ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md)).
+`internal/scheduler` owns that predicate
 and the planner reads it rather than reimplementing it, for the reason `internal/pathmatch` has one
 matcher. Components that conflict with nothing are a shard of one; the grouping is the finest one
 that is safe, and there is nothing to set wrong. **There is no `--shards`, and no `--concurrency`** —
@@ -58,8 +75,10 @@ joined by `-`, unique because component names are. The matrix goes to `--out`
 
 **`plan` writes no `.lydite-reports/plan.json`, alone among the commands.** The rule that every
 command writes one exists so a *verdict* reaches the surface without depending on a redirection
-somebody remembered; `plan` reaches no verdict, and a section titled "plan" in a pull-request comment
-says nothing a reader can act on.
+somebody remembered. The one verdict `plan` reaches is the orphan gate's, and `lydite test`
+publishes that same row from its own document — a `plan.json` would carry it into the pull-request
+comment a second time, under a section titled "plan" that repeats what the test section already
+says. The plan's own channel is stdout, the job log and the exit code.
 
 ## `lydite test merge`: the fold decides completeness
 

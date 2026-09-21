@@ -308,12 +308,16 @@ func noComplexitySource(m measurement) string {
 // for the same reason: an override runs in the component's own directory
 // regardless of any lockfile above it, and Producer has to look where the
 // install actually ran rather than where one would otherwise be inferred.
+//
+// The declared args go with them, because a component may narrow the package
+// set its coverage is measured over and a figure taken over a narrower tree
+// does not compare to one taken over the whole of it.
 func producerOf(root string, c component.Component, cfg config.Config, tc *toolchain.Env) string {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok {
 		return ""
 	}
-	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version())
+	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version(), c.Args...)
 }
 
 // coverageOptions is what the command decided about coverage before anything
@@ -1002,6 +1006,9 @@ func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row,
 		// refuses the same pair: the coverage half of every score was taken
 		// by a different instrument, so the difference is a change of
 		// definition rather than debt anybody added.
+		if reason, ok := scopeChangeReason(m.Producer, base.Producer); ok {
+			return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", " + reason}, nil
+		}
 		return ui.Row{Status: ui.StatusNew, Label: label,
 			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
 				counts, producerName(m.Producer), producerName(base.Producer))}, nil
@@ -1214,6 +1221,9 @@ func componentRow(m measurement, baseline gitstate.Baseline, tolerance float64) 
 	// bumped the instrument, whose only ways out are to widen the tolerance
 	// for every future change or to merge red.
 	if base.Producer != m.Producer {
+		if reason, ok := scopeChangeReason(m.Producer, base.Producer); ok {
+			return ui.Row{Status: ui.StatusNew, Label: label, Value: lineValue(m.Lines) + ", " + reason}
+		}
 		return ui.Row{Status: ui.StatusNew, Label: label,
 			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
 				lineValue(m.Lines), producerName(m.Producer), producerName(base.Producer))}
@@ -1248,6 +1258,45 @@ func producerName(p string) string {
 		return "an unidentified instrument"
 	}
 	return p
+}
+
+// producerScope splits a Go producer into its toolchain half and, when the
+// component declared one, the package scope Runner.Producer appends after
+// ", scope " — the only two things a mismatch needs told apart to say whether
+// it is a toolchain bump or a component narrowing what it measures.
+//
+// No other language's producer carries this suffix, so a non-Go producer
+// simply has no scope half, which is exactly what an absent one means here.
+func producerScope(p string) (toolchain, scope string) {
+	toolchain, scope, ok := strings.Cut(p, ", scope ")
+	if !ok {
+		return p, ""
+	}
+	return toolchain, scope
+}
+
+// scopeChangeReason says a producer mismatch is a scope change — the same
+// toolchain measuring a different package set — rather than a change of
+// instrument, so a reader who just narrowed a component's coverage recognizes
+// their own edit instead of decoding two producer strings to find it.
+//
+// A mismatch that also moved the toolchain is not a pure scope change: the
+// instrument itself is different, and the existing "measured by X, baseline by
+// Y" wording already names that without asking a reader to parse two halves.
+func scopeChangeReason(current, base string) (string, bool) {
+	curTool, curScope := producerScope(current)
+	baseTool, baseScope := producerScope(base)
+	if curTool != baseTool || curScope == baseScope {
+		return "", false
+	}
+	describe := func(scope string) string {
+		if scope == "" {
+			return "the component's default scope"
+		}
+		return scope
+	}
+	return fmt.Sprintf("not compared — the measured scope changed, from %s to %s",
+		describe(baseScope), describe(curScope)), true
 }
 
 // notCompared says why a composed figure has no comparison, naming the

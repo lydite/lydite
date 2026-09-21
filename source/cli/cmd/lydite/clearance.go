@@ -23,6 +23,7 @@ import (
 func newClearanceCmd() *cobra.Command {
 	var dir string
 	var eventPath string
+	var statusOut string
 	var noColor bool
 	cmd := &cobra.Command{
 		Use:           "clearance",
@@ -41,18 +42,27 @@ A clearance names one revision. Any push produces a new head carrying no
 verdict, so the clearance does not travel with the branch.
 
 The input is the webhook payload the platform delivers, which a workflow
-writes to the path in GITHUB_EVENT_PATH.`,
+writes to the path in GITHUB_EVENT_PATH.
+
+--status-out <file> renders the ` + clearance.ClearanceContext + ` commit status as a document
+instead of posting it, for a step that posts it under lydite's App identity;
+the ` + clearance.Context + ` status is not resolved on that route. Posting here is the
+path for a repository that has not adopted the reusable workflows: it posts
+` + clearance.ClearanceContext + ` and then resolves ` + clearance.Context + ` to success on the
+same head. The two are alternatives, not a ladder. A comment that clears nothing writes no document.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClearance(cmd.Context(), cmd, dir, eventPath, noColor)
+			return runClearance(cmd.Context(), cmd, dir, eventPath, statusOut, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload to answer (defaults to GITHUB_EVENT_PATH)")
+	cmd.Flags().StringVar(&statusOut, "status-out", "",
+		"render the "+clearance.ClearanceContext+" status as a JSON document at this path for another step to post, instead of posting it here")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	return cmd
 }
 
-func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath string, noColor bool) error {
+func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath, statusOut string, noColor bool) error {
 	report := ui.NewReport("clearance")
 
 	if eventPath == "" {
@@ -127,7 +137,7 @@ func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath string
 		return uncovered, err
 	}
 
-	row, err := applyAction(ctx, client, repo, event, head, clearance.Decide(request, uncover))
+	row, err := applyAction(ctx, client, repo, event, head, statusOut, clearance.Decide(request, uncover))
 	if err != nil {
 		return err
 	}
@@ -135,11 +145,20 @@ func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath string
 }
 
 // applyAction carries out the decision and returns the row describing it.
-func applyAction(ctx context.Context, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head string, action clearance.Action) (ui.Row, error) {
+//
+// statusOut names where a clearance is rendered instead of posted. It is read
+// by this one branch: a decision that clears nothing has no status to write,
+// and rendering one anyway would hand the posting step a document saying a
+// referral was resolved by a comment that resolved nothing.
+func applyAction(ctx context.Context, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head, statusOut string, action clearance.Action) (ui.Row, error) {
 	switch action.Kind {
 	case clearance.KindClear:
 		description := fmt.Sprintf("cleared by @%s at %s", event.Comment.User.Login, shortSHA(head))
-		if err := client.PublishStatus(ctx, repo, head, clearance.StateSuccess, description, runURL()); err != nil {
+		// The head is the one the platform answered for this pull request a
+		// moment ago, never anything the comment named: the poster resolves
+		// it again and refuses a document naming anything else.
+		ref := pullRequestRef{SHA: head, Number: event.Issue.Number}
+		if err := recordClearance(ctx, client, repo, statusOut, clearanceStatus(ref, description)); err != nil {
 			return ui.Row{}, err
 		}
 		reply(ctx, client, repo, event.Issue.Number, ui.Comment{
