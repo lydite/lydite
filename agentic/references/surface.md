@@ -136,7 +136,12 @@ status is one the relay admits for the ref that carries it.
 status as a `forge.Status` document (state, context, description, target_url, sha, pull_request)
 instead of posting it, for a step that posts it through the relay. Posting directly with the job's
 own token remains the path for a repository that has not adopted the reusable workflows; the two
-are alternatives, and neither is attempted after the other. A document that cannot be written
+are alternatives, and neither is attempted after the other. The two
+routes are not equivalent for a clearance: the direct post also resolves `lydite/referral` to
+success (after posting `lydite/clearance`), while the rendered document is `lydite/clearance` only,
+because the relay admits a clearance ref to that context alone. On the relay route the referral
+status is not resolved by a clearance, so a repository requiring `lydite/referral` needs its gate
+to read `lydite/clearance`; that belongs to the reusable-workflow slice. A document that cannot be written
 fails the run. `clearance` does not require `--status-out`, and a comment that clears nothing
 writes no document.
 

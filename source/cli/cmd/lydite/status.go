@@ -200,16 +200,35 @@ func clearanceStatus(ref pullRequestRef, description string) forge.Status {
 // identity.
 //
 // The two are alternatives the caller chooses between, not a ladder, for the
-// same reason publish's are: a repository that has not adopted the reusable
-// workflows posts directly and keeps every property of the status, and
-// neither route is attempted after the other. A document that cannot be
-// written fails the run — a clearance nothing recorded leaves the referral
-// standing while the job that answered the comment reports success.
+// same reason publish's are, and they are not the same write.
+//
+// The rendered route writes the one document a clearance ref is trusted with,
+// `lydite/clearance`. The relay admits a clearance ref to that context only,
+// so a document for `lydite/referral` could never be posted by it, and the
+// referral is not resolved on this route.
+//
+// The direct route keeps every property a repository that has not adopted the
+// reusable workflows relies on: it posts `lydite/clearance` and then resolves
+// `lydite/referral` to success on the same head, so a required check on the
+// referral unblocks and a second `/lydite clear` reads the referral as passing.
+// The clearance goes first: if the second post fails, the run fails loudly and
+// the pull request holds a clearance record beside a referral still standing,
+// which a repeated comment repairs. The other order could leave a green
+// referral with nothing recording who cleared it.
+//
+// A document that cannot be written, or a post that fails, fails the run — a
+// clearance nothing recorded leaves the referral standing while the job that
+// answered the comment reports success.
 func recordClearance(ctx context.Context, client *forge.Client, repo forge.Repo, out string, s forge.Status) error {
 	if out != "" {
 		return forge.WriteStatus(out, s)
 	}
-	return client.PostStatus(ctx, repo, s)
+	if err := client.PostStatus(ctx, repo, s); err != nil {
+		return err
+	}
+	resolved := s
+	resolved.Context = clearance.Context
+	return client.PostStatus(ctx, repo, resolved)
 }
 
 // statusOutFlag names the flag that renders the status instead of posting it.

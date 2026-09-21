@@ -338,3 +338,11 @@ state change on `lydite/referral`, so the relay admits it for a clearance ref. `
 --publish --status-out <file>` and `lydite clearance --status-out <file>` render the status as a
 document for a step that posts it through the relay; the direct post remains for repositories that
 have not adopted the reusable workflows. The two are alternatives, not a ladder.
+
+On the direct route the clearance also resolves `lydite/referral` to success on the same head,
+posted after `lydite/clearance` so a partial failure never leaves a green referral with no
+clearance record, and a failure of either post fails the run. This keeps a repository that has not
+adopted the reusable workflows, and requires `lydite/referral`, unblocked by `/lydite clear`. On
+the relay route the referral status is not resolved by a clearance: the relay admits a clearance
+ref to `lydite/clearance` only, so a repository with a required check on `lydite/referral` needs
+its gate to read `lydite/clearance`. That is for the reusable-workflow slice to settle.

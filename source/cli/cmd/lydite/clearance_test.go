@@ -38,7 +38,14 @@ type fakeForge struct {
 	// over.
 	changedFails bool
 	published    []map[string]string
-	comments     []string
+	// postPaths is the request path of each status post, which names the sha
+	// the status lands on.
+	postPaths []string
+	// failPost, when non-zero, is the 1-based status post the platform
+	// refuses; the refused post is not recorded as published.
+	failPost int
+	posts    int
+	comments []string
 }
 
 func (f *fakeForge) start(t *testing.T) {
@@ -59,9 +66,15 @@ func (f *fakeForge) start(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(f.statuses)
 		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodPost:
+			f.posts++
+			if f.posts == f.failPost {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.published = append(f.published, body)
+			f.postPaths = append(f.postPaths, r.URL.Path)
 			w.WriteHeader(http.StatusCreated)
 		case strings.Contains(r.URL.Path, "/comments"):
 			if r.Method == http.MethodPost {
@@ -149,30 +162,78 @@ var (
 	later     = commented.Add(time.Hour)
 )
 
-// The clearance is its own status on the head, under its own context: the
-// referral it answers stays where it is, and a job trusted to clear is not
-// thereby trusted to publish a verdict.
-func TestClearPublishesTheClearanceStatusOnTheHead(t *testing.T) {
+// The clearance is its own status on the head, under its own context, and the
+// direct route then resolves the referral on the same head: a repository that
+// has not adopted the reusable workflows requires `lydite/referral`, and a
+// second `/lydite clear` reads it as passing. The clearance is posted first so
+// a partial failure never leaves a green referral with no clearance record.
+func TestClearPostsTheClearanceThenResolvesTheReferralOnTheHead(t *testing.T) {
 	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
+	t.Setenv("GITHUB_SERVER_URL", "https://example.invalid")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	t.Setenv("GITHUB_RUN_ID", "12")
 
 	out := runClearanceCmd(t, eventFile(t, "/lydite clear", "pedromvgomes", commented))
 
-	if len(forge.published) != 1 {
-		t.Fatalf("published %d statuses, want 1", len(forge.published))
+	description := "cleared by @pedromvgomes at " + shortSHA(head)
+	want := []map[string]string{
+		{"state": "success", "context": "lydite/clearance", "description": description,
+			"target_url": "https://example.invalid/lydite/lydite/actions/runs/12"},
+		{"state": "success", "context": "lydite/referral", "description": description,
+			"target_url": "https://example.invalid/lydite/lydite/actions/runs/12"},
 	}
-	got := forge.published[0]
-	if got["state"] != "success" || got["context"] != "lydite/clearance" {
-		t.Fatalf("published %+v", got)
+	if len(forge.published) != len(want) {
+		t.Fatalf("published %d statuses, want %d: %+v", len(forge.published), len(want), forge.published)
 	}
-	if got["context"] == clearance.Context {
-		t.Fatalf("the clearance was published under the referral's own context %q", got["context"])
-	}
-	if !strings.Contains(got["description"], "pedromvgomes") {
-		t.Errorf("the clearance does not name who gave it: %q", got["description"])
+	for i, w := range want {
+		got := forge.published[i]
+		if len(got) != len(w) {
+			t.Errorf("post %d carries %d field(s): %+v", i, len(got), got)
+		}
+		for k, v := range w {
+			if got[k] != v {
+				t.Errorf("post %d %s = %q, want %q", i, k, got[k], v)
+			}
+		}
+		if !strings.HasSuffix(forge.postPaths[i], "/statuses/"+head) {
+			t.Errorf("post %d landed at %s, want the head %s", i, forge.postPaths[i], head)
+		}
 	}
 	if !strings.Contains(out, "clearance") {
 		t.Errorf("report did not mention the clearance:\n%s", out)
+	}
+}
+
+// A failure resolving the referral fails the run: the clearance is recorded
+// but the referral still blocks, and a job reporting success would hide that.
+func TestAFailedReferralPostAfterTheClearanceFailsTheRun(t *testing.T) {
+	forge := &fakeForge{permission: "admin", failPost: 2, statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), "")
+
+	if err == nil {
+		t.Fatal("a referral that could not be resolved was reported as cleared")
+	}
+	if len(forge.published) != 1 || forge.published[0]["context"] != "lydite/clearance" {
+		t.Errorf("published %+v, want the clearance alone", forge.published)
+	}
+}
+
+// A failure recording the clearance posts nothing further: the referral is
+// never resolved without a clearance record beside it.
+func TestAFailedClearancePostPostsNothingElse(t *testing.T) {
+	forge := &fakeForge{permission: "admin", failPost: 1, statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), "")
+
+	if err == nil {
+		t.Fatal("a clearance that could not be posted was reported as recorded")
+	}
+	if len(forge.published) != 0 || forge.posts != 1 {
+		t.Errorf("published %+v after %d post(s), want none after the first", forge.published, forge.posts)
 	}
 }
 
@@ -211,6 +272,15 @@ func TestClearRendersTheStatusDocumentInsteadOfPostingIt(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Errorf("the document carries %d field(s): %+v", len(got), got)
+	}
+	// Only the clearance document is written: the relay admits a clearance
+	// ref to lydite/clearance alone, so the referral is not resolved here.
+	entries, err := os.ReadDir(filepath.Dir(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || forge.posts != 0 {
+		t.Errorf("wrote %d file(s) and made %d post(s), want the one document and no posts", len(entries), forge.posts)
 	}
 	// The reply is the commenter's answer and is posted whichever route the
 	// status takes: rendering a document says nothing to the person who asked.

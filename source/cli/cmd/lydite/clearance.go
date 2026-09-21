@@ -45,10 +45,11 @@ The input is the webhook payload the platform delivers, which a workflow
 writes to the path in GITHUB_EVENT_PATH.
 
 --status-out <file> renders the ` + clearance.ClearanceContext + ` commit status as a document
-instead of posting it, for a step that posts it under lydite's App identity.
-Posting it here is the path for a repository that has not adopted the reusable
-workflows, and keeps every property of the status; the two are alternatives,
-not a ladder. A comment that clears nothing writes no document.`,
+instead of posting it, for a step that posts it under lydite's App identity;
+the ` + clearance.Context + ` status is not resolved on that route. Posting here is the
+path for a repository that has not adopted the reusable workflows: it posts
+` + clearance.ClearanceContext + ` and then resolves ` + clearance.Context + ` to success on the
+same head. The two are alternatives, not a ladder. A comment that clears nothing writes no document.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClearance(cmd.Context(), cmd, dir, eventPath, statusOut, noColor)
 		},

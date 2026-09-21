@@ -12,8 +12,10 @@ const Context = "lydite/referral"
 
 // ClearanceContext is the commit status a clearance is published under.
 //
-// A clearance is its own status rather than a state change on Context,
-// because the two are written under different authority: a job that may
+// A clearance is its own status, written beside Context rather than instead
+// of it; the direct-post route also resolves Context to success, the relay
+// route does not. They are separate statuses because they are written under
+// different authority: a job that may
 // publish a verdict may not clear one, and a job that may clear may not
 // publish a verdict. One context both could write is authority neither can
 // be scoped to — the relay trusts each allowlisted workflow ref for exactly
