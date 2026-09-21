@@ -623,7 +623,11 @@ func recordTypeScriptLicence(ctx context.Context, rep *ui.Report, tree *licenceB
 		return
 	}
 	base := typescriptLicenceBase(ctx, tree, c.Dir, policy)
-	current, err := typescript.LicenceSet(ctx, cdir, policy)
+	// The scan root bounds the walk to the workspace root whose lockfile
+	// resolves this component: a member nested under one declares no lockfile
+	// of its own, and lydite was never asked to look above what it was pointed
+	// at.
+	current, err := typescript.LicenceSet(ctx, cdir, tree.root, policy)
 	if err != nil {
 		// Unmeasured and never fail: a component whose own dependencies could
 		// not be enumerated has had nothing decided about it, and a red row
@@ -729,7 +733,11 @@ func rustLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir st
 // make every dependency it already had read as introduced here.
 func typescriptLicenceBase(ctx context.Context, tree *licenceBaseTree, componentDir string, policy licence.Policy) licence.Base {
 	return tree.set(ctx, componentDir, "package.json", func(dir string) (licence.Set, error) {
-		return typescript.LicenceSet(ctx, dir, policy)
+		// The scan root inside the base worktree, which set has already
+		// opened. The outer scan root bounds nothing here: dir sits in the
+		// worktree, so a walk bounded by the branch's own root climbs out of
+		// the tree being measured.
+		return typescript.LicenceSet(ctx, dir, tree.dir, policy)
 	})
 }
 
