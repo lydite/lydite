@@ -34,9 +34,29 @@ command's document at one scan root; a CI run produces one per job. It is also w
 [ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md)'s shard matrix additive: more
 `test` jobs is more directories and nothing about the comment changes.
 
-**A missing input is a section, never an omission.** A named directory that is absent,
-unreadable or holds no document renders `unmeasured`, naming what was missing. A section that
-quietly disappears is indistinguishable from a concern that passed — the wardnet#957 failure.
+**A missing input is a section, never an omission — for a concern the run expected, not only a
+directory it was given.** A named directory that is absent, unreadable or holds no document
+renders `unmeasured`, naming what was missing. But naming the directory was never the whole of
+the guarantee: an artifact that never exists — a job that dies before it uploads, a path
+mismatch between the writer and the reader — is never passed to `buildComment` at all, so a
+check confined to named directories has nothing to render unmeasured and nothing to say. `lydite
+publish --expect` closes that gap: it names the commands this run was supposed to produce a
+report for, independently of which directories arrived, and a command left unaccounted for after
+every directory is read renders `unmeasured` the same way an empty or unreadable directory does.
+Both cases converge on one status and one section; only `--expect` catches the one no directory
+was ever named for. A section that quietly disappears is indistinguishable from a concern that
+passed — the wardnet#957 failure, and see
+[the rule that states it](../../.claude/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md).
+
+The distinction this closes is not academic: for four merged pull requests —
+[#181](https://github.com/lydite/lydite/pull/181),
+[#182](https://github.com/lydite/lydite/pull/182),
+[#188](https://github.com/lydite/lydite/pull/188), and
+[#193](https://github.com/lydite/lydite/pull/193) — the referral job's report was never uploaded,
+`buildComment` was never given a directory to find it missing from, and the standing comment
+rendered no referral section at all while its overall verdict still read clean. No check can
+silently vanish from the surface is the property this guarantee exists to hold, and it was false
+on all four, because the one check that mattered was never in a directory to begin with.
 
 **A section is `unmeasured` only when nothing in it was decided.** Promoting on any single
 unmeasured row would mark ordinary runs as ungated: `--affected` reports every unselected
