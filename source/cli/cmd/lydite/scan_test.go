@@ -332,18 +332,81 @@ func TestScanReportsAComponentWithNoDerivableLanguage(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 		t.Fatalf("parsing the report: %v", err)
 	}
-	// The component's own row, and — because nothing else ran either — the
-	// run's. Both are unmeasured: one says this component has no language,
-	// the other says no check executed at all.
+	// One row per gate the component would have had, and — because nothing
+	// else ran either — the run's. All are unmeasured: each gate says why it
+	// did not apply, and the last says no check executed at all.
 	labels := map[string]string{}
 	for _, r := range doc.Rows {
 		labels[r.Label] = r.Status
 	}
-	if got, ok := labels["scan(legacy)"]; !ok || got != string(ui.StatusUnmeasured) {
-		t.Fatalf("rows = %+v, want an unmeasured scan(legacy)", doc.Rows)
+	for _, label := range []string{"scan(legacy)", "licence(legacy)", "findings(legacy)"} {
+		if got, ok := labels[label]; !ok || got != string(ui.StatusUnmeasured) {
+			t.Fatalf("rows = %+v, want an unmeasured %s", doc.Rows, label)
+		}
 	}
 	if got, ok := labels["scan"]; !ok || got != string(ui.StatusUnmeasured) {
 		t.Fatalf("rows = %+v, want the run to say no check ran", doc.Rows)
+	}
+}
+
+// A gate that is simply absent from the document reads as one that ran and
+// found nothing, so each gate a scanned component would have had says why it
+// did not apply — in its own words, because the gates answer different
+// questions and an author reading a licence row is not being told about a
+// linter.
+func TestEachGateThatDoesNotApplySaysSoInItsOwnWords(t *testing.T) {
+	rows := unscannedRows("legacy", "")
+
+	labels := make([]string, 0, len(rows))
+	values := map[string]string{}
+	for _, r := range rows {
+		if r.Status != ui.StatusUnmeasured {
+			t.Errorf("row %s = %s, want unmeasured: a gate that could not run is never a pass", r.Label, r.Status)
+		}
+		labels = append(labels, r.Label)
+		values[r.Label] = r.Value
+	}
+	if !slices.Equal(labels, []string{"scan(legacy)", "licence(legacy)", "findings(legacy)"}) {
+		t.Fatalf("labels = %v, want the SAST, licence and finding-gate rows", labels)
+	}
+	if values["scan(legacy)"] == values["licence(legacy)"] || values["licence(legacy)"] == values["findings(legacy)"] {
+		t.Errorf("values = %v, want each gate's own reason rather than one sentence three times", values)
+	}
+	for label, value := range values {
+		if !strings.Contains(value, "raw command") {
+			t.Errorf("%s = %q, want the declaration an author would change named", label, value)
+		}
+	}
+}
+
+// A raw command states no language at all; a language lydite recognises as
+// source and runs no tool over states one nothing checks. The declaration an
+// author would change differs between them, so the sentence does too.
+func TestTheReasonNothingScansAComponentNamesWhichCaseItIs(t *testing.T) {
+	raw := unscannedReason("")
+	unsupported := unscannedReason(runner.Python)
+
+	if raw == unsupported {
+		t.Fatalf("both reasons = %q, want a raw command told apart from an unscanned language", raw)
+	}
+	if !strings.Contains(unsupported, string(runner.Python)) {
+		t.Errorf("reason = %q, want the language named", unsupported)
+	}
+}
+
+// A language with a runner and no scanner must not leave through the opt-out
+// branch: langEnabled answers false for every language it has no key for, which
+// would skip it as silently as a switch the repository never touched.
+func TestALanguageWithNoScannerIsNotReadAsAnOptOut(t *testing.T) {
+	for _, l := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript} {
+		if !scannedLang(l) {
+			t.Errorf("scannedLang(%s) = false, want the languages scan has checks for", l)
+		}
+	}
+	for _, l := range []runner.Lang{"", runner.Python, runner.Shell, runner.Lang("cobol")} {
+		if scannedLang(l) {
+			t.Errorf("scannedLang(%q) = true, want a language with no scanner to render its rows", l)
+		}
 	}
 }
 
@@ -748,6 +811,52 @@ func TestTwoComponentsOverOneDirectoryAreScannedOnce(t *testing.T) {
 	}
 	if deduped == "" {
 		t.Fatalf("rows = %+v, want the deduplicated component to say so", doc.Rows)
+	}
+}
+
+// The rows saying a gate does not apply belong to the component nothing scans
+// and to no other. A component in a language lydite does run carries exactly
+// the rows its checks produced — a `scan(api)` or `findings(api)` beside them
+// would report a gate as inapplicable to a component that gate had just run
+// over.
+func TestAScannedComponentCarriesNoneOfTheRowsForAComponentNothingScans(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n"+
+			"  - name: api\n    dir: .\n    runner: go-test\n"+
+			"  - name: legacy\n    dir: legacy\n    command: [\"make\", \"check\"]\n")
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeLydite(t, dir, "legacy/Makefile", "check:\n\t@true\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	var doc struct {
+		Rows []struct{ Status, Label string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	var scanned, unscanned []string
+	for _, r := range doc.Rows {
+		switch {
+		case strings.HasSuffix(r.Label, "(api)"):
+			scanned = append(scanned, r.Label)
+		case strings.HasSuffix(r.Label, "(legacy)"):
+			unscanned = append(unscanned, r.Label)
+		}
+	}
+	if !slices.Equal(scanned, []string{"gosec(api)", "govulncheck(api)", "licence(api)"}) {
+		t.Errorf("rows for the Go component = %v, want its checks and nothing else", scanned)
+	}
+	if !slices.Equal(unscanned, []string{"scan(legacy)", "licence(legacy)", "findings(legacy)"}) {
+		t.Errorf("rows for the raw-command component = %v, want one per gate that does not apply", unscanned)
 	}
 }
 

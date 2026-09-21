@@ -125,16 +125,20 @@ func newScanCmd() *cobra.Command {
 			scanned := map[string]string{}
 			for _, c := range file.Components {
 				lang := langOf(c)
-				if lang == "" {
+				if !scannedLang(lang) {
 					// Said out loud rather than skipped. A component lydite
-					// cannot derive a language for is one nothing scans, and
-					// dropping it in silence reads exactly like a component
-					// that was scanned and found clean.
-					rep.Add(ui.Row{
-						Status: ui.StatusUnmeasured,
-						Label:  "scan(" + c.Name + ")",
-						Value:  "not scanned — a component declaring its own command implies no language",
-					})
+					// has no scanner for is one nothing scans, and dropping it
+					// in silence reads exactly like a component that was
+					// scanned and found clean.
+					//
+					// Asked before langEnabled, which answers false for every
+					// language it has no key for: a language with a runner and
+					// no scanner would otherwise leave through the opt-out
+					// branch and be skipped as though the repository had
+					// switched it off.
+					for _, row := range unscannedRows(c.Name, lang) {
+						rep.Add(row)
+					}
 					continue
 				}
 				// A language turned off in .lydite/config.yml is one whose
@@ -172,7 +176,7 @@ func newScanCmd() *cobra.Command {
 					// Said, not dropped. A consumer keying rows by component
 					// name would otherwise lose this one with nothing to
 					// separate "already covered" from "never declared" — the
-					// same reason a raw-command component gets a row.
+					// same reason a component nothing scans gets rows.
 					rep.Add(ui.Row{
 						Status: ui.StatusUnmeasured,
 						Label:  "scan(" + c.Name + ")",
@@ -224,9 +228,10 @@ func newScanCmd() *cobra.Command {
 
 			// A run in which no check ran says so, in a row of its own.
 			//
-			// Counting rows is not the test for that: a raw-command component
-			// and a deduplicated one each add an `unmeasured` row, so a
-			// repository whose every component declares a raw command, with
+			// Counting rows is not the test for that: a component nothing
+			// scans adds a row per gate that does not apply to it and a
+			// deduplicated one adds one of its own, so a repository whose
+			// every component declares a raw command, with
 			// Semgrep off, produces a document of amber rows and has executed
 			// nothing. Each opt-out is the repository's to make and none is
 			// reported on its own; all of them together is a different fact.
@@ -394,6 +399,60 @@ func anyLanguageDeclared(file component.File) bool {
 		}
 	}
 	return false
+}
+
+// scannedLang reports whether lydite has checks for a language at all, which is
+// a property of lydite rather than of the repository — a language switched off
+// in .lydite/config.yml has scanners and is not being asked to run them.
+//
+// The three are enumerated rather than derived from runner.Runs, so a language
+// that gains a runner before it gains a scanner is not scanned by default: it
+// would reach langEnabled, which answers false for every language it has no key
+// for, and be skipped as silently as an opt-out the repository never stated.
+func scannedLang(l runner.Lang) bool {
+	switch l {
+	case runner.Go, runner.Rust, runner.TypeScript:
+		return true
+	default:
+		return false
+	}
+}
+
+// unscannedRows is what a component lydite has no scanner for contributes to the
+// report: one row per gate a scanned component gets, each saying why that gate
+// in particular did not run.
+//
+// A row per gate rather than one for the component, because a gate that is
+// absent from the document is indistinguishable from one that ran and found
+// nothing — a consumer reading every component's licence verdict, or a reader
+// looking down the licence rows, finds this one answered rather than missing.
+// Each row's reason is the gate's own: a licence gate read no dependency set,
+// and that is a different sentence from no linter having run.
+//
+// Every row is `unmeasured`, so the verdict stays `pass`: a component declaring
+// its own command is a configuration the repository is entitled to state, and
+// what must not happen is silence about it.
+func unscannedRows(name string, lang runner.Lang) []ui.Row {
+	why := unscannedReason(lang)
+	return []ui.Row{
+		{Status: ui.StatusUnmeasured, Label: "scan(" + name + ")",
+			Value: "not scanned — " + why + ", so no linter, vulnerability or SAST check runs over it"},
+		{Status: ui.StatusUnmeasured, Label: licence.Gate + "(" + name + ")",
+			Value: "not measured — " + why + ", so there is no dependency set to read licences from"},
+		{Status: ui.StatusUnmeasured, Label: "findings(" + name + ")",
+			Value: "not counted — " + why + ", so no gate reports a finding count for it"},
+	}
+}
+
+// unscannedReason is why no scanner applies to a component. The two cases are
+// not one sentence: a raw command states no language at all, while a language
+// lydite recognises as source and runs no tool over states one nothing checks,
+// and the declaration an author would change differs between them.
+func unscannedReason(lang runner.Lang) string {
+	if lang == "" {
+		return "the component declares a raw command, which implies no language"
+	}
+	return "the component's language, " + string(lang) + ", has no scanner in lydite"
 }
 
 // langEnabled reports whether .lydite/config.yml leaves one language's checks

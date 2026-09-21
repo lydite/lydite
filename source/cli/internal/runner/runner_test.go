@@ -525,7 +525,11 @@ func TestNextestLinuxTargetsAreStatic(t *testing.T) {
 // A language with a runner and no source extensions is one the orphan gate
 // cannot see, so its files would go undeclared while the gate reported a
 // clean pass — the declared list failing open, one level down.
-func TestEveryLangHasSourceExts(t *testing.T) {
+//
+// The implication runs this way only. A language in the table without a
+// runner is the deliberate case: lydite reads a .py or a .sh as source a
+// component has to claim, and runs nothing over either.
+func TestEveryRunnersLangHasSourceExts(t *testing.T) {
 	for _, r := range registry {
 		if len(sourceExts[r.Lang]) == 0 {
 			t.Errorf("runner %q is %q, which has no source extensions", r.Name, r.Lang)
@@ -596,6 +600,28 @@ func TestInstrumentationIsInstalledForWhatActuallyRunsIt(t *testing.T) {
 		if got := runsLLVMCov(inv); got != tc.want {
 			t.Errorf("runsLLVMCov(%s/%s) = %v, want %v — the command is %q",
 				tc.name, tc.variant, got, tc.want, line(inv))
+		}
+	}
+}
+
+// Runs separates the languages lydite has a runner for from the ones it only
+// recognises, and it is read off the registry so the two cannot drift. A
+// caller resolving a suite, a coverage report or a language's scanners asks
+// this first: those all reach a Lang through a runner, and a language with
+// none would resolve to nothing there while still being a file the orphan
+// gate sees.
+func TestRunsIsTrueForExactlyTheRunnersLanguages(t *testing.T) {
+	for _, r := range registry {
+		if !Runs(r.Lang) {
+			t.Errorf("runner %q is %q, which Runs reports lydite does not run", r.Name, r.Lang)
+		}
+	}
+	for _, l := range []Lang{Python, Shell} {
+		if Runs(l) {
+			t.Errorf("%s has no runner in the registry, so Runs must say so", l)
+		}
+		if len(sourceExts[l]) == 0 {
+			t.Errorf("%s has no source extensions, so the orphan gate cannot see its files", l)
 		}
 	}
 }
