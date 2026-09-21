@@ -494,6 +494,29 @@ func TestACommandComponentSharesOneInstallWithItsRunnerSibling(t *testing.T) {
 	}
 }
 
+// A command component resolving a workspace root but holding no package.json
+// of its own is not one of that workspace's packages, so its suite runs
+// without lydite ever attempting an install for it — the same root a sibling
+// package resolves is not enough on its own to join.
+func TestACommandComponentWithNoPackageJSONInstallsNothing(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, root, "mod/main.go", "package main\n\nfunc main() {}\n")
+	runs := recordingStub(t, "pnpm")
+
+	mod := component.Component{Name: "mod", Dir: "mod", Command: []string{"sh", "-c", "exit 0"}}
+	rep := ui.NewReport("test")
+	runComponents(context.Background(), root, []component.Component{mod}, nil, nil,
+		config.Default(), nil, 1, false, false, rep)
+
+	if got := stubRuns(t, runs); got != 0 {
+		t.Errorf("pnpm ran %d time(s), want no install: mod holds no package.json, so it is not one of the workspace's packages", got)
+	}
+	if suite := rowByLabel(t, rep, "test(mod)"); suite.Status != ui.StatusPass {
+		t.Errorf("row = %+v, want the suite to have run", suite)
+	}
+}
+
 // recordingStub puts a program of the given name ahead of any real one on
 // PATH, leaving one file per invocation in the returned directory. Nothing
 // here runs a real package manager: an install that reaches the network tests
@@ -617,6 +640,16 @@ func nodeCommandComponent() component.Component {
 	return component.Component{
 		Name: "web", Dir: "web",
 		Command: []string{"sh", "-c", "exit 0"},
+	}
+}
+
+// installsNodeDeps answers for its own input rather than assuming
+// component.Load already ran: a component naming neither a runner nor a
+// command installs nothing, the same answer a real declaration could never
+// produce since validateInvocation requires exactly one of the two.
+func TestInstallsNodeDepsAnswersFalseWithNeitherRunnerNorCommand(t *testing.T) {
+	if installsNodeDeps(t.TempDir(), component.Component{Name: "empty"}) {
+		t.Error("a component naming neither a runner nor a command installs no node dependencies")
 	}
 }
 
