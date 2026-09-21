@@ -1,0 +1,18 @@
+from scope import Counter, add, tally, widest
+
+
+def test_add_sums():
+    assert add(2, 3) == 5
+
+
+def test_tally_doubles():
+    assert tally([1, 2]) == [2, 4]
+
+
+def test_widest_over_two_signs():
+    assert widest([-7, 3]) == -7
+
+
+def test_bump_increments():
+    counter = Counter()
+    assert counter.bump() == 1
