@@ -222,10 +222,39 @@ lockfiles resolves to nothing rather than a guessed priority order, and
 deliberately **no key naming the package manager**: the lockfile already states it,
 and a second statement could only drift.
 
+**The install runs from the workspace root, not the component's own directory.**
+`nodedeps.WorkspaceRoot` walks up from the component's `dir` to the nearest
+ancestor holding a recognised lockfile, bounded by the scan root, and installs
+there — a package of a workspace declares its dependencies nowhere; the lockfile
+that resolves them sits at the root above it, and a component at `packages/ui`
+in a repository whose only `pnpm-lock.yaml` is at the root installs from that
+root rather than installing nothing. `typescript.install` is unaffected by this
+walk: the override still replaces detection entirely and still runs in the
+component's own directory, since a repository that authored one said where it
+meant it to run by declaring the component there. Several components resolving
+the same root share one install: the first to reach it runs the frozen install,
+and every other one waits and then finds it already done, rather than each
+mutating the same `node_modules` tree on its own schedule. That install runs
+under one environment — the first component's — and a second component naming
+a different one is an error: sharing one write of the tree silently under
+whichever declaration got there first could write a token or a registry
+neither component asked the other to see.
+
+A component's coverage or mutation producer — the runner and provider
+`internal/runner.Producer` reads back out of `node_modules` — is read from the
+same place `Install` wrote to: the workspace root when one resolved, the
+component's own directory otherwise. A component nested in a workspace whose
+dependencies hoist above it would otherwise find nothing there and report no
+producer at all.
+
 An install that fails stops the suite, with a row saying so. A JavaScript suite run
 without its dependencies fails at import, naming the tests rather than what is
 actually missing — the same misattribution a suite run without its database
-produces.
+produces. A component for which no workspace root resolves — no single lockfile
+between its `dir` and the scan root, and no `typescript.install` override — gets
+its own `install(<name>)` row instead: unmeasured, not a pass or a fail, because
+no package manager ran and the run must say so rather than read like one that
+installed the workspace it was pointed at.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to

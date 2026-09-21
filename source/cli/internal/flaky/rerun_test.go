@@ -314,7 +314,7 @@ func probe(t *testing.T) (dir string, env []string) {
 	if !ok {
 		t.Fatal("no go-test runner")
 	}
-	if err := r.Prepare(context.Background(), inv, dir, "", executil.Env{}, io.Discard); err != nil {
+	if err := r.Prepare(context.Background(), inv, dir, "", "", executil.Env{}, io.Discard); err != nil {
 		t.Skipf("the pinned test wrapper is not installed and could not be fetched: %v", err)
 	}
 	return dir, toolchain.Compose(inv.PathDirs, nil)

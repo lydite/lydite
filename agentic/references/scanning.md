@@ -121,14 +121,19 @@ one-line claim, so there was nothing left to lose. `gosec` and Semgrep need one 
 `-fmt json -out <file> -stdout -verbose text` and `--json-output=<file>` both write a copy rather
 than a replacement.
 
-**The tool's own exit status decides the row**, with two exceptions where it under-reports: gosec
-states a package that did not compile in the report rather than in its status, and Semgrep exits
-zero for a run whose rules would not load. A scan that read nothing must not render as a clean
-pass, which is the failure `reportableBiome`'s `parse` and `internalError/io` categories exist to
-catch. Both carry their reason in `Result.Detail`, which is the only place a verdict lydite
-invented can explain itself. Every parser keeps that same stance: an unrecognised category, level
-or code is reported rather than dropped, and a report that will not parse falls back to the exit
-status — a parser that silently drops what it does not recognise is how a gate stops gating.
+**The tool's own exit status decides the row**, with three exceptions. Two are tools that
+under-report: gosec states a package that did not compile in the report rather than in its
+status, and Semgrep exits zero for a run whose rules would not load. The third is gitleaks, whose
+status is accurate about what it walked and answers the wrong question once lydite scopes the
+claims to the files git would carry — its row follows the claims that survive that scoping, and
+the status is read only for whether gitleaks walked at all. A scan that read nothing must not
+render as a clean pass, which is the failure `reportableBiome`'s `parse` and `internalError/io`
+categories exist to catch. All three carry their reason in `Result.Detail`, which is the only
+place a verdict lydite invented can explain itself. Every parser keeps that same stance: an
+unrecognised category, level or code is reported rather than dropped, and a report that will not
+parse falls back to the exit status — except gitleaks', where the claims are the authority, so an
+unreadable report is a gate that could not run and fails the row saying so. A parser that
+silently drops what it does not recognise is how a gate stops gating.
 
 **A scan anchors what it found, against the lines the change touched.**
 `coverage.ChangedLines` is asked once and `record` anchors each check's claims —
@@ -157,9 +162,43 @@ reads bytes, not a build graph, and the files most likely to carry a credential 
 `.github/workflows/`, a `docker-compose.yml`, an `.env` — belong to no component at all. It runs
 once over the scan root's working tree, never over history, and its findings carry no component,
 so `findingCounts` puts the count in `root_findings` beside Semgrep's. It is not diff-scoped: the
-row fails on every secret in the tree, as gosec's does, and the anchor is what decides which claims
-reach the diff and which land in the standing comment as pre-existing debt. See
+row fails on every secret in the tree it reports on, as gosec's does, and the anchor decides
+which claims reach the diff and which land in the standing comment as pre-existing debt. See
 [ADR 0035](../../docs/adr/0035-secret-scanning-is-root-scoped-over-the-working-tree.md).
+
+**That working tree is the part of it git would carry**, which is tracked files plus untracked
+ones `.gitignore` does not cover. `gitleaks dir` takes one path and has no flag that scopes its
+walk, so it reads a warm `target/` and an installed `node_modules/` as source and reports their
+compiled-in test vectors as leaks; the claims are scoped instead, against `gitdiff.Tracked` — the
+same question `internal/orphan` and the mutation worktree already ask, and deliberately not a
+suppression, which would leave every repository with a `target/` permanently referred. A file git
+will not carry cannot be committed by accident, which is the leak this gate exists to catch; a
+file that is untracked but not ignored is one `git add .` from being published, so it stays in
+scope. What it gives up is a real credential sitting in ignored output, and gitleaks still walks
+that output, so the filter buys correctness and no scan time at all.
+
+**Two answers from git are not a filter.** `git ls-files` stops at a nested repository in both of
+its shapes — a submodule is one index entry naming the gitlink path, and an embedded repository is
+listed as its directory and not descended into — while gitleaks walks each as ordinary source, so
+comparing the two answers as text would drop every leak underneath one in silence. The gitlink
+paths come from `git ls-files --stage`'s mode `160000` entries and the embedded directories from
+the trailing slash git already writes, and anything beneath one of those prefixes is kept. And a
+root git lists no file at all under — a `--dir` inside a gitignored subtree, a vendored checkout —
+is a scope lydite never established rather than a tree with nothing in it: `tracked` reports it as
+its own error, the answer `internal/orphan` gives as `ErrNoFiles`, and it fails the row beside a
+report naming a leak instead of filtering every one of them away. Beside a report naming none it
+costs nothing, because a repository with no file in it and a gitleaks that found nothing agree.
+
+**The row follows the claims that survive**, because gitleaks exits 1 for a leak in the ignored
+output no claim survives, and a gate whose every claim was filtered away must not still fail.
+Four outcomes are the gate failing rather than the gate's finding, each with its reason in
+`Result.Detail`: a report lydite could not read, an exit its report does not account for, a leak
+naming no line inside the scan root, and a scope git could not be asked for — the last reporting
+every claim unscoped as well, since a pass there is indistinguishable from a tree that was scoped
+and clean. Each renders as a failing row rather than the amber `unmeasured` the grammar has for a
+gate that could not run, because `executil.Result` carries a verdict as an error or nothing. One
+gap is named in ADR 0035 rather than closed: a walk that stopped early after finding something
+exits 1 with a non-empty report and is indistinguishable from one that finished.
 
 **`scan` has no `--component` or `--affected`.** Selection is `lydite test`'s surface today; a scan
 that narrowed itself would need the same widening-on-ignorance argument made again, and nothing
