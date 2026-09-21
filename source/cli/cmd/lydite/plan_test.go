@@ -146,9 +146,11 @@ func TestPlanFailsOnAComposeFileItCannotRead(t *testing.T) {
 	}
 }
 
-// The report is what a person reads; the matrix is what a workflow reads. A
-// document in .lydite-reports/ would put a section titled "plan" in the
-// pull-request comment saying nothing anyone can act on.
+// The report is what a person reads; the matrix is what a workflow reads. The
+// one verdict the plan reaches is the orphan gate's, and `lydite test` reports
+// that same row from its own document — a plan.json would carry it into the
+// pull-request comment a second time. The plan's own channel is stdout, the
+// job log and the exit code.
 func TestPlanWritesNoReportDocument(t *testing.T) {
 	root := planRepo(t)
 	if _, err := runPlanCmd(t, root); err != nil {
