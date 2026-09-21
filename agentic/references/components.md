@@ -240,6 +240,22 @@ a different one is an error: sharing one write of the tree silently under
 whichever declaration got there first could write a token or a registry
 neither component asked the other to see.
 
+**A raw `command:` component joins the same install when it is itself a JS
+package.** Opting out of the derived runner variants does not opt a component
+out of the workspace it sits in: a `command:` component can still be one of a
+shared `pnpm-lock.yaml`'s packages, and running its command against an
+uninstalled workspace root hands the coordination away — the package manager
+auto-installs the whole workspace on its own schedule, racing lydite's own
+`nodedeps.Install` of that same root and producing exactly the lockfile-write
+collision the coordination exists to prevent. The join criterion is narrow: a
+`package.json` in the component's own directory, not merely a resolvable
+workspace root above it. A workspace root resolves for any sibling under it,
+Go or Rust included, and a component that never asked for a node install must
+not be given one just for sharing an ancestor with components that did.
+Meeting the criterion routes the component through the identical
+`nodedeps.Install` call, coalesced on the same workspace root as every other
+component there.
+
 A component's coverage or mutation producer — the runner and provider
 `internal/runner.Producer` reads back out of `node_modules` — is read from the
 same place `Install` wrote to: the workspace root when one resolved, the
@@ -254,7 +270,10 @@ produces. A component for which no workspace root resolves — no single lockfil
 between its `dir` and the scan root, and no `typescript.install` override — gets
 its own `install(<name>)` row instead: unmeasured, not a pass or a fail, because
 no package manager ran and the run must say so rather than read like one that
-installed the workspace it was pointed at.
+installed the workspace it was pointed at. That row keys off the same join
+criterion above, not off whether a runner matched, so a `command:` component
+that meets it is exactly as visible when its install has no root to resolve
+as a `vitest` or `jest` component is.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
