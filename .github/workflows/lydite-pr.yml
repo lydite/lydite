@@ -292,6 +292,10 @@ jobs:
         if: always()
         with:
           name: referral
+          # review wrote .lydite-reports under whichever tree --dir named
+          # above, and this job's own working directory holds two: head, the
+          # pull request's own checkout.
+          path: head
 
   scan:
     name: scan
@@ -795,7 +799,19 @@ jobs:
           # to read renders something, and which paths were there to be read is
           # what tells that apart from a comment over the right ones.
           printf 'publishing %s\n' "${dirs[@]}"
-          lydite publish "${args[@]}" --base "$BASE_SHA" --out comment.md
+          # The four concerns this job waits on, named so that one whose
+          # artifact never existed is a section saying so rather than an
+          # absence. A job that dies before it uploads leaves no directory for
+          # the loop above to find, so `publish` would otherwise never be told
+          # that concern was supposed to be here — and a comment missing a
+          # section reads exactly like one whose gate passed. Every job below
+          # runs whenever this one does: `referral` has only `needs: setup`,
+          # and scan/merge/mutation-merge carry this job's own title
+          # condition. A concern a run legitimately does not have is left out
+          # of this list rather than reported missing.
+          lydite publish "${args[@]}" \
+            --expect review,scan,test,mutation \
+            --base "$BASE_SHA" --out comment.md
           echo "::group::the comment"
           cat comment.md
           echo "::endgroup::"

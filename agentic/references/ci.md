@@ -30,6 +30,17 @@ request's checkout, so `referral-publish` checks out the base commit into `base/
 its own binary there, and reads its one local action (`lydite-reports`) from that same trusted
 tree rather than from the head checkout it also holds for reading exemptions and the diff.
 
+**`referral` writes `.lydite-reports` under `head/`, because it runs `lydite review --dir head
+--publish` against the pull request's own checkout rather than the job's own working
+directory** — so the `lydite-reports` step that uploads it needs `path: head`, not the
+composite's `.`-relative default. lydite/lydite#194 shipped this mismatch: no artifact ever
+uploaded, so `publish` had nothing missing to report and no way to distinguish that from a run
+that legitimately produced no referral verdict. `--expect` on `lydite publish` is what closes
+the second half — a concern named there and found in none of `publish`'s `--reports` directories
+now renders as its own unmeasured section, rather than being indistinguishable from a concern
+the run never asked for. See
+[`point-lydite-reports-path-at-the-checkout-lydite-used.md`](../rules/point-lydite-reports-path-at-the-checkout-lydite-used.md).
+
 What this split protects is the credential and the binary, not the api-surface result itself.
 `referral` writes the raw per-component comparison to an artifact via
 `lydite review compare --write-surfaces`, and `referral-publish` (never re-running the

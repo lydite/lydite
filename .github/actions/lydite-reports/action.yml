@@ -24,6 +24,16 @@ inputs:
       own — names itself differently.
     required: false
     default: lydite-reports
+  path:
+    description: >
+      where the job wrote `.lydite-reports`, relative to this step's own
+      working directory. lydite writes its report under whatever tree
+      `--dir` named, so a job invoking lydite against a checkout at a
+      subdirectory (`--dir head`, say) has to name that subdirectory here
+      too — the default is right for every job that runs lydite with
+      `--dir .` from the workspace root.
+    required: false
+    default: "."
 
 runs:
   using: composite
@@ -33,7 +43,7 @@ runs:
     - id: present
       shell: bash
       env:
-        REPORTS: .lydite-reports
+        REPORTS: ${{ inputs.path }}/.lydite-reports
       run: |
         if [ -d "$REPORTS" ]; then
           echo "found=true" >> "$GITHUB_OUTPUT"
@@ -46,7 +56,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ inputs.prefix }}-${{ inputs.name }}
-        path: .lydite-reports
+        path: ${{ inputs.path }}/.lydite-reports
         retention-days: 7
         # The directory disowns itself with a .gitignore, and an artifact that
         # silently dropped it would be missing the file that explains why the

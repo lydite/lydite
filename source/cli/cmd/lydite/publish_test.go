@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -59,6 +61,121 @@ func TestADirectoryHoldingNoDocumentIsReported(t *testing.T) {
 	body := buildComment([]string{empty}, "").Render()
 	if !strings.Contains(body, "holds no report document") {
 		t.Fatalf("an empty report directory was not reported:\n%s", body)
+	}
+}
+
+// A job that dies before it uploads leaves no artifact, so the directory it
+// would have been downloaded into is never there to be named — the concern
+// reaches the comment as nothing at all rather than as something unreadable.
+// The run says which concerns it expected, and one that arrived in no
+// directory is a section rather than a silence.
+func TestAConcernExpectedFromNoDirectoryAtAllIsNamed(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "review", "test")
+
+	body := comment.Render()
+	if !strings.Contains(body, "referral") {
+		t.Fatalf("the concern that produced no report is absent from the comment:\n%s", body)
+	}
+	if !strings.Contains(body, "the run expected a `review` report") {
+		t.Errorf("the comment does not say what was missing:\n%s", body)
+	}
+	if comment.Headline == "every check passed" {
+		t.Errorf("the headline reads as a clean run: %q", comment.Headline)
+	}
+	if !strings.Contains(comment.Headline, "no verdict came from referral") {
+		t.Errorf("the headline does not name the concern that went unmeasured: %q", comment.Headline)
+	}
+}
+
+// A concern nobody expected is still considered only if a document for it
+// arrives. A run that legitimately does not run a command must not be told it
+// is missing one.
+func TestAnUnexpectedConcernIsNotReportedMissing(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; nothing was missing that the run asked for", got)
+	}
+	if body := comment.Render(); strings.Contains(body, "referral") {
+		t.Errorf("a concern the run never expected is reported as missing:\n%s", body)
+	}
+}
+
+// A concern expected under a name this binary does not declare in the
+// concerns table still has to be named, not silently folded away for want of
+// a title lydite recognizes.
+func TestAnExpectedUndeclaredConcernIsNamed(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test", "coverage")
+
+	body := comment.Render()
+	if !strings.Contains(body, "coverage") {
+		t.Fatalf("the undeclared concern is absent from the comment:\n%s", body)
+	}
+	if !strings.Contains(body, "the run expected a `coverage` report") {
+		t.Errorf("the comment does not say what was missing:\n%s", body)
+	}
+	if comment.Headline == "every check passed" {
+		t.Errorf("the headline reads as a clean run: %q", comment.Headline)
+	}
+}
+
+// An undeclared concern that does arrive is rendered from what was found, not
+// also reported as missing because its name is absent from the concerns
+// table.
+func TestAnExpectedUndeclaredConcernThatArrivesIsNotAlsoReportedMissing(t *testing.T) {
+	dir := reportDirWith(t, "coverage", ui.Row{Status: ui.StatusPass, Label: "coverage(cli)", Value: "passed"})
+	comment := buildComment([]string{dir}, "", "coverage")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; the expected concern arrived", got)
+	}
+	if body := comment.Render(); strings.Contains(body, "the run expected a `coverage` report") {
+		t.Errorf("an expected concern that arrived is also reported missing:\n%s", body)
+	}
+}
+
+// --expect is a flag on the command, not only a parameter buildComment
+// happens to take — a run invoking `lydite publish --expect ...` has to reach
+// the same behaviour the unit tests exercise directly.
+func TestTheExpectFlagIsWiredToTheRun(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+
+	cmd := newPublishCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--reports", present, "--expect", "review,test"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("publish: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "the run expected a `review` report") {
+		t.Fatalf("--expect did not reach the run:\n%s", out.String())
+	}
+}
+
+// sortedNames is what keeps an undeclared concern's place in the comment
+// stable across runs, rather than following Go's randomised map order.
+func TestSortedNamesOrdersAlphabetically(t *testing.T) {
+	got := sortedNames(map[string]bool{
+		"zeta": true, "alpha": true, "mid": true, "kappa": true, "omega": true, "beta": true,
+	})
+	want := []string{"alpha", "beta", "kappa", "mid", "omega", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sortedNames(...) = %v, want %v", got, want)
+	}
+}
+
+// A blank --expect entry names nothing, and must not itself render as a
+// concern the run expected.
+func TestABlankExpectEntryIsIgnored(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+	comment := buildComment([]string{present}, "", "test", "", "  ")
+
+	if got := comment.Headline; got != "every check passed" {
+		t.Errorf("headline is %q; a blank --expect entry names no concern", got)
 	}
 }
 
