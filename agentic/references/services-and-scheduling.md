@@ -95,8 +95,11 @@ each resolving that root for their install would otherwise mutate the one
 `node_modules` tree it produces without the scheduler serialising either of
 them. The gap is closed by installing that root exactly once per process
 (`internal/nodedeps`, see [Components](components.md)) rather than by growing
-a second lock: nothing here needs to know a workspace root exists, because
-nothing races to write it twice. It takes plain data — an item
+a second lock — and that one install now serves a runner-based TypeScript
+component and a raw `command:` component alike, whenever either resolves the
+same root, still through the single `nodedeps.Install` call: nothing here
+needs to know a workspace root exists, or which of those two shapes asked for
+it, because nothing races to write it twice. It takes plain data — an item
 is a name and a set of ports — and the caller supplies the function that runs one,
 so the constraint is testable without a container runtime and the port-conflict
 predicate has one implementation rather than one here and another in the planner
