@@ -73,32 +73,47 @@ YAML. The file is compose's, not lydite's, and rejecting a key lydite has no opi
 about would make lydite's version the ceiling on what a repository may write in a
 file lydite does not own.
 
-## The scheduler: ports are the only thing that serialises
+## The scheduler: a port, a tree, and nothing logical
 
 Components run concurrently. `internal/scheduler` bounds how many at once and
 holds a lock on what a component occupies while it runs: each host port its
-compose services publish, and its own directory tree. Two components sharing
-either run in sequence — the directory by containment rather than equality,
-since a component at the repository root and one rooted at `web/` are writing
-into the same files. Both conflicts are physical — the second would fail to bind
-the port, and two components rooted at one tree install into, build in and
-write their output to it at once, where an `npm ci` removing and recreating a
-`node_modules` another is importing from is not a race either suite can report
-honestly. `component.validate` enforces unique names, not unique directories,
-so a repository may legitimately declare two components over one root.
+compose services publish, its own directory tree, and every further path it
+declares under `occupies:`. Two components sharing any of them run in sequence —
+the directories by containment rather than equality, since a component at the
+repository root and one rooted at `web/` are writing into the same files. Every
+one of these conflicts is physical — the second would fail to bind the port, and
+two components writing into one tree install into, build in and write their
+output to it at once, where an `npm ci` removing and recreating a `node_modules`
+another is importing from is not a race either suite can report honestly.
+`component.validate` enforces unique names, not unique directories, so a
+repository may legitimately declare two components over one root.
 
-**A shared `node_modules` above several components is not something this lock
-covers.** The directory lock is keyed on a component's own declared `dir:`, by
-containment — and a workspace root a lockfile puts *above* every one of those
-directories names nothing the scheduler ever holds a lock on. Two components
-each resolving that root for their install would otherwise mutate the one
-`node_modules` tree it produces without the scheduler serialising either of
-them. The gap is closed by installing that root exactly once per process
-(`internal/nodedeps`, see [Components](components.md)) rather than by growing
-a second lock: nothing here needs to know a workspace root exists, because
-nothing races to write it twice. It takes plain data — an item
-is a name and a set of ports — and the caller supplies the function that runs one,
-so the constraint is testable without a container runtime and the port-conflict
+**An item's occupied set is its root plus its declared paths, compared whole.**
+A root inside somebody else's occupied path and two occupied paths that overlap
+are the same conflict as two overlapping roots: the pair writes into one tree
+either way, and which of the two a path was declared as decides nothing about
+what a second component writing into it would do. A pair overlapping at
+`packages/tokens` and again at `packages/tokens/dist` is reported once, named by
+the outermost path that covers it. The declaration is what makes this lock
+possible at all — a `setup:` line is opaque shell, so nothing lydite reads can
+see the tree two components both build (see
+[ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md)).
+
+**A shared `node_modules` above several components is still not what this lock
+covers.** A workspace root a lockfile puts *above* every declared `dir:` names
+nothing the scheduler holds unless somebody writes it down, and two components
+each resolving that root for their install would mutate the one `node_modules`
+tree it produces without either being serialised. That gap is closed by
+installing the root exactly once per process (`internal/nodedeps`, see
+[Components](components.md)), and it stays closed that way even though an
+`occupies:` entry could now name the root: doing the work once removes the
+duplicated install as well as the race, where a lock on a root every component
+sits under would serialise the whole repository one component at a time. The
+lock is for a tree lydite does not itself write.
+
+The scheduler takes plain data — an item is a name, a set of host ports and the
+paths it writes into — and the caller supplies the function that runs one, so
+the constraint is testable without a container runtime and the conflict
 predicate has one implementation rather than one here and another in the planner
 that groups shards ([ADR 0017](../../docs/adr/0017-shards-the-scheduler-and-the-planner.md)).
 

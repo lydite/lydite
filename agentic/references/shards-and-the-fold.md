@@ -37,7 +37,10 @@ matrix built on unknown ports can put two components that contend for one port i
 which is the single thing the planner exists to prevent.
 
 **A shard is a conflict group**: the transitive closure of `scheduler.Conflicts` — components sharing
-a published host port, or rooted at overlapping directories. `internal/scheduler` owns that predicate
+a published host port, or writing into one tree, whether that is their roots overlapping or a path
+either of them declares it `occupies:`
+([ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md)).
+`internal/scheduler` owns that predicate
 and the planner reads it rather than reimplementing it, for the reason `internal/pathmatch` has one
 matcher. Components that conflict with nothing are a shard of one; the grouping is the finest one
 that is safe, and there is nothing to set wrong. **There is no `--shards`, and no `--concurrency`** —
