@@ -42,6 +42,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/config"
@@ -1389,7 +1390,8 @@ func pythonInstall(dir, root string) (string, []string, bool) {
 // pin: JavaScript, because installing one into the tree it is about to gate
 // would have lydite change what the repository resolves to, and Python, whose
 // pytest and coverage.py are whatever the repository's own install put in the
-// environment.
+// interpreter. Both are read back out of what actually ran, and both answer
+// empty for exactly one reason — either half of the pair is unidentifiable.
 func (r Runner) Producer(dir, root, override, lang string) string {
 	switch r.Name {
 	case GoTest:
@@ -1407,6 +1409,10 @@ func (r Runner) Producer(dir, root, override, lang string) string {
 		// Jest instruments through babel-plugin-istanbul, which it bundles,
 		// so the runner's own version is the whole of the answer.
 		return jsProducer(dir, root, override, "jest")
+	case PythonPytest:
+		// pytest runs the suite and coverage.py records the lines, and the
+		// two are versioned independently — so the pair is the instrument.
+		return pythonProducer(dir)
 	default:
 		return ""
 	}
@@ -1450,6 +1456,87 @@ func jsProducer(dir, scanRoot, override, run string, providers ...string) string
 	}
 	return ""
 }
+
+// pythonProducer names the pytest that ran the suite and the coverage.py that
+// recorded its lines, or nothing when either cannot be identified.
+//
+// It asks the interpreter rather than the tree, because there is nothing in the
+// tree to read: a Python install writes into the environment `python3` resolves
+// to — a virtualenv, a uv-managed one, the system site-packages — and which of
+// those it was is a property of the process, not of a directory lydite can
+// walk. The question is put to `python3` in dir, the same name and the same
+// working directory the invocation itself runs through, so a tree that selects
+// its environment by sitting in a directory — a pyenv `.python-version`, a
+// `.venv` a wrapper resolves relative to the cwd — is asked in the one it
+// selects.
+//
+// The interpreter runs in isolated mode (`-I`), because that directory belongs
+// to the tree under scan and must not decide what the lookup imports or which
+// metadata it reads. `python -c` otherwise puts the cwd first on sys.path, and
+// importlib.metadata both imports stdlib modules lazily and scans sys.path for
+// `*.dist-info`: a scanned tree carrying its own `email/`, `csv.py` or
+// `importlib_metadata.py` would execute tree-controlled code in a process
+// holding lydite's own environment — the `review` job's credentials among it —
+// and a hand-written `pytest-9.9.dist-info` in the tree would name a version
+// nothing installed. `-I` drops the cwd from sys.path, ignores every `PYTHON*`
+// variable and skips user site-packages, while a venv selected by PATH still
+// resolves through its own pyvenv.cfg, which is what makes it the right shape
+// here: RunQuietIsolatedEnv would also have to reproduce whatever a pyenv shim
+// or wrapper needs to find an interpreter at all, and a lookup that cannot
+// reach the interpreter the suite ran under answers about a different one.
+//
+// Producer is given no declared environment, so a component reaching its
+// interpreter only through its own `env:` declaration answers from lydite's
+// interpreter instead. That leaves the packages unidentifiable and the producer
+// empty rather than wrong, which is the safe half of the trade.
+//
+// importlib.metadata reads the installed distribution's own metadata, so the
+// answer is the version of the package that would be imported. Parsing
+// `--version` output instead would read prose a release is free to reword, and
+// `coverage --version` names a console script belonging to whichever
+// environment created it first rather than to this interpreter.
+func pythonProducer(dir string) string {
+	// An interpreter that never answers must not hold a measurement open.
+	ctx, cancel := context.WithTimeout(context.Background(), pythonProducerTimeout)
+	defer cancel()
+
+	argv := append([]string{"-I", "-c", pythonVersionScript}, pythonProducerPackages...)
+	res := executil.RunQuiet(ctx, dir, pytestName, argv...)
+	if !res.Ok() {
+		return ""
+	}
+	versions := strings.Split(strings.TrimSuffix(res.Output, "\n"), "\n")
+	if len(versions) != len(pythonProducerPackages) {
+		return ""
+	}
+	named := make([]string, len(versions))
+	for i, v := range versions {
+		named[i] = join(pythonProducerPackages[i], strings.TrimSpace(v))
+	}
+	return both(named[0], named[1])
+}
+
+// pythonProducerPackages is the distributions pythonProducer names, in the
+// order pythonVersionScript prints them.
+var pythonProducerPackages = []string{"pytest", "coverage"}
+
+// pythonProducerTimeout bounds the version lookup. It is generous because a
+// cold interpreter start on a loaded runner is slow, and the cost of being
+// wrong is a producer lost, not a suite.
+const pythonProducerTimeout = 30 * time.Second
+
+// pythonVersionScript prints one line per package named on its command line,
+// in that order, and an empty line for one that is not installed — so a
+// missing package is told apart from an interpreter that could not run at all,
+// and each half reaches join as its own unknown.
+const pythonVersionScript = `
+import importlib.metadata as metadata, sys
+for name in sys.argv[1:]:
+    try:
+        print(metadata.version(name))
+    except Exception:
+        print("")
+`
 
 // both names two halves of one instrument, or nothing when either is unknown.
 // A producer naming half of what measured compares equal to itself across a
