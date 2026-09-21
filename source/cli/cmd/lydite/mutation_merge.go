@@ -161,10 +161,12 @@ func shardProjection(dir, name string) (string, bool) {
 	defer func() { _ = f.Close() }()
 	scan := bufio.NewScanner(f)
 	// A suite writes whatever it likes into this log, and a single line longer
-	// than the scanner's buffer ends the scan. The projection is one short line
-	// among them, so the buffer is sized for a log that holds long ones before
-	// it.
-	scan.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// than the scanner's token limit ends the scan where it stands. The
+	// projection is one short line below those, so the limit is raised past the
+	// default until a log holding long lines is read through. The ceiling is the
+	// whole of the decision: the scanner grows its own buffer to whatever a line
+	// needs up to it.
+	scan.Buffer(nil, 1024*1024)
 	for scan.Scan() {
 		if line, ok := costProjectionIn(scan.Text()); ok {
 			return line, true

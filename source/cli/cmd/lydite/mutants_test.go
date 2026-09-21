@@ -293,7 +293,7 @@ func TestCountsWithNoElapsedTimeReadAsUnrecorded(t *testing.T) {
 	if app.Killed != 4 {
 		t.Errorf("the counts read back as %+v, want the four killed mutants", app)
 	}
-	if d, ok := app.elapsed(); ok {
-		t.Errorf("a document carrying no elapsed time reported %s", d)
+	if d, ok := app.elapsed(); ok || d != 0 {
+		t.Errorf("a document carrying no elapsed time reported %s, %v; want nought and unrecorded", d, ok)
 	}
 }

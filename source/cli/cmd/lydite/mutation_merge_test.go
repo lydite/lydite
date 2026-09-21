@@ -198,8 +198,40 @@ func TestTheProjectionIsReadBackThroughTheFormatItIsWrittenWith(t *testing.T) {
 		"9 mutant(s), budget 1m0s each, 4 worker(s): at most",
 		"app | " + line,
 	} {
-		if _, ok := costProjectionIn(other); ok {
-			t.Errorf("%q was read as a projection", other)
+		if got, ok := costProjectionIn(other); ok || got != "" {
+			t.Errorf("%q was read as the projection %q, %v; want no line at all", other, got, ok)
 		}
+	}
+}
+
+// Every failure of the search answers with no line at all, and not with text a
+// caller taking the line without its flag would go on to quote as something a
+// run said: a component with no log and a log that never reached the projection
+// are both nothing to say.
+func TestAShardWithNoProjectionToQuoteAnswersWithNoLine(t *testing.T) {
+	dir := mutationShardDir(t, t.TempDir(), nil)
+
+	if line, ok := shardProjection(dir, "b"); ok || line != "" {
+		t.Errorf("a component with no log answered %q, %v; want no line at all", line, ok)
+	}
+
+	writeComponentLog(t, dir, "b", "running the baseline suite", "ok fixture/b 1.2s")
+	if line, ok := shardProjection(dir, "b"); ok || line != "" {
+		t.Errorf("a log that never reached the projection answered %q, %v; want no line at all", line, ok)
+	}
+}
+
+// A suite writes whatever it likes into the log the projection shares — a
+// fixture dumped whole, a payload in a panic — and such a line is far longer
+// than the limit a scanner reads with by default. The projection sits below
+// those lines rather than above them, so a run that wrote one is read past it.
+func TestTheProjectionIsFoundBelowALineLongerThanTheDefaultLimit(t *testing.T) {
+	dir := mutationShardDir(t, t.TempDir(), nil)
+	line := costProjection(412, 4, budget(30*time.Second, 0))
+	writeComponentLog(t, dir, "b", strings.Repeat("x", 512*1024), line)
+
+	got, ok := shardProjection(dir, "b")
+	if !ok || got != line {
+		t.Errorf("the projection below a long line read back as %q, %v; want %q", got, ok, line)
 	}
 }
