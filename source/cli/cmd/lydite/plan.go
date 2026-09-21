@@ -21,10 +21,17 @@ import (
 // newPlanCmd groups the declared components into shards and emits the matrix a
 // CI job runs one of.
 //
-// It is pure: it reads .lydite/components.yml and each component's compose
-// file, and nothing else. No git, no network, no process — so it runs on a
-// shallow checkout, on a fork, and on a machine with no container runtime,
-// which is what lets every other job depend on it.
+// It reads .lydite/components.yml, each component's compose file, and the
+// tracked-file list the orphan gate holds the declaration against. No network,
+// no suite, no toolchain, no container runtime — and the file list is a
+// `git ls-files` read of the index rather than of history, so it runs on a
+// shallow checkout and on a fork, which is what lets every other job depend on
+// it.
+//
+// It can fail. An orphan — a source file under no component and under no
+// exclude — exits non-zero, and since every shard depends on the plan, that
+// blocks the whole matrix before any suite runs. Outside a git repository the
+// orphan row is unmeasured and the plan still passes.
 //
 // It takes no knob. A shard is a conflict group — the transitive closure of
 // scheduler.Conflicts, so components sharing a published host port, or writing
@@ -54,8 +61,14 @@ same host port, or writing into one tree — their roots, or a path either
 declares it occupies — would collide if they ran at once, and the scheduler
 inside a run is what serialises them.
 
-Nothing is executed and nothing is fetched. The matrix goes to --out; stdout
-carries the report.`,
+Nothing is fetched, no suite runs and no service starts; the one thing read
+outside the declaration is git's tracked-file list, which the orphan gate holds
+that declaration against. A source file under no component fails the plan, and
+every shard depends on it, so the matrix runs nothing until the declaration
+covers the tree. Outside a git repository the orphan row is unmeasured and the
+plan passes.
+
+The matrix goes to --out; stdout carries the report.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			file, err := component.Load(dir)
@@ -79,6 +92,16 @@ carries the report.`,
 			}
 
 			rep := ui.NewReport("plan")
+			// The same orphanRow `lydite test` adds, called rather than
+			// reimplemented: one predicate with two callers is what keeps the
+			// two verdicts from drifting, and a second copy of the gate would
+			// agree with this one only until somebody edited one of them.
+			//
+			// Whether the declaration is complete does not depend on which
+			// components a run selects, or on the sharding — a file under no
+			// component is one the matrix never gives to any job, and the plan
+			// is where that is cheapest to say.
+			rep.Add(orphanRow(cmd.Context(), dir, file))
 			for _, s := range shards {
 				rep.Add(s.row())
 			}
@@ -89,9 +112,11 @@ carries the report.`,
 			}
 			// No .lydite-reports/plan.json. Every other command writes one so
 			// that a *verdict* reaches the pull-request comment without
-			// depending on a redirection somebody remembered; this reaches no
-			// verdict, and a section titled "plan" in that comment says
-			// nothing a reader can act on.
+			// depending on a redirection somebody remembered; the one verdict
+			// this reaches is the orphan gate's, which `lydite test` publishes
+			// from its own report, and a second document would put it in that
+			// comment twice. Here it is read from stdout, the job log and the
+			// exit code.
 			w := cmd.OutOrStdout()
 			if err := rep.Write(w, asJSON, ui.ColorEnabled(w, noColor)); err != nil {
 				return err
@@ -174,8 +199,9 @@ func writeMatrix(out string, shards []shard) error {
 // pair the matrix splits across jobs and nothing serialises.
 //
 // The stack is read with no container runtime, because plan starts nothing.
-// Probing would make a pure command depend on the state of the machine, and
-// the ports are in the file whether or not anything can run it.
+// Probing would make the matrix depend on the state of the machine that
+// planned it, and the ports are in the file whether or not anything can run
+// it.
 //
 // A compose file that will not load is an error rather than a component with
 // no ports. Its ports are unknown, so a matrix built without them could put
