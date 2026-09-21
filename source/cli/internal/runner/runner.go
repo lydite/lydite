@@ -1360,7 +1360,10 @@ func pythonInstall(dir, root string) (string, []string, bool) {
 		if len(found) == 1 {
 			return d, found[0], true
 		}
-		if len(found) > 1 || d == root || filepath.Dir(d) == d {
+		// Exactly one manifest returned above, so a set that is not empty here
+		// is two or more — the ambiguous directory, which ends the walk. An
+		// empty one continues, up to the bound.
+		if len(found) != 0 || d == root || filepath.Dir(d) == d {
 			return "", nil, false
 		}
 	}

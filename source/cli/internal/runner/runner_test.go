@@ -1182,6 +1182,12 @@ func TestPytestRerunDropsWhatItSuppliesItself(t *testing.T) {
 		{"a declared filter is kept with its value", []string{"-k", "not slow", "tests"}, "-k not slow"},
 		{"a declared marker is kept with its value", []string{"-m", "not slow", "tests"}, "-m not slow"},
 		{"a value flag with no following argument is not consumed", []string{"-q", "-k"}, "-q -k"},
+		// A declared value is arbitrary text the repository chose, and one that
+		// looks like a flag is passed through as the value it is: read a second
+		// time as a flag of its own it would be emitted twice, and a value flag
+		// spelled that way would swallow the argument behind it.
+		{"a value that looks like a flag is kept once", []string{"-k", "-slow", "tests"}, "-k -slow"},
+		{"a dropped flag's flag-shaped value goes with it", []string{"--cov-report", "-lcov", "-q"}, "-q"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := strings.Join(pytestFlags(tc.args), " "); got != tc.want {
@@ -1223,7 +1229,10 @@ func TestTwoPythonManifestsInstallNothing(t *testing.T) {
 	touch(t, filepath.Join(dir, "poetry.lock"))
 	touch(t, filepath.Join(dir, "requirements.txt"))
 
-	if at, argv, ok := pythonInstall(dir, root); ok {
+	// Nothing to install is nothing to run and nowhere to run it: a directory
+	// named beside a false answer is one a caller reading past it would install
+	// in through whichever manager it guessed.
+	if at, argv, ok := pythonInstall(dir, root); ok || at != "" || argv != nil {
 		t.Errorf("pythonInstall = %q, %v, %v, want nothing for an ambiguous directory", at, argv, ok)
 	}
 }
@@ -1236,8 +1245,34 @@ func TestThePythonInstallWalkStopsAtTheRoot(t *testing.T) {
 	root := mkdirAll(t, outer, "repo")
 	dir := mkdirAll(t, root, "svc")
 
-	if at, argv, ok := pythonInstall(dir, root); ok {
+	if at, argv, ok := pythonInstall(dir, root); ok || at != "" || argv != nil {
 		t.Errorf("pythonInstall = %q, %v, %v, want nothing above the bound", at, argv, ok)
+	}
+}
+
+// The root the caller hands down is the bound, and preparing a component never
+// derives one of its own instead: a directory between the component and the
+// scan root can hold a .lydite — a vendored subtree that is itself a lydite
+// target — so a re-derived bound reaches for a manifest belonging to a
+// different tree.
+func TestThePythonInstallHonoursTheRootItIsGiven(t *testing.T) {
+	outer := t.TempDir()
+	mkdirAll(t, outer, config.Dir)
+	touch(t, filepath.Join(outer, "uv.lock"))
+	root := mkdirAll(t, outer, "repo")
+	dir := mkdirAll(t, root, "svc")
+	cwd := stubManager(t, "uv")
+
+	r, ok := Lookup(PythonPytest)
+	if !ok {
+		t.Fatal("no python-pytest runner")
+	}
+	inv, _ := r.Build(Plain, nil)
+	if err := r.Prepare(context.Background(), inv, dir, root, "", executil.Env{}, io.Discard); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := os.Stat(cwd); err == nil {
+		t.Errorf("uv ran in %q, and the lockfile above %q is another tree's", readFile(t, cwd), root)
 	}
 }
 
