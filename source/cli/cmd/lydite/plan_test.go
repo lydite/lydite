@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/scheduler"
 )
 
 // planRepo is a declaration whose shards are not the declaration order: `api`
@@ -177,5 +180,88 @@ func TestPlanRefusesTwoShardsWithOneName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "a-b-c") {
 		t.Errorf("error = %v, want it to name the collision", err)
+	}
+}
+
+// Two components writing into one generated tree belong in one job for the
+// reason two sharing a port do: the scheduler serialises them inside a run,
+// and split across jobs on a runner hosting both nothing does.
+func TestComponentsOccupyingOneTreeAreOneShard(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: ui\n    dir: packages/ui\n    runner: vitest\n    occupies: [\"packages/tokens\"]\n"+
+			"  - name: api\n    dir: go/api\n    runner: go-test\n"+
+			"  - name: storybook\n    dir: apps/storybook\n    runner: vitest\n    occupies: [\"packages/tokens/dist\"]\n")
+	for _, dir := range []string{"packages/ui", "go/api", "apps/storybook"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	matrix := filepath.Join(t.TempDir(), "matrix.json")
+	out, err := runPlanCmd(t, root, "--out", matrix)
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(matrix) // #nosec G304 -- a path this test just wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []matrixEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("matrix is not JSON: %v\n%s", err, data)
+	}
+	want := []matrixEntry{
+		{Name: "ui-storybook", Components: "ui,storybook"},
+		{Name: "api", Components: "api"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("matrix = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("matrix[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if !strings.Contains(out, "ui and storybook share directory packages/tokens") {
+		t.Errorf("plan does not say why ui and storybook are one shard:\n%s", out)
+	}
+}
+
+// The planner groups by the predicate the scheduler serialises by, so the two
+// items have to carry the same fields: one that planItems fills and itemFor
+// does not is a pair the matrix keeps together and the run then lets overlap,
+// and one the other way round is a pair split across jobs that nothing
+// serialises. Neither shows up in either command's own tests.
+func TestPlanAndRunSeeTheSameConflicts(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: ui\n    dir: packages/ui\n    runner: vitest\n    occupies: [\"packages/tokens\"]\n"+
+			"  - name: storybook\n    dir: apps/storybook\n    runner: vitest\n    occupies: [\"packages/tokens/dist\"]\n"+
+			"  - name: root\n    dir: .\n    runner: go-test\n"+
+			"  - name: api\n    dir: go/api\n    runner: go-test\n")
+	for _, dir := range []string{"packages/ui", "apps/storybook", "go/api"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	file, err := component.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planned, err := planItems(root, file)
+	if err != nil {
+		t.Fatalf("planItems: %v", err)
+	}
+	var ran []scheduler.Item
+	for _, p := range planComponents(context.Background(), root, file.Components, "test", false) {
+		defer p.log.Close()
+		ran = append(ran, itemFor(p))
+	}
+
+	a, b := scheduler.Conflicts(planned), scheduler.Conflicts(ran)
+	if len(a) == 0 {
+		t.Fatal("the declaration produced no conflicts, so the comparison proves nothing")
+	}
+	if fmt.Sprint(a) != fmt.Sprint(b) {
+		t.Fatalf("the planner and the run disagree:\nplan %v\nrun  %v", a, b)
 	}
 }

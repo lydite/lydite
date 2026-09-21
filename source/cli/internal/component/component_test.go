@@ -248,6 +248,110 @@ components:
 	}
 }
 
+// occupies names further directories the component holds while it runs, and
+// is optional: a component that says nothing occupies nothing beyond its own
+// dir.
+func TestOccupiesParsesAndIsOptional(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: ui
+    dir: packages/ui
+    runner: vitest
+    occupies: ["packages/tokens", "packages/tokens/dist"]
+  - name: cli
+    dir: cli
+    runner: go-test
+`), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := f.Components[0].Occupies; len(got) != 2 || got[0] != "packages/tokens" || got[1] != "packages/tokens/dist" {
+		t.Errorf("occupies = %v", got)
+	}
+	if got := f.Components[1].Occupies; got != nil {
+		t.Errorf("an omitted occupies must leave Occupies nil, got %v", got)
+	}
+}
+
+// The scheduler compares occupied directories as strings, so the declaration
+// is cleaned where it is read: three spellings of one directory are one lock,
+// not three.
+func TestOccupiesIsNormalised(t *testing.T) {
+	f, err := Parse([]byte("components:\n  - {name: a, dir: web, runner: vitest, occupies: [\"./tokens/\", \"packages/ui/../gen\"]}\n"), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"tokens", "packages/gen"}
+	for i, w := range want {
+		if got := f.Components[0].Occupies[i]; got != w {
+			t.Errorf("occupies[%d] = %q, want %q", i, got, w)
+		}
+	}
+}
+
+// An occupied path is a directory lydite locks and a reviewer reads off the
+// declaration, so the shapes that name nothing the repository contains are
+// refused where they are written.
+func TestOccupiesRejects(t *testing.T) {
+	for _, tc := range []struct{ name, occupies, want string }{
+		{"empty", `""`, "is empty"},
+		{"absolute", `"/var/tmp"`, "must be relative to the scan root"},
+		{"home", `"~/cache"`, "must be relative to the scan root"},
+		{"escaping", `"../outside"`, "escapes the scan root"},
+		{"escaping after cleaning", `"packages/../../outside"`, "escapes the scan root"},
+		{"the parent alone", `".."`, "escapes the scan root"},
+		{"declared twice", `"tokens", "tokens"`, "already occupied"},
+		{"declared twice, spelled differently", `"tokens", "./tokens/"`, "already occupied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := "components:\n  - {name: a, dir: web, runner: vitest, occupies: [" + tc.occupies + "]}\n"
+			_, err := Parse([]byte(doc), FileName)
+			if err == nil {
+				t.Fatalf("occupies [%s] was accepted", tc.occupies)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// Two components occupying one path is the whole point of the key: it is what
+// makes the scheduler run them in sequence. Uniqueness across components is
+// never enforced.
+func TestTwoComponentsMayOccupyOnePath(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - {name: ui, dir: packages/ui, runner: vitest, occupies: ["packages/tokens"]}
+  - {name: storybook, dir: apps/storybook, runner: vitest, occupies: ["packages/tokens"]}
+`), FileName)
+	if err != nil {
+		t.Fatalf("two components occupying one path were rejected: %v", err)
+	}
+	if f.Components[0].Occupies[0] != f.Components[1].Occupies[0] {
+		t.Error("both components occupy the same path")
+	}
+}
+
+// A component may occupy a directory its own setup builds, which on a cold
+// checkout is not there yet — and a cold checkout is where the collision this
+// key prevents actually happens, so requiring the path to exist would refuse
+// the declaration on exactly the run that needs it.
+func TestOccupiedPathNeedNotExist(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, FileName, "components:\n  - {name: ui, dir: ui, runner: vitest, occupies: [\"packages/tokens/dist\"]}\n")
+	if err := os.MkdirAll(filepath.Join(root, "ui"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load refused a directory the component's own setup creates: %v", err)
+	}
+	if len(f.Components) != 1 || len(f.Components[0].Occupies) != 1 {
+		t.Fatalf("components = %+v", f.Components)
+	}
+}
+
 // An error naming only "a cycle exists" leaves the reader to find it.
 func TestCycleErrorNamesTheCycle(t *testing.T) {
 	_, err := Parse([]byte("components:\n  - {name: a, dir: cli, runner: go-test, depends_on: [b]}\n  - {name: b, dir: cli, runner: go-test, depends_on: [a]}\n"), "components.yml")
