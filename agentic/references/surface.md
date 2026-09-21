@@ -98,7 +98,7 @@ because one upsert does: the CLI, the relay, and the composite action's fallback
 credential**. The job presents the GitHub Actions OIDC token; the relay verifies signature (JWKS),
 `iss`, a declared `aud` and `exp`, takes the repository from the `repository` claim and never
 from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge` and
-`refs/pull/<n>/head` both), mints an installation token narrowed to that one repository and to
+`refs/pull/<n>/head` both; a clearance run is the one exception, below), mints an installation token narrowed to that one repository and to
 `pull_requests: write` and `statuses: write`, writes, and discards it. It stores nothing.
 
 Three endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
@@ -109,12 +109,36 @@ held; the repository is the claim's, the revision has to equal the pull request'
 synthetic merge commit, the same revision `forge.PullRequestEvent` reads a head from the event
 payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it starts `lydite/`,
 so a caller can no more author a status on another commit or under another tool's check name than
-it can name another repository. `context` is refused outright when it is `clearance.Context`
-(`lydite/referral`) even so: the claim names a repository and a pull request, not a job, so
-nothing here tells `referral-publish` — the one job isolated to hold `statuses: write` — apart
-from `publish`, which also holds `id-token: write` and does run the pull request's own code.
-That exclusion lifts only once slice 2's job isolation makes the two tellable apart; the relay
-cannot make that call by itself. `POST /review`
+it can name another repository. The two gated
+contexts are posted only by an isolated job, which the relay tells apart by the OIDC
+`job_workflow_ref` and by nothing else: `lydite-pr.yml` has one job holding `id-token: write`
+today, and OIDC carries no job identity, so `environment`, audience and `ref` cannot tell the
+isolated job from one running the pull request's own code. A local same-repo reusable workflow is
+never allowlisted, because its ref is controlled by the pull request; an external callee in
+`lydite/actions` cannot be edited by the pull request's author.
+
+The allowlist is two Wrangler vars, `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`, each
+a comma- or newline-separated list of exact
+`lydite/actions/.github/workflows/<name>.yml@<ref>` strings, empty by default. An empty list
+admits no job, so `lydite/referral` is refused to every caller until it is set. The match is
+exact, with no patterns: `job_workflow_ref` carries the ref as the caller wrote it, so a SHA pin
+matches only if that exact SHA is allowlisted, and a refusal names the ref it saw so the entry can
+be pasted. Consumers pin the floating major tag and this repository pins an exact SHA; both have to
+be allowlisted. A ref in both lists holds neither authority and is refused.
+
+Each ref is trusted for one context. A referral ref may post `lydite/referral` only, and a
+clearance ref `lydite/clearance` only. The clearance context is `lydite/clearance`, distinct from
+referral, so `clearance.Context` must be `lydite/clearance` for the relay to accept it.
+
+**A clearance run names its pull request in the body.** `lydite-clearance.yml` runs on
+`issue_comment` from the default branch, so its OIDC `ref` is not a pull ref. For a job whose ref
+is in the clearance allowlist only, the number comes from the body (`pull_request`) and is
+resolved live with the installation token: `/status` is a `403` unless the body's `sha` equals the
+resolved head, and `/comment` requires the pull request to resolve and be open. A referral-workflow
+token derives the pull request from its claim, and a body number that disagrees is a `403`.
+`/review` is not exempted.
+
+`POST /review`
 applies the operations document `lydite threads` computed. Before applying anything, `/review`
 lists the pull request's own review comments and **refuses the whole request if any `reply` or
 `delete` names an id outside that set** — a comment id is a number the caller supplies while
@@ -155,6 +179,21 @@ belongs on a tree that has already merged — which is where `lydite-baseline.ym
   under the wrong byline forever. `/review`'s `403` falls back with a warning instead, because it
   is ambiguous with a comment-id race the relay refuses without detail. See
   [ADR 0037](../../docs/adr/0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md).
+- **`/status` falls back to the bot token only on `409`.** A `403` for a job that is not
+  allowlisted is deterministic and fails the step. A relay `5xx` or `000` fails the step too,
+  unlike the comment ladder above, because an App-authored `pending` followed by a bot-authored
+  `success` is the mixed record the App identity exists to end. Only the reusable workflows call
+  the relay for statuses; a repository that has not adopted them never calls it and keeps the
+  direct post.
+- **The reusable workflows build lydite from a pinned commit.** They check out `lydite/lydite` at
+  a commit SHA pinned inside the callee YAML, so no pull-request input chooses the binary and no
+  release or tag is needed. The cost is a Go build per run, a pin bump whenever lydite changes what
+  the workflows call, and allowlisting that `lydite/actions` commit's exact SHA ref.
+- **What stays open.** The `referral` job's artifact still carries a claimed-clean result that is
+  not independently verified (see [`ci.md`](ci.md)). A pull request can also swap the pinned ref
+  for any other allowlisted ref, so refs of superseded commits and tags must be pruned.
+- **Release checklist: prune the allowlists.** On each release, remove the refs of superseded
+  `lydite/actions` commits and tags from `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`.
 - **The relay is deployed and live.** `pr-relay` runs at `pr.lydite.org`, its secrets are synced,
   `vars.LYDITE_RELAY_URL` is set on `lydite/lydite`, and the lydite App is installed on this
   repository. The `github-token` fallback above stays a supported path, not a temporary one, for
