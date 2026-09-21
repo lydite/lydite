@@ -548,14 +548,17 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 }
 
 // itemFor is what the scheduler locks on: the component's root, cleaned so
-// `./web`, `web/` and `web` are one directory, and the host ports its services
-// publish.
+// `./web`, `web/` and `web` are one directory, the further paths it declares
+// it writes into, and the host ports its services publish.
+//
+// The occupied paths are cleaned by component.Parse, since a declaration the
+// scheduler compares against another's is only ever read through it.
 //
 // One construction, because a second one that agreed today would come apart
 // the day the normalisation changed — and the test built on the copy would
 // keep passing.
 func itemFor(p componentPlan) scheduler.Item {
-	return scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Ports: p.ports}
+	return scheduler.Item{Name: p.c.Name, Dir: path.Clean(p.c.Dir), Occupies: p.c.Occupies, Ports: p.ports}
 }
 
 // planComponents opens each component's log and loads the stack of any that

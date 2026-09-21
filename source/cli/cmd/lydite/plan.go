@@ -27,14 +27,13 @@ import (
 // which is what lets every other job depend on it.
 //
 // It takes no knob. A shard is a conflict group — the transitive closure of
-// scheduler.Conflicts, so components sharing a published host port or
-// overlapping directories stay in one process where the scheduler serialises
-// them. Two matrix jobs on hosted runners are separate machines and would not
-// collide, but self-hosted runners routinely place several jobs on one host
-// and then they do; keeping the pair together is safe on any topology. The
-// grouping is the finest one that is safe, its size is a property of the
-// declaration rather than a number anyone tunes, and there is nothing to set
-// wrong.
+// scheduler.Conflicts, so components sharing a published host port, or writing
+// into one tree, stay in one process where the scheduler serialises them. Two
+// matrix jobs on hosted runners are separate machines and would not collide,
+// but self-hosted runners routinely place several jobs on one host and then
+// they do; keeping the pair together is safe on any topology. The grouping is
+// the finest one that is safe, its size is a property of the declaration
+// rather than a number anyone tunes, and there is nothing to set wrong.
 //
 // It cannot narrow by --affected, which needs a merge-base, git history and a
 // checkout that is not shallow. The shards narrow instead, running
@@ -51,8 +50,9 @@ func newPlanCmd() *cobra.Command {
 matrix a CI job runs one of.
 
 A shard is a set of components that must run in one process: two publishing the
-same host port, or rooted at overlapping directories, would collide if they ran
-at once, and the scheduler inside a run is what serialises them.
+same host port, or writing into one tree — their roots, or a path either
+declares it occupies — would collide if they ran at once, and the scheduler
+inside a run is what serialises them.
 
 Nothing is executed and nothing is fetched. The matrix goes to --out; stdout
 carries the report.`,
@@ -166,7 +166,12 @@ func writeMatrix(out string, shards []shard) error {
 }
 
 // planItems is every declared component as the scheduler sees it: its root,
-// and the host ports its compose services publish.
+// the further paths it declares it writes into, and the host ports its compose
+// services publish.
+//
+// It holds the same fields itemFor does, because the planner groups by the
+// predicate the scheduler serialises by: a field one of the two left out is a
+// pair the matrix splits across jobs and nothing serialises.
 //
 // The stack is read with no container runtime, because plan starts nothing.
 // Probing would make a pure command depend on the state of the machine, and
@@ -179,7 +184,7 @@ func writeMatrix(out string, shards []shard) error {
 func planItems(root string, file component.File) ([]scheduler.Item, error) {
 	items := make([]scheduler.Item, 0, len(file.Components))
 	for _, c := range file.Components {
-		item := scheduler.Item{Name: c.Name, Dir: path.Clean(c.Dir)}
+		item := scheduler.Item{Name: c.Name, Dir: path.Clean(c.Dir), Occupies: c.Occupies}
 		if c.Compose.Declared() {
 			dir := filepath.Join(root, filepath.FromSlash(c.Dir))
 			stack, err := compose.LoadWith(compose.NoRuntime, dir, c, io.Discard)
