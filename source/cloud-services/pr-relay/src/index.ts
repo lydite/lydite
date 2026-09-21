@@ -172,7 +172,7 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     if (error) {
       return json(400, { error });
     }
-    const refused = statusAuthorityError(payload.context as string, claims.job_workflow_ref, env);
+    const refused = statusAuthorityError(payload.context as string, claims, env);
     if (refused) {
       // 403 and not 400: the payload is well formed, and what is refused is
       // the job asking. Deterministic either way — the same job retrying
@@ -303,11 +303,12 @@ type Target = { pull: number; submitted: boolean } | { error: string };
  * request the comment was left on appears in no claim at all and the run has
  * nothing to write to unless it may say which.
  *
- * That exemption is keyed on the verified `job_workflow_ref` being one the
- * clearance allowlist names, and on nothing in the body — a request cannot ask
- * for it. Every other run, an allowlisted referral workflow included, keeps
- * deriving the pull request from its ref and is refused when that ref names
- * none. `/review` is outside the exemption too: a clearance run has no
+ * That exemption is keyed on the verified claims `clearanceRun` reads — the
+ * clearance allowlist naming the `job_workflow_ref`, and the run presenting the
+ * event and the ref shape a clearance run has — and on nothing in the body: a
+ * request cannot ask for it. Every other run, an allowlisted referral workflow
+ * included, keeps deriving the pull request from its ref and is refused when
+ * that ref names none. `/review` is outside the exemption too: a clearance run has no
  * operations document, and the ids in one are checked against the pull request
  * the ref named.
  */
@@ -324,30 +325,70 @@ function resolveTarget(
     }
     return { pull: fromRef, submitted: false };
   }
-  if (route !== "/review" && clearanceRun(claims.job_workflow_ref, env)) {
-    const named = payload.pull_request;
-    if (typeof named !== "number" || !Number.isInteger(named) || named <= 0) {
-      return { error: "this run's ref names no pull request, so a pull request number is required" };
+  if (route !== "/review") {
+    const authority = clearanceRun(claims, env);
+    if (authority.error) {
+      return { error: authority.error };
     }
-    return { pull: named, submitted: true };
+    if (authority.run) {
+      const named = payload.pull_request;
+      if (typeof named !== "number" || !Number.isInteger(named) || named <= 0) {
+        return { error: "this run's ref names no pull request, so a pull request number is required" };
+      }
+      return { pull: named, submitted: true };
+    }
   }
   return { error: "this run is not for a pull request, so there is nothing to write to" };
 }
 
+/** Whether a run holds clearance authority, and why an allowlisted ref does not. */
+interface ClearanceAuthority {
+  run: boolean;
+  error?: string;
+}
+
+// What `lydite-clearance.yml` runs as: an `issue_comment` on the default
+// branch, which is the only shape a clearance run ever presents.
+const CLEARANCE_EVENT = "issue_comment";
+const BRANCH_REF = "refs/heads/";
+
 /**
  * Whether this run is a clearance run: one whose `job_workflow_ref` the
- * clearance allowlist names and the referral allowlist does not.
+ * clearance allowlist names and the referral allowlist does not, running as
+ * `issue_comment` on a branch ref.
+ *
+ * The allowlist names a workflow file, and a workflow file says nothing about
+ * what started it. The same allowlisted callee reached from a `push`, a
+ * `workflow_dispatch` or a same-repository `pull_request` caller would otherwise
+ * hold the two things that separate a clearance run from every other job —
+ * naming any pull request it likes in the body, and posting the status a human
+ * Clearance acts on — from a run triggered by whoever can open a pull request.
+ * `event_name` and `ref` are claims the requester cannot set, so they are what
+ * that authority is conditioned on, and an allowlisted ref presenting any other
+ * shape is refused rather than read as an ordinary run.
  *
  * A ref in both lists holds neither authority. `statusAuthorityError` refuses it
  * outright as the deployment mistake it is, and reading it as a clearance run
  * here would hand a referral workflow — which runs beside the pull request's own
  * code — the one thing that separates the two.
  */
-function clearanceRun(ref: string | undefined, env: Env): boolean {
-  const named = ref ?? "";
-  return (
-    allowlisted(env.CLEARANCE_WORKFLOW_REFS, named) && !allowlisted(env.REFERRAL_WORKFLOW_REFS, named)
-  );
+function clearanceRun(claims: ActionsClaims, env: Env): ClearanceAuthority {
+  const named = claims.job_workflow_ref ?? "";
+  if (
+    !allowlisted(env.CLEARANCE_WORKFLOW_REFS, named) ||
+    allowlisted(env.REFERRAL_WORKFLOW_REFS, named)
+  ) {
+    return { run: false };
+  }
+  if (claims.event_name !== CLEARANCE_EVENT || !claims.ref.startsWith(BRANCH_REF)) {
+    return {
+      run: false,
+      error: `a clearance run is an ${CLEARANCE_EVENT} run on a ${BRANCH_REF} ref, and this run is ${
+        claims.event_name || "an unnamed event"
+      } on ${claims.ref || "no ref"}`,
+    };
+  }
+  return { run: true };
 }
 
 /**
@@ -390,13 +431,18 @@ function statusPayloadError(payload: StatusRequest): string | undefined {
  * verdict is never being trusted to author the other. A job whose ref is in
  * neither list is unaffected outside the gated contexts: the `lydite/` namespace
  * check is the whole of what governs the rest.
+ *
+ * The clearance ref's authority is the whole of `clearanceRun`'s condition and
+ * not the allowlist alone: an allowlisted callee reached from a `push` or a
+ * `pull_request` caller is a run whoever can open a pull request controls, and
+ * the status a human Clearance acts on is not theirs to author.
  */
 function statusAuthorityError(
   context: string,
-  ref: string | undefined,
+  claims: ActionsClaims,
   env: Env,
 ): string | undefined {
-  const named = ref ?? "";
+  const named = claims.job_workflow_ref ?? "";
   const referral = allowlisted(env.REFERRAL_WORKFLOW_REFS, named);
   const clearance = allowlisted(env.CLEARANCE_WORKFLOW_REFS, named);
   if (referral && clearance) {
@@ -404,6 +450,12 @@ function statusAuthorityError(
     // either would grant an authority nobody wrote down. It is a deployment
     // mistake, refused rather than interpreted.
     return `${named} is allowlisted for both ${REFERRAL_CONTEXT} and ${CLEARANCE_CONTEXT}`;
+  }
+  if (clearance) {
+    const authority = clearanceRun(claims, env);
+    if (authority.error) {
+      return authority.error;
+    }
   }
   const permitted = referral ? REFERRAL_CONTEXT : clearance ? CLEARANCE_CONTEXT : undefined;
   if (permitted) {

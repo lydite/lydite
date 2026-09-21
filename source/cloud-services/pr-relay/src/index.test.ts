@@ -572,6 +572,10 @@ const open7 = { 7: { state: "open", sha: "abc123" } };
 describe("gating the referral and clearance contexts on job_workflow_ref", () => {
   const referral = { ...verdict, context: "lydite/referral" };
   const clearance = { ...verdict, context: "lydite/clearance" };
+  // What a clearance run presents: `lydite-clearance.yml` runs on
+  // `issue_comment` from the default branch, so the token is minted for a
+  // branch ref.
+  const clearanceClaims = { ref: "refs/heads/main", event_name: "issue_comment" };
 
   async function status(
     ref: string | undefined,
@@ -598,7 +602,12 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
   });
 
   it("admits an allowlisted clearance workflow to the clearance context", async () => {
-    const { response, written } = await status(CLEARANCE_REF, clearance);
+    const { response, written } = await status(
+      CLEARANCE_REF,
+      { ...clearance, pull_request: 7 },
+      gatedEnv(),
+      clearanceClaims,
+    );
     expect(response.status).toBe(200);
     expect(written).toHaveLength(1);
   });
@@ -633,7 +642,16 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
 
   it("keeps each workflow to its own context", async () => {
     expect((await status(REFERRAL_REF, clearance)).response.status).toBe(403);
-    expect((await status(CLEARANCE_REF, referral)).response.status).toBe(403);
+    expect(
+      (
+        await status(
+          CLEARANCE_REF,
+          { ...referral, pull_request: 7 },
+          gatedEnv(),
+          clearanceClaims,
+        )
+      ).response.status,
+    ).toBe(403);
   });
 
   it("refuses a ref allowlisted for both contexts", async () => {
@@ -691,11 +709,10 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
   });
 
   describe("a clearance run's pull request", () => {
-    const mainRef = { ref: "refs/heads/main" };
     const named = { ...clearance, pull_request: 7 };
 
     it("is resolved live for a status, and bound on the head sha", async () => {
-      const ok = await status(CLEARANCE_REF, named, gatedEnv(), mainRef);
+      const ok = await status(CLEARANCE_REF, named, gatedEnv(), clearanceClaims);
       expect(ok.response.status).toBe(200);
       expect(ok.written).toHaveLength(1);
 
@@ -703,7 +720,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         CLEARANCE_REF,
         { ...named, sha: "stale" },
         gatedEnv(),
-        mainRef,
+        clearanceClaims,
       );
       expect(stale.response.status).toBe(403);
       expect(stale.written).toHaveLength(0);
@@ -712,7 +729,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         CLEARANCE_REF,
         { ...named, pull_request: 8 },
         gatedEnv(),
-        mainRef,
+        clearanceClaims,
       );
       expect(missing.response.status).toBe(403);
       expect(missing.written).toHaveLength(0);
@@ -723,7 +740,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         REFERRAL_REF,
         { ...referral, pull_request: 7 },
         gatedEnv(),
-        mainRef,
+        clearanceClaims,
       );
       expect(response.status).toBe(403);
     });
@@ -733,15 +750,55 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         "x/y/.github/workflows/z.yml@main",
         { ...verdict, pull_request: 7 },
         gatedEnv(),
-        mainRef,
+        clearanceClaims,
       );
       expect(response.status).toBe(403);
     });
 
     it("is not offered to a workflow allowlisted for both", async () => {
       const both = gatedEnv({ REFERRAL_WORKFLOW_REFS: CLEARANCE_REF });
-      const { response } = await status(CLEARANCE_REF, named, both, mainRef);
+      const { response } = await status(CLEARANCE_REF, named, both, clearanceClaims);
       expect(response.status).toBe(403);
+    });
+
+    // The allowlist names a workflow file, and the same callee is reachable
+    // from a caller running on any event. Naming a pull request in the body,
+    // and posting the clearance status, belong to the one event the clearance
+    // workflow runs on.
+    it("is not offered to a run on another event", async () => {
+      const impostors = [
+        { ref: "refs/heads/main", event_name: "push" },
+        { ref: "refs/heads/main", event_name: "workflow_dispatch" },
+        { ref: "refs/pull/7/merge", event_name: "pull_request" },
+      ];
+      for (const claim of impostors) {
+        const posted = await status(CLEARANCE_REF, named, gatedEnv(), claim);
+        expect(posted.response.status).toBe(403);
+        expect(posted.written).toHaveLength(0);
+        expect(JSON.stringify(await posted.response.json())).toContain(
+          claim.event_name,
+        );
+
+        const commented = await commentOn(
+          open7,
+          { ...comment, pull_request: 9 },
+          CLEARANCE_REF,
+          claim,
+        );
+        expect(commented.response.status).toBe(403);
+        expect(commented.written).toHaveLength(0);
+      }
+    });
+
+    it("is not offered to a run naming no event", async () => {
+      const { response, written } = await status(CLEARANCE_REF, named, gatedEnv(), {
+        ref: "refs/heads/main",
+      });
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+      expect(JSON.stringify(await response.json())).toContain(
+        "an unnamed event",
+      );
     });
 
     it("never overrides the pull request a pull ref names", async () => {
@@ -756,7 +813,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
       pulls: Record<number, { state: string; sha: string }>,
       body: unknown,
       ref = CLEARANCE_REF,
-      claim: object = mainRef,
+      claim: object = clearanceClaims,
     ) {
       const written: { url: string; init?: RequestInit }[] = [];
       const token = await keys.sign(
@@ -814,7 +871,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
 
     it("does not extend to a review", async () => {
       const token = await keys.sign(
-        claims({ job_workflow_ref: CLEARANCE_REF, ...mainRef }),
+        claims({ job_workflow_ref: CLEARANCE_REF, ...clearanceClaims }),
       );
       const response = await send(
         "/review",

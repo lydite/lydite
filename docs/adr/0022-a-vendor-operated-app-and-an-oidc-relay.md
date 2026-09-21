@@ -300,12 +300,21 @@ exact `lydite/actions/.github/workflows/<name>.yml@<ref>` strings (comma or newl
 empty by default; an empty list admits no job). There are no patterns: a SHA pin matches only if
 that exact SHA is allowlisted, and a refusal names the ref. Consumers pin the floating major tag
 and this repository an exact SHA, so both are allowlisted. A ref in both lists is refused. A
-referral ref may post `lydite/referral` only and a clearance ref `lydite/clearance` only;
-`clearance.Context` must be `lydite/clearance` for the relay to accept it.
+referral ref may post `lydite/referral` only and a clearance ref `lydite/clearance` only. The
+relay accepts the clearance status only under `lydite/clearance`, while `clearance.Context` in
+`internal/clearance/decide.go` emits `lydite/referral`, so the CLI's clearance status is refused
+by the relay until `clearance.Context` is `lydite/clearance` — and nothing posts a status through
+the relay until it is.
 
-A clearance run is `issue_comment` from the default branch, so its `ref` is not a pull ref. For a
-ref in the clearance allowlist only, the pull request number comes from the body and is resolved
-live with the installation token: `/status` is a `403` unless `sha` equals the live head, and
+A clearance run is `issue_comment` from the default branch, so its `ref` is not a pull ref. The
+allowlist names a workflow file, which says nothing about what started it: the same callee
+reached from a `push`, a `workflow_dispatch` or a same-repository `pull_request` caller is a run
+whoever can open a pull request controls, and it would otherwise hold both of the things that
+separate a clearance run from every other job. Clearance authority therefore takes a ref in the
+clearance allowlist only, `event_name` equal to `issue_comment`, and a `refs/heads/` ref — all
+three verified claims — and an allowlisted ref presenting any other event or ref shape is a `403`
+naming what it presented. For a run that holds it, the pull request number comes from the body and
+is resolved live with the installation token: `/status` is a `403` unless `sha` equals the live head, and
 `/comment` requires the pull request to resolve and be open. A referral ref derives the pull
 request from its claim and a disagreeing body number is a `403`. `/review` is not exempted.
 

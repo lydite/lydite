@@ -20,6 +20,13 @@ export const ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
  * `ref` is checked where it is used rather than in the verifier: a claim a
  * consumer of these types does not gate on is not one this refuses a token
  * over.
+ *
+ * `event_name` is the fourth: the workflow event the run was triggered by,
+ * `issue_comment` or `push` or `pull_request`. Which workflow file a job came
+ * from says nothing about what started it, so a callee allowlisted for one
+ * event is reachable from a caller running on any other — `event_name` and
+ * `ref` together are what tell those apart, and both are the platform's own
+ * statement rather than the requester's.
  */
 export interface ActionsClaims {
   iss: string;
@@ -30,6 +37,7 @@ export interface ActionsClaims {
   sha?: string;
   workflow_ref?: string;
   job_workflow_ref?: string;
+  event_name?: string;
 }
 
 interface Jwk {

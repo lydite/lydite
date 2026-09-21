@@ -127,12 +127,22 @@ be pasted. Consumers pin the floating major tag and this repository pins an exac
 be allowlisted. A ref in both lists holds neither authority and is refused.
 
 Each ref is trusted for one context. A referral ref may post `lydite/referral` only, and a
-clearance ref `lydite/clearance` only. The clearance context is `lydite/clearance`, distinct from
-referral, so `clearance.Context` must be `lydite/clearance` for the relay to accept it.
+clearance ref `lydite/clearance` only. The relay accepts the clearance status only under
+`lydite/clearance`, while `clearance.Context` in `internal/clearance/decide.go` emits
+`lydite/referral` — a context the clearance allowlist's own ref may not post — so the CLI's
+clearance status is refused by the relay until `clearance.Context` is `lydite/clearance`, and
+nothing posts a status through the relay until it is.
 
 **A clearance run names its pull request in the body.** `lydite-clearance.yml` runs on
-`issue_comment` from the default branch, so its OIDC `ref` is not a pull ref. For a job whose ref
-is in the clearance allowlist only, the number comes from the body (`pull_request`) and is
+`issue_comment` from the default branch, so its OIDC `ref` is not a pull ref. A job holds
+clearance authority — the body-named pull request, and `lydite/clearance` — only when its
+`job_workflow_ref` is in the clearance allowlist and not the referral one, its `event_name` is
+`issue_comment`, and its `ref` starts `refs/heads/`. The allowlist names a workflow file and a
+file says nothing about what started it, so the same callee reached from a `push`, a
+`workflow_dispatch` or a same-repository `pull_request` caller is a run whoever can open a pull
+request controls; an allowlisted ref presenting any other event or ref shape is a `403` naming
+the event and the ref it presented. For a job that holds the authority, the number comes from
+the body (`pull_request`) and is
 resolved live with the installation token: `/status` is a `403` unless the body's `sha` equals the
 resolved head, and `/comment` requires the pull request to resolve and be open. A referral-workflow
 token derives the pull request from its claim, and a body number that disagrees is a `403`.
