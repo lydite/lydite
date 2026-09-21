@@ -29,3 +29,9 @@ indistinguishable from the other gate's if both are missing — `merge.go` works
 prefixing its own `"flaky: "` onto that call's returned problem strings before appending them,
 rather than changing `componentRows` itself (whose message text `mutation_test.go` already
 asserts verbatim, outside that change's boundary).
+
+`componentRows` is now a thin wrapper over `componentRowsNoting`, which takes an extra
+`note func(string) string` and appends a non-empty note after the same "has no row in any
+shard's report" sentence (`mutation_merge.go`'s `projectionNote` is the one caller that passes
+one). Every other caller still gets the sentence with nothing appended, so the label-less
+message and the verbatim assertion in `mutation_test.go` are unchanged for them.
