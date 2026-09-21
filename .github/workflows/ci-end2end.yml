@@ -323,11 +323,25 @@ jobs:
       # `tally` publish host port 5432 under services deliberately named `db`
       # and `postgres`, so they have to land in one shard: apart, they are safe
       # only on a runner topology that gives every matrix job its own machine.
+      #
+      # The plan also asks the orphan gate, and `scripts/seed.ts` is an orphan
+      # by design, so a plan that exits 0 here is a gate that stopped firing.
+      # The matrix is written before the verdict is returned, so it is read
+      # either way.
       - name: lydite test plan (proving ground)
         run: |
-          set -euo pipefail
-          /tmp/lydite test plan --dir proving-ground --out matrix.json
+          status=0
+          /tmp/lydite test plan --dir proving-ground --out matrix.json > plan.txt || status=$?
+          cat plan.txt
           cat matrix.json
+          if [ "$status" -eq 0 ]; then
+            echo "plan exited 0, but scripts/seed.ts is an orphan by design" >&2
+            exit 1
+          fi
+          grep -qF 'scripts/seed.ts' plan.txt || {
+            echo "plan failed without naming scripts/seed.ts as the orphan" >&2
+            exit 1
+          }
 
       - name: the plan groups the contended components (proving ground)
         if: matrix.component == ''
