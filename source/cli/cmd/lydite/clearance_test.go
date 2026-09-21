@@ -353,6 +353,111 @@ func TestExemptReadsTheExemptionsFileFromInsideTheScanRoot(t *testing.T) {
 	}
 }
 
+// --dir is a flag on the command a person or a workflow actually runs, not
+// only a parameter runClearance happens to take — the two tests above call
+// runClearance directly and would still pass if the flag were never
+// registered on the cobra command at all.
+func TestTheDirFlagIsWiredIntoTheCommand(t *testing.T) {
+	inCheckoutUnder(t, "source", "exemptions:\n  - name: docs\n    reason: prose only\n    paths: [\"source/docs/**\"]\n")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed: []map[string]any{
+			{"filename": "source/docs/one.md"},
+			{"filename": "source/src/a.go"},
+		},
+	}
+	forge.start(t)
+
+	cmd := newClearanceCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{
+		"--dir", "source",
+		"--event", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented),
+		"--no-color",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(forge.comments) != 1 {
+		t.Fatalf("posted %d comments, want 1", len(forge.comments))
+	}
+	body := forge.comments[0]
+	if strings.Contains(body, "source/docs/one.md") {
+		t.Errorf("--dir was not honoured by the command itself, so a covered path was proposed:\n%s", body)
+	}
+	if !strings.Contains(body, "source/src/a.go") {
+		t.Errorf("the uncovered path is missing from the proposal:\n%s", body)
+	}
+}
+
+// referral.RootRelative shells out to git, and a directory that is not one
+// answers with an error rather than a prefix. That is a derivation lydite
+// could not carry out, not a repository with nothing declared.
+func TestExemptOutsideAGitRepositoryIsRefused(t *testing.T) {
+	t.Chdir(t.TempDir())
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
+		t.Fatalf("a derivation with no repository to ask went unanswered: %+v", forge.comments)
+	}
+}
+
+// A file that exists but does not parse is a different answer from a
+// repository that declared nothing: the first is lydite's to log and refuse,
+// the second is the day-one state.
+func TestAnUnparseableExemptionsFileIsRefused(t *testing.T) {
+	inCheckoutWith(t, "exemptions: [this is not a mapping]\n")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "docs/one.md"}},
+	}
+	forge.start(t)
+
+	log := capturedStderr(t, func() {
+		runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	})
+
+	if !strings.Contains(log, "deriving the change's uncovered paths") {
+		t.Fatalf("an unparseable exemptions file left nothing in the job log:\n%s", log)
+	}
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
+		t.Fatalf("an unparseable exemptions file went unanswered: %+v", forge.comments)
+	}
+}
+
+// A file lydite cannot read is a different question from one that is not
+// there: the day-one state is an absent file, and a present one this
+// process was refused is an error, not an empty declaration.
+func TestAnUnreadableExemptionsFileIsRefused(t *testing.T) {
+	inCheckoutWith(t, "exemptions:\n  - name: docs\n    reason: prose only\n    paths: [\"docs/**\"]\n")
+	if err := os.Chmod(referral.FileName, 0o000); err != nil {
+		t.Skipf("cannot make the exemptions file unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(referral.FileName, 0o600) })
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "docs/one.md"}},
+	}
+	forge.start(t)
+
+	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
+		t.Fatalf("an unreadable exemptions file went unanswered: %+v", forge.comments)
+	}
+}
+
 // The block a reader pastes is indented the two spaces `.lydite/exemptions.yml`
 // is written in. yaml.v3 indents four unless told otherwise, and a block that
 // has to be re-indented before it lands is one a reader edits by hand — which

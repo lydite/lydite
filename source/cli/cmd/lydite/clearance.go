@@ -227,7 +227,7 @@ func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, 
 	// root and a path.Join with prefix would then name the wrong file.
 	repoPath := path.Join(prefix, referral.FileName)
 	var file referral.File
-	data, err := os.ReadFile(filepath.Join(dir, referral.FileName))
+	data, err := os.ReadFile(filepath.Join(dir, referral.FileName)) // #nosec G304 -- dir is the operator's own --dir flag, not pull-request content
 	switch {
 	case err == nil:
 		if file, err = referral.Parse(data, repoPath); err != nil {
