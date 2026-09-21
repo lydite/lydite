@@ -67,6 +67,32 @@ runner but not the provider compares equal to itself across a provider bump,
 which is the comparison this exists to prevent — and the provider is the half
 that changed.
 
+### The measured scope is part of the instrument
+
+A version alone does not say what quantity was measured. A component is free to
+declare the package set its coverage is taken over, and a figure that is a
+proportion of a smaller tree is a different quantity for the same reason a
+provider bump makes one — so a declared argument that moves the denominator
+belongs in the producer beside the version.
+
+| Language | Denominator-moving arguments | In the producer |
+|---|---|---|
+| Go | `-coverpkg`, the trailing package patterns | yes — `go 1.26.6, scope -coverpkg=./internal/... ./...` |
+| Rust | `-p`, a nextest filter expression | no |
+| vitest | `--coverage.include`, `--coverage.exclude` | no |
+| jest | `--collectCoverageFrom` | no |
+
+Only what moves the denominator. A `-timeout` or a `-race` leaves the measured
+tree alone, and a producer that changed with every edit to `args:` would spend
+the ungated change this ADR accepts per instrument bump on a change that moved
+no figure.
+
+lydite's own default scope renders as the toolchain alone, so a component that
+narrows nothing compares exactly as it does where no scope can be declared. For
+the three rows saying no, a scope change still reports as a regression or an
+improvement against a baseline taken over the old scope — the failure this ADR
+exists to prevent, answered for one language and open for the others.
+
 ### Exact versions, compared verbatim
 
 Any difference reports the component `new`. lydite cannot know which bumps change
@@ -207,3 +233,9 @@ consumer contract, which exists to keep rendering concerns out.
   `lydite/actions` needs the step, which is a cross-repository cutover.
 - The first change after any instrument bump is ungated for the components that
   instrument measures, and for the repository row.
+- **A Go component whose `args:` name a scope is reported `new` once**, since an
+  entry whose producer names no scope compares unequal to one that does. It
+  needs no state-directory bump — the producer field already exists and is
+  already compared verbatim — and no migration: the next `lydite test record`
+  lands an entry carrying the scope and gating resumes against it. See
+  [`coverage.md`](../../agentic/references/coverage.md).

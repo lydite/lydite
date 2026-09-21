@@ -140,9 +140,10 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   to get there. A repository wants this when `./...` pulls in a package that skews the number
   lydite would otherwise report, such as a bare `func main()` with nothing left to exercise;
   filed as [#185](https://github.com/lydite/lydite/issues/185) by a repository wanting
-  `-coverpkg=./internal/...`. **This narrowing is not yet visible to the baseline comparison**:
-  see [`coverage.md`](coverage.md) for why a scope change reads as a regression or an improvement
-  today.
+  `-coverpkg=./internal/...`. **The narrowing is part of the producer**: `Runner.Producer` names
+  the declared scope beside the Go toolchain, so a component that narrows is reported `new` for one
+  change rather than having the smaller denominator scored as a regression or an improvement — see
+  [`coverage.md`](coverage.md).
 - `cargo-nextest` — instrumented is `cargo llvm-cov nextest --lcov`. Build-only is `cargo build
   --all-targets`, because `cargo build` alone never compiles the test targets and a test-only
   compilation error is exactly what separates an unviable mutant from a killed one.
@@ -153,6 +154,13 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   would pay for the instrumentation and produce no report either gate can read. Build-only is `tsc
   --noEmit`, since a JavaScript test run has no compile step and a syntactically broken mutant
   would read as a test failure.
+
+**Only `go-test` carries its declared scope into its producer.** The other runners take arguments
+that move a denominator just as `-coverpkg` does — vitest's `--coverage.include` and
+`--coverage.exclude`, jest's `--collectCoverageFrom`, cargo-llvm-cov's `-p` and its nextest filter
+expressions — and declaring one of those in `args:` changes what the figure is a proportion of
+without changing the producer the baseline compares, so the change reads as coverage movement.
+See [`coverage.md`](coverage.md).
 
 **Coverage is written under `.lydite-reports/coverage/`, never at `.lydite-reports/` itself**, and
 vitest is additionally told `--coverage.clean=false`. Vitest empties its reports directory before a

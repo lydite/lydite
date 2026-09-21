@@ -81,6 +81,62 @@ func TestTheGoProducerIsTheToolchain(t *testing.T) {
 	}
 }
 
+// A component that narrows the package set its coverage is measured over is
+// measured by a different instrument: the figure is a proportion of a smaller
+// tree, and comparing it to one taken over the whole module reports a scope
+// change as a coverage change.
+func TestTheGoProducerNamesADeclaredScope(t *testing.T) {
+	root := t.TempDir()
+	foo := registry[GoTest].Producer(root, root, "", "1.26.6", "-coverpkg=./internal/foo/...", "./...")
+	bar := registry[GoTest].Producer(root, root, "", "1.26.6", "-coverpkg=./internal/bar/...", "./...")
+	if foo == bar {
+		t.Errorf("both producers = %q, want a declared -coverpkg to tell them apart", foo)
+	}
+	if !strings.Contains(foo, "go 1.26.6") {
+		t.Errorf("producer = %q, want the Go toolchain still named", foo)
+	}
+	whole := registry[GoTest].Producer(root, root, "", "1.26.6", "./...")
+	if part := registry[GoTest].Producer(root, root, "", "1.26.6", "./internal/..."); part == whole {
+		t.Errorf("both producers = %q, want the package patterns to tell them apart", whole)
+	}
+}
+
+// A flag that moves no part of the measured tree leaves the producer alone. A
+// producer that changed with every edit to args would report a component as
+// newly measured for a timeout nobody's coverage depends on, and the first
+// figure after it would have nothing to compare against.
+func TestTheGoProducerIgnoresFlagsThatMoveNoDenominator(t *testing.T) {
+	root := t.TempDir()
+	plain := registry[GoTest].Producer(root, root, "", "1.26.6", "-race", "./...")
+	timeout := registry[GoTest].Producer(root, root, "", "1.26.6", "-race", "-timeout=30s", "./...")
+	if plain != timeout {
+		t.Errorf("producers = %q and %q, want an unrelated flag to leave the producer alone", plain, timeout)
+	}
+	if got := registry[GoTest].Producer(root, root, "", "1.26.6", "-race", "./..."); got != "go 1.26.6" {
+		t.Errorf("producer = %q, want the default scope to read as the toolchain alone", got)
+	}
+}
+
+// A -coverpkg spelling its value in the next argument narrows the same tree as
+// one spelling it after an equals sign, so the two name one scope.
+func TestTheGoProducerReadsASeparatedCoverpkgValue(t *testing.T) {
+	root := t.TempDir()
+	inline := registry[GoTest].Producer(root, root, "", "1.26.6", "-coverpkg=./internal/...", "./...")
+	separate := registry[GoTest].Producer(root, root, "", "1.26.6", "-coverpkg", "./internal/...", "./...")
+	if inline != separate {
+		t.Errorf("producers = %q and %q, want one scope however -coverpkg is spelled", inline, separate)
+	}
+}
+
+// Everything after -args is an argument to the test binary, so a bare word
+// there is not a package pattern and does not narrow anything.
+func TestTheGoProducerStopsReadingPackagesAtArgs(t *testing.T) {
+	root := t.TempDir()
+	if got := registry[GoTest].Producer(root, root, "", "1.26.6", "./...", "-args", "fixture"); got != "go 1.26.6" {
+		t.Errorf("producer = %q, want a test binary's own argument read as no scope", got)
+	}
+}
+
 // Rust's is the pair: cargo-llvm-cov writes the lcov, and the line records
 // follow the LLVM in the toolchain that built them. Naming either alone would
 // compare equal across a change to the other.
@@ -100,6 +156,9 @@ func TestAnUnknownToolchainLeavesNoProducer(t *testing.T) {
 		if got := registry[name].Producer(root, root, "", ""); got != "" {
 			t.Errorf("%s producer = %q, want nothing when the toolchain is unknown", name, got)
 		}
+	}
+	if got := registry[GoTest].Producer(root, root, "", "", "-coverpkg=./internal/...", "./..."); got != "" {
+		t.Errorf("producer = %q, want a scope alone to name nothing without the toolchain that measured it", got)
 	}
 }
 

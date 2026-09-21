@@ -111,16 +111,24 @@ same argument that keeps a types-only TypeScript package from being reported.
   workspace's own runner and coverage provider read back from `node_modules` after the install. It
   is compared verbatim, and a difference reports the component `new` rather than `regressed` — see
   [ADR 0025](../../docs/adr/0025-a-baseline-records-its-producer-and-only-record-writes-it.md).
-- **The producer does not yet fold in a component's declared `-coverpkg`.** `runner.Producer` for
-  `go-test` reports only the Go toolchain version. A component can narrow what its coverage is
-  measured against by declaring its own `-coverpkg` in `args:` (see components.md), but the
-  producer string does not change when it does — so today, narrowing or widening that scope reads
-  as a real coverage regression or improvement against a baseline recorded over the old scope,
-  instead of as the incomparable-producer case ADR 0025 exists to catch. It is the same class of
-  problem ADR 0025 closes for a toolchain or dependency bump, just not yet closed for a
-  component-triggered scope change: tracked as
-  [#207](https://github.com/lydite/lydite/issues/207), open, with the eventual fix shape
-  undecided.
+- **A Go producer names the package set it measured.** `runner.Producer` for `go-test` appends
+  `, scope -coverpkg=<packages> <patterns>` whenever a component's declared `args:` move the
+  denominator — its own `-coverpkg`, or a package pattern other than `./...`, which includes the
+  bare `.` a component declaring flags and no pattern tests (see components.md).
+  Only what moves the denominator is folded in: a `-timeout` or a `-race` leaves the producer
+  alone, since one that changed with every edit to `args:` would report a component newly measured
+  for a change that moved no figure. lydite's own default scope renders as the toolchain alone
+  (`go 1.26.6`), so a component that narrows nothing carries the producer it would have had with
+  no scope at all. A narrowing is therefore the incomparable-producer case ADR 0025 exists to
+  catch rather than a coverage movement: the component is reported `new`, and the row reads
+  `not compared — the measured scope changed, from <old> to <new>` rather than the generic
+  `measured by X, baseline by Y`, which names a toolchain change.
+- **No other runner folds its declared scope in.** vitest's `--coverage.include` and
+  `--coverage.exclude`, jest's `--collectCoverageFrom`, and cargo-llvm-cov's `-p` and its nextest
+  filter expressions each move a denominator the same way and none of them reaches the producer
+  string, so a scope change declared for one of those runners reads as a real regression or
+  improvement against a baseline recorded over the old scope. It is the same class of problem
+  ADR 0025 closes for a toolchain or dependency bump, closed for Go and open for the other three.
 - **`v4`, so every consumer takes one clean cache miss.** `gitstate.StatePath`'s directory is keyed
   to the metric and to the unit it is measured over; entries recorded under the old per-language
   percentages are a different quantity, and are simply never found. A gained field bumps it too
@@ -131,6 +139,16 @@ same argument that keeps a types-only TypeScript package from being reported.
   and the gate enforces nothing — silently, permanently, with no way to self-heal. wardnet's branch
   accumulated nine of them. Treating one as a miss heals the already-written entries with no manual
   purge.
+
+**A recorded producer that names no scope does not compare against one that does**, and that is a
+one-time blindness every Go component whose `args:` name a scope passes through. It reports `new`
+with `not compared — the measured scope changed`, and the composed `coverage(repo)` and CRAP rows
+go with it, since a composed figure refuses to compare unless its baseline covers every component
+in it. It costs exactly one ungated change per repository: the next `lydite test record` lands an
+entry carrying the scope, and gating resumes against it. No state-directory bump is involved — the
+producer field already exists and is already compared verbatim — so there is no migration, nothing
+to purge, and nothing for a consumer to do. A Go component declaring no scope, and every component
+of every other language, is untouched.
 
 **A run on the default branch measures rather than reads.** There, HEAD is its own merge-base, so
 the tree the run just measured is the tree a baseline would be read for. Reading it would miss on
