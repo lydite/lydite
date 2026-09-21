@@ -79,6 +79,16 @@ carries the report.`,
 			}
 
 			rep := ui.NewReport("plan")
+			// The same orphanRow `lydite test` adds, called rather than
+			// reimplemented: one predicate with two callers is what keeps the
+			// two verdicts from drifting, and a second copy of the gate would
+			// agree with this one only until somebody edited one of them.
+			//
+			// Whether the declaration is complete does not depend on which
+			// components a run selects, or on the sharding — a file under no
+			// component is one the matrix never gives to any job, and the plan
+			// is where that is cheapest to say.
+			rep.Add(orphanRow(cmd.Context(), dir, file))
 			for _, s := range shards {
 				rep.Add(s.row())
 			}

@@ -12,6 +12,7 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/scheduler"
+	"lydite/lydite/internal/ui"
 )
 
 // planRepo is a declaration whose shards are not the declaration order: `api`
@@ -155,6 +156,49 @@ func TestPlanWritesNoReportDocument(t *testing.T) {
 	}
 	if _, err := os.Stat(documentPath(reportsDir(root), "plan")); !os.IsNotExist(err) {
 		t.Errorf("plan wrote a report document: %v", err)
+	}
+}
+
+// One declaration, two commands, one orphan verdict. Both reach the gate
+// through the same orphanRow, and a copy of it in either command would agree
+// with this one right up until somebody edited one of them for that command's
+// own reason — a divergence neither command's other tests can see.
+func TestPlanAndTestReachTheSameOrphanVerdict(t *testing.T) {
+	root := gitRepo(t, map[string]string{
+		component.FileName: "components:\n  - name: cli\n    dir: cli\n    runner: go-test\n",
+		"cli/main.go":      "package main\n",
+		"scripts/seed.ts":  "export const s = 1\n",
+	})
+	planned, err := runPlanCmd(t, root, "--json")
+	if err == nil {
+		t.Errorf("an orphan must fail the plan:\n%s", planned)
+	}
+	tested, _ := runTestCmd(t, root, "--json", "--component", "cli")
+	fromPlan := jsonRowByLabel(t, planned, "orphans")
+	fromTest := jsonRowByLabel(t, tested, "orphans")
+	if fromPlan.Status != string(ui.StatusFail) {
+		t.Errorf("status = %q, want %q — the declaration covers neither the orphan nor an exclude", fromPlan.Status, ui.StatusFail)
+	}
+	if fmt.Sprint(fromPlan) != fmt.Sprint(fromTest) {
+		t.Errorf("the two commands disagree about the orphans:\nplan %+v\ntest %+v", fromPlan, fromTest)
+	}
+}
+
+// The gate reads its file list from git, so outside a repository it has none:
+// it reports unmeasured and the plan still emits its matrix. A plan that
+// failed in an exported tarball would be the gate firing on ordinary work.
+func TestPlanOutsideAGitRepositoryIsUnmeasured(t *testing.T) {
+	root := planRepo(t)
+	out, err := runPlanCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	row := jsonRowByLabel(t, out, "orphans")
+	if row.Status != string(ui.StatusUnmeasured) {
+		t.Errorf("status = %q, want %q — an unrunnable gate is not a passing one", row.Status, ui.StatusUnmeasured)
+	}
+	if !strings.Contains(row.Value, "git") {
+		t.Errorf("value = %q, want it to name the missing repository", row.Value)
 	}
 }
 
