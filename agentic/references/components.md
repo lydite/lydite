@@ -132,6 +132,17 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   exercised solely through another package's tests reads as uncovered and a pull request whose new
   code is fully exercised from its caller fails the patch gate on correct work
   ([#36](https://github.com/lydite/lydite/issues/36)).
+
+  `-coverpkg=./...` is a default, not a ceiling: a component can narrow the denominator its
+  coverage is measured against by declaring its own `-coverpkg` in `args:`. lydite places the
+  coverage flags before the declared args, and `go test` honours the last occurrence of a
+  repeated flag, so the declared one wins — a component author never has to touch `internal/runner`
+  to get there. A repository wants this when `./...` pulls in a package that skews the number
+  lydite would otherwise report, such as a bare `func main()` with nothing left to exercise;
+  filed as [#185](https://github.com/lydite/lydite/issues/185) by a repository wanting
+  `-coverpkg=./internal/...`. **This narrowing is not yet visible to the baseline comparison**:
+  see [`coverage.md`](coverage.md) for why a scope change reads as a regression or an improvement
+  today.
 - `cargo-nextest` — instrumented is `cargo llvm-cov nextest --lcov`. Build-only is `cargo build
   --all-targets`, because `cargo build` alone never compiles the test targets and a test-only
   compilation error is exactly what separates an unviable mutant from a killed one.

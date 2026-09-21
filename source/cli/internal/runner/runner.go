@@ -345,6 +345,16 @@ func goTestArgs(args []string) []string {
 // patch gate. The build-only variant is `go build`, not `go vet` or a
 // compile-only test flag, because what it has to answer is whether the
 // package compiles at all.
+//
+// That -coverpkg is a default and not a ceiling. The coverage flags are placed
+// before the component's declared args and `go test` honours the last
+// occurrence of a repeated flag, so a component that declares its own
+// -coverpkg narrows what its coverage is measured against — the tree lydite
+// would instrument is a guess at the one the component means, and the
+// component is the side that knows. It is the opposite choice from GoRerun,
+// which appends -run and -count=1 after the declared args so a declared
+// duplicate cannot win; there the filter is the whole point of the invocation
+// and a component may not overrule it.
 func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	pkgs := goTestArgs(args)
 	switch variant {

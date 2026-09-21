@@ -58,17 +58,44 @@ func TestGoTestDefaultsToTheWholePackageTree(t *testing.T) {
 	}
 }
 
+// effectiveCoverpkg is the -coverpkg `go test` acts on: flag parsing takes the
+// last occurrence of a repeated flag, so the last one in the argv is the scope
+// the measurement actually has. Asserting only that some -coverpkg is present
+// passes just as happily with a second one appended or the ordering flipped,
+// which is the failure these tests exist to catch.
+func effectiveCoverpkg(args []string) string {
+	for i := len(args) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(args[i], "-coverpkg="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // Without -coverpkg, Go instruments only the package under test, so code
 // exercised solely through another package's tests reads as uncovered — a
 // pull request whose new code is fully exercised from its caller fails the
 // patch gate on correct, tested work.
 func TestGoInstrumentedCarriesCoverpkg(t *testing.T) {
 	inv := argv(t, GoTest, Instrumented)
-	if !slices.Contains(inv.Args, "-coverpkg=./...") {
-		t.Errorf("instrumented go-test = %v, want -coverpkg=./...", inv.Args)
+	if got := effectiveCoverpkg(inv.Args); got != "./..." {
+		t.Errorf("instrumented go-test = %v, effective -coverpkg %q, want ./...", inv.Args, got)
 	}
 	if inv.CoverageReport == "" {
 		t.Error("the instrumented variant must name where its report lands")
+	}
+}
+
+// lydite's -coverpkg=./... is a default, not a ceiling: a component whose tree
+// holds generated or vendored packages narrows its coverage denominator by
+// declaring its own -coverpkg, which wins because lydite's sits ahead of the
+// declared args. Flip that order and the declared scope is discarded in
+// silence — the component's coverage is then measured against a tree it said
+// it did not mean.
+func TestGoInstrumentedLetsADeclaredCoverpkgWin(t *testing.T) {
+	inv := argv(t, GoTest, Instrumented, "-coverpkg=./internal/...", "-race", "./...")
+	if got := effectiveCoverpkg(inv.Args); got != "./internal/..." {
+		t.Errorf("instrumented go-test = %v, effective -coverpkg %q, want ./internal/...", inv.Args, got)
 	}
 }
 
