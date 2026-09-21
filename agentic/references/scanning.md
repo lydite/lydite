@@ -224,7 +224,9 @@ npm's `package-lock.json` states every dependency's licence outright and is read
 install ever run to produce it; yarn and pnpm state no licence in their lockfile at all, so their
 only source is a `node_modules` an earlier step already installed, read opportunistically, and a
 component whose tree is not there answers `unmeasured` naming that no licence source exists
-without an install this scan does not perform. All three render `not configured`, `pass`, `fail`,
+without an install this scan does not perform. What is read is read at the workspace root that
+*declares* the component, not in the component's own directory, and scoped back to the one
+component there. All three render `not configured`, `pass`, `fail`,
 `unmeasured` and `context` the same way — TypeScript is a full participant in the gate, not a
 permanently-`context` row the way `crapRow` renders `context` for a language it has no complexity
 source for at all
@@ -267,8 +269,36 @@ and inventing an implicit gate out of that default is the failure this design ex
 would fail every adopting repository on the licences it already ships, the same argument that
 chose the delta everywhere else.
 
+**TypeScript reads the lockfile that declares the component, which for a workspace member is the
+root's.** A member declares a `package.json` and no lockfile of its own, so `LicenceSet` resolves
+the directory to read through `nodedeps.WorkspaceRoot(dir, scanRoot)` — the nearest ancestor
+naming exactly one manager, the walk bounded by the scan root, because lydite was never asked to
+look above what it was pointed at — and `nodedeps.Manager` then names the manager at *that*
+directory. A component whose own directory holds the lockfile resolves to itself. A component
+under no resolvable root is an error and an `unmeasured` row, never an empty set. The merge-base
+side resolves against the scan root *inside* the base worktree (`licenceBaseTree`'s own `dir`):
+the working tree's root bounds nothing there, and a walk bounded by it would climb out of the
+tree being measured.
+
+**What is read at that root is scoped back to the one component**, because the root's lockfile
+resolves every member's dependencies into one tree. Under npm the lockfile holds the structure
+that separates them: `memberClosure` walks from the member's importer entry — keyed by its
+directory relative to the root in slash form, `packages/ui` — following each entry's
+`dependencies`, `devDependencies`, `optionalDependencies` and `peerDependencies` edges under
+node's own resolution, `P/node_modules/<name>` first and then each ancestor directory's, so a
+nested duplicate resolves to the copy that entry actually loads. A `link: true` entry resolves on
+to the member it points at, whose dependencies a package depending on that member does require;
+an edge the lockfile resolved nowhere — an optional dependency skipped on this platform — drops
+out of the walk. A member the lockfile names no importer entry for is an error and an
+`unmeasured` row, not an empty closure. A component that owns the lockfile is the empty member
+and is read whole. Under yarn and pnpm there is no such structure: `node_modules` is a hoisted
+tree recording no importer and no edge, scoping it needs an install `scan` never runs, and a
+nested member is therefore an error and an `unmeasured` row rather than a set carrying every
+sibling's dependencies. Those members stay blind, and per ADR 0042's consequences a gate that
+never passes also holds the lockfile-bump exemption in `internal/referral` shut for them.
+
 **TypeScript's source depends on the package manager, and neither one runs an install.**
-`nodedeps.Manager` picks the one lockfile present. Under npm, `lockfileDependencies` reads
+Under npm, `lockfileDependencies` reads
 `package-lock.json` as schema version 3's flat `packages` map, keyed by the path an entry was
 installed at — `node_modules/wrangler/node_modules/esbuild` names `esbuild`, the segment after the
 last `node_modules/`, because that is how a duplicate is nested. Each entry's licence is
@@ -278,8 +308,9 @@ classified files into one SPDX `OR` — a package offering either of two licence
 is allowed. An entry marked `link: true` is a workspace's own local package pointing back into the
 repository rather than at a downloaded tarball, and is skipped the way Go skips its own main
 module: a repository's own licence is not a dependency's, and is not this gate's to judge. Under
-yarn or pnpm, neither lockfile format states a licence at all, so `installedDependencies` reads
-whatever `node_modules` an earlier step already installed. A symlink there is not, by itself, a
+yarn or pnpm — where the component is the root itself, the only case those two are measured in —
+neither lockfile format states a licence at all, so `installedDependencies` reads whatever
+`node_modules` an earlier step already installed there. A symlink there is not, by itself, a
 workspace member: pnpm's default layout symlinks every registry package into its own `.pnpm`
 store, not only a workspace member the way yarn does, so `workspaceLocal` tells the two apart by
 resolving where the link actually points — inside `node_modules` (itself resolved first, so a

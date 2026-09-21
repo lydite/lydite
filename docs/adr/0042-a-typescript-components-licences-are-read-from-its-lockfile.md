@@ -3,10 +3,11 @@
 [ADR 0038](0038-a-licence-policy-gates-the-licences-a-change-introduces.md) deferred
 TypeScript: "TypeScript has no licence source here and gets one `context` row naming the
 limit." This closes that deferral. A TypeScript component's dependency licences are read
-from its own lockfile rather than from an installed `node_modules` tree, and `lydite scan`
-never runs a package-manager install to measure them — for npm the lockfile already answers
-the question completely; for yarn and pnpm no install-free answer exists, and this slice
-states that as its limit rather than paying for one.
+from the lockfile that declares it rather than from an installed `node_modules` tree, and
+`lydite scan` never runs a package-manager install to measure them — for npm the lockfile
+already answers the question completely, for a component at its own root and for a member of
+a workspace alike; for yarn and pnpm no install-free answer exists, and this ADR states that
+as its limit rather than paying for one.
 
 ## The measurement that decided it
 
@@ -38,6 +39,36 @@ install — once for the current tree, and again inside the merge-base's throwaw
 since [ADR 0038](0038-a-licence-policy-gates-the-licences-a-change-introduces.md)'s delta
 compares the same measurement on both sides. Doubling an `npm ci` per component, per scan, to
 re-derive data the lockfile already states exactly, is not a cost this ADR accepts.
+
+## The lockfile is the one that declares the component, not the one in its directory
+
+A component's own directory need not hold a lockfile at all. A workspace member declares a
+`package.json` and nothing else; the lockfile that resolves its dependencies sits at the
+workspace root, one or more directories above it. Reading only the component's own directory
+answers `unmeasured` for a lockfile that exists one level up, and a row that can never be
+measured is a gate that can never pass — which, per the consequences below, also holds the
+lockfile-bump exemption in `internal/referral` permanently shut for that component.
+
+`LicenceSet` therefore resolves the directory to read through
+`nodedeps.WorkspaceRoot(dir, scanRoot)`: the nearest ancestor of `dir` naming exactly one
+manager, with the walk bounded by the scan root, because lydite was never asked to look above
+what it was pointed at. A component whose own directory holds the lockfile resolves to itself
+and behaves exactly as a component at its own root always has. A component under no resolvable
+root — no lockfile between it and the scan root, or a directory naming two managers — is an
+error, and the row is `unmeasured`. Never an empty set: a set nothing was read into is every
+dependency conforming to a policy that read none of them.
+
+The merge-base side resolves the same way against the scan root **inside the base worktree**.
+The outer scan root bounds nothing there — `licenceBaseTree` opens the merge-base in a
+throwaway worktree, so a walk bounded by the working tree's own root climbs straight out of
+the tree being measured.
+
+Resolving the root is half the answer. The root's lockfile resolves every member's
+dependencies into one tree, so what is read there has to be scoped back to the one component:
+reporting the whole tree for a member puts a sibling's dependency in this component's set,
+where it locates against a manifest that never declares it, reads as transitive at `Line: 0`,
+and files the same claim once per member of the workspace. The two managers differ in whether
+an install-free scoping exists at all.
 
 ## npm: the lockfile is the whole answer
 
@@ -72,6 +103,26 @@ either side.
   buys nothing for a transitive one, which stays `Line: 0` under every language alike. Never
   guessed.
 
+The lockfile also holds the structure that scopes a member: an importer entry, keyed by the
+member's directory relative to the root in slash form (`packages/ui`), names that member's own
+edges, and every `node_modules/` entry names its own. A member's set is the closure over them,
+walked from its importer entry with node's own resolution — a name required from the package
+installed at `P` resolves to `P/node_modules/<name>` when the lockfile holds one, and otherwise
+to the nearest ancestor directory's, which is what decides which copy of a duplicated package an
+entry actually loads. A `link: true` entry resolves on to the member it points at, whose
+dependencies a package depending on that member does require. Peer dependencies are walked
+alongside ordinary, dev and optional ones, because npm installs a peer into the tree like any
+other and a package whose peer resolved requires it at runtime; an edge naming a package the
+lockfile resolved nowhere — an optional dependency skipped on this platform — drops out of the
+walk. A member the lockfile names no importer entry for is an error and an `unmeasured` row,
+not an empty closure, for the same reason an unresolvable root is.
+
+The alternative considered was shelling out to the package manager to enumerate one package —
+`npm ls --workspace`, `pnpm --filter`, a yarn focus. It is simpler to get right per manager and
+it was rejected: it gives up the no-install property this ADR exists to state, it needs an
+installed tree the merge-base worktree does not have, and for npm it re-derives from a
+subprocess exactly what the lockfile already records.
+
 ## yarn and pnpm: no install-free source exists, and none is added
 
 Neither `yarn.lock` nor `pnpm-lock.yaml` carries a package's licence in any format measured.
@@ -92,6 +143,16 @@ all three managers, and a future slice that decides `scan` should install for so
 reason can extend the same opportunistic read; nothing here forecloses that, and nothing here
 pays for it before it is asked for.
 
+A **nested member** under yarn or pnpm is blind for a second, independent reason, and stays
+blind even where a tree is installed. `node_modules` records no importer entry and no
+per-entry edge — it is a hoisted tree, a flat store of what resolved for the workspace as a
+whole — so nothing in it separates one member's dependencies from its siblings'. Scoping there
+needs either an install run per member, which no path of `scan` permits, or a structure
+neither manager writes. The row is `unmeasured`, naming exactly that: reading the root's tree
+whole would report every sibling's dependencies as this component's, locating each against a
+manifest that never declared it. A yarn or pnpm component whose own directory holds the
+lockfile is the workspace root, and is read whole the way it always is.
+
 ## Consequences
 
 - `internal/typescript` gains a licence source with the same exported shape
@@ -107,5 +168,15 @@ pays for it before it is asked for.
   own rule, the lockfile-bump exemption `internal/referral` is expected to gain therefore never
   applies to it either — the exemption is conditional on the gate having run and passed, never
   on its absence, and an `unmeasured` row is exactly that absence.
+- A **nested member** of a yarn or pnpm workspace is `unmeasured` even where a tree is
+  installed, and pays the same cost: its licences go unread and the lockfile-bump exemption
+  stays shut for it. This is the price of the no-install property, paid by those two managers
+  only — an npm member is measured, and a yarn or pnpm component at its own root is measured
+  whenever a tree is there.
+- Every one of these blind cases renders `unmeasured`, never `pass`. A root that does not
+  resolve, an npm member with no importer entry, a nested yarn or pnpm member, a missing
+  `node_modules`: each is a read that failed, reported as one. The gate is blind rather than
+  wrong, and an empty set — every dependency conforming to a policy that read none of them —
+  is never substituted for a measurement that could not be taken.
 - No new pinned tool, no new manifest, no new Dependabot entry. `license-checker`, `licensee`
   and `npm ls` remain unused in this repository.
