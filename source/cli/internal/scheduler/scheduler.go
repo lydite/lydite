@@ -184,8 +184,12 @@ func Pairs(conflicts []Conflict) int {
 // A tree already covered by an ancestor in the result is dropped: a pair
 // overlapping at `packages/tokens` and again at `packages/tokens/dist` shares
 // one tree, and naming the inner one too would report the same contention
-// twice. Sorting puts an ancestor ahead of everything it contains, so one pass
-// is enough.
+// twice. Every candidate is checked against every path already kept, because
+// a plain string sort does not keep an ancestor next to its descendants: a
+// sibling whose name extends the ancestor with a byte below '/' ('-', '.')
+// sorts between them, as `packages/tokens-x` does between `packages/tokens`
+// and `packages/tokens/dist`. An ancestor still sorts ahead of everything it
+// contains, so a descendant is only ever compared against paths kept before it.
 func sharedTrees(a, b []string) []string {
 	set := make(map[string]struct{})
 	for _, x := range a {
@@ -202,7 +206,14 @@ func sharedTrees(a, b []string) []string {
 	sort.Strings(trees)
 	out := make([]string, 0, len(trees))
 	for _, p := range trees {
-		if len(out) == 0 || !contains(out[len(out)-1], p) {
+		covered := false
+		for _, kept := range out {
+			if contains(kept, p) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
 			out = append(out, p)
 		}
 	}

@@ -503,6 +503,22 @@ func TestOverlappingOccupiedPathsCollapseToTheOuterTree(t *testing.T) {
 	}
 }
 
+// A sibling whose name extends an ancestor's with a byte that sorts below '/'
+// lands between the ancestor and its descendants, and the descendant is still
+// covered by the ancestor rather than reported as a tree of its own.
+func TestASiblingSortingBetweenAnAncestorAndItsDescendantDoesNotHideTheAncestor(t *testing.T) {
+	paths := []string{"packages/tokens", "packages/tokens-x", "packages/tokens/dist"}
+	got := Conflicts([]Item{
+		{Name: "a", Occupies: paths},
+		{Name: "b", Occupies: paths},
+	})
+	if len(got) != 2 ||
+		got[0].On != "directory packages/tokens" ||
+		got[1].On != "directory packages/tokens-x" {
+		t.Fatalf("Conflicts = %v, want packages/tokens and packages/tokens-x only", got)
+	}
+}
+
 // An occupied path costs parallelism only where the tree is actually written
 // into twice. Items whose paths are disjoint all run at once, forced by a
 // barrier none of them can pass alone.
