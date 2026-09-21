@@ -208,6 +208,28 @@ fold already fails a declared component with no row. Loud, and by machinery that
 exists. The reported timings are what make a later budget a measured decision
 rather than a guess.
 
+Nothing adds a budget. What a run gains is that its cost is stated before it is
+paid and recorded after: once mutants are generated it writes one line to the
+component's log, `N mutant(s), budget Xs each, W worker(s): at most Ys`, a worst
+case and not a cap, which survives a killed job because the log does. Elapsed
+time is recorded as data in `mutants.json` and the ledger. The fold, for a
+component with no row, quotes that line when the log survived and names no
+cause: a timeout kill, a runner OOM and a failed upload leave identical absence,
+so a fold saying "too large" would be a guess.
+
+Two answers to a too-large run were considered and not taken.
+
+**Sharding mutation more finely than tests.** Mutation reuses `test plan`'s
+matrix verbatim, one planner with two consumers, and a component's compose stack
+is the same whether it is mutated or not. Finer sharding needs a second
+conflict-safe planner, or splitting one component's mutants across jobs, and
+neither exists.
+
+**Narrowing the operator catalogue above a size threshold.** It contradicts the
+catalogue being fixed and not configurable: a catalogue a repository can empty is
+not a floor, and a threshold would make a verdict mean different things on
+different days. Overturning it takes a new ADR, not a threshold.
+
 ## What the executor settled
 
 The measurements below are of this repository, on one machine, and are recorded

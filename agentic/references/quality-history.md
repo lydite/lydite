@@ -107,10 +107,12 @@ rather than by expectation. The last record and not a mean, which is a number no
 had. There is no index file: the directory listing is the index, and an index is state that
 can disagree with the files it names.
 
-**Mutation is one struct, not six independent scalars, and it comes from `mutants.json`.** A
-mutation run's killed, timed-out, out-of-memory, survived, unviable and acknowledged counts always
-arrive together out of one `mutation.Summary`, so `Component.Mutation` is a single pointer rather
-than six optional fields — a record with three of six present is a question nothing produced.
+**Mutation is one struct, not seven independent scalars, and it comes from `mutants.json`.** A
+mutation run's killed, timed-out, out-of-memory, survived, unviable and acknowledged counts, and
+its elapsed time in seconds, always arrive together from one component's run and its
+`mutants.json` entry, so `Component.Mutation` is a single pointer rather than seven optional fields — a record with three
+present is a question nothing produced. Nought or absent elapsed time means not recorded. The
+ledger version is not bumped for it: a field added later starts a series on the day it was added.
 It is absent for a component the recorded commit's own diff did not touch, for one declared
 `mutation: false`, and for one whose run did not complete, and present with a measured zero
 wherever a component ran and killed every mutant — the same rule every other metric here follows,
