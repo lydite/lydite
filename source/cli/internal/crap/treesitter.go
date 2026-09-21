@@ -40,16 +40,16 @@ func tracked(file string) (runner.Lang, bool) {
 // skipped reports whether a file belongs to a language this gate otherwise
 // scores, but is written in an extension outside walked — the JSX-risking
 // TypeScript extensions above, or any later addition to runner.LangForExt's
-// tables this gate has not caught up with. Never true for Go or for an
-// extension no runner claims at all, both of which are simply not this gate's
+// tables this gate has not caught up with. Never true for Go, for an extension
+// no runner claims at all, or for a language no runner runs (a script), all of which are simply not this gate's
 // concern.
 func skipped(file string) bool {
 	ext := strings.ToLower(filepath.Ext(file))
 	if walked[ext] || ext == ".go" {
 		return false
 	}
-	_, ok := runner.LangForExt(ext)
-	return ok
+	lang, ok := runner.LangForExt(ext)
+	return ok && runner.Runs(lang)
 }
 
 // scoreTree scores every function one Rust or TypeScript file declares, the way

@@ -43,6 +43,12 @@ components:
 # verdict silently. Declaring a component over them would have lydite try to
 # build a crate that is deliberately not one; leaving them undeclared is what
 # this line says out loud.
+#
+# The last two are scripts no runner runs: the installer that ships with every
+# release, and the CI helper that asserts on the proving-ground fixture. Each is
+# exercised by the workflow that invokes it, not by a suite.
 excludes:
   - "source/cli/internal/**/*-pin/**"
   - "source/cli/internal/mutation/testdata/**"
+  - "scripts/install.sh"
+  - ".github/assert-proving-ground.py"

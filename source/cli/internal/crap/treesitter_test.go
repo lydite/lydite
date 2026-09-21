@@ -405,6 +405,16 @@ func TestMtsAndCtsAreWalkedAsTypeScript(t *testing.T) {
 	}
 }
 
+// A script is a language no runner runs, so this gate has nothing to score and
+// nothing to report as skipped.
+func TestAScriptPathIsNotReportedSkipped(t *testing.T) {
+	for _, file := range []string{"a.py", "a.sh", "a.bash"} {
+		if skipped(file) {
+			t.Errorf("skipped(%q) = true, want false", file)
+		}
+	}
+}
+
 // A .jsx or .js file is TypeScript by runner.LangForExt's own table, but this
 // gate cannot walk it — JSX parses badly under the TypeScript grammar — so it
 // is neither silently dropped nor scored as though it were absent: Measure
