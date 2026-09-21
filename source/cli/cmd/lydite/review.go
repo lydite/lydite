@@ -17,7 +17,7 @@ import (
 )
 
 func newReviewCmd() *cobra.Command {
-	var dir, base, baseBranch, eventPath, surfacesPath string
+	var dir, base, baseBranch, eventPath, surfacesPath, statusOut string
 	var asJSON, noColor, doPublish bool
 	var reports []string
 	cmd := &cobra.Command{
@@ -54,10 +54,23 @@ every component ran and passed in a scan document under --reports. Without
 here. A component's own comparison executes its own code — a Rust crate's
 build.rs, a proc-macro — so the job that publishes with a credential should
 not also be the job that ran it: compute in one job with none, decide and
-publish in another that never runs the change's own code.`,
+publish in another that never runs the change's own code.
+
+--publish --status-out <file> renders the commit status as a document instead
+of posting it, for a step that posts it under lydite's App identity. Posting it
+here is the path for a repository that has not adopted the reusable workflows,
+and keeps every property of the status; the two are alternatives, not a ladder.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			report := ui.NewReport("review")
+
+			// Refused before anything is measured. A flag that renders what
+			// another flag decides, given on its own, would otherwise leave a
+			// run that named a destination with nothing written to it and
+			// nothing said about that.
+			if statusOut != "" && !doPublish {
+				return fmt.Errorf("%s renders the status --publish decides: pass both, or neither", statusOutFlag)
+			}
 
 			// The base is always resolved here, never taken from --surfaces's
 			// document: that document crosses from a job that ran the
@@ -146,11 +159,7 @@ publish in another that never runs the change's own code.`,
 			// verdict, so the status a machine reads and the report a person
 			// reads are the same value rather than two derivations of it.
 			if doPublish {
-				target, err := resolveTarget("--publish", eventPath)
-				if err != nil {
-					return err
-				}
-				if err := publish(ctx, target, decision, report.Verdict()); err != nil {
+				if err := publish(ctx, statusOut, eventPath, decision, report.Verdict()); err != nil {
 					return err
 				}
 			}
@@ -172,6 +181,11 @@ publish in another that never runs the change's own code.`,
 	// platform's environment is absent, so a local review can neither post
 	// by accident nor appear to have posted when it did not.
 	cmd.Flags().BoolVar(&doPublish, "publish", false, "record the verdict as the "+clearance.Context+" commit status")
+	// The rendered document is the whole of the write, so this needs no
+	// credential: the step that posts it holds the identity, and this run
+	// holds only the verdict.
+	cmd.Flags().StringVar(&statusOut, "status-out", "",
+		"with --publish, render the "+clearance.Context+" status as a JSON document at this path for another step to post, instead of posting it here")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload naming the pull request (defaults to GITHUB_EVENT_PATH)")
 	cmd.Flags().StringVar(&surfacesPath, "surfaces", "", "read a comparison 'review compare' already made instead of running it here, and decide from that instead")
 	// Evidence only, never a gate of its own: an exemption conditioned on
