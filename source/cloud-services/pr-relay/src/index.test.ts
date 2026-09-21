@@ -443,16 +443,13 @@ describe("recording a status", () => {
     expect(response.status).toBe(400);
   });
 
-  // The OIDC claim names a repository and a pull request, not a job: nothing
-  // here tells `referral-publish` — the one job isolated to hold
-  // `statuses: write` — apart from any other job in the same workflow that
-  // also holds `id-token: write` and runs the pull request's own code. Until
-  // a caller can be told apart from the code it is running, the one status a
-  // human Clearance acts on is refused outright, `lydite/` prefix or not.
-  it("refuses the clearance context even though it is in lydite's namespace", async () => {
+  // The gated contexts are admitted only from a `job_workflow_ref` the
+  // allowlist names, and an empty allowlist names none — so the verdict a
+  // merge is gated on is refused to every caller, `lydite/` prefix or not.
+  it("refuses a gated context to a job no allowlist names", async () => {
     const token = await keys.sign(claims());
     const response = await postStatus(token, { ...verdict, context: "lydite/referral" });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
   });
 
   // The same designed path the comment has: not installed is an answer, and
@@ -504,5 +501,411 @@ describe("recording a status", () => {
     const body = JSON.stringify(await response.json());
     expect(body).not.toContain("upstream detail");
     expect(body).toContain("status");
+  });
+});
+
+const REFERRAL_REF =
+  "lydite/actions/.github/workflows/referral.yml@refs/tags/v1";
+const CLEARANCE_REF =
+  "lydite/actions/.github/workflows/clearance.yml@refs/tags/v1";
+function gatedEnv(overrides: Partial<Env> = {}): Env {
+  return {
+    ...env,
+    REFERRAL_WORKFLOW_REFS: REFERRAL_REF,
+    CLEARANCE_WORKFLOW_REFS: CLEARANCE_REF,
+    ...overrides,
+  };
+}
+
+// Answers `GET /pulls/:n` for every number in `pulls` (a missing number is a
+// 404) and records each status and comment write.
+function pullStub(
+  pulls: Record<number, { state: string; sha: string }>,
+  written: { url: string; init?: RequestInit }[] = [],
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    const target = String(url);
+    if (target.endsWith("/installation")) {
+      return Response.json({ id: 42 });
+    }
+    if (target.includes("/access_tokens")) {
+      return Response.json({ token: "ghs_test" });
+    }
+    const pull = /\/pulls\/(\d+)$/.exec(target);
+    if (pull) {
+      const found = pulls[Number(pull[1])];
+      return found
+        ? Response.json({ state: found.state, head: { sha: found.sha } })
+        : new Response("", { status: 404 });
+    }
+    if (target.includes("/comments?")) {
+      return Response.json([]);
+    }
+    if (target.includes("/statuses/") || target.includes("/comments")) {
+      written.push({ url: target, init });
+      return Response.json({ id: 1 });
+    }
+    throw new Error(`the relay called something unexpected: ${target}`);
+  }) as typeof fetch;
+}
+
+function send(
+  route: string,
+  token: string,
+  body: unknown,
+  relayEnv: Env,
+  fetcher: typeof fetch,
+): Promise<Response> {
+  const relay = createRelay({ fetchJwks: keys.jwks, fetcher });
+  return relay.fetch(
+    new Request(`https://pr.lydite.org${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    }),
+    relayEnv,
+  );
+}
+
+const open7 = { 7: { state: "open", sha: "abc123" } };
+
+describe("gating the referral and clearance contexts on job_workflow_ref", () => {
+  const referral = { ...verdict, context: "lydite/referral" };
+  const clearance = { ...verdict, context: "lydite/clearance" };
+  // What a clearance run presents: `lydite-clearance.yml` runs on
+  // `issue_comment` from the default branch, so the token is minted for a
+  // branch ref.
+  const clearanceClaims = { ref: "refs/heads/main", event_name: "issue_comment" };
+
+  async function status(
+    ref: string | undefined,
+    body: unknown,
+    relayEnv = gatedEnv(),
+    claim = {},
+  ) {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const token = await keys.sign(claims({ job_workflow_ref: ref, ...claim }));
+    const response = await send(
+      "/status",
+      token,
+      body,
+      relayEnv,
+      pullStub(open7, written),
+    );
+    return { response, written };
+  }
+
+  it("admits an allowlisted referral workflow to the referral context", async () => {
+    const { response, written } = await status(REFERRAL_REF, referral);
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+  });
+
+  it("admits an allowlisted clearance workflow to the clearance context", async () => {
+    const { response, written } = await status(
+      CLEARANCE_REF,
+      { ...clearance, pull_request: 7 },
+      gatedEnv(),
+      clearanceClaims,
+    );
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+  });
+
+  it("refuses an unlisted workflow, naming its ref", async () => {
+    const ref = "someone/else/.github/workflows/x.yml@refs/heads/main";
+    const { response, written } = await status(ref, referral);
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(await response.json())).toContain(ref);
+    expect(written).toHaveLength(0);
+  });
+
+  it("refuses a same-repository reusable workflow on the pull request's own ref", async () => {
+    const ref =
+      "lydite/proving-ground/.github/workflows/x.yml@refs/pull/7/merge";
+    expect((await status(ref, referral)).response.status).toBe(403);
+    expect((await status(ref, clearance)).response.status).toBe(403);
+  });
+
+  it("matches the allowlisted string exactly", async () => {
+    const near = [
+      REFERRAL_REF.slice(0, -3),
+      REFERRAL_REF.replace("@refs/tags/v1", "@refs/heads/main"),
+      `${REFERRAL_REF}x`,
+      REFERRAL_REF.replace("referral.yml", "referral.yml.evil"),
+      REFERRAL_REF.replace(/@.*/, ""),
+    ];
+    for (const ref of near) {
+      expect((await status(ref, referral)).response.status).toBe(403);
+    }
+  });
+
+  it("keeps each workflow to its own context", async () => {
+    expect((await status(REFERRAL_REF, clearance)).response.status).toBe(403);
+    expect(
+      (
+        await status(
+          CLEARANCE_REF,
+          { ...referral, pull_request: 7 },
+          gatedEnv(),
+          clearanceClaims,
+        )
+      ).response.status,
+    ).toBe(403);
+  });
+
+  it("refuses a ref allowlisted for both contexts", async () => {
+    const both = gatedEnv({
+      REFERRAL_WORKFLOW_REFS: REFERRAL_REF,
+      CLEARANCE_WORKFLOW_REFS: REFERRAL_REF,
+    });
+    expect((await status(REFERRAL_REF, referral, both)).response.status).toBe(
+      403,
+    );
+    expect((await status(REFERRAL_REF, clearance, both)).response.status).toBe(
+      403,
+    );
+  });
+
+  it("refuses the gated contexts to every caller when the allowlists are empty", async () => {
+    for (const relayEnv of [
+      gatedEnv({ REFERRAL_WORKFLOW_REFS: "", CLEARANCE_WORKFLOW_REFS: "" }),
+      env,
+    ]) {
+      expect(
+        (await status(REFERRAL_REF, referral, relayEnv)).response.status,
+      ).toBe(403);
+      expect(
+        (await status(CLEARANCE_REF, clearance, relayEnv)).response.status,
+      ).toBe(403);
+      expect(
+        (await status(undefined, referral, relayEnv)).response.status,
+      ).toBe(403);
+      expect(
+        (await status(REFERRAL_REF, verdict, relayEnv)).response.status,
+      ).toBe(200);
+    }
+  });
+
+  it("reads an allowlist separated by commas and newlines, padded and with empty entries", async () => {
+    const relayEnv = gatedEnv({
+      REFERRAL_WORKFLOW_REFS: `  other/x.yml@a ,, \n  ${REFERRAL_REF}  \n\n,`,
+    });
+    expect(
+      (await status(REFERRAL_REF, referral, relayEnv)).response.status,
+    ).toBe(200);
+    expect(
+      (await status("other/x.yml@a", referral, relayEnv)).response.status,
+    ).toBe(200);
+    expect((await status("", referral, relayEnv)).response.status).toBe(403);
+  });
+
+  it("names a missing job_workflow_ref as such", async () => {
+    const { response } = await status(undefined, referral);
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(await response.json())).toContain(
+      "names no job_workflow_ref",
+    );
+  });
+
+  describe("a clearance run's pull request", () => {
+    const named = { ...clearance, pull_request: 7 };
+
+    it("is resolved live for a status, and bound on the head sha", async () => {
+      const ok = await status(CLEARANCE_REF, named, gatedEnv(), clearanceClaims);
+      expect(ok.response.status).toBe(200);
+      expect(ok.written).toHaveLength(1);
+
+      const stale = await status(
+        CLEARANCE_REF,
+        { ...named, sha: "stale" },
+        gatedEnv(),
+        clearanceClaims,
+      );
+      expect(stale.response.status).toBe(403);
+      expect(stale.written).toHaveLength(0);
+
+      const missing = await status(
+        CLEARANCE_REF,
+        { ...named, pull_request: 8 },
+        gatedEnv(),
+        clearanceClaims,
+      );
+      expect(missing.response.status).toBe(403);
+      expect(missing.written).toHaveLength(0);
+    });
+
+    it("is not offered to a referral workflow, on a status", async () => {
+      const { response } = await status(
+        REFERRAL_REF,
+        { ...referral, pull_request: 7 },
+        gatedEnv(),
+        clearanceClaims,
+      );
+      expect(response.status).toBe(403);
+    });
+
+    it("is not offered to an unlisted workflow", async () => {
+      const { response } = await status(
+        "x/y/.github/workflows/z.yml@main",
+        { ...verdict, pull_request: 7 },
+        gatedEnv(),
+        clearanceClaims,
+      );
+      expect(response.status).toBe(403);
+    });
+
+    it("is not offered to a workflow allowlisted for both", async () => {
+      const both = gatedEnv({ REFERRAL_WORKFLOW_REFS: CLEARANCE_REF });
+      const { response } = await status(CLEARANCE_REF, named, both, clearanceClaims);
+      expect(response.status).toBe(403);
+    });
+
+    // The allowlist names a workflow file, and the same callee is reachable
+    // from a caller running on any event. Naming a pull request in the body,
+    // and posting the clearance status, belong to the one event the clearance
+    // workflow runs on.
+    it("is not offered to a run on another event", async () => {
+      const impostors = [
+        { ref: "refs/heads/main", event_name: "push" },
+        { ref: "refs/heads/main", event_name: "workflow_dispatch" },
+        { ref: "refs/pull/7/merge", event_name: "pull_request" },
+      ];
+      for (const claim of impostors) {
+        const posted = await status(CLEARANCE_REF, named, gatedEnv(), claim);
+        expect(posted.response.status).toBe(403);
+        expect(posted.written).toHaveLength(0);
+        expect(JSON.stringify(await posted.response.json())).toContain(
+          claim.event_name,
+        );
+
+        const commented = await commentOn(
+          open7,
+          { ...comment, pull_request: 9 },
+          CLEARANCE_REF,
+          claim,
+        );
+        expect(commented.response.status).toBe(403);
+        expect(commented.written).toHaveLength(0);
+      }
+    });
+
+    it("is not offered to a run naming no event", async () => {
+      const { response, written } = await status(CLEARANCE_REF, named, gatedEnv(), {
+        ref: "refs/heads/main",
+      });
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+      expect(JSON.stringify(await response.json())).toContain(
+        "an unnamed event",
+      );
+    });
+
+    it("never overrides the pull request a pull ref names", async () => {
+      const { response } = await status(REFERRAL_REF, {
+        ...referral,
+        pull_request: 9,
+      });
+      expect(response.status).toBe(403);
+    });
+
+    async function commentOn(
+      pulls: Record<number, { state: string; sha: string }>,
+      body: unknown,
+      ref = CLEARANCE_REF,
+      claim: object = clearanceClaims,
+    ) {
+      const written: { url: string; init?: RequestInit }[] = [];
+      const token = await keys.sign(
+        claims({ job_workflow_ref: ref, ...claim }),
+      );
+      const response = await send(
+        "/comment",
+        token,
+        body,
+        gatedEnv(),
+        pullStub(pulls, written),
+      );
+      return { response, written };
+    }
+
+    it("is resolved live for a comment, which needs the pull request open", async () => {
+      const ok = await commentOn(open7, { ...comment, pull_request: 7 });
+      expect(ok.response.status).toBe(200);
+      expect(ok.written).toHaveLength(1);
+      expect(ok.written[0]?.url).toContain("/issues/7/comments");
+
+      const closed = await commentOn(
+        { 7: { state: "closed", sha: "x" } },
+        { ...comment, pull_request: 7 },
+      );
+      expect(closed.response.status).toBe(403);
+      expect(closed.written).toHaveLength(0);
+
+      const missing = await commentOn({}, { ...comment, pull_request: 7 });
+      expect(missing.response.status).toBe(403);
+      expect(missing.written).toHaveLength(0);
+    });
+
+    it("refuses pull request zero even when every number resolves open", async () => {
+      const everyPull = new Proxy(
+        {},
+        { get: () => ({ state: "open", sha: open7[7].sha }) },
+      ) as Record<number, { state: string; sha: string }>;
+      const written: { url: string; init?: RequestInit }[] = [];
+      for (const [route, body] of [
+        ["/comment", { ...comment, pull_request: 0 }],
+        ["/status", { ...clearance, pull_request: 0 }],
+      ] as const) {
+        const token = await keys.sign(
+          claims({ job_workflow_ref: CLEARANCE_REF, ...clearanceClaims }),
+        );
+        const response = await send(
+          route,
+          token,
+          body,
+          gatedEnv(),
+          pullStub(everyPull, written),
+        );
+        expect(response.status).toBe(403);
+      }
+      expect(written).toHaveLength(0);
+    });
+
+    it("requires a positive integer number for a comment", async () => {
+      for (const pull_request of [undefined, 0, -1, 1.5, "7"]) {
+        const { response, written } = await commentOn(open7, {
+          ...comment,
+          pull_request,
+        });
+        expect(response.status).toBe(403);
+        expect(written).toHaveLength(0);
+      }
+    });
+
+    it("leaves a non-clearance run on a non-pull ref refused for a comment", async () => {
+      expect(
+        (await commentOn(open7, { ...comment, pull_request: 7 }, REFERRAL_REF))
+          .response.status,
+      ).toBe(403);
+      expect(
+        (await commentOn(open7, { ...comment, pull_request: 7 }, ""))
+          .response.status,
+      ).toBe(403);
+    });
+
+    it("does not extend to a review", async () => {
+      const token = await keys.sign(
+        claims({ job_workflow_ref: CLEARANCE_REF, ...clearanceClaims }),
+      );
+      const response = await send(
+        "/review",
+        token,
+        { version: 1, pull_request: 7 },
+        gatedEnv(),
+        pullStub(open7),
+      );
+      expect(response.status).toBe(403);
+    });
   });
 });

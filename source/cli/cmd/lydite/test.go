@@ -1195,23 +1195,74 @@ func runCommands(ctx context.Context, dir, label string, c component.Component, 
 // but one: the mutation worker's closure passes "" instead, because its dir
 // sits inside a copy of the scan root and not the scan root itself.
 func prepare(ctx context.Context, inv runner.Invocation, dir, root, label string, c component.Component, cfg config.Config, tc *toolchain.Env, log *componentLog) (ui.Row, bool) {
-	r, ok := runner.Lookup(c.Runner)
-	if !ok || r.Prepare == nil {
-		return ui.Row{}, true
-	}
 	// Two environments, because two different people's software gets
 	// installed here: the repository's dependencies with what the repository
 	// declared, and lydite's pinned runners with lydite's toolchain alone.
 	env := executil.Env{Check: childEnv(tc, c, inv), Install: tc.Environ()}
+	r, ok := runner.Lookup(c.Runner)
+	if !ok {
+		return prepareCommand(ctx, dir, root, label, c, cfg, env, log)
+	}
+	if r.Prepare == nil {
+		return ui.Row{}, true
+	}
 	if err := r.Prepare(ctx, inv, dir, root, cfg.TypeScript.Install, env, log.out); err != nil {
 		row := failure(label, log, err.Error(), "not prepared", "")
 		if r.Lang == runner.TypeScript {
-			row.Detail = append(row.Detail, "Set typescript.install in "+config.FileName+" if this component installs differently.")
+			row.Detail = append(row.Detail, installHint)
 		}
 		return row, false
 	}
 	return ui.Row{}, true
 }
+
+// prepareCommand installs the node dependencies of a component that names no
+// runner, so that its command runs over a workspace lydite installed.
+//
+// A package manager asked to run a script in a workspace it finds uninstalled
+// installs the whole workspace itself, unasked and uncoordinated. That install
+// writes the same node_modules tree as the one lydite runs for every other
+// component resolving that root, and two of them over one tree is a rename
+// race whose loser fails inside a package manager rather than in anything
+// lydite reports. Going through nodedeps makes the two one install, because
+// coalescing there is keyed on the root and knows nothing about runners.
+func prepareCommand(ctx context.Context, dir, root, label string, c component.Component, cfg config.Config, env executil.Env, log *componentLog) (ui.Row, bool) {
+	if !installsNodeDeps(dir, c) {
+		return ui.Row{}, true
+	}
+	if err := nodedeps.Install(ctx, dir, root, cfg.TypeScript.Install, env.Check, log.out); err != nil {
+		row := failure(label, log, err.Error(), "not prepared", "")
+		row.Detail = append(row.Detail, installHint)
+		return row, false
+	}
+	return ui.Row{}, true
+}
+
+// installsNodeDeps reports whether lydite installs this component's node
+// dependencies before its suite runs.
+//
+// A runner answers for its own language, and only the JavaScript ones install
+// anything. A component declaring a raw command names no runner and therefore
+// no language, and "under a JavaScript workspace root" answers the question
+// wrongly on its own: a Go or Rust component sitting beside that root's
+// packages resolves the same root, and handing it a node install it never
+// asked for is slower and stranger than the race not installing it avoids. A
+// package.json in the component's own directory is what makes it one of that
+// workspace's packages.
+func installsNodeDeps(dir string, c component.Component) bool {
+	if r, ok := runner.Lookup(c.Runner); ok {
+		return r.Prepare != nil && r.Lang == runner.TypeScript
+	}
+	if len(c.Command) == 0 {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "package.json"))
+	return err == nil && !info.IsDir()
+}
+
+// installHint is the way out of a failed install: the repository says how its
+// dependencies go in when detection does not match.
+const installHint = "Set typescript.install in " + config.FileName + " if this component installs differently."
 
 // installLabel is how every row about one component's install is named.
 //
@@ -1232,8 +1283,8 @@ func installLabel(name string) string { return "install(" + name + ")" }
 // dependencies are in place by some other means passes, and this row claims
 // only that lydite did not put them there.
 func installNote(root string, c component.Component, cfg config.Config) (ui.Row, bool) {
-	r, ok := runner.Lookup(c.Runner)
-	if !ok || r.Prepare == nil || r.Lang != runner.TypeScript {
+	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+	if !installsNodeDeps(dir, c) {
 		return ui.Row{}, false
 	}
 	// typescript.install replaces detection entirely and runs in the
@@ -1241,7 +1292,6 @@ func installNote(root string, c component.Component, cfg config.Config) (ui.Row,
 	if cfg.TypeScript.Install != "" {
 		return ui.Row{}, false
 	}
-	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
 	if _, ok := nodedeps.WorkspaceRoot(dir, root); ok {
 		return ui.Row{}, false
 	}
@@ -1251,7 +1301,7 @@ func installNote(root string, c component.Component, cfg config.Config) (ui.Row,
 		Value:  "not installed",
 		Detail: []string{
 			"no single " + strings.Join(nodedeps.Managers(), "/") + " lockfile between " + c.Dir + " and the scan root, so no install ran",
-			"Set typescript.install in " + config.FileName + " if this component installs differently.",
+			installHint,
 		},
 	}, true
 }

@@ -285,3 +285,48 @@ App requests, and it is gt's side of
 repository is agnostic to whether a consumer requires the check. What changes is
 only that the check, when it is posted, is attributable to the App that published
 it.
+
+## Amendment (2026-09-21): the relay tells an isolated job apart by `job_workflow_ref`
+
+The 2026-09-20 amendment's blanket refusal of `lydite/referral` is superseded. OIDC carries no job
+identity, and `lydite-pr.yml` has one job holding `id-token: write`, so `environment`, audience
+and `ref` cannot tell the isolated job from one running the pull request's own code. The
+verified `job_workflow_ref` can: a local same-repo reusable workflow is never allowlisted, since
+its ref is controlled by the pull request, while an external callee in `lydite/actions` cannot be
+edited by the pull request's author.
+
+The allowlist is two Wrangler vars, `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`, of
+exact `lydite/actions/.github/workflows/<name>.yml@<ref>` strings (comma or newline separated,
+empty by default; an empty list admits no job). There are no patterns: a SHA pin matches only if
+that exact SHA is allowlisted, and a refusal names the ref. Consumers pin the floating major tag
+and this repository an exact SHA, so both are allowlisted. A ref in both lists is refused. A
+referral ref may post `lydite/referral` only and a clearance ref `lydite/clearance` only. The
+relay accepts the clearance status only under `lydite/clearance`, while `clearance.Context` in
+`internal/clearance/decide.go` emits `lydite/referral`, so the CLI's clearance status is refused
+by the relay until `clearance.Context` is `lydite/clearance` — and nothing posts a status through
+the relay until it is.
+
+A clearance run is `issue_comment` from the default branch, so its `ref` is not a pull ref. The
+allowlist names a workflow file, which says nothing about what started it: the same callee
+reached from a `push`, a `workflow_dispatch` or a same-repository `pull_request` caller is a run
+whoever can open a pull request controls, and it would otherwise hold both of the things that
+separate a clearance run from every other job. Clearance authority therefore takes a ref in the
+clearance allowlist only, `event_name` equal to `issue_comment`, and a `refs/heads/` ref — all
+three verified claims — and an allowlisted ref presenting any other event or ref shape is a `403`
+naming what it presented. For a run that holds it, the pull request number comes from the body and
+is resolved live with the installation token: `/status` is a `403` unless `sha` equals the live head, and
+`/comment` requires the pull request to resolve and be open. A referral ref derives the pull
+request from its claim and a disagreeing body number is a `403`. `/review` is not exempted.
+
+Following [ADR 0037](0037-a-deterministic-relay-misconfiguration-fails-the-step-not-the-fallback.md),
+a `403` for a non-allowlisted job fails the step. Statuses fall back to the bot token only on
+`409`; a relay `5xx` or `000` fails the step, deliberately unlike the comment ladder, because an
+App-authored `pending` followed by a bot-authored `success` is the mixed record the App identity
+exists to end.
+
+The reusable workflows build lydite from a checkout of `lydite/lydite` at a commit SHA pinned in
+the callee YAML, so no pull-request input chooses the binary and no release is needed; the cost is
+a Go build per run, a pin bump when lydite changes what the workflows call, and allowlisting that
+commit's exact ref. Not closed: the `referral` job's artifact still carries a claimed-clean result
+that is not independently verified, and a pull request can swap the pinned ref for any other
+allowlisted ref, so refs of superseded commits must be pruned on each release.

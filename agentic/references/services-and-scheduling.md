@@ -105,7 +105,10 @@ nothing the scheduler holds unless somebody writes it down, and two components
 each resolving that root for their install would mutate the one `node_modules`
 tree it produces without either being serialised. That gap is closed by
 installing the root exactly once per process (`internal/nodedeps`, see
-[Components](components.md)), and it stays closed that way even though an
+[Components](components.md)) — one install that serves a runner-based TypeScript
+component and a raw `command:` component alike, whenever either resolves the
+same root, still through the single `nodedeps.Install` call — and it stays
+closed that way even though an
 `occupies:` entry could now name the root: doing the work once removes the
 duplicated install as well as the race, where a lock on a root every component
 sits under would serialise the whole repository one component at a time. The

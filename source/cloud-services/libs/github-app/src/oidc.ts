@@ -11,6 +11,22 @@ export const ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
  * cannot ask for a comment on a repository it does not belong to; `ref` is what
  * the submitted pull-request number is checked against, so it cannot ask for
  * one on a different pull request either.
+ *
+ * `job_workflow_ref` is the third the requester cannot choose: the
+ * `owner/repo/.github/workflows/<name>.yml@<ref>` of the workflow file the job
+ * itself came from — a reusable workflow's own path when the job was called
+ * from one, rather than the caller's `workflow_ref`. It is what tells one job
+ * in a run apart from another, and it is optional here for the same reason
+ * `ref` is checked where it is used rather than in the verifier: a claim a
+ * consumer of these types does not gate on is not one this refuses a token
+ * over.
+ *
+ * `event_name` is the fourth: the workflow event the run was triggered by,
+ * `issue_comment` or `push` or `pull_request`. Which workflow file a job came
+ * from says nothing about what started it, so a callee allowlisted for one
+ * event is reachable from a caller running on any other — `event_name` and
+ * `ref` together are what tell those apart, and both are the platform's own
+ * statement rather than the requester's.
  */
 export interface ActionsClaims {
   iss: string;
@@ -20,6 +36,8 @@ export interface ActionsClaims {
   ref: string;
   sha?: string;
   workflow_ref?: string;
+  job_workflow_ref?: string;
+  event_name?: string;
 }
 
 interface Jwk {
