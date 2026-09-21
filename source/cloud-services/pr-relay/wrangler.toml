@@ -18,6 +18,15 @@ custom_domain = true
 LYDITE_APP_ID = ""
 AUDIENCE = "https://pr.lydite.org"
 
+# The `job_workflow_ref` claims allowed to post each gated status context, as
+# exact `owner/repo/.github/workflows/<name>.yml@<ref>` strings separated by
+# commas or newlines. Exact and not a pattern: an entry without its `@<ref>`
+# would admit the workflow at a revision anyone with write access can move.
+# Empty admits no job, which is the state in which `lydite/referral` and
+# `lydite/clearance` are refused to every caller.
+REFERRAL_WORKFLOW_REFS = ""
+CLEARANCE_WORKFLOW_REFS = ""
+
 # LYDITE_APP_PRIVATE_KEY is a per-Worker secret, set by workers-secrets-sync.yml
 # and never declared here. Per-Worker and deliberately not an account-level
 # store: this Worker must not be able to read the dashboard App's key, which is

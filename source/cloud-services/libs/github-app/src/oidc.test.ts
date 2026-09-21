@@ -24,6 +24,23 @@ describe("verifyActionsToken", () => {
     expect(verified.ref).toBe("refs/pull/7/merge");
   });
 
+  it("keeps the job_workflow_ref claim the signature covers", async () => {
+    const keys = await issuerKeys();
+    const ref = "lydite/actions/.github/workflows/referral.yml@refs/heads/main";
+    const verified = await verifyActionsToken(await keys.sign(claims({ job_workflow_ref: ref })), AUDIENCE, keys.jwks);
+    expect(verified.job_workflow_ref).toBe(ref);
+  });
+
+  it("keeps the event_name claim the signature covers", async () => {
+    const keys = await issuerKeys();
+    const verified = await verifyActionsToken(
+      await keys.sign(claims({ event_name: "issue_comment" })),
+      AUDIENCE,
+      keys.jwks,
+    );
+    expect(verified.event_name).toBe("issue_comment");
+  });
+
   it("refuses a token that is not a JWT", async () => {
     const keys = await issuerKeys();
     await expect(verifyActionsToken("not-a-token", AUDIENCE, keys.jwks)).rejects.toThrow();

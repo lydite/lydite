@@ -6,7 +6,9 @@ dashboard's. `libs/github-app` is what both mint tokens through.
 
 Read [`surface.md`](../../agentic/references/surface.md) before changing either Worker — it
 carries the relay's trust boundary, why RS256 is fixed rather than read from the token, why a
-rejection carries no detail, why `ref` is the only claim a run cannot choose, and why the
+rejection carries no detail, why `ref` is the only claim a run cannot choose, why the `referral` and `clearance`
+contexts are accepted only from an allowlisted `job_workflow_ref` (empty by default) and
+a clearance run names its pull request in the body for the relay to resolve live, and why the
 `github-token` fallback is a required path rather than a stopgap. The two-App split is
 [ADR 0022](../../docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md); widening either
 App's permissions is what that decision exists to prevent.
