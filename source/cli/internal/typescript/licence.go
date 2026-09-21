@@ -68,13 +68,20 @@ type npmPackage struct {
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 }
 
-// requires is every package name an entry depends on, sorted, across all four
-// kinds of edge. An edge naming a package the lockfile resolved nowhere — an
-// optional dependency npm skipped on this platform, a peer it did not install
-// — resolves to nothing and drops out of the walk.
-func (p npmPackage) requires() []string {
+// requires is every package name an entry depends on, sorted. Development
+// edges are included only when dev is set: they are what building the
+// component itself needs, and a package that depends on a workspace member
+// loads its runtime dependencies and never the member's development ones. An
+// edge naming a package the lockfile resolved nowhere — an optional dependency
+// npm skipped on this platform, a peer it did not install — resolves to nothing
+// and drops out of the walk.
+func (p npmPackage) requires(dev bool) []string {
+	blocks := []map[string]string{p.Dependencies, p.OptionalDependencies, p.PeerDependencies}
+	if dev {
+		blocks = append(blocks, p.DevDependencies)
+	}
 	names := make([]string, 0, len(p.Dependencies)+len(p.DevDependencies)+len(p.OptionalDependencies)+len(p.PeerDependencies))
-	for _, block := range []map[string]string{p.Dependencies, p.DevDependencies, p.OptionalDependencies, p.PeerDependencies} {
+	for _, block := range blocks {
 		for name := range block {
 			if !slices.Contains(names, name) {
 				names = append(names, name)
@@ -228,7 +235,7 @@ func memberClosure(packages map[string]npmPackage, member, dir string) (map[stri
 	for len(queue) > 0 {
 		from := queue[0]
 		queue = queue[1:]
-		for _, name := range packages[from].requires() {
+		for _, name := range packages[from].requires(from == member) {
 			target, ok := resolveEntry(packages, from, name)
 			if !ok || reachable[target] {
 				continue

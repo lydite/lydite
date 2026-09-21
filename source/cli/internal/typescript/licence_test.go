@@ -498,6 +498,24 @@ func TestLicenceSetFollowsALinkToAnotherMember(t *testing.T) {
 	}
 }
 
+// A member's development dependencies are its own build's. A component that
+// depends on the member loads its runtime dependencies, so a rejected
+// development-only package of the linked member is absent from the consumer's
+// set and present in the member's own.
+func TestLicenceSetLeavesALinkedMembersDevelopmentDependenciesOut(t *testing.T) {
+	root := npmWorkspace(t)
+	policy := licence.NewPolicy([]string{"MPL-2.0"})
+	for member, want := range map[string]bool{"app": false, "ui": true} {
+		set, err := LicenceSet(context.Background(), filepath.Join(root, "packages", member), root, policy)
+		if err != nil {
+			t.Fatalf("LicenceSet(%s): %v", member, err)
+		}
+		if _, held := rejected(t, set)["typescript"]; held != want {
+			t.Errorf("typescript is ui's development-only dependency: in %s's set = %v, want %v, got %v", member, held, want, set.Dependencies())
+		}
+	}
+}
+
 // A claim against a nested member's own declared dependency locates at the
 // line of that member's own manifest, in either block. A set scoped to the
 // whole workspace would carry siblings' dependencies, which that manifest
