@@ -308,12 +308,16 @@ func noComplexitySource(m measurement) string {
 // for the same reason: an override runs in the component's own directory
 // regardless of any lockfile above it, and Producer has to look where the
 // install actually ran rather than where one would otherwise be inferred.
+//
+// The declared args go with them, because a component may narrow the package
+// set its coverage is measured over and a figure taken over a narrower tree
+// does not compare to one taken over the whole of it.
 func producerOf(root string, c component.Component, cfg config.Config, tc *toolchain.Env) string {
 	r, ok := runner.Lookup(c.Runner)
 	if !ok {
 		return ""
 	}
-	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version())
+	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version(), c.Args...)
 }
 
 // coverageOptions is what the command decided about coverage before anything
