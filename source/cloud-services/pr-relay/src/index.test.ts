@@ -443,16 +443,13 @@ describe("recording a status", () => {
     expect(response.status).toBe(400);
   });
 
-  // The OIDC claim names a repository and a pull request, not a job: nothing
-  // here tells `referral-publish` — the one job isolated to hold
-  // `statuses: write` — apart from any other job in the same workflow that
-  // also holds `id-token: write` and runs the pull request's own code. Until
-  // a caller can be told apart from the code it is running, the one status a
-  // human Clearance acts on is refused outright, `lydite/` prefix or not.
-  it("refuses the clearance context even though it is in lydite's namespace", async () => {
+  // The gated contexts are admitted only from a `job_workflow_ref` the
+  // allowlist names, and an empty allowlist names none — so the verdict a
+  // merge is gated on is refused to every caller, `lydite/` prefix or not.
+  it("refuses a gated context to a job no allowlist names", async () => {
     const token = await keys.sign(claims());
     const response = await postStatus(token, { ...verdict, context: "lydite/referral" });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
   });
 
   // The same designed path the comment has: not installed is an answer, and

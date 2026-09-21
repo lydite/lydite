@@ -18,6 +18,21 @@ export interface Env {
   LYDITE_APP_ID: string;
   LYDITE_APP_PRIVATE_KEY: string;
   AUDIENCE: string;
+  /**
+   * The `job_workflow_ref` values allowed to post each gated context, as exact
+   * strings separated by commas or newlines.
+   *
+   * Exact, because every looser shape is a hole: a prefix match on
+   * `lydite/actions/.github/workflows/referral.yml` accepts
+   * `...referral.yml.evil@…`, and an entry without its `@<ref>` accepts the
+   * workflow at any revision, including a branch anyone with write access can
+   * move. A SHA-pinned entry therefore admits that SHA and nothing else.
+   *
+   * Both default to empty, which admits no job at all — the state in which the
+   * gated contexts are refused to every caller.
+   */
+  REFERRAL_WORKFLOW_REFS?: string;
+  CLEARANCE_WORKFLOW_REFS?: string;
 }
 
 /** What a client sends. Deliberately small, and none of it is trusted. */
@@ -46,10 +61,12 @@ const JWKS = "https://token.actions.githubusercontent.com/.well-known/jwks";
 
 const ROUTES = ["/comment", "/review", "/status"];
 
-// `lydite/lydite/internal/clearance.Context`. The one status a human
-// Clearance acts on, and the reason `/status` cannot yet accept it — see the
-// check below.
-const CLEARANCE_CONTEXT = "lydite/referral";
+// The two contexts a job may only post from an allowlisted workflow: the
+// referral verdict a merge is gated on, and the status a human Clearance acts
+// on. They are distinct names so that one workflow's authority to post its own
+// is never authority to post the other.
+const REFERRAL_CONTEXT = "lydite/referral";
+const CLEARANCE_CONTEXT = "lydite/clearance";
 
 /**
  * What the relay talks to.
@@ -152,6 +169,14 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     if (error) {
       return json(400, { error });
     }
+    const refused = statusAuthorityError(payload.context as string, claims.job_workflow_ref, env);
+    if (refused) {
+      // 403 and not 400: the payload is well formed, and what is refused is
+      // the job asking. Deterministic either way — the same job retrying
+      // answers the same — so a transport sorting this answer has nothing to
+      // fall back for.
+      return json(403, { error: refused });
+    }
   }
   if (route === "/review" && payload.version !== OPS_VERSION) {
     // Refused whole rather than half-applied. A document from a newer lydite
@@ -242,10 +267,10 @@ const UNWRITTEN: Record<string, string> = {
 /**
  * What is wrong with a `/status` payload, or nothing.
  *
- * Everything checkable without a network call lives here — the fields the
- * caller must supply, the namespace its `context` must stay inside, and the
- * one context this relay does not yet accept at all. `sha` against the pull
- * request's real head is not: that check needs the installation token, so it
+ * Everything about the document itself lives here — the fields the caller must
+ * supply and the namespace its `context` must stay inside. Which job may post
+ * which context is `statusAuthorityError`'s; `sha` against the pull request's
+ * real head is neither, because that check needs the installation token and so
  * stays in `handle`, beside the write it gates.
  */
 function statusPayloadError(payload: StatusRequest): string | undefined {
@@ -259,17 +284,73 @@ function statusPayloadError(payload: StatusRequest): string | undefined {
     // another tool.
     return "a status context must start with lydite/";
   }
-  if (payload.context === CLEARANCE_CONTEXT) {
-    // The OIDC claim names a repository and a pull request, not a job — this
-    // relay cannot tell `referral-publish`, the one job isolated to hold
-    // `statuses: write`, from any other job in the same workflow that also
-    // holds `id-token: write` and runs the pull request's own code. Until a
-    // caller can be told apart from the code it is running, the one context a
-    // human Clearance acts on is refused here rather than trusted to whoever
-    // asks for it.
-    return `${CLEARANCE_CONTEXT} is not accepted through this relay yet`;
+  return undefined;
+}
+
+/**
+ * Why this job may not post this context, or nothing.
+ *
+ * `repository` and `ref` say which pull request is being written to; neither
+ * says which job is asking, and the gated contexts are exactly the ones where
+ * that matters. A workflow holding `id-token: write` and running the pull
+ * request's own code is indistinguishable, by those two claims alone, from the
+ * isolated job that runs no such code — so the verdict a merge is gated on, and
+ * the status a human Clearance acts on, are admitted only from a
+ * `job_workflow_ref` named in the allowlist for that context.
+ *
+ * The pairing is exclusive in both directions. An allowlisted referral workflow
+ * may post the referral context and nothing else, and a clearance workflow the
+ * clearance context and nothing else, so that being trusted to author one
+ * verdict is never being trusted to author the other. A job whose ref is in
+ * neither list is unaffected outside the gated contexts: the `lydite/` namespace
+ * check is the whole of what governs the rest.
+ */
+function statusAuthorityError(
+  context: string,
+  ref: string | undefined,
+  env: Env,
+): string | undefined {
+  const named = ref ?? "";
+  const referral = allowlisted(env.REFERRAL_WORKFLOW_REFS, named);
+  const clearance = allowlisted(env.CLEARANCE_WORKFLOW_REFS, named);
+  if (referral && clearance) {
+    // One ref cannot hold both authorities, and resolving the ambiguity toward
+    // either would grant an authority nobody wrote down. It is a deployment
+    // mistake, refused rather than interpreted.
+    return `${named} is allowlisted for both ${REFERRAL_CONTEXT} and ${CLEARANCE_CONTEXT}`;
+  }
+  const permitted = referral ? REFERRAL_CONTEXT : clearance ? CLEARANCE_CONTEXT : undefined;
+  if (permitted) {
+    return context === permitted ? undefined : `${named} may post ${permitted} only`;
+  }
+  if (context === REFERRAL_CONTEXT || context === CLEARANCE_CONTEXT) {
+    // Naming the ref is what makes this actionable: an allowlist is edited by
+    // pasting the exact string a refusal quoted, and a SHA pin is a character
+    // difference nobody reads out of a job log otherwise.
+    return `${context} is posted only by an allowlisted workflow, and ${
+      named || "this run names no job_workflow_ref"
+    } is not one`;
   }
   return undefined;
+}
+
+/**
+ * Whether a `job_workflow_ref` is one of the exact strings a var lists.
+ *
+ * Commas and newlines both separate, because a Wrangler var is typed by hand
+ * and a list of workflow refs is long enough to want breaking over lines.
+ * Empty entries are dropped and an empty or unset var matches nothing — an
+ * allowlist that is not configured admits no job rather than every job.
+ */
+function allowlisted(list: string | undefined, ref: string): boolean {
+  if (!ref) {
+    return false;
+  }
+  return (list ?? "")
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .includes(ref);
 }
 
 /**
