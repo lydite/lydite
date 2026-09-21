@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -132,6 +134,37 @@ func TestAnExpectedUndeclaredConcernThatArrivesIsNotAlsoReportedMissing(t *testi
 	}
 	if body := comment.Render(); strings.Contains(body, "the run expected a `coverage` report") {
 		t.Errorf("an expected concern that arrived is also reported missing:\n%s", body)
+	}
+}
+
+// --expect is a flag on the command, not only a parameter buildComment
+// happens to take — a run invoking `lydite publish --expect ...` has to reach
+// the same behaviour the unit tests exercise directly.
+func TestTheExpectFlagIsWiredToTheRun(t *testing.T) {
+	present := reportDirWith(t, "test", ui.Row{Status: ui.StatusPass, Label: "test(cli)", Value: "passed"})
+
+	cmd := newPublishCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--reports", present, "--expect", "review,test"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("publish: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "the run expected a `review` report") {
+		t.Fatalf("--expect did not reach the run:\n%s", out.String())
+	}
+}
+
+// sortedNames is what keeps an undeclared concern's place in the comment
+// stable across runs, rather than following Go's randomised map order.
+func TestSortedNamesOrdersAlphabetically(t *testing.T) {
+	got := sortedNames(map[string]bool{
+		"zeta": true, "alpha": true, "mid": true, "kappa": true, "omega": true, "beta": true,
+	})
+	want := []string{"alpha", "beta", "kappa", "mid", "omega", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sortedNames(...) = %v, want %v", got, want)
 	}
 }
 
