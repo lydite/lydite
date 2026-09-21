@@ -37,6 +37,11 @@ export interface Env {
 
 /** What a client sends. Deliberately small, and none of it is trusted. */
 interface CommentRequest {
+  /**
+   * The pull request to write to. Ordinarily only an assertion to be agreed
+   * with the one `ref` names; `resolveTarget` says which runs it actually
+   * names the target for, and what is then done to resolve it.
+   */
   pull_request?: number;
   marker?: string;
   body?: string;
@@ -95,6 +100,9 @@ const production: Deps = {
  * token GitHub minted for that run; the relay checks it, decides from the
  * verified claims which repository and which pull request may be written to,
  * mints an installation token narrowed to exactly that, writes, and discards it.
+ * The repository is always the claim's. The pull request is too, except for the
+ * clearance runs `resolveTarget` describes, which have no pull-request ref and
+ * whose submitted number is resolved through that token before it is written to.
  *
  * Three endpoints, and each writes to one pull request and nothing else.
  * `POST /comment` upserts the standing comment; `POST /review` applies the
@@ -148,19 +156,14 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     return json(401, { error: "the Actions OIDC token did not verify" });
   }
 
-  // The pull request comes from `ref`, and a submitted number only has to
-  // agree with it. A run whose ref is not a pull-request ref — a push build —
-  // has no pull request to write to, and saying so is better than letting it
-  // name one.
-  const fromRef = pullRequestFromRef(claims.ref);
-  if (!fromRef) {
-    return json(403, { error: "this run is not for a pull request, so there is nothing to write to" });
-  }
-
   const payload = (await request.json().catch(() => ({}))) as CommentRequest & ReviewOps & StatusRequest;
-  if (payload.pull_request !== undefined && payload.pull_request !== fromRef) {
-    return json(403, { error: "the pull request submitted is not the one this run is for" });
+
+  const target = resolveTarget(route, claims, payload, env);
+  if ("error" in target) {
+    return json(403, { error: target.error });
   }
+  const pull = target.pull;
+
   if (route === "/comment" && (!payload.body || !payload.marker)) {
     return json(400, { error: "a marker and a body are required" });
   }
@@ -201,15 +204,25 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     const token = await installationToken(jwt, installation, claims.repository, deps.fetcher);
 
     if (route === "/comment") {
+      if (target.submitted) {
+        // A number out of the body is the caller's assertion, and nothing is
+        // written under it until GitHub has answered for it. `/status` binds
+        // its own write on the head sha below; a comment has no such anchor,
+        // so this is where the submitted number is resolved.
+        const refused = await submittedPullRefusal(token, claims.repository, pull, deps.fetcher);
+        if (refused) {
+          return json(403, { error: refused });
+        }
+      }
       const outcome = await upsertComment(
         token,
         claims.repository,
-        fromRef,
+        pull,
         payload.marker as string,
         payload.body as string,
         deps.fetcher,
       );
-      return json(200, { repository: claims.repository, pull_request: fromRef, comment: outcome });
+      return json(200, { repository: claims.repository, pull_request: pull, comment: outcome });
     }
 
     if (route === "/status") {
@@ -218,15 +231,21 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
       // no branch and which no verdict is ever published against — the same
       // reason `forge.PullRequestEvent` reads a head from the event payload
       // rather than from `GITHUB_SHA`. Resolving it here, with the token
-      // rather than trusting the body, is what lets `sha` be checked at all.
-      const head = await pullRequestHeadSha(token, claims.repository, fromRef, deps.fetcher);
-      if (payload.sha !== head) {
+      // rather than trusting the body, is what lets `sha` be checked at all —
+      // and it is what resolves a submitted number too, since a verdict on a
+      // pull request this repository does not have is a pull request `GET
+      // /pulls/:n` answers nothing for.
+      const pr = await pullRequest(token, claims.repository, pull, deps.fetcher);
+      if (!pr) {
+        return json(403, { error: NO_SUCH_PULL });
+      }
+      if (payload.sha !== pr.head?.sha) {
         return json(403, { error: "the sha submitted is not this pull request's head" });
       }
       await postStatus(token, claims.repository, payload, deps.fetcher);
       return json(200, {
         repository: claims.repository,
-        pull_request: fromRef,
+        pull_request: pull,
         status: "posted",
       });
     }
@@ -237,7 +256,7 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     // so this is what stops a run deleting a comment on somebody else's pull
     // request — and refusing the whole document rather than the operation
     // means a caller cannot use the answer to probe which ids exist.
-    const members = await reviewCommentIds(token, claims.repository, fromRef, deps.fetcher);
+    const members = await reviewCommentIds(token, claims.repository, pull, deps.fetcher);
     const named = [
       ...(payload.reply ?? []).map((op) => op.comment),
       ...(payload.delete ?? []).map((op) => op.comment),
@@ -246,8 +265,8 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
       return json(403, { error: "the operations name a comment that is not on this pull request" });
     }
 
-    const outcomes = await applyReview(token, claims.repository, fromRef, payload, deps.fetcher);
-    return json(200, { repository: claims.repository, pull_request: fromRef, outcomes });
+    const outcomes = await applyReview(token, claims.repository, pull, payload, deps.fetcher);
+    return json(200, { repository: claims.repository, pull_request: pull, outcomes });
   } catch {
     // The reason is deliberately not relayed. It is about lydite's own
     // credentials and GitHub's answers to them, neither of which is the
@@ -263,6 +282,73 @@ const UNWRITTEN: Record<string, string> = {
   "/review": "the review could not be applied",
   "/status": "the status could not be posted",
 };
+
+/**
+ * The one pull request a request may write to, or why there is none.
+ *
+ * `submitted` travels with the number because it decides what still has to be
+ * checked: a number taken from `ref` is already GitHub's own answer, while a
+ * number taken from the body is the caller's assertion and is resolved live
+ * before anything is written under it.
+ */
+type Target = { pull: number; submitted: boolean } | { error: string };
+
+/**
+ * Where the pull request comes from.
+ *
+ * `ref` is the only claim a run cannot choose, so wherever it names a pull
+ * request it names the one being written to, and a submitted number has only to
+ * agree with it. A clearance run has no such ref: `lydite-clearance.yml` runs on
+ * `issue_comment`, whose token is minted for the default branch, so the pull
+ * request the comment was left on appears in no claim at all and the run has
+ * nothing to write to unless it may say which.
+ *
+ * That exemption is keyed on the verified `job_workflow_ref` being one the
+ * clearance allowlist names, and on nothing in the body — a request cannot ask
+ * for it. Every other run, an allowlisted referral workflow included, keeps
+ * deriving the pull request from its ref and is refused when that ref names
+ * none. `/review` is outside the exemption too: a clearance run has no
+ * operations document, and the ids in one are checked against the pull request
+ * the ref named.
+ */
+function resolveTarget(
+  route: string,
+  claims: ActionsClaims,
+  payload: CommentRequest,
+  env: Env,
+): Target {
+  const fromRef = pullRequestFromRef(claims.ref);
+  if (fromRef) {
+    if (payload.pull_request !== undefined && payload.pull_request !== fromRef) {
+      return { error: "the pull request submitted is not the one this run is for" };
+    }
+    return { pull: fromRef, submitted: false };
+  }
+  if (route !== "/review" && clearanceRun(claims.job_workflow_ref, env)) {
+    const named = payload.pull_request;
+    if (typeof named !== "number" || !Number.isInteger(named) || named <= 0) {
+      return { error: "this run's ref names no pull request, so a pull request number is required" };
+    }
+    return { pull: named, submitted: true };
+  }
+  return { error: "this run is not for a pull request, so there is nothing to write to" };
+}
+
+/**
+ * Whether this run is a clearance run: one whose `job_workflow_ref` the
+ * clearance allowlist names and the referral allowlist does not.
+ *
+ * A ref in both lists holds neither authority. `statusAuthorityError` refuses it
+ * outright as the deployment mistake it is, and reading it as a clearance run
+ * here would hand a referral workflow — which runs beside the pull request's own
+ * code — the one thing that separates the two.
+ */
+function clearanceRun(ref: string | undefined, env: Env): boolean {
+  const named = ref ?? "";
+  return (
+    allowlisted(env.CLEARANCE_WORKFLOW_REFS, named) && !allowlisted(env.REFERRAL_WORKFLOW_REFS, named)
+  );
+}
 
 /**
  * What is wrong with a `/status` payload, or nothing.
@@ -354,24 +440,65 @@ function allowlisted(list: string | undefined, ref: string): boolean {
 }
 
 /**
- * The pull request's current head, so a submitted `sha` can be checked
- * against something GitHub itself says rather than the caller's own claim
- * about it.
+ * Why a submitted pull-request number may not be written to, or nothing.
+ *
+ * The repository is still the claim's, so what is in question is only whether
+ * that repository has this pull request and whether it is open. Open, because
+ * the run that submits a number is answering a comment somebody has just left
+ * on a change under review; a closed pull request is not that conversation, and
+ * admitting one would make every number the repository has ever issued writable
+ * by a single job.
  */
-async function pullRequestHeadSha(
+async function submittedPullRefusal(
   token: string,
   repository: string,
   pull: number,
   fetcher: typeof fetch,
 ): Promise<string | undefined> {
+  const pr = await pullRequest(token, repository, pull, fetcher);
+  if (!pr) {
+    return NO_SUCH_PULL;
+  }
+  if (pr.state !== "open") {
+    return "the pull request submitted is not open";
+  }
+  return undefined;
+}
+
+const NO_SUCH_PULL = "this repository has no such pull request";
+
+/** As much of `GET /pulls/:n` as any check here is decided on. */
+interface PullRequest {
+  state?: string;
+  head?: { sha?: string };
+}
+
+/**
+ * What GitHub says about a pull request, or nothing when the repository has
+ * none by that number.
+ *
+ * A 404 is an answer about the number the caller named and is refused as one.
+ * Every other failure is about lydite's own credentials or GitHub's
+ * availability, so it throws and reaches the caller as the route's `502` —
+ * which keeps a transport's three-way sort intact: a refusal is deterministic
+ * and a `502` is worth retrying.
+ */
+async function pullRequest(
+  token: string,
+  repository: string,
+  pull: number,
+  fetcher: typeof fetch,
+): Promise<PullRequest | undefined> {
   const response = await fetcher(`${GITHUB_API}/repos/${repository}/pulls/${pull}`, {
     headers: apiHeaders(`Bearer ${token}`),
   });
-  if (!response.ok) {
-    throw new Error(`resolving the pull request's head answered ${response.status}`);
+  if (response.status === 404) {
+    return undefined;
   }
-  const pr = (await response.json()) as { head?: { sha?: string } };
-  return pr.head?.sha;
+  if (!response.ok) {
+    throw new Error(`resolving the pull request answered ${response.status}`);
+  }
+  return (await response.json()) as PullRequest;
 }
 
 /**
