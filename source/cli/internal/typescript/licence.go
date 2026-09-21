@@ -56,7 +56,33 @@ type npmPackage struct {
 	Link bool `json:"link"`
 	// Resolved is the tarball URL or git reference npm fetched this entry
 	// from — the origin that names the pin, alongside its name and version.
+	// On a `link: true` entry it is instead the workspace member's own
+	// directory, which is the `packages` key holding that member's own edges.
 	Resolved string `json:"resolved"`
+	// The edges resolution walks from this entry. Peers are among them because
+	// npm installs a peer dependency into the tree like any other, and a
+	// package whose peer resolves is a package that requires it at runtime.
+	Dependencies         map[string]string `json:"dependencies"`
+	DevDependencies      map[string]string `json:"devDependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
+	PeerDependencies     map[string]string `json:"peerDependencies"`
+}
+
+// requires is every package name an entry depends on, sorted, across all four
+// kinds of edge. An edge naming a package the lockfile resolved nowhere — an
+// optional dependency npm skipped on this platform, a peer it did not install
+// — resolves to nothing and drops out of the walk.
+func (p npmPackage) requires() []string {
+	names := make([]string, 0, len(p.Dependencies)+len(p.DevDependencies)+len(p.OptionalDependencies)+len(p.PeerDependencies))
+	for _, block := range []map[string]string{p.Dependencies, p.DevDependencies, p.OptionalDependencies, p.PeerDependencies} {
+		for name := range block {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // licenceOf is the SPDX expression an entry states, or Unknown when it states
@@ -119,7 +145,12 @@ func licenceText(raw json.RawMessage) string {
 // randomised map order produced first — the version a row and a finding name
 // for a rejected pair would then change between two scans of the identical
 // lockfile, even though the verdict itself would not.
-func lockfileDependencies(dir string) ([]licence.Dependency, error) {
+// A member names the workspace member the set is scoped to, as its directory
+// relative to dir in slash form — `packages/ui`, the key npm writes that
+// member's importer entry under. The empty member is the root itself, whose
+// dependencies are the whole lockfile's: a component that owns the lockfile
+// owns every entry resolved under it.
+func lockfileDependencies(dir, member string) ([]licence.Dependency, error) {
 	data, err := os.ReadFile(filepath.Join(dir, npmLockFile)) // #nosec G304 -- dir is the workspace root resolved for a declared component
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", npmLockFile, err)
@@ -132,6 +163,13 @@ func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 	for path := range lock.Packages {
 		paths = append(paths, path)
 	}
+	if member != "" {
+		reachable, err := memberClosure(lock.Packages, member, dir)
+		if err != nil {
+			return nil, err
+		}
+		paths = slices.DeleteFunc(paths, func(path string) bool { return !reachable[path] })
+	}
 	sort.Strings(paths)
 	out := make([]licence.Dependency, 0, len(paths))
 	for _, path := range paths {
@@ -143,6 +181,95 @@ func lockfileDependencies(dir string) ([]licence.Dependency, error) {
 		out = append(out, licence.Dependency{Package: name, Version: p.Version, Licence: licenceOf(p)})
 	}
 	return out, nil
+}
+
+// memberPath is the workspace member dir names, relative to the root that
+// resolves it, in the slash form npm keys an importer entry by. The root
+// itself is the empty member.
+func memberPath(root, dir string) (string, error) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return "", fmt.Errorf("locating %s under the workspace root %s: %w", dir, root, err)
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// memberClosure is every `packages` key one workspace member resolves to,
+// walked from that member's own importer entry.
+//
+// A root lockfile resolves every member's dependencies into one tree, so the
+// entries under it are the workspace's and not any one member's. Reporting the
+// whole tree for a nested member puts a sibling's dependency in this
+// component's set, where it locates against a manifest that never declares it
+// and reads as transitive, and files the same claim once per member of the
+// workspace. The lockfile already holds the structure that separates them: an
+// importer entry names the member's own edges, and each `node_modules/` entry
+// names its own, so the member's set is the closure over them.
+//
+// Resolution follows node's, because that is what decides which copy of a
+// package an entry actually loads: a name required from the package installed
+// at P resolves to `P/node_modules/<name>` if the lockfile holds one, and
+// otherwise to the nearest ancestor directory's `node_modules/<name>`. A
+// `link: true` entry resolves on to the member it points at, whose own
+// dependencies a package depending on that member does require.
+//
+// A member the lockfile names no importer entry for is an error rather than an
+// empty closure: nothing was resolved for it, and a set nothing was resolved
+// into is every dependency conforming to a policy that read none of them.
+func memberClosure(packages map[string]npmPackage, member, dir string) (map[string]bool, error) {
+	if _, ok := packages[member]; !ok {
+		return nil, fmt.Errorf("%s in %s resolves no dependencies for the workspace member %s: it names no entry for that path, so this component's dependencies are not among the ones it resolved", npmLockFile, dir, member)
+	}
+	reachable := map[string]bool{}
+	queue := []string{member}
+	for len(queue) > 0 {
+		from := queue[0]
+		queue = queue[1:]
+		for _, name := range packages[from].requires() {
+			target, ok := resolveEntry(packages, from, name)
+			if !ok || reachable[target] {
+				continue
+			}
+			reachable[target] = true
+			queue = append(queue, target)
+			if linked := packages[target]; linked.Link && linked.Resolved != "" {
+				if _, ok := packages[linked.Resolved]; ok && !reachable[linked.Resolved] {
+					reachable[linked.Resolved] = true
+					queue = append(queue, linked.Resolved)
+				}
+			}
+		}
+	}
+	return reachable, nil
+}
+
+// resolveEntry is the `packages` key a name required from the package
+// installed at from resolves to, and false when the lockfile resolved that
+// name nowhere reachable from there.
+//
+// The search climbs from's own directory and then each ancestor, skipping a
+// `node_modules` directory itself — node looks in `<dir>/node_modules`, never
+// in `node_modules/node_modules`.
+func resolveEntry(packages map[string]npmPackage, from, name string) (string, bool) {
+	for dir := from; ; {
+		if dir != nodeModulesDir && !strings.HasSuffix(dir, "/"+nodeModulesDir) {
+			candidate := strings.TrimPrefix(dir+"/", "/") + nodeModulesDir + "/" + name
+			if _, ok := packages[candidate]; ok {
+				return candidate, true
+			}
+		}
+		if dir == "" {
+			return "", false
+		}
+		if i := strings.LastIndex(dir, "/"); i >= 0 {
+			dir = dir[:i]
+		} else {
+			dir = ""
+		}
+	}
 }
 
 // LockDependencies is every package a `package-lock.json`'s content resolved,
@@ -321,8 +448,15 @@ func installedDependency(root, name string) licence.Dependency {
 // set, which is every dependency conforming to a policy nothing was read
 // against.
 //
-// The set a nested component gets is its whole workspace's, since one root
-// lockfile resolves every member's dependencies together.
+// What is read at that root is scoped to the one component. npm's lockfile
+// holds the structure that separates a member's dependencies from its
+// siblings' — see memberClosure — so a nested npm component's set is its own
+// closure. yarn and pnpm are read out of an installed `node_modules`, which
+// records no importer and no edge, and scoping one there needs either an
+// install or a structure neither manager writes: a nested member under those
+// two is the error the row reports as `unmeasured`, rather than a set carrying
+// every sibling's dependencies. A component whose own directory holds the
+// lockfile is the workspace root and is read whole, under all three.
 //
 // No install is run, for either manager and on either side of the comparison.
 // npm's lockfile states every dependency's licence outright, and under the
@@ -337,12 +471,19 @@ func LicenceSet(ctx context.Context, dir, scanRoot string, policy licence.Policy
 	// WorkspaceRoot ends its walk only at a directory naming exactly one
 	// manager, so this lookup cannot disagree with it.
 	manager, _ := nodedeps.Manager(root)
+	member, err := memberPath(root, dir)
+	if err != nil {
+		return licence.Set{}, err
+	}
 	if manager == "npm" {
-		deps, err := lockfileDependencies(root)
+		deps, err := lockfileDependencies(root, member)
 		if err != nil {
 			return licence.Set{}, err
 		}
 		return policy.Reject(deps), nil
+	}
+	if member != "" {
+		return licence.Set{}, fmt.Errorf("%s is the member %s of the workspace at %s, and %s records no per-member resolution to scope %s by: reading the root's %s whole would report every sibling's dependencies as this component's", dir, member, root, manager, nodeModulesDir, nodeModulesDir)
 	}
 	deps, err := installedDependencies(ctx, root)
 	if err != nil {

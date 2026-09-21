@@ -333,7 +333,7 @@ func TestLicenceSetReadsTheWorkspaceRootsLockfile(t *testing.T) {
   "lockfileVersion": 3,
   "packages": {
     "": {"name": "workspace", "version": "0.0.0"},
-    "packages/ui": {"name": "ui", "version": "0.0.0"},
+    "packages/ui": {"name": "ui", "version": "0.0.0", "dependencies": {"lightningcss": "1.33.0", "typescript": "7.0.2"}},
     "node_modules/ui": {"resolved": "packages/ui", "link": true},
     "node_modules/lightningcss": {"version": "1.33.0", "license": "MPL-2.0"},
     "node_modules/typescript": {"version": "7.0.2", "license": "Apache-2.0"}
@@ -367,6 +367,194 @@ func TestLicenceSetReadsTheWorkspaceRootsLockfile(t *testing.T) {
 	}
 	if _, held := pairs["ui"]; held {
 		t.Error("ui is the workspace's own package, want it out of the set entirely")
+	}
+}
+
+// npmWorkspace materialises a three-member npm workspace and answers its root.
+//
+// `ui` and `api` share lightningcss at two versions — api's own copy is nested
+// under its directory, the shape npm writes when two members want different
+// releases — and api alone depends on zlib-sync, which pulls unlicensed-probe
+// in transitively. `app` depends on the member `ui` rather than on a registry
+// package.
+func npmWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	lockfile := `{
+  "name": "workspace",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "workspace", "version": "0.0.0"},
+    "packages/ui": {"name": "ui", "version": "0.0.0", "dependencies": {"lightningcss": "1.33.0"}, "devDependencies": {"typescript": "7.0.2"}},
+    "packages/api": {"name": "api", "version": "0.0.0", "dependencies": {"lightningcss": "1.20.0", "zlib-sync": "0.6.0"}},
+    "packages/app": {"name": "app", "version": "0.0.0", "dependencies": {"ui": "*"}},
+    "node_modules/ui": {"resolved": "packages/ui", "link": true},
+    "node_modules/api": {"resolved": "packages/api", "link": true},
+    "node_modules/app": {"resolved": "packages/app", "link": true},
+    "node_modules/lightningcss": {"version": "1.33.0", "license": "MPL-2.0"},
+    "packages/api/node_modules/lightningcss": {"version": "1.20.0", "license": "MPL-2.0"},
+    "node_modules/zlib-sync": {"version": "0.6.0", "license": "GPL-3.0-only", "dependencies": {"unlicensed-probe": "1.0.0"}},
+    "node_modules/unlicensed-probe": {"version": "1.0.0"},
+    "node_modules/typescript": {"version": "7.0.2", "license": "Apache-2.0"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), []byte(lockfile), 0o600); err != nil {
+		t.Fatalf("writing package-lock.json: %v", err)
+	}
+	manifests := map[string]string{
+		"ui": `{
+  "name": "ui",
+  "dependencies": {
+    "lightningcss": "1.33.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}`,
+		"api": `{
+  "name": "api",
+  "dependencies": {
+    "lightningcss": "1.20.0",
+    "zlib-sync": "0.6.0"
+  }
+}`,
+		"app": `{"name":"app","dependencies":{"ui":"*"}}`,
+	}
+	for name, manifest := range manifests {
+		dir := filepath.Join(root, "packages", name)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("creating the workspace member %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
+			t.Fatalf("writing %s's package.json: %v", name, err)
+		}
+	}
+	return root
+}
+
+// One root lockfile resolves every member's dependencies together, and each
+// member's set holds the ones it resolves rather than the workspace's. A
+// sibling's dependency in this set would locate against a manifest that never
+// declares it, and would be claimed once per member of the workspace.
+func TestLicenceSetScopesANestedMemberToItsOwnDependencies(t *testing.T) {
+	root := npmWorkspace(t)
+	policy := licence.NewPolicy(permissive)
+
+	ui, err := LicenceSet(context.Background(), filepath.Join(root, "packages", "ui"), root, policy)
+	if err != nil {
+		t.Fatalf("LicenceSet(ui): %v", err)
+	}
+	api, err := LicenceSet(context.Background(), filepath.Join(root, "packages", "api"), root, policy)
+	if err != nil {
+		t.Fatalf("LicenceSet(api): %v", err)
+	}
+
+	uiPairs, apiPairs := rejected(t, ui), rejected(t, api)
+	// The shared dependency resolves to the copy each member's own directory
+	// reaches first, so one lockfile answers one package at two versions.
+	if d := uiPairs["lightningcss"]; d.Version != "1.33.0" {
+		t.Errorf("ui's lightningcss = %q, want 1.33.0", d.Version)
+	}
+	if d := apiPairs["lightningcss"]; d.Version != "1.20.0" {
+		t.Errorf("api's lightningcss = %q, want 1.20.0 from packages/api/node_modules", d.Version)
+	}
+	if _, held := uiPairs["zlib-sync"]; held {
+		t.Errorf("zlib-sync is api's dependency alone, want it out of ui's set, got %v", ui.Dependencies())
+	}
+	if _, held := uiPairs["unlicensed-probe"]; held {
+		t.Errorf("unlicensed-probe is reached through api's zlib-sync alone, want it out of ui's set, got %v", ui.Dependencies())
+	}
+	if _, held := apiPairs["zlib-sync"]; !held {
+		t.Errorf("zlib-sync is GPL-3.0-only and api depends on it, want it in api's set, got %v", api.Dependencies())
+	}
+	if _, held := apiPairs["unlicensed-probe"]; !held {
+		t.Errorf("unlicensed-probe is reached transitively through zlib-sync, want it in api's set, got %v", api.Dependencies())
+	}
+	if _, held := apiPairs["typescript"]; held {
+		t.Error("typescript is Apache-2.0, which the allow-list holds")
+	}
+}
+
+// A member depending on another member of the same workspace requires what
+// that member requires: the `link: true` entry resolution lands on is a
+// pointer at the sibling's own importer entry, and the walk follows it.
+func TestLicenceSetFollowsALinkToAnotherMember(t *testing.T) {
+	root := npmWorkspace(t)
+	set, err := LicenceSet(context.Background(), filepath.Join(root, "packages", "app"), root, licence.NewPolicy(permissive))
+	if err != nil {
+		t.Fatalf("LicenceSet(app): %v", err)
+	}
+	pairs := rejected(t, set)
+	if d, held := pairs["lightningcss"]; !held || d.Version != "1.33.0" {
+		t.Errorf("app depends on the member ui, which depends on lightningcss 1.33.0, got %v", set.Dependencies())
+	}
+	for _, sibling := range []string{"ui", "app"} {
+		if _, held := pairs[sibling]; held {
+			t.Errorf("%q is the workspace's own package, want it out of the set entirely", sibling)
+		}
+	}
+	if _, held := pairs["zlib-sync"]; held {
+		t.Errorf("zlib-sync is reachable from api alone, want it out of app's set, got %v", set.Dependencies())
+	}
+}
+
+// A claim against a nested member's own declared dependency locates at the
+// line of that member's own manifest, in either block. A set scoped to the
+// whole workspace would carry siblings' dependencies, which that manifest
+// names nowhere, and every one of them would report Line: 0 as though it had
+// been reached transitively.
+func TestLicenceFindingsLocateANestedMembersOwnDependency(t *testing.T) {
+	root := npmWorkspace(t)
+	member := filepath.Join(root, "packages", "ui")
+	set, err := LicenceSet(context.Background(), member, root, licence.NewPolicy([]string{"ISC"}))
+	if err != nil {
+		t.Fatalf("LicenceSet(ui): %v", err)
+	}
+	lines := map[string]int{}
+	for _, f := range LicenceFindings(member, set.Dependencies()) {
+		lines[f.Message] = f.Line
+	}
+	for message, line := range lines {
+		if line == 0 {
+			t.Errorf("%q located at line 0, want the member's own manifest line declaring it", message)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("got %d claims, want one for each of ui's own two dependencies: %v", len(lines), lines)
+	}
+}
+
+// A component the root's lockfile names no importer entry for — a directory
+// the workspace never declared as a member, or one added since the lockfile
+// was written — has had nothing resolved for it, and says so. An empty
+// closure returned successfully is every dependency conforming to a policy
+// that read none of them.
+func TestLicenceSetOnAMemberTheLockfileDoesNotNameIsAnError(t *testing.T) {
+	root := npmWorkspace(t)
+	undeclared := filepath.Join(root, "packages", "docs")
+	if err := os.MkdirAll(undeclared, 0o750); err != nil {
+		t.Fatalf("creating the undeclared member: %v", err)
+	}
+	_, err := LicenceSet(context.Background(), undeclared, root, licence.NewPolicy(permissive))
+	if err == nil || !strings.Contains(err.Error(), "packages/docs") {
+		t.Fatalf("the lockfile names no entry for packages/docs, want an error naming it, got %v", err)
+	}
+}
+
+// yarn's and pnpm's source is an installed tree, which records no importer and
+// no edge to scope by, so a nested member under either is unmeasured rather
+// than a set carrying every sibling's dependencies.
+func TestLicenceSetOnANestedYarnMemberIsAnError(t *testing.T) {
+	root := fixture.Tree(t, filepath.Join("testdata", "yarnprobe"))
+	install(t, root, "lightningcss", `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`)
+	member := filepath.Join(root, "packages", "ui")
+	if err := os.MkdirAll(member, 0o750); err != nil {
+		t.Fatalf("creating the workspace member: %v", err)
+	}
+
+	_, err := LicenceSet(context.Background(), member, root, licence.NewPolicy(permissive))
+	if err == nil || !strings.Contains(err.Error(), "per-member resolution") {
+		t.Fatalf("yarn records no per-member resolution, want an error naming that rather than the root's whole tree, got %v", err)
 	}
 }
 
@@ -536,7 +724,7 @@ func TestLicenceTextOnAnUnrecognisedShapeIsEmpty(t *testing.T) {
 // that cannot be parsed: nothing was measured, and LicenceSet's caller reads
 // this as unmeasured rather than an empty, passing set.
 func TestLockfileDependenciesOnAMissingLockfileIsAnError(t *testing.T) {
-	if _, err := lockfileDependencies(t.TempDir()); err == nil {
+	if _, err := lockfileDependencies(t.TempDir(), ""); err == nil {
 		t.Fatal("want an error over a directory with no package-lock.json")
 	}
 }
