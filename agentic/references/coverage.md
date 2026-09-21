@@ -111,6 +111,16 @@ same argument that keeps a types-only TypeScript package from being reported.
   workspace's own runner and coverage provider read back from `node_modules` after the install. It
   is compared verbatim, and a difference reports the component `new` rather than `regressed` — see
   [ADR 0025](../../docs/adr/0025-a-baseline-records-its-producer-and-only-record-writes-it.md).
+- **The producer does not yet fold in a component's declared `-coverpkg`.** `runner.Producer` for
+  `go-test` reports only the Go toolchain version. A component can narrow what its coverage is
+  measured against by declaring its own `-coverpkg` in `args:` (see components.md), but the
+  producer string does not change when it does — so today, narrowing or widening that scope reads
+  as a real coverage regression or improvement against a baseline recorded over the old scope,
+  instead of as the incomparable-producer case ADR 0025 exists to catch. It is the same class of
+  problem ADR 0025 closes for a toolchain or dependency bump, just not yet closed for a
+  component-triggered scope change: tracked as
+  [#207](https://github.com/lydite/lydite/issues/207), open, with the eventual fix shape
+  undecided.
 - **`v4`, so every consumer takes one clean cache miss.** `gitstate.StatePath`'s directory is keyed
   to the metric and to the unit it is measured over; entries recorded under the old per-language
   percentages are a different quantity, and are simply never found. A gained field bumps it too

@@ -95,11 +95,21 @@ type Component struct {
 	// language is never declared: cargo-nextest can only be Rust, and a
 	// second statement of it could only disagree.
 	Runner runner.Name `yaml:"runner"`
-	// Args are passed through to the runner, ahead of anything a variant
-	// adds. Every repository's test invocation is bespoke at the edges —
-	// tagged builds, workspace filters, custom profiles — and this is where
-	// that belongs. lydite decides where, when, how many at once and what
-	// the result means; it does not learn to run anyone's tests.
+	// Args are passed through to the runner. Every repository's test
+	// invocation is bespoke at the edges — tagged builds, workspace filters,
+	// custom profiles — and this is where that belongs. lydite decides
+	// where, when, how many at once and what the result means; it does not
+	// learn to run anyone's tests.
+	//
+	// Placement relative to what a variant adds is not uniform, and a
+	// declared arg can win or lose depending on which. Go's instrumented
+	// variant places its own -coverpkg=./... default before these args, so
+	// a declared -coverpkg overrides it — go test honours the last
+	// occurrence of a repeated flag, and the component is the side that
+	// knows its own package tree. GoRerun does the opposite: it appends its
+	// -run and -count=1 after these args, so a declared duplicate cannot
+	// overrule the filter that rerun exists to apply. See buildGoTest and
+	// GoRerun in internal/runner for the reasoning behind each.
 	Args []string `yaml:"args,omitempty"`
 	// Command is the escape hatch: a whole invocation, run instead of a
 	// runner. A component using it opts out of the derived variants, so it
