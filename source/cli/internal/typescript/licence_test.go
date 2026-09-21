@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -827,5 +828,43 @@ func TestInstalledDependencyOnAMalformedManifestIsUnknown(t *testing.T) {
 	}
 	if d.Licence != licence.Unknown {
 		t.Errorf("garbled = %q, want %q", d.Licence, licence.Unknown)
+	}
+}
+
+// The walk visits an entry's edges in name order, so the closure and every
+// finding derived from it are the same on every run.
+func TestRequiresNamesEveryEdgeKindSortedAndOnce(t *testing.T) {
+	p := npmPackage{
+		Dependencies:         map[string]string{"zeta": "1", "alpha": "1"},
+		OptionalDependencies: map[string]string{"mid": "1"},
+		PeerDependencies:     map[string]string{"alpha": "1", "beta": "1"},
+		DevDependencies:      map[string]string{"dev": "1"},
+	}
+	if got, want := p.requires(false), []string{"alpha", "beta", "mid", "zeta"}; !slices.Equal(got, want) {
+		t.Errorf("requires(false) = %v, want %v", got, want)
+	}
+	if got, want := p.requires(true), []string{"alpha", "beta", "dev", "mid", "zeta"}; !slices.Equal(got, want) {
+		t.Errorf("requires(true) = %v, want %v", got, want)
+	}
+}
+
+// A name resolves through the nearest ancestor holding it, however many
+// directories separate the requiring package from that ancestor.
+func TestResolveEntryClimbsThroughEveryAncestor(t *testing.T) {
+	packages := map[string]npmPackage{
+		"packages/api/node_modules/dep": {},
+		"node_modules/dep":              {},
+		"node_modules/rootonly":         {},
+	}
+	for _, c := range []struct{ from, name, want string }{
+		{"packages/api/sub/deeper", "dep", "packages/api/node_modules/dep"},
+		{"packages/api/sub/deeper", "rootonly", "node_modules/rootonly"},
+		{"packages/other", "dep", "node_modules/dep"},
+		{"packages/other", "missing", ""},
+	} {
+		got, ok := resolveEntry(packages, c.from, c.name)
+		if got != c.want || ok != (c.want != "") {
+			t.Errorf("resolveEntry(%q, %q) = %q, %v, want %q", c.from, c.name, got, ok, c.want)
+		}
 	}
 }

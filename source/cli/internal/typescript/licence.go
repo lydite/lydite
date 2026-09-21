@@ -80,7 +80,7 @@ func (p npmPackage) requires(dev bool) []string {
 	if dev {
 		blocks = append(blocks, p.DevDependencies)
 	}
-	names := make([]string, 0, len(p.Dependencies)+len(p.DevDependencies)+len(p.OptionalDependencies)+len(p.PeerDependencies))
+	var names []string
 	for _, block := range blocks {
 		for name := range block {
 			if !slices.Contains(names, name) {
@@ -271,11 +271,8 @@ func resolveEntry(packages map[string]npmPackage, from, name string) (string, bo
 		if dir == "" {
 			return "", false
 		}
-		if i := strings.LastIndex(dir, "/"); i >= 0 {
-			dir = dir[:i]
-		} else {
-			dir = ""
-		}
+		// No slash leaves the empty directory, the root.
+		dir = dir[:max(strings.LastIndex(dir, "/"), 0)]
 	}
 }
 
