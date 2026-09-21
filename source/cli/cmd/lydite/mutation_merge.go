@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,7 +95,8 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, componentRows(rep, decl, inputs, mutationLabel)...)
+	problems = append(problems, componentRowsNoting(rep, decl, inputs, mutationLabel,
+		func(name string) string { return projectionNote(inputs, name) })...)
 	// A tree the shards disagree about is reported under `shards`, which is the
 	// row that says these documents are not one run. The counts still fold from
 	// the rows, because a fold that dropped them would answer a narrower
@@ -109,6 +113,64 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	rep.Add(foldedMutationRow(inputs, counts, decl))
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedMutationLabel(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
+}
+
+// projectionNote is what a shard's uploaded directory still says about a
+// component that took no row.
+//
+// Only the projection, quoted as the run's own words, and only when the log
+// survived: the run said what it was about to cost before it spent it, and a
+// reader deciding what to do about a missing row wants that figure. It is not a
+// cause and is not offered as one — a killed job, a runner that ran out of
+// memory and an upload that never arrived all leave exactly this behind, and a
+// projection is a statement made before any of them happened.
+//
+// The first shard that has the log answers. A component is one shard's
+// responsibility, so there is normally one; two would mean two jobs ran the same
+// work, which is the failure the second arm of componentRows reports and not
+// this one.
+func projectionNote(inputs []shardInput, name string) string {
+	for _, in := range inputs {
+		line, ok := shardProjection(in.dir, name)
+		if !ok {
+			continue
+		}
+		return fmt.Sprintf("and the log it left in %s says the run projected: %q — what the run said it was about to cost, not what became of it",
+			in.dir, line)
+	}
+	return ""
+}
+
+// shardProjection reads the projection out of one component's mutation log
+// inside a shard's report directory.
+//
+// The log is found by the layout openLog writes — a directory named for the
+// component, holding the log named for the command — rather than by walking
+// whatever subdirectories the artifact happens to hold, so a lone shard
+// extracted straight into the reports directory reads the same as one nested
+// under a directory of its own.
+//
+// Every failure is the same answer, which is that there is no projection to
+// quote: a missing directory, a log that cannot be opened, and a log that never
+// reached the line are all a fold that says what it said before.
+func shardProjection(dir, name string) (string, bool) {
+	f, err := os.Open(filepath.Join(dir, name, mutationLogName)) // #nosec G304 -- a shard's own report directory, under a directory named for a declared component
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	scan := bufio.NewScanner(f)
+	// A suite writes whatever it likes into this log, and a single line longer
+	// than the scanner's buffer ends the scan. The projection is one short line
+	// among them, so the buffer is sized for a log that holds long ones before
+	// it.
+	scan.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scan.Scan() {
+		if line, ok := costProjectionIn(scan.Text()); ok {
+			return line, true
+		}
+	}
+	return "", false
 }
 
 // foldedMutationLabel names every label this fold produces itself, so

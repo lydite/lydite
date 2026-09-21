@@ -256,12 +256,31 @@ func wholeTreeRows(rep *ui.Report, inputs []shardInput, labels []string) []strin
 // is two jobs running the same work, and a consumer keying rows by label picks
 // one of two answers.
 func componentRows(rep *ui.Report, decl component.File, inputs []shardInput, label func(string) string) []string {
+	return componentRowsNoting(rep, decl, inputs, label, nil)
+}
+
+// componentRowsNoting is componentRows with a hook that says what else a shard's
+// directory holds about a component with no row.
+//
+// A component can go missing for reasons the documents cannot tell apart — a job
+// killed at its timeout writes no document at all, and neither does a runner that
+// ran out of memory or an upload that failed — so the note says only what some
+// artefact of the run actually states, and never why the row is absent. A fold
+// that named a cause from this evidence would be guessing in the voice of a
+// diagnosis.
+func componentRowsNoting(rep *ui.Report, decl component.File, inputs []shardInput, label func(string) string, note func(string) string) []string {
 	var problems []string
 	for _, c := range decl.Components {
 		found := rowsFor(inputs, label(c.Name))
 		switch len(found) {
 		case 0:
-			problems = append(problems, c.Name+" has no row in any shard's report")
+			problem := c.Name + " has no row in any shard's report"
+			if note != nil {
+				if extra := note(c.Name); extra != "" {
+					problem += ", " + extra
+				}
+			}
+			problems = append(problems, problem)
 		case 1:
 			rep.Add(found[0])
 		default:

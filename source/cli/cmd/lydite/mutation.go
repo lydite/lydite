@@ -359,6 +359,15 @@ func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[
 	}
 }
 
+// mutationLogKind names this command's per-component log, which openLog writes
+// as `<reports>/<component>/mutation.log`. The fold reads that file back out of
+// a shard's uploaded directory, so the name is one constant rather than a
+// literal at each end.
+const (
+	mutationLogKind = "mutation"
+	mutationLogName = mutationLogKind + ".log"
+)
+
 // runMutation plans every selected component, runs its mutants and adds the
 // rows in declaration order.
 //
@@ -378,7 +387,7 @@ func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[
 // mutants, which is the quadratic oversubscription defaultConcurrency is a
 // constant rather than NumCPU to avoid.
 func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]componentMutation {
-	plans := planComponents(ctx, opts.root, selected, "mutation", opts.stream)
+	plans := planComponents(ctx, opts.root, selected, mutationLogKind, opts.stream)
 	for _, p := range plans {
 		defer p.log.Close()
 	}
@@ -839,9 +848,33 @@ func budget(baseline, override time.Duration) time.Duration {
 // lands well under. Stating the ceiling is not capping it — ADR 0027 refuses a
 // runtime budget, and nothing here stops a run.
 func costProjection(mutants, workers int, timeout time.Duration) string {
-	return fmt.Sprintf("%d mutant(s), budget %s each, %d worker(s): at most %s",
+	return fmt.Sprintf(costProjectionFormat,
 		mutants, timeout.Round(time.Second), staged(mutants, workers),
 		projectedCeiling(mutants, workers, timeout).Round(time.Second))
+}
+
+// costProjectionFormat is the projection's one spelling, written through
+// Sprintf here and read back through Sscanf by the fold, which finds the line
+// in a log a shard uploaded without a document. A reader holding its own copy
+// of the wording agrees with the writer until either is edited, and the
+// disagreement is silent: the fold simply stops finding the line.
+const costProjectionFormat = "%d mutant(s), budget %s each, %d worker(s): at most %s"
+
+// costProjectionIn returns the projection a mutation log carries, if it carries
+// one.
+//
+// The whole line, verbatim, because what a reader is shown is what the run
+// itself said — a projection restated in the fold's own words would be the
+// fold making a claim about a run it never saw.
+func costProjectionIn(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	var mutants, workers int
+	var budget, ceiling string
+	n, err := fmt.Sscanf(line, costProjectionFormat, &mutants, &budget, &workers, &ceiling)
+	if err != nil || n != 4 {
+		return "", false
+	}
+	return line, true
 }
 
 // projectedCeiling is the longest a run of this many mutants can take: as many
