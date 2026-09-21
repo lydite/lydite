@@ -99,6 +99,53 @@ func TestGoInstrumentedLetsADeclaredCoverpkgWin(t *testing.T) {
 	}
 }
 
+// A declared coverage flag is written for the coverage gate, and only the
+// instrumented variant is that gate. `go test -coverpkg=X` instruments without
+// any -cover of its own, so carrying a declared one into the plain and
+// build-only variants pays for instrumentation nothing reads — on the variant
+// mutation runs once per mutant, thousands of times.
+func TestTheUninstrumentedVariantsCarryNoCoverageFlag(t *testing.T) {
+	declared := []string{
+		"-coverpkg=./internal/...", "-coverprofile", "x.out", "-covermode=atomic", "-cover",
+		"-race", "-timeout", "5m", "./internal/...",
+	}
+	for _, variant := range []Variant{Plain, BuildOnly} {
+		inv := argv(t, GoTest, variant, declared...)
+		for _, arg := range inv.Args {
+			name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+			if strings.HasPrefix(arg, "-") && coverageFlags[name] {
+				t.Errorf("%s go-test = %v, want no coverage flag", variant, inv.Args)
+			}
+		}
+		// A coverage flag's value may be the argument behind it, and a path
+		// left where `go test` expects a package is a worse argv than the one
+		// the strip was for.
+		if slices.Contains(inv.Args, "x.out") {
+			t.Errorf("%s go-test = %v, want -coverprofile's separate value dropped with it", variant, inv.Args)
+		}
+		// The strip drops flags, never package patterns: a variant narrowed to
+		// the component directory builds and tests almost nothing and still
+		// reports a pass.
+		if !slices.Contains(inv.Args, "./internal/...") {
+			t.Errorf("%s go-test = %v, want the declared package pattern", variant, inv.Args)
+		}
+		for _, want := range []string{"-race", "-timeout", "5m"} {
+			if !slices.Contains(inv.Args, want) {
+				t.Errorf("%s go-test = %v, want %q kept", variant, inv.Args, want)
+			}
+		}
+	}
+	// The instrumented variant is the one the flags were declared for: it keeps
+	// them, behind lydite's own, so the declared scope still wins.
+	inv := argv(t, GoTest, Instrumented, declared...)
+	if got := effectiveCoverpkg(inv.Args); got != "./internal/..." {
+		t.Errorf("instrumented go-test = %v, effective -coverpkg %q, want ./internal/...", inv.Args, got)
+	}
+	if i := slices.Index(inv.Args, "-coverpkg=./..."); i < 0 || i > slices.Index(inv.Args, "-coverpkg=./internal/...") {
+		t.Errorf("instrumented go-test = %v, want lydite's -coverpkg ahead of the declared one", inv.Args)
+	}
+}
+
 // Instrumentation replaces the runner for Rust rather than adding a flag to
 // it, which is why it cannot be a placeholder spliced into a command string.
 func TestCargoInstrumentedReplacesTheRunner(t *testing.T) {
