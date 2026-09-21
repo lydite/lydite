@@ -527,8 +527,8 @@ func TestNextestLinuxTargetsAreStatic(t *testing.T) {
 // clean pass — the declared list failing open, one level down.
 //
 // The implication runs this way only. A language in the table without a
-// runner is the deliberate case: lydite reads a .py or a .sh as source a
-// component has to claim, and runs nothing over either.
+// runner is the deliberate case: lydite reads a .sh as source a component has
+// to claim, and runs nothing over it.
 func TestEveryRunnersLangHasSourceExts(t *testing.T) {
 	for _, r := range registry {
 		if len(sourceExts[r.Lang]) == 0 {
@@ -616,7 +616,7 @@ func TestRunsIsTrueForExactlyTheRunnersLanguages(t *testing.T) {
 			t.Errorf("runner %q is %q, which Runs reports lydite does not run", r.Name, r.Lang)
 		}
 	}
-	for _, l := range []Lang{Python, Shell} {
+	for _, l := range []Lang{Shell} {
 		if Runs(l) {
 			t.Errorf("%s has no runner in the registry, so Runs must say so", l)
 		}
@@ -1003,6 +1003,11 @@ func TestARerunOfNoTestsIsRefusedInEveryLanguage(t *testing.T) {
 	if _, ok := VitestRerun(nil, []string{"one.test.ts"}, nil); ok {
 		t.Error("VitestRerun built an invocation for no tests")
 	}
+	// pytest with no node ids collects the whole suite, so this one would
+	// report on every test there is rather than on none.
+	if _, ok := PytestRerun([]string{"-q"}, nil); ok {
+		t.Error("PytestRerun built an invocation for no tests")
+	}
 }
 
 // Both profiles are declared, and they write to different files: a rerun
@@ -1046,5 +1051,232 @@ func TestTheRunPatternIsAnchored(t *testing.T) {
 	}
 	if !re.MatchString("TestFoo") {
 		t.Error("the pattern for TestFoo does not match TestFoo")
+	}
+}
+
+func TestPytestVariants(t *testing.T) {
+	for _, tc := range []struct {
+		variant Variant
+		want    string
+	}{
+		{Plain, "python3 -m pytest -q tests"},
+		{Instrumented, "python3 -m pytest --cov=. --cov-report=lcov:.lydite-reports/coverage/lcov.info --junitxml=.lydite-reports/junit.xml -q tests"},
+		{BuildOnly, "python3 -m pytest --collect-only -q -q tests"},
+	} {
+		if got := line(argv(t, PythonPytest, tc.variant, "-q", "tests")); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.variant, got, tc.want)
+		}
+	}
+}
+
+// The suite runs through the interpreter, not through a `pytest` on PATH: a
+// bare pytest belongs to whichever environment created the script first, and
+// `python3 -m` also puts the invocation's own directory on sys.path, so a
+// component's package is importable without having been installed.
+func TestPytestRunsThroughTheInterpreter(t *testing.T) {
+	for _, v := range []Variant{Plain, Instrumented, BuildOnly} {
+		inv := argv(t, PythonPytest, v)
+		if inv.Name != "python3" {
+			t.Errorf("%s runs %q, want the interpreter", v, inv.Name)
+		}
+		if len(inv.Args) < 2 || inv.Args[0] != "-m" || inv.Args[1] != "pytest" {
+			t.Errorf("%s = %v, want pytest run as a module", v, inv.Args)
+		}
+	}
+}
+
+// A bare --cov measures nothing: coverage.py with no source named records no
+// files, and the component reports unmeasured having paid for the
+// instrumentation. The lcov is named too, because coverage.py's default report
+// is a terminal summary neither gate can parse.
+func TestPytestInstrumentationNamesItsTargetAndItsReport(t *testing.T) {
+	inv := argv(t, PythonPytest, Instrumented)
+	if !slices.Contains(inv.Args, "--cov=.") {
+		t.Errorf("instrumented pytest = %v, want an explicit --cov target", inv.Args)
+	}
+	if !slices.Contains(inv.Args, "--cov-report=lcov:"+inv.CoverageReport) {
+		t.Errorf("instrumented pytest = %v, want the lcov written to %q", inv.Args, inv.CoverageReport)
+	}
+	if !strings.HasSuffix(inv.CoverageReport, "lcov.info") {
+		t.Errorf("CoverageReport = %q, want the lcov the invocation writes", inv.CoverageReport)
+	}
+	// --junitxml is pytest's own flag, so the report comes with the run rather
+	// than through a wrapper the way Go's does.
+	if inv.JUnitReport != junitReport || !slices.Contains(inv.Args, "--junitxml="+junitReport) {
+		t.Errorf("instrumented pytest = %v, JUnitReport = %q, want the report asked for by name", inv.Args, inv.JUnitReport)
+	}
+}
+
+// Collection is the whole of Python's build-only floor: importing every test
+// module and the code it imports is the most a run can check without executing
+// a test. It must not execute one — a variant that ran the suite would report
+// every killed mutant as unviable.
+func TestPytestBuildOnlyCollectsWithoutRunning(t *testing.T) {
+	inv := argv(t, PythonPytest, BuildOnly)
+	if !slices.Contains(inv.Args, "--collect-only") {
+		t.Errorf("build-only pytest = %v, want --collect-only", inv.Args)
+	}
+}
+
+// The flaky gate reads run 1's outcomes out of the report the suite wrote, so
+// asking for the gate has to make the plain run write one — at the path the
+// ledger reads whichever variant ran, and with no instrumentation, since the
+// plain run measures none.
+func TestPytestJUnitPlainWritesTheReportWithoutInstrumentation(t *testing.T) {
+	inv, ok := PytestJUnitPlain([]string{"-q", "tests"})
+	if !ok {
+		t.Fatal("PytestJUnitPlain supplied no invocation")
+	}
+	want := "python3 -m pytest --junitxml=.lydite-reports/junit.xml -q tests"
+	if got := line(inv); got != want {
+		t.Errorf("PytestJUnitPlain = %q, want %q", got, want)
+	}
+	if inv.JUnitReport != junitReport {
+		t.Errorf("PytestJUnitPlain writes %q, want %q", inv.JUnitReport, junitReport)
+	}
+	if inv.CoverageReport != "" {
+		t.Errorf("PytestJUnitPlain reports coverage at %q, and a plain run measures none", inv.CoverageReport)
+	}
+}
+
+// The rerun selects by exact node id and never by -k: a node id names the file
+// as well as the test, so two tests sharing a name in different modules stay
+// distinct, and it is exact, so a rerun of test_add cannot also select
+// test_added the way a -k expression would.
+func TestPytestRerunNamesExactNodeIds(t *testing.T) {
+	ids := []string{"tests/test_a.py::test_add", "tests/test_b.py::Suite::test_add"}
+	inv, ok := PytestRerun([]string{"-q"}, ids)
+	if !ok {
+		t.Fatal("PytestRerun supplied no invocation")
+	}
+	if slices.Contains(inv.Args, "-k") {
+		t.Errorf("PytestRerun = %v, want no -k filter", inv.Args)
+	}
+	if got := inv.Args[len(inv.Args)-len(ids):]; !slices.Equal(got, ids) {
+		t.Errorf("PytestRerun ends %v, want the node ids last: %v", got, ids)
+	}
+	if inv.JUnitReport != rerunJUnitReport {
+		t.Errorf("PytestRerun writes %q, want the rerun's own report %q", inv.JUnitReport, rerunJUnitReport)
+	}
+	if !slices.Contains(inv.Args, "--junitxml="+rerunJUnitReport) {
+		t.Errorf("PytestRerun = %v, want its own report asked for", inv.Args)
+	}
+}
+
+// pytest unions its positional arguments, so a declared path left in place
+// reruns the whole suite beside the tests the gate asked for — and a declared
+// report path would land run 2's outcomes where the ledger reads run 1's
+// counts, since pytest takes the last --junitxml.
+func TestPytestRerunDropsWhatItSuppliesItself(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"nothing declared", nil, ""},
+		{"an unrelated flag is kept", []string{"-q", "--strict-markers"}, "-q --strict-markers"},
+		{"a declared path goes", []string{"-q", "tests", "integration"}, "-q"},
+		{"the coverage flags go", []string{"--cov=src", "--cov-branch", "-q"}, "-q"},
+		{"a separate coverage value goes with its flag", []string{"--cov", "src", "-q"}, "-q"},
+		{"a declared report path goes with its value", []string{"--junitxml", "mine.xml", "-q"}, "-q"},
+		{"a declared filter is kept with its value", []string{"-k", "not slow", "tests"}, "-k not slow"},
+		{"a declared marker is kept with its value", []string{"-m", "not slow", "tests"}, "-m not slow"},
+		{"a value flag with no following argument is not consumed", []string{"-q", "-k"}, "-q -k"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(pytestFlags(tc.args), " "); got != tc.want {
+				t.Errorf("pytestFlags(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// The install is resolved from the nearest directory at or above the component
+// holding exactly one recognised manifest, which is what turns a component
+// nested in a repository whose requirements sit at the root into a directory an
+// install is possible in.
+func TestThePythonInstallIsResolvedByTheNearestManifest(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	touch(t, filepath.Join(root, "requirements.txt"))
+	nested := mkdirAll(t, root, "services", "api")
+	uv := mkdirAll(t, root, "services", "worker")
+	touch(t, filepath.Join(uv, "uv.lock"))
+
+	at, argv, ok := pythonInstall(nested, root)
+	if !ok || at != root || !slices.Contains(argv, "-r") {
+		t.Errorf("pythonInstall(%q) = %q, %v, %v, want pip installing from the root's requirements", nested, at, argv, ok)
+	}
+	if at, argv, ok := pythonInstall(uv, root); !ok || at != uv || argv[0] != "uv" {
+		t.Errorf("pythonInstall(%q) = %q, %v, %v, want uv in the component's own directory", uv, at, argv, ok)
+	}
+}
+
+// Two manifests in one directory is ambiguous and installs nothing rather than
+// picking a priority order: installing through the wrong manager resolves
+// versions the repository does not use. It ends the walk too — that directory
+// is where this project's dependencies are declared, and a parent's manifest
+// belongs to a different project.
+func TestTwoPythonManifestsInstallNothing(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	touch(t, filepath.Join(root, "uv.lock"))
+	dir := mkdirAll(t, root, "svc")
+	touch(t, filepath.Join(dir, "poetry.lock"))
+	touch(t, filepath.Join(dir, "requirements.txt"))
+
+	if at, argv, ok := pythonInstall(dir, root); ok {
+		t.Errorf("pythonInstall = %q, %v, %v, want nothing for an ambiguous directory", at, argv, ok)
+	}
+}
+
+// Nothing above the bound is installed from: a tree lydite was not pointed at
+// is another project's, and its manifest is not this component's to install.
+func TestThePythonInstallWalkStopsAtTheRoot(t *testing.T) {
+	outer := t.TempDir()
+	touch(t, filepath.Join(outer, "requirements.txt"))
+	root := mkdirAll(t, outer, "repo")
+	dir := mkdirAll(t, root, "svc")
+
+	if at, argv, ok := pythonInstall(dir, root); ok {
+		t.Errorf("pythonInstall = %q, %v, %v, want nothing above the bound", at, argv, ok)
+	}
+}
+
+// A component's dependencies are installed in the directory that declares them,
+// with the repository's own environment: this is the repository's package
+// manager reading the repository's lockfile, unlike a pinned tool of lydite's.
+func TestThePythonInstallRunsInTheManifestsDirectory(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	touch(t, filepath.Join(root, "uv.lock"))
+	dir := mkdirAll(t, root, "svc")
+	cwd := stubManager(t, "uv")
+
+	r, ok := Lookup(PythonPytest)
+	if !ok {
+		t.Fatal("no python-pytest runner")
+	}
+	inv, _ := r.Build(Plain, nil)
+	if err := r.Prepare(context.Background(), inv, dir, "", "", executil.Env{}, io.Discard); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := readFile(t, cwd); got != root {
+		t.Errorf("uv ran in %q, want the directory holding the lockfile %q", got, root)
+	}
+}
+
+// A tree with no manifest lydite recognises has nothing that can be installed
+// without guessing, and a pytest run against an environment somebody else
+// provisioned is an ordinary way to run a Python suite — so preparing it is a
+// no-op rather than a failure. A component whose dependencies are genuinely
+// missing fails its own collection, naming them.
+func TestAPythonComponentWithNoManifestPreparesWithoutFailing(t *testing.T) {
+	root := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, root, config.Dir)
+	dir := mkdirAll(t, root, "svc")
+
+	r, _ := Lookup(PythonPytest)
+	inv, _ := r.Build(Plain, nil)
+	if err := r.Prepare(context.Background(), inv, dir, root, "", executil.Env{}, io.Discard); err != nil {
+		t.Errorf("Prepare: %v, want nothing to do", err)
 	}
 }

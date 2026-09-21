@@ -34,6 +34,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -66,6 +67,8 @@ const (
 	Vitest Name = "vitest"
 	// Jest is `jest`.
 	Jest Name = "jest"
+	// PythonPytest is `python3 -m pytest`.
+	PythonPytest Name = "python-pytest"
 )
 
 // Lang is the language a source file is written in. A runner implies one and
@@ -81,6 +84,8 @@ const (
 	Rust Lang = "rust"
 	// TypeScript is the Node toolchain.
 	TypeScript Lang = "typescript"
+	// Python is the interpreter and the packages a repository installs for it.
+	Python Lang = "python"
 )
 
 // The languages lydite recognises as source and runs nothing for. No runner
@@ -89,9 +94,6 @@ const (
 // through a runner. What does meet one is a question asked of a path alone:
 // whether some component claims the file.
 const (
-	// Python is a .py file, which lydite reads as source and runs no tool
-	// over.
-	Python Lang = "python"
 	// Shell is a shell script, which lydite reads as source and runs no tool
 	// over.
 	Shell Lang = "shell"
@@ -268,7 +270,9 @@ type Runner struct {
 	// component needs the pinned wrapper its instrumented variant runs
 	// through. Its plain variant is `go test`, which needs nothing — the
 	// toolchain fetches what a build needs on the way past — so this one is
-	// read off the invocation like the rest.
+	// read off the invocation like the rest. A Python component imports what
+	// its manifest declares and pip fetches none of it on the way past a
+	// collection, so every variant of that one needs the install.
 	Prepare func(ctx context.Context, inv Invocation, dir, root, override string, env executil.Env, out io.Writer) error
 }
 
@@ -279,6 +283,7 @@ var registry = map[Name]Runner{
 	CargoLLVMCovNextest: {Name: CargoLLVMCovNextest, Lang: Rust, Build: buildCargoLLVMCovNextest, Prepare: installCargoTools},
 	Vitest:              {Name: Vitest, Lang: TypeScript, Build: buildVitest, Prepare: installNodeDeps},
 	Jest:                {Name: Jest, Lang: TypeScript, Build: buildJest, Prepare: installNodeDeps},
+	PythonPytest:        {Name: PythonPytest, Lang: Python, Build: buildPytest, Prepare: installPythonDeps},
 }
 
 // Lookup returns the runner a component declared.
@@ -1086,6 +1091,280 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 	}
 }
 
+// pytestName runs the suite through the interpreter rather than through a
+// `pytest` on PATH.
+//
+// `python3 -m pytest` is the pytest installed for that interpreter — a bare
+// `pytest` belongs to whichever environment created the script first, which on
+// a machine with a virtualenv beside a system install is not the environment
+// the dependencies went into. It also prepends the invocation's own directory
+// to sys.path, so a component's package is importable without having been
+// installed, which a bare `pytest` does not do.
+//
+// python3 rather than python: a virtualenv links both names, and a system
+// without a virtualenv frequently has only the versioned one.
+const pytestName = "python3"
+
+// pytestArgs is the `python3 -m pytest` prefix every variant shares. pytest
+// with no path argument collects from its rootdir down, which is the component
+// directory the invocation runs in — so unlike `go test`, there is no default
+// target to supply.
+func pytestArgs(args ...string) []string {
+	return append([]string{"-m", "pytest"}, args...)
+}
+
+// buildPytest derives Python's three variants.
+//
+// The instrumented form names an explicit `--cov` target because a bare --cov
+// measures nothing: coverage.py with no source to measure records no files, and
+// the component reports unmeasured having paid for the instrumentation. The
+// target is `.` — the component's own directory, which is where the invocation
+// runs — so what is measured is the tree the component declares, the same scope
+// Go's -coverpkg=./... gives a module.
+//
+// lcov is asked for by name for the reason the JavaScript runners ask: it is
+// the format both gates read, and coverage.py's default report is a terminal
+// summary neither can parse. --junitxml is pytest's own flag and needs no
+// plugin, unlike the coverage report, which comes from pytest-cov.
+func buildPytest(variant Variant, args []string) (Invocation, bool) {
+	switch variant {
+	case Plain:
+		return Invocation{Name: pytestName, Args: pytestArgs(args...)}, true
+	case Instrumented:
+		lcov := path.Join(coverageDir, "lcov.info")
+		instrumented := pytestArgs(
+			"--cov=.",
+			"--cov-report=lcov:"+lcov,
+			"--junitxml="+junitReport,
+		)
+		return Invocation{
+			Name:           pytestName,
+			Args:           append(instrumented, args...),
+			CoverageReport: lcov,
+			JUnitReport:    junitReport,
+		}, true
+	case BuildOnly:
+		// Collection, because Python has no compile step a mutant can fail on
+		// its own: importing every test module and the code it imports is the
+		// most a run can check without executing a test, and it catches a
+		// syntax error and an import-time failure — which is what a mutant that
+		// cannot run at all usually is.
+		//
+		// The line between an unviable mutant and a killed one is less precise
+		// for Python than for Go or Rust by construction. Names are bound when
+		// a call executes, so a mutant that breaks an attribute, a signature or
+		// an operand's type collects cleanly and fails only once the test runs,
+		// where it counts as killed. Collecting the declared arguments' own
+		// selection keeps the question about the modules the suite runs rather
+		// than about a wider tree.
+		return Invocation{Name: pytestName, Args: pytestArgs(append([]string{"--collect-only", "-q"}, args...)...)}, true
+	default:
+		return Invocation{}, false
+	}
+}
+
+// PytestJUnitPlain is the plain pytest suite with the JUnit report turned on
+// and no instrumentation.
+//
+// GoJUnitPlain's counterpart, for the same reason and with the same shape: the
+// flaky gate reads run 1's outcomes from the report the suite wrote, and under
+// --no-coverage the plain variant writes none. Not a fourth Variant, because
+// mutation runs Plain once per mutant and a report written and discarded
+// thousands of times is work in the way of the thing being timed.
+func PytestJUnitPlain(args []string) (Invocation, bool) {
+	return Invocation{
+		Name:        pytestName,
+		Args:        pytestArgs(append([]string{"--junitxml=" + junitReport}, args...)...),
+		JUnitReport: junitReport,
+	}, true
+}
+
+// PytestRerun is the flaky gate's second run for a Python component: the named
+// tests alone, given as exact node ids, with the report landing beside run 1's.
+//
+// Node ids and not -k. A node id is `path/to/test_mod.py::Class::test_name` —
+// the file, so two tests sharing a name in different modules stay distinct, and
+// exact, so a rerun of `test_add` cannot also select `test_added`. -k is a
+// substring expression over names and does both of those wrong.
+//
+// One invocation for every named test rather than one per file, because a
+// rerun per file pays a fresh interpreter and conftest import for each, for a
+// gate whose whole budget is meant to be the new tests' own duration.
+//
+// The declared arguments are copied so the two runs differ in as little as
+// possible, with the coverage and report flags stripped and the declared paths
+// dropped: pytest unions its positional arguments, so a declared path left in
+// place reruns the whole suite beside the tests the gate asked for. There is no
+// -count=1 counterpart to GoRerun's — pytest caches no result, so a second run
+// of the same ids executes them again.
+//
+// It answers false for an empty name set, for GoRerun's reason: a pytest with
+// no ids collects the whole suite, so a rerun of nothing would report on every
+// test there is.
+func PytestRerun(args []string, ids []string) (Invocation, bool) {
+	if len(ids) == 0 {
+		return Invocation{}, false
+	}
+	argv := pytestArgs("--junitxml=" + rerunJUnitReport)
+	argv = append(argv, pytestFlags(args)...)
+	argv = append(argv, ids...)
+	return Invocation{Name: pytestName, Args: argv, JUnitReport: rerunJUnitReport}, true
+}
+
+// pytestFlags is the declared arguments with the flags run 2 supplies itself
+// removed, and the declared paths dropped.
+//
+// The coverage flags go for the reason Go's do: the rerun must not overwrite
+// the measurement the coverage gate is about to read, nor pay for
+// instrumentation nothing reads. The report path goes because the rerun states
+// its own, and pytest resolves a repeated --junitxml by taking the last, which
+// would put run 2's outcomes where the ledger reads run 1's counts.
+//
+// A path is an argument that is not a flag, and it is dropped wherever it sits
+// — the node ids are the selection now. A declared -k or -m is kept: run 1
+// reported these tests through that filter, so it cannot deselect them, and
+// dropping it would make the two runs differ for a reason that is not the
+// test's.
+//
+// A flag may spell its value in the next argument as readily as after an equals
+// sign, so pytestValueFlags says which ones do: dropping --cov-report and
+// leaving its argument behind hands pytest a path where it expects a node id,
+// and keeping -k without its pattern turns the pattern into one.
+func pytestFlags(args []string) []string {
+	out := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, inline := strings.Cut(a, "=")
+		value, separate := "", false
+		if !inline && pytestValueFlags[name] && i+1 < len(args) {
+			value, separate = args[i+1], true
+			i++
+		}
+		if pytestRerunSupplies(name) {
+			continue
+		}
+		out = append(out, a)
+		if separate {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// pytestRerunSupplies reports whether the rerun states this flag itself, so a
+// declared one is dropped rather than carried into run 2. Every --cov* flag
+// belongs to pytest-cov, and the rerun is not instrumented at all.
+func pytestRerunSupplies(name string) bool {
+	return strings.HasPrefix(name, "--cov") || name == "--junitxml" || name == "--junit-xml"
+}
+
+// pytestValueFlags is the pytest and pytest-cov flags whose value may be the
+// argument after them, which is what keeps a dropped flag from leaving its
+// value behind as a node id and a kept flag's value from being read as a
+// declared path.
+//
+// A flag this table does not name is taken to carry its value inline, which is
+// the spelling that is unambiguous for every flag there is. A boolean flag left
+// out of it is right: only a flag that takes a value can swallow the argument
+// behind it.
+var pytestValueFlags = map[string]bool{
+	"--cov": true, "--cov-report": true, "--cov-config": true,
+	"--cov-fail-under": true, "--cov-context": true, "--junitxml": true,
+	"--junit-xml": true, "--junit-prefix": true, "-k": true, "-m": true,
+	"-p": true, "-n": true, "-c": true, "-o": true, "--override-ini": true,
+	"--maxfail": true, "--rootdir": true, "--basetemp": true,
+	"--confcutdir": true, "--deselect": true, "--ignore": true,
+	"--ignore-glob": true, "--import-mode": true, "--log-level": true,
+	"--durations": true, "--timeout": true, "--dist": true, "-W": true,
+	"-r": true,
+}
+
+// pythonManifests maps each recognised dependency manifest to the install it
+// implies, run in the directory holding it.
+//
+// A lockfile's install is a frozen one, for nodedeps' reason: an install that
+// resolves a version the repository did not lock would have lydite change what
+// the tree under measurement contains, and then gate the result. A requirements
+// file is installed as written, which is as pinned as the repository chose to
+// make it — pip has no stricter form to ask for, and lydite is not the one to
+// decide that file should have been a lockfile.
+var pythonManifests = map[string][]string{
+	"uv.lock":          {"uv", "sync", "--frozen"},
+	"poetry.lock":      {"poetry", "install", "--no-interaction"},
+	"Pipfile.lock":     {"pipenv", "sync"},
+	"requirements.txt": {pytestName, "-m", "pip", "install", "-r", "requirements.txt"},
+}
+
+// installPythonDeps installs the repository's own Python dependencies, from the
+// nearest directory at or above the component that holds exactly one
+// recognised manifest.
+//
+// It gets the environment the repository declared, the way installNodeDeps
+// does and unlike installCargoTools: this is the repository's own package
+// manager reading the repository's own lockfile, and a workspace whose install
+// needs an index URL or a token said so in its own declaration.
+//
+// Doing nothing is not a failure. A tree with no manifest lydite recognises, or
+// with two of them, has nothing that can be installed without guessing — and a
+// pytest run against an environment somebody else provisioned is an ordinary
+// way to run a Python suite, unlike a JavaScript one, which cannot import
+// anything without a node_modules. A component whose dependencies are genuinely
+// missing fails its own collection, naming them.
+//
+// root bounds the walk — the scan root for an ordinary run, or the tree's own
+// .lydite when the caller has none to give, which is declarationRoot's case.
+func installPythonDeps(ctx context.Context, _ Invocation, dir, root, _ string, env executil.Env, out io.Writer) error {
+	if root == "" {
+		root = declarationRoot(dir)
+	}
+	at, argv, ok := pythonInstall(dir, root)
+	if !ok {
+		return nil
+	}
+	res := executil.RunOutput(ctx, at, env.Check, out, argv[0], argv[1:]...)
+	if !res.Ok() {
+		return fmt.Errorf("%s: %w", strings.Join(argv, " "), res.Err)
+	}
+	return nil
+}
+
+// pythonInstall resolves where a component's dependencies are installed from
+// and what installs them: the nearest directory from dir up to root holding
+// exactly one recognised manifest.
+//
+// The walk is what turns a component nested in a repository whose requirements
+// sit at the root into a directory an install is possible in — the same walk
+// nodedeps makes for a workspace member. Two manifests in one directory is
+// ambiguous and installs nothing rather than picking a priority order, since
+// installing through the wrong manager resolves versions the repository does
+// not use — and it ends the walk rather than continuing past it, because that
+// directory is where this project's dependencies are declared and a parent's
+// manifest belongs to a different project.
+//
+// The walk never climbs above root, so a component outside the tree lydite was
+// pointed at is its own bound and nothing above a scan root is ever installed
+// from.
+func pythonInstall(dir, root string) (string, []string, bool) {
+	dir, root = filepath.Clean(dir), filepath.Clean(root)
+	for d := dir; ; d = filepath.Dir(d) {
+		var found [][]string
+		for manifest, argv := range pythonManifests {
+			if _, err := os.Stat(filepath.Join(d, manifest)); err == nil {
+				found = append(found, argv)
+			}
+		}
+		if len(found) == 1 {
+			return d, found[0], true
+		}
+		if len(found) > 1 || d == root || filepath.Dir(d) == d {
+			return "", nil, false
+		}
+	}
+}
+
 // Producer names what wrote a component's coverage report, for the baseline to
 // record beside the counts.
 //
@@ -1106,9 +1385,11 @@ func buildJest(variant Variant, args []string) (Invocation, bool) {
 // or the Rust toolchain whose LLVM wrote an lcov.
 //
 // An empty answer means lydite could not identify the instrument, which is
-// possible only for JavaScript: it is the one language whose measuring tool
-// lydite deliberately does not pin, because installing one into the tree it is
-// about to gate would have lydite change what the repository resolves to.
+// possible for a language whose measuring tool lydite deliberately does not
+// pin: JavaScript, because installing one into the tree it is about to gate
+// would have lydite change what the repository resolves to, and Python, whose
+// pytest and coverage.py are whatever the repository's own install put in the
+// environment.
 func (r Runner) Producer(dir, root, override, lang string) string {
 	switch r.Name {
 	case GoTest:
