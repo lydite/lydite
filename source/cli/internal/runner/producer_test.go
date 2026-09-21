@@ -137,6 +137,26 @@ func TestTheGoProducerStopsReadingPackagesAtArgs(t *testing.T) {
 	}
 }
 
+// Plain's build strips a declared -coverpkg from its own argv so an
+// uninstrumented variant is not paid the cost of instrumentation nothing
+// reads. That strip is local to the invocation it builds: Producer reads the
+// declared args afresh, so a scope named for the gate still names the
+// instrumented variant's producer even after Plain has been built from the
+// same slice.
+func TestTheGoProducerNamesAScopeAfterPlainStripsItsOwnCoverage(t *testing.T) {
+	root := t.TempDir()
+	args := []string{"-coverpkg=./internal/foo/...", "./..."}
+
+	if _, ok := registry[GoTest].Build(Plain, args); !ok {
+		t.Fatal("Build(Plain, ...) = false, want a Go plain invocation")
+	}
+
+	got := registry[GoTest].Producer(root, root, "", "1.26.6", args...)
+	if !strings.Contains(got, "-coverpkg=./internal/foo/...") {
+		t.Errorf("producer = %q, want the declared scope named after Plain was built", got)
+	}
+}
+
 // Rust's is the pair: cargo-llvm-cov writes the lcov, and the line records
 // follow the LLVM in the toolchain that built them. Naming either alone would
 // compare equal across a change to the other.
