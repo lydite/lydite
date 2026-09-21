@@ -272,6 +272,10 @@ The language and global figures blend units that are not quite identical — a G
 statements where lcov counts lines, and the global figure blends across languages. This is accepted
 and stated rather than hidden; the alternative is the mean ADR 0007 rejected.
 
+**lcov is also Python's format.** pytest-cov writes it with `SF:` paths relative to the component
+directory. Python has no exclusion scan, so `[lydite:exclude_from_coverage]` is unavailable there:
+lydite holds no Python grammar to find the annotation with.
+
 **A component with no measurable lines is unmeasured, never 0%.** An empty Go profile, a crate
 llvm-cov reports zero lines for, an lcov with no `LF` records — each is reported with its reason,
 so no 0/0 reaches an aggregate and no floor comparison fails a component no work could clear.

@@ -118,6 +118,30 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   would pay for the instrumentation and produce no report either gate can read. Build-only is `tsc
   --noEmit`, since a JavaScript test run has no compile step and a syntactically broken mutant
   would read as a test failure.
+- `python-pytest` — plain is `python3 -m pytest`; instrumented adds pytest-cov's `--cov=.
+  --cov-report=lcov:…` and `--junitxml=…`; build-only is `--collect-only -q`. The JUnit report is
+  read as plain and a rerun names the exact node ids. Collection is the build-only floor, and it is
+  a coarser one than `go build`, `cargo build` or `tsc --noEmit`: Python binds names late, so a
+  mutant that breaks a call still collects, and an unviable mutant reads as killed by construction.
+  `Prepare` installs the nearest single manifest at or above the component — `uv.lock` (`uv sync
+  --frozen`), `poetry.lock` (`poetry install`), `Pipfile.lock` (`pipenv sync`), `requirements.txt`
+  (`pip install -r`) — and installs nothing when there is none or more than one.
+
+**What a Python component gets.** The runner reaches only part of lydite's pipeline:
+
+| concern | Python |
+|---|---|
+| suite and JUnit report | yes |
+| coverage | yes, through lcov |
+| `[lydite:exclude_from_coverage]` | no — lydite holds no Python grammar |
+| CRAP | files are reported skipped |
+| mutation | unmeasured — no generator or backend for Python |
+| scan | unmeasured — no scanner |
+| toolchain | not pinned or provisioned (see [`toolchains.md`](toolchains.md)) |
+
+The producer is read as `pytest X, coverage Y` by asking `python3 -I` for the installed versions
+through `importlib.metadata`, under lydite's own environment: a `PATH` declared in `env:` is not
+honoured, and the producer is empty when either package cannot be identified.
 
 **Coverage is written under `.lydite-reports/coverage/`, never at `.lydite-reports/` itself**, and
 vitest is additionally told `--coverage.clean=false`. Vitest empties its reports directory before a
@@ -141,7 +165,7 @@ measured from the previous run's file, which is a coverage number describing cod
 there, supplied by lydite itself.
 
 **One artefact per language, and both gates read it.** Go's profile, Rust's lcov, TypeScript's
-lcov. Rust exports the lcov alone: an lcov's summed `LF`/`LH` records give the same covered and
+lcov, Python's lcov. Rust exports the lcov alone: an lcov's summed `LF`/`LH` records give the same covered and
 total counts cargo-llvm-cov's `--json` totals carry — verified at 30 of 57 both ways against the
 proving ground's three-crate workspace — while the per-line hits the patch gate reads are not
 derivable from the JSON, which has no line data at all. Only one of the two is load-bearing, and
