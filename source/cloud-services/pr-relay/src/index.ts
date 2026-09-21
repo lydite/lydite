@@ -487,7 +487,7 @@ function allowlisted(list: string | undefined, ref: string): boolean {
   return (list ?? "")
     .split(/[,\n]/)
     .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
+    .filter(Boolean)
     .includes(ref);
 }
 

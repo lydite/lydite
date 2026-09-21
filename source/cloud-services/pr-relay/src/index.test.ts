@@ -847,6 +847,31 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
       expect(missing.written).toHaveLength(0);
     });
 
+    it("refuses pull request zero even when every number resolves open", async () => {
+      const everyPull = new Proxy(
+        {},
+        { get: () => ({ state: "open", sha: open7[7].sha }) },
+      ) as Record<number, { state: string; sha: string }>;
+      const written: { url: string; init?: RequestInit }[] = [];
+      for (const [route, body] of [
+        ["/comment", { ...comment, pull_request: 0 }],
+        ["/status", { ...clearance, pull_request: 0 }],
+      ] as const) {
+        const token = await keys.sign(
+          claims({ job_workflow_ref: CLEARANCE_REF, ...clearanceClaims }),
+        );
+        const response = await send(
+          route,
+          token,
+          body,
+          gatedEnv(),
+          pullStub(everyPull, written),
+        );
+        expect(response.status).toBe(403);
+      }
+      expect(written).toHaveLength(0);
+    });
+
     it("requires a positive integer number for a comment", async () => {
       for (const pull_request of [undefined, 0, -1, 1.5, "7"]) {
         const { response, written } = await commentOn(open7, {
