@@ -682,11 +682,19 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 			"no line this change touched is both mutable and reported as executed"), log), out
 	}
 
+	timeout, workers := budget(baseline, opts.timeout), workersFor(p, opts.limit)
+	// Into the live stream, where the per-mutant lines go, and not only into
+	// the document: a run too large to finish is killed by its job timeout and
+	// writes no document at all, so a projection the document alone carried is
+	// one the reader who needs it never sees. ADR 0027 refuses a runtime
+	// budget, and this is not one — nothing here stops a run.
+	_, _ = fmt.Fprintln(log.out, costProjection(len(mutants), workers, timeout))
+
 	results, err := mutation.Execute(ctx, backend, mutants, mutation.Options{
 		Env:       childEnv(tc, c, suite),
-		Timeout:   budget(baseline, opts.timeout),
+		Timeout:   timeout,
 		MaxMemory: maxMemory,
-		Workers:   workersFor(p, opts.limit),
+		Workers:   workers,
 		Slots:     slots,
 		Log:       log.out,
 	})
@@ -818,6 +826,37 @@ func budget(baseline, override time.Duration) time.Duration {
 	// other arm returns is a branch nothing can be asked about.
 	return max(baseline*budgetFactor, minimumBudget)
 }
+
+// costProjection is what a run says it is about to cost, before it pays it.
+//
+// The basis is in the line and not only the number, because every term in it is
+// a decision lydite made for this component — how many mutants the change
+// yielded, what its own baseline bought each of them, and how many run at once
+// — and a reader who can see the derivation can argue with it.
+//
+// It is a worst case: every mutant running to the whole of its budget, with no
+// worker ever idle. A killed mutant costs a fraction of that, so a real run
+// lands well under. Stating the ceiling is not capping it — ADR 0027 refuses a
+// runtime budget, and nothing here stops a run.
+func costProjection(mutants, workers int, timeout time.Duration) string {
+	return fmt.Sprintf("%d mutant(s), budget %s each, %d worker(s): at most %s",
+		mutants, timeout.Round(time.Second), staged(mutants, workers),
+		projectedCeiling(mutants, workers, timeout).Round(time.Second))
+}
+
+// projectedCeiling is the longest a run of this many mutants can take: as many
+// rounds as it takes to stage them all, each round costing a whole budget.
+func projectedCeiling(mutants, workers int, timeout time.Duration) time.Duration {
+	w := staged(mutants, workers)
+	rounds := (mutants + w - 1) / w
+	return time.Duration(rounds) * timeout
+}
+
+// staged is how many mutants actually run at once, which is the executor's own
+// clamp: never fewer than one, and never more than there are mutants to stage.
+// A projection over an unclamped count states a parallelism the run does not
+// have, which is the direction that understates the cost.
+func staged(mutants, workers int) int { return min(max(workers, 1), max(mutants, 1)) }
 
 // memoryBudget is how much memory one mutant's suite may hold before it counts
 // as killed.

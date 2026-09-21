@@ -115,6 +115,53 @@ func TestTheBudgetIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
 	}
 }
 
+// A run says what it is about to cost before it pays it, and the ceiling is
+// every mutant taking its whole budget with no worker idle. It is a projection
+// and not a cap: ADR 0027 refuses a runtime budget, and nothing reads this.
+func TestARunProjectsItsCeilingFromTheBudgetAndTheWorkers(t *testing.T) {
+	const timeout = 60 * time.Second
+	for _, c := range []struct {
+		mutants, workers int
+		want             time.Duration
+	}{
+		// Divides exactly: two rounds of four.
+		{mutants: 8, workers: 4, want: 2 * timeout},
+		// The remainder is a whole round: three mutants over two workers
+		// leaves one running alone, and the run waits for it.
+		{mutants: 9, workers: 4, want: 3 * timeout},
+		// A component publishing a port stages one mutant at a time, so its
+		// ceiling is the whole run end to end.
+		{mutants: 5, workers: 1, want: 5 * timeout},
+		// More workers than mutants buys no round that is not there.
+		{mutants: 2, workers: 8, want: timeout},
+	} {
+		if got := projectedCeiling(c.mutants, c.workers, timeout); got != c.want {
+			t.Errorf("%d mutant(s) over %d worker(s) = %s, want %s", c.mutants, c.workers, got, c.want)
+		}
+	}
+}
+
+// The line carries its own derivation, so a reader who thinks the projection is
+// wrong can see which term they disagree with rather than only the total.
+func TestTheProjectionStatesWhatItIsDerivedFrom(t *testing.T) {
+	line := costProjection(9, 4, budget(20*time.Second, 0))
+	for _, want := range []string{"9 mutant(s)", "budget 1m0s each", "4 worker(s)", "at most 3m0s"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the projection %q does not state %q", line, want)
+		}
+	}
+}
+
+// --timeout is what a mutant's budget becomes, so it is what the projection is
+// derived from too: a line stating a ceiling the run is not going to honour is
+// worse than none.
+func TestTheProjectionIsDerivedFromTheOverriddenTimeout(t *testing.T) {
+	line := costProjection(4, 2, budget(5*time.Minute, 30*time.Second))
+	if !strings.Contains(line, "budget 30s each") || !strings.Contains(line, "at most 1m0s") {
+		t.Errorf("--timeout was not projected from: %q", line)
+	}
+}
+
 // The memory bound multiplies the component's own measured peak, never the
 // machine's memory: a bound that moved with the machine would make a mutant
 // killed on a small runner and surviving on a large one.
