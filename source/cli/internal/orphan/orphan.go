@@ -198,7 +198,13 @@ func Unscanned(ctx context.Context, root string, f component.File, enabled func(
 	for _, p := range files {
 		ext := strings.ToLower(path.Ext(p))
 		lang, ok := runner.LangForExt(ext)
-		if !ok || ambiguousExt[ext] || (enabled != nil && !enabled(lang)) {
+		// A language lydite has no runner for is skipped rather than
+		// reported. "Unscanned" names a file some scanner could have read and
+		// no component pointed one at; there is no scanner to point, so every
+		// such file would be a gap no declaration could ever close. Find still
+		// asks about them, because whether a component claims a path needs no
+		// scanner to answer.
+		if !ok || !runner.Runs(lang) || ambiguousExt[ext] || (enabled != nil && !enabled(lang)) {
 			continue
 		}
 		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components, modules) {
@@ -369,7 +375,10 @@ func goIgnored(dir string) bool {
 	return false
 }
 
-// sourceOf keeps the paths written in a language lydite has a runner for.
+// sourceOf keeps the paths written in a language lydite recognises as source,
+// whether or not it has a runner for one: a component claims the files under
+// its directory whatever they are written in, so a language lydite runs
+// nothing over is still a language whose files somebody has to own.
 func sourceOf(tracked []string) []string {
 	exts := map[string]bool{}
 	for _, e := range runner.SourceExts() {
