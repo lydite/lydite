@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
@@ -116,10 +118,17 @@ func statusEntry(state string, at time.Time) map[string]any {
 
 func runClearanceCmd(t *testing.T, eventPath string) string {
 	t.Helper()
+	return runClearanceCmdIn(t, ".", eventPath)
+}
+
+// runClearanceCmdIn answers the comment with the scan root at dir, which is
+// where the declarations in force are read from.
+func runClearanceCmdIn(t *testing.T, dir, eventPath string) string {
+	t.Helper()
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	if err := runClearance(context.Background(), cmd, eventPath, true); err != nil {
+	if err := runClearance(context.Background(), cmd, dir, eventPath, true); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
 	return out.String()
@@ -245,16 +254,119 @@ func TestAMistypedVerbIsAnsweredAndClearsNothing(t *testing.T) {
 // repository that has declared nothing.
 func inCheckoutWith(t *testing.T, exemptions string) {
 	t.Helper()
+	inCheckoutUnder(t, ".", exemptions)
+}
+
+// inCheckoutUnder is that checkout with the scan root at sub rather than at
+// the repository root. The fixture is a repository because the exemptions
+// file is located from the scan root's own path inside one.
+func inCheckoutUnder(t *testing.T, sub, exemptions string) {
+	t.Helper()
 	dir := t.TempDir()
+	if r := executil.RunQuiet(context.Background(), dir, "git", "init", "--quiet", "-b", "main"); !r.Ok() {
+		t.Fatalf("git init: %v\n%s", r.Err, r.Output)
+	}
 	if exemptions != "" {
-		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(referral.FileName)), 0o750); err != nil {
+		file := filepath.Join(dir, sub, referral.FileName)
+		if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, referral.FileName), []byte(exemptions), 0o600); err != nil {
+		if err := os.WriteFile(file, []byte(exemptions), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Chdir(dir)
+}
+
+// A repository whose scan root is a subdirectory declares its exemptions
+// there, and --dir is what says where. Reading the file from the process's
+// own directory finds nothing in that shape, reports every changed path as
+// uncovered, and proposes an entry over the whole change under a headline
+// calling those the paths no declared exemption covers.
+func TestExemptReadsTheExemptionsFileUnderTheScanRoot(t *testing.T) {
+	inCheckoutUnder(t, "source", "exemptions:\n  - name: docs\n    reason: prose only\n    paths: [\"source/docs/**\"]\n")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed: []map[string]any{
+			{"filename": "source/docs/one.md"},
+			{"filename": "source/src/a.go"},
+		},
+	}
+	forge.start(t)
+
+	runClearanceCmdIn(t, "source", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+
+	if len(forge.comments) != 1 {
+		t.Fatalf("posted %d comments, want 1", len(forge.comments))
+	}
+	body := forge.comments[0]
+	if strings.Contains(body, "source/docs/one.md") {
+		t.Errorf("the declarations under the scan root were not read, so a covered path was proposed:\n%s", body)
+	}
+	if !strings.Contains(body, "source/src/a.go") {
+		t.Errorf("the uncovered path is missing from the proposal:\n%s", body)
+	}
+}
+
+// The block a reader pastes is indented the two spaces `.lydite/exemptions.yml`
+// is written in. yaml.v3 indents four unless told otherwise, and a block that
+// has to be re-indented before it lands is one a reader edits by hand — which
+// is exactly what the encoder is here to spare them.
+func TestTheProposedBlockIsIndentedTwoSpacesPerLevel(t *testing.T) {
+	lines, err := proposalYAML("docs-only", []string{"docs/one.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"exemptions:", "  - name: docs-only", "    paths:", "      - docs/one.md"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("the block carries no %q line:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// What went wrong deriving the uncovered set goes to the job log, because the
+// refusal the commenter reads deliberately names no cause. A run that logs
+// nothing leaves whoever investigates it with the refusal alone.
+func TestAFailedDerivationIsNamedInTheJobLog(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission:   "write",
+		statuses:     []map[string]any{statusEntry("pending", earlier)},
+		changedFails: true,
+	}
+	forge.start(t)
+
+	log := capturedStderr(t, func() {
+		runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	})
+
+	if !strings.Contains(log, "deriving the change's uncovered paths") {
+		t.Fatalf("a failed derivation left nothing in the job log:\n%s", log)
+	}
+}
+
+// And a derivation that worked says nothing. A log line on every run is one
+// nobody reads on the run that failed.
+func TestAProposalThatWorkedLogsNothing(t *testing.T) {
+	inCheckoutWith(t, "")
+	forge := &fakeForge{
+		permission: "write",
+		statuses:   []map[string]any{statusEntry("pending", earlier)},
+		changed:    []map[string]any{{"filename": "src/a.go"}},
+	}
+	forge.start(t)
+
+	log := capturedStderr(t, func() {
+		runClearanceCmd(t, eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+	})
+
+	if log != "" {
+		t.Fatalf("a derivation that worked wrote to the job log:\n%s", log)
+	}
+	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "exemptions:") {
+		t.Fatalf("the proposal this logs nothing about was not posted: %+v", forge.comments)
+	}
 }
 
 // The proposal covers the paths nothing declared covers, and nothing else:
@@ -537,7 +649,7 @@ func TestClearanceNeedsAnEventPayload(t *testing.T) {
 	t.Setenv("GITHUB_EVENT_PATH", "")
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
-	err := runClearance(context.Background(), cmd, "", true)
+	err := runClearance(context.Background(), cmd, ".", "", true)
 	if err == nil || !strings.Contains(err.Error(), "event payload") {
 		t.Fatalf("err = %v, want a message naming the missing payload", err)
 	}

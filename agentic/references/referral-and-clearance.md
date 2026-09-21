@@ -339,6 +339,18 @@ the question a person has to answer. Landing the entry is an ordinary pull reque
 somebody opens, reviews and merges. See
 [ADR 0049](../../docs/adr/0049-exempt-proposes-an-entry-and-lands-nothing.md).
 
+**Which exemptions file that is comes from `--dir`, as it does everywhere else.**
+`lydite clearance` takes the same flag `review` does, and `uncoveredPaths` locates the
+file at `path.Join(referral.RootRelative(ctx, dir), referral.FileName)` — the scan
+root's own path inside the repository, which is the `source/.lydite/exemptions.yml`
+shape `referral.IsExemptionsPath` supports. Reading the fixed path relative to the
+process's own directory finds nothing there, and an absent file is the day-one state:
+every changed path comes back uncovered and the proposal covers the whole change under
+a headline calling those the paths no declared exemption covers. The read is off the
+working tree rather than out of a commit, unlike `review`'s `loadExemptionsAt`, because
+this job's checkout *is* the default branch — there is no branch here whose own
+widening it could read.
+
 Nothing a commenter writes may widen what the block says. A glob argument was rejected
 for exactly that — it lets an author propose `docs/**` off a change that touched one
 README — and it is worse here than in a hand-written entry, because the block reads as

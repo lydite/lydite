@@ -34,7 +34,11 @@ the change or deliberately left unanswered.
 `paths` comes from the change's own uncovered set, which `/lydite exempt` computes for itself:
 it asks the forge for the pull request's changed paths, and runs `internal/referral`'s `Covers`
 and `uncovered` over that list against the exemptions file in its own checkout of the default
-branch. `uncovered` answers "which paths would I have to declare?" — weaker than the
+branch — located under `--dir` through `referral.RootRelative`, the way every other command
+finds it, so a repository whose scan root is a subdirectory reads the declarations governing it
+rather than none at all. The read is off the working tree rather than out of a commit: this
+job's checkout is the default branch already, so there is no branch here whose own widening it
+could read. `uncovered` answers "which paths would I have to declare?" — weaker than the
 all-or-nothing rule `Decide` applies, and exactly the question `/lydite exempt` is asked.
 
 **A commenter-supplied glob was rejected.** It lets the author widen the proposal past what

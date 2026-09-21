@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,6 +20,7 @@ import (
 )
 
 func newClearanceCmd() *cobra.Command {
+	var dir string
 	var eventPath string
 	var noColor bool
 	cmd := &cobra.Command{
@@ -40,15 +42,16 @@ verdict, so the clearance does not travel with the branch.
 The input is the webhook payload the platform delivers, which a workflow
 writes to the path in GITHUB_EVENT_PATH.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClearance(cmd.Context(), cmd, eventPath, noColor)
+			return runClearance(cmd.Context(), cmd, dir, eventPath, noColor)
 		},
 	}
+	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload to answer (defaults to GITHUB_EVENT_PATH)")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	return cmd
 }
 
-func runClearance(ctx context.Context, cmd *cobra.Command, eventPath string, noColor bool) error {
+func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath string, noColor bool) error {
 	report := ui.NewReport("clearance")
 
 	if eventPath == "" {
@@ -116,7 +119,7 @@ func runClearance(ctx context.Context, cmd *cobra.Command, eventPath string, noC
 	// to the job log; the commenter reads a refusal, because a command that
 	// errors out with no reply is one whose author has only silence to go on.
 	uncover := func() ([]string, error) {
-		uncovered, err := uncoveredPaths(ctx, client, repo, event.Issue.Number)
+		uncovered, err := uncoveredPaths(ctx, client, repo, dir, event.Issue.Number)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lydite: deriving the change's uncovered paths: %v\n", err)
 		}
@@ -195,28 +198,38 @@ func explain(ctx context.Context, client *forge.Client, repo forge.Repo, event f
 // uncoveredPaths answers which of a pull request's changed paths no declared
 // exemption covers.
 //
-// The exemptions file comes from the working directory, which is the
-// clearance job's own checkout of the default branch — so the declarations
-// consulted are the ones in force, never the ones the pull request proposes
-// for itself. An absent file is the day-one state rather than an error; an
-// unparseable one is an error, because "nothing is exempt" and "the file
-// nobody can read" are different answers and only the first is a
-// repository's decision.
+// The exemptions file comes from the working tree, which is the clearance
+// job's own checkout of the default branch — so the declarations consulted
+// are the ones in force, never the ones the pull request proposes for itself.
+// Which file that is comes from --dir the way every other command resolves
+// it: referral.RootRelative turns the scan root into its path from the
+// repository root, so a repository whose scan root is a subdirectory reads
+// the declarations governing it rather than missing them and proposing an
+// entry over every path the change touches.
+//
+// An absent file is the day-one state rather than an error; an unparseable
+// one is an error, because "nothing is exempt" and "the file nobody can read"
+// are different answers and only the first is a repository's decision.
 //
 // The changed paths are the platform's own list of names, and are the only
 // thing the comment surface asks about the pull request itself. Nothing of
 // its content is fetched: see
 // docs/adr/0049-exempt-proposes-an-entry-and-lands-nothing.md.
-func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, number int) ([]string, error) {
+func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, dir string, number int) ([]string, error) {
+	prefix, err := referral.RootRelative(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	repoPath := path.Join(prefix, referral.FileName)
 	var file referral.File
-	data, err := os.ReadFile(referral.FileName)
+	data, err := os.ReadFile(repoPath)
 	switch {
 	case err == nil:
-		if file, err = referral.Parse(data, referral.FileName); err != nil {
+		if file, err = referral.Parse(data, repoPath); err != nil {
 			return nil, err
 		}
 	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("reading %s: %w", referral.FileName, err)
+		return nil, fmt.Errorf("reading %s: %w", repoPath, err)
 	}
 	changed, err := client.ChangedPaths(ctx, repo, number)
 	if err != nil {
@@ -268,7 +281,7 @@ type proposalEntry struct {
 // many-segments wildcard and so stays two literal stars.
 func escapeGlob(p string) string {
 	var b strings.Builder
-	b.Grow(len(p))
+	b.Grow(len(p)) // [lydite:exclude_from_mutation][Grow only preallocates capacity; strings.Builder writes the same runes in the same order without it, so no observation of the returned string can tell the two apart — only an allocation count, which nothing here measures]
 	for _, r := range p {
 		switch r {
 		case '\\', '*', '?', '[', ']':
