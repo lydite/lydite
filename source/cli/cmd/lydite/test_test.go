@@ -371,6 +371,27 @@ func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	}
 }
 
+// A component that names a raw command over node dependencies fails the same
+// way as one that names a runner: the label and detail installNote's silence
+// would otherwise leave unreported come from the same failure() call either
+// component's install goes through.
+func TestACommandComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "web/package.json", `{"name":"web"}`)
+	cfg := config.Default()
+	cfg.TypeScript.Install = "exit 3"
+	row, _ := runComponent(context.Background(), root, planFor(t, root, nodeCommandComponent()), cfg, nil, false, nil)
+	if row.Status != ui.StatusFail {
+		t.Fatalf("status = %q, want a failure", row.Status)
+	}
+	if row.Value != "not prepared" {
+		t.Errorf("value = %q, want the preparation named rather than the suite", row.Value)
+	}
+	if !strings.Contains(strings.Join(row.Detail, " "), config.FileName) {
+		t.Errorf("detail = %v, want the override named as the way out", row.Detail)
+	}
+}
+
 // An install that resolved no workspace root ran nothing at all, and a report
 // that mentioned it only by staying silent is indistinguishable from one whose
 // workspace was installed.
