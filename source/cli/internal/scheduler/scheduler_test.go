@@ -519,6 +519,38 @@ func TestASiblingSortingBetweenAnAncestorAndItsDescendantDoesNotHideTheAncestor(
 	}
 }
 
+// The trees a pair shares come out ancestor-first and in sorted order however
+// many there are. They are gathered from a map, so a chain of nested paths that
+// was not sorted would be pruned against a descendant seen before its ancestor
+// and a report would reorder itself from run to run.
+func TestSharedTreesAreReportedSortedAndPrunedToTheirOutermostPath(t *testing.T) {
+	paths := []string{
+		"z",
+		"a/b/c/d/e/f/g/h",
+		"p/q",
+		"a/b/c/d/e/f/g",
+		"a/b/c/d/e/f",
+		"a/b/c/d/e",
+		"a/b/c/d",
+		"m/n",
+		"a/b/c",
+		"a/b",
+	}
+	got := Conflicts([]Item{
+		{Name: "a", Occupies: paths},
+		{Name: "b", Occupies: paths},
+	})
+	want := []string{"a/b", "m/n", "p/q", "z"}
+	if len(got) != len(want) {
+		t.Fatalf("Conflicts = %v, want one per tree in %v", got, want)
+	}
+	for i, w := range want {
+		if got[i].On != "directory "+w {
+			t.Fatalf("Conflicts[%d] = %q, want %q (all: %v)", i, got[i].On, "directory "+w, got)
+		}
+	}
+}
+
 // An occupied path costs parallelism only where the tree is actually written
 // into twice. Items whose paths are disjoint all run at once, forced by a
 // barrier none of them can pass alone.
