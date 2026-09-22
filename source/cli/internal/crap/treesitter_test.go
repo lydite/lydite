@@ -148,9 +148,12 @@ func TestThePythonWalkCountsWhatADR0036Predicts(t *testing.T) {
 // exists for a divergence that has not happened yet.
 func TestComplexityOfRefusesAGrammarWithNoCountingRule(t *testing.T) {
 	unmatched := treesitter.Grammar(99)
-	_, err := complexityOf(runner.Python, unmatched, treesitter.Func{}, nil)
+	complexity, err := complexityOf(runner.Python, unmatched, treesitter.Func{}, nil)
 	if err == nil {
 		t.Fatal("complexityOf(unmatched grammar) = nil error, want one naming the language")
+	}
+	if complexity != 0 {
+		t.Errorf("complexity = %d, want 0 alongside the error — a refusal carries no number a caller could mistake for a real one", complexity)
 	}
 }
 
