@@ -2,6 +2,7 @@ package gitstate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -821,6 +822,185 @@ func TestARecordingWithNothingToSayWritesNothing(t *testing.T) {
 	if got := revCount(t, ctx, clone); got != before {
 		t.Errorf("a recording with nothing in it added %d commits", got-before)
 	}
+}
+
+// Three runs writing to the branch at once all land, which is the overlap the
+// retry loop is sized for. A push is rejected only when another run landed
+// between this attempt's fetch and its push, and each of the others lands
+// exactly once — so the last of three is rejected twice and records on its
+// third attempt. Baseline runs are grouped per commit SHA, so this ordering is
+// the ordinary shape of two merges landing close together, not a contrived one.
+func TestThreeOverlappingRunsAllRecord(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`})
+	clone := cloneOf(t, ctx, origin)
+	other := newContender(t, ctx, origin)
+	at := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
+
+	ours := ledger.Record{
+		Kind: ledger.KindEntry, At: at.Add(time.Hour), Commit: "ours", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
+	}
+	// Another run lands between this one's fetch and its push on every attempt
+	// but the last, which is the worst ordering three overlapping runs produce.
+	asked := 0
+	landed, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) {
+			asked++
+			if asked < 3 {
+				other.land(at, "main")
+			}
+			return []ledger.Record{ours}, nil
+		})
+	if err != nil {
+		t.Fatalf("a run overtaken by two others never recorded: %v", err)
+	}
+	if len(landed) != 1 || landed[0].Commit != ours.Commit {
+		t.Errorf("Write reported %v as landed, want the one record it appended", landed)
+	}
+	recorded := recordedCommits(t, ctx, clone, at)
+	for _, commit := range []string{"contender1", "contender2", "ours"} {
+		if !recorded[commit] {
+			t.Errorf("%s is not in the history, so one of three overlapping runs lost its measurement", commit)
+		}
+	}
+	if r := executil.RunQuiet(ctx, clone, "git", "show", "origin/"+BranchName+":"+StatePath("tree1")); !r.Ok() {
+		t.Error("the baseline of the run that landed last is not on the branch")
+	}
+}
+
+// A run that loses the race on every attempt loses nothing silently. Its push
+// never lands, which Write returns as an error rather than as a recording, and
+// the branch's own newest record — not this run's — is what the next successful
+// run reads to declare how wide the break is. The measurement is gone; the
+// history says so, which is the whole of the ledger's completeness contract.
+func TestARunThatLosesEveryRaceRecordsNothingAndSaysSo(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`})
+	clone := cloneOf(t, ctx, origin)
+	other := newContender(t, ctx, origin)
+	at := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
+
+	ours := ledger.Record{
+		Kind: ledger.KindEntry, At: at.Add(time.Hour), Commit: "ours", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
+	}
+	asked := 0
+	landed, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) ([]ledger.Record, error) {
+			asked++
+			other.land(at, "main")
+			return []ledger.Record{ours}, nil
+		})
+	if err == nil {
+		t.Fatal("Write reported a recording even though every push was rejected")
+	}
+	if landed != nil {
+		t.Errorf("Write reported %d record(s) landed on a push that never landed", len(landed))
+	}
+	if asked < 3 {
+		t.Errorf("the push was attempted %d time(s) before giving up, want at least 3", asked)
+	}
+	if !strings.Contains(err.Error(), BranchName) || !strings.Contains(err.Error(), "attempts") {
+		t.Errorf("error = %q, want it to name the branch and how many attempts were made", err)
+	}
+
+	recorded := recordedCommits(t, ctx, clone, at)
+	if recorded[ours.Commit] {
+		t.Error("a run whose push was rejected every time still reached the history")
+	}
+	if r := executil.RunQuiet(ctx, clone, "git", "show", "origin/"+BranchName+":"+StatePath("tree1")); r.Ok() {
+		t.Error("a run whose push was rejected every time still left a baseline on the branch")
+	}
+
+	// The next run reads the branch as it stands, finds a newest record that is
+	// not this commit's parent, and has everything a gap record needs.
+	next := ledger.Record{
+		Kind: ledger.KindEntry, At: at.Add(2 * time.Hour), Commit: "next", Parent: ours.Commit, Branch: "main",
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 31, Total: 100}}},
+	}
+	var latest ledger.Record
+	seen := false
+	if _, err := Write(ctx, clone, "tree2", Snapshot{Coverage: Baseline{"api": entry(31, 100)}},
+		func(worktree string) ([]ledger.Record, error) {
+			latest, seen = ledger.Latest(worktree, next.Branch, next.At)
+			return []ledger.Record{next}, nil
+		}); err != nil {
+		t.Fatalf("the run after the lost one: %v", err)
+	}
+	if !seen || latest.Commit == next.Parent {
+		t.Errorf("the next run's newest recorded commit = (%q, found=%v), want one that is not its parent —"+
+			" a break it can measure rather than a hole nothing names", latest.Commit, seen)
+	}
+}
+
+// contender is another run writing to the state branch. Each call to land
+// appends one record of its own and pushes it, which is what makes the next
+// push from the repository under test non-fast-forward.
+type contender struct {
+	t   *testing.T
+	ctx context.Context
+	dir string
+	n   int
+}
+
+func newContender(t *testing.T, ctx context.Context, origin string) *contender {
+	t.Helper()
+	run := gitRunner(t, ctx)
+	dir := t.TempDir()
+	run(dir, "clone", "-b", BranchName, origin, ".")
+	run(dir, "config", "user.email", "t@t")
+	run(dir, "config", "user.name", "t")
+	return &contender{t: t, ctx: ctx, dir: dir}
+}
+
+// land advances the remote branch by one record, off whatever the branch holds
+// now, and returns the commit it recorded.
+func (c *contender) land(at time.Time, branch string) string {
+	c.t.Helper()
+	run := gitRunner(c.t, c.ctx)
+	c.n++
+	commit := fmt.Sprintf("contender%d", c.n)
+	run(c.dir, "fetch", "origin", BranchName)
+	run(c.dir, "reset", "--hard", "origin/"+BranchName)
+	files, _, err := ledger.Append(c.dir, []ledger.Record{{
+		Kind: ledger.KindEntry, At: at.Add(time.Duration(c.n) * time.Minute),
+		Commit: commit, Branch: branch,
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 10 + c.n, Total: 100}}},
+	}})
+	if err != nil {
+		c.t.Fatalf("the contending run could not append its record: %v", err)
+	}
+	run(c.dir, append([]string{"add"}, files...)...)
+	run(c.dir, "commit", "-m", "record for "+commit)
+	run(c.dir, "push", "origin", "HEAD:refs/heads/"+BranchName)
+	return commit
+}
+
+// recordedCommits is every commit the branch's history holds for the month of
+// at, which is what says whether a run's record actually reached the branch.
+func recordedCommits(t *testing.T, ctx context.Context, dir string, at time.Time) map[string]bool {
+	t.Helper()
+	if r := executil.RunQuiet(ctx, dir, "git", "fetch", "origin", BranchName); !r.Ok() {
+		t.Fatalf("fetch: %v", r.Err)
+	}
+	path := ledger.Dir + "/" + at.UTC().Format("2006-01") + ".ndjson"
+	r := executil.RunQuiet(ctx, dir, "git", "show", "origin/"+BranchName+":"+path)
+	if !r.Ok() {
+		t.Fatalf("%s is not on %s: %v", path, BranchName, r.Err)
+	}
+	commits := map[string]bool{}
+	for _, line := range strings.Split(r.Output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec ledger.Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("a line of %s is not a record: %v", path, err)
+		}
+		commits[rec.Commit] = true
+	}
+	return commits
 }
 
 // originAndClone is a seeded state branch and a working repository pointed at
