@@ -117,8 +117,11 @@ same argument that keeps a types-only TypeScript package from being reported.
   bare `.` a component declaring flags and no pattern tests (see components.md).
   Only what moves the denominator is folded in: a `-timeout` or a `-race` leaves the producer
   alone, since one that changed with every edit to `args:` would report a component newly measured
-  for a change that moved no figure. lydite's own default scope renders as the toolchain alone
-  (`go 1.26.6`), so a component that narrows nothing carries the producer it would have had with
+  for a change that moved no figure. The flag itself reaches only the instrumented run that
+  produces this producer: plain and build-only never see it, so mutation's per-mutant plain runs
+  are never instrumented on its account (see components.md). lydite's own default scope renders
+  as the toolchain alone (`go 1.26.6`), so a component that narrows nothing carries the producer
+  it would have had with
   no scope at all. A narrowing is therefore the incomparable-producer case ADR 0025 exists to
   catch rather than a coverage movement: the component is reported `new`, and the row reads
   `not compared — the measured scope changed, from <old> to <new>` rather than the generic

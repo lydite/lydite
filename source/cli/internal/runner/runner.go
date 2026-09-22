@@ -361,11 +361,19 @@ func goTestArgs(args []string) []string {
 // which appends -run and -count=1 after the declared args so a declared
 // duplicate cannot win; there the filter is the whole point of the invocation
 // and a component may not overrule it.
+// The coverage flags reach the instrumented variant alone. `go test
+// -coverpkg=X` instruments with no -cover of its own, so a declared coverage
+// flag — written for the gate, which is the instrumented variant — otherwise
+// buys the plain and build-only variants an instrumentation nothing reads.
+// Plain is what mutation runs once per mutant, where that is paid thousands of
+// times. The strip is local to the argv: Producer reads the declared args
+// itself, and a coverage scope removed before it sees them is a component
+// whose measured tree goes unnamed.
 func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 	pkgs := goTestArgs(args)
 	switch variant {
 	case Plain:
-		return Invocation{Name: "go", Args: append([]string{"test"}, pkgs...)}, true
+		return Invocation{Name: "go", Args: append([]string{"test"}, goTestUninstrumented(pkgs)...)}, true
 	case Instrumented:
 		profile := path.Join(coverageDir, "coverage.out")
 		// Through the pinned wrapper, because `go test` writes no report and
@@ -390,7 +398,7 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 			PathDirs:       []string{gotestsumBinDir()},
 		}, true
 	case BuildOnly:
-		return Invocation{Name: "go", Args: append([]string{"build"}, pkgs...)}, true
+		return Invocation{Name: "go", Args: append([]string{"build"}, goTestUninstrumented(pkgs)...)}, true
 	default:
 		return Invocation{}, false
 	}
@@ -495,11 +503,27 @@ func RunPattern(names []string) string {
 // package, and dropping `5m` out of `-timeout 5m` leaves a flag with no value.
 // A flag that table does not name is taken to carry its value inline, which is
 // the spelling that is unambiguous for every flag there is.
-func goTestFlags(args []string) []string {
+func goTestFlags(args []string) []string { return dropCoverage(args, false) }
+
+// goTestUninstrumented is the declared arguments with the coverage flags
+// removed and everything else — the package patterns included — kept, which is
+// what a variant that supplies its own packages cannot use goTestFlags for: a
+// run narrowed to the component directory tests almost nothing and still
+// reports a pass.
+func goTestUninstrumented(args []string) []string { return dropCoverage(args, true) }
+
+// dropCoverage is the scan both spellings share: one pass, because deciding
+// what a package pattern is has to happen in the same pass that pairs a flag
+// with the value behind it. `-timeout 5m` spells its value as a bare word, and
+// a second pass over the survivors could not tell that word from a package.
+func dropCoverage(args []string, keepPackages bool) []string {
 	out := []string{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "-") {
+			if keepPackages {
+				out = append(out, a)
+			}
 			continue
 		}
 		name, _, inline := strings.Cut(strings.TrimLeft(a, "-"), "=")
@@ -519,9 +543,11 @@ func goTestFlags(args []string) []string {
 	return out
 }
 
-// coverageFlags is what run 2 must not carry. The profile is the measurement
-// the coverage gate is about to read, and -coverpkg and -covermode without it
-// are instrumentation the rerun pays for and nothing reads.
+// coverageFlags is what an uninstrumented run must not carry. The profile is
+// the measurement the coverage gate is about to read, and -cover, -coverpkg
+// and -covermode without it are instrumentation the run pays for and nothing
+// reads. One table for every such run, since a flag that is coverage in the
+// rerun is coverage in the plain variant too.
 var coverageFlags = map[string]bool{
 	"cover":        true,
 	"coverprofile": true,
