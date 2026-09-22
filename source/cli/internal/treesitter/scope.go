@@ -195,10 +195,7 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 	if last == nil {
 		return Span{}, false
 	}
-	anchor, prevEnd, ok := g.pastDecorations(last.NextSibling(), last.EndPoint().Row, language)
-	if !ok {
-		return Span{}, false
-	}
+	anchor, prevEnd := g.pastDecorations(last.NextSibling(), last.EndPoint().Row, language)
 	if anchor == nil || anchor.IsExtra() || anchor.StartPoint().Row != prevEnd+1 ||
 		!g.introducesFunction(anchor, language, anchor.StartPoint().Row) {
 		return Span{}, false
@@ -211,20 +208,24 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 // comment is about together with the row the last decoration ended on.
 //
 // Each decoration must begin on the row after the previous one ended, which is
-// the adjacency bound scope describes; anything else answers not ok, and the
-// declaration covers nothing. Where the grammar wraps the decorations and the
+// the adjacency bound scope describes; anything else answers nil, and the
+// declaration covers nothing. A caller cannot tell an adjacency violation from
+// running out of siblings without a match, and does not need to: scope treats
+// a nil anchor as no match either way, so a third return carrying that
+// distinction would be a bool nothing ever reads before a nil check has
+// already settled the answer. Where the grammar wraps the decorations and the
 // declaration in one node — Python's decorated_definition — the walk steps
 // into the wrapper and carries on over its children, so what comes back is the
 // declaration itself and the wrapper is never the anchor.
 func (g Grammar) pastDecorations(n *gotreesitter.Node, prevEnd uint32,
-	language *gotreesitter.Language) (*gotreesitter.Node, uint32, bool) {
+	language *gotreesitter.Language) (*gotreesitter.Node, uint32) {
 	for n != nil {
 		wrapper := decorated[g.tables()] != "" && n.Type(language) == decorated[g.tables()]
 		if !wrapper && !decorations[g.tables()][n.Type(language)] {
-			return n, prevEnd, true
+			return n, prevEnd
 		}
 		if n.StartPoint().Row != prevEnd+1 {
-			return nil, prevEnd, false
+			return nil, prevEnd
 		}
 		if wrapper {
 			n = n.Child(0)
@@ -233,7 +234,7 @@ func (g Grammar) pastDecorations(n *gotreesitter.Node, prevEnd uint32,
 		prevEnd = n.EndPoint().Row
 		n = n.NextSibling()
 	}
-	return nil, prevEnd, true
+	return nil, prevEnd
 }
 
 // introducesFunction reports whether n opens a function on row.
