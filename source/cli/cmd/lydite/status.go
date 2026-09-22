@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
@@ -202,37 +204,54 @@ func clearanceStatus(ref pullRequestRef, description string) forge.Status {
 // The two are alternatives the caller chooses between, not a ladder, for the
 // same reason publish's are, and they are not the same write.
 //
-// The rendered route writes the one document a clearance ref is trusted with,
-// `lydite/clearance`. The relay may separately move `lydite/referral` from
-// `pending` to `success` on the same ref's authority, but only against its
-// own live read of the standing status — never from anything this command
-// renders, and never a state this command chose. This function does not
-// render that second document; the caller posts it as its own request if it
-// wants the referral resolved through the relay too.
+// Either route records two statuses on the head: `lydite/clearance`, which
+// says who cleared the revision, and `lydite/referral` resolved to success,
+// which is what a required check is gated on. A clearance that records only
+// the first leaves every consumer's pull request blocked on a referral nobody
+// can resolve.
 //
-// The direct route keeps every property a repository that has not adopted the
-// reusable workflows relies on: it posts `lydite/clearance` and then resolves
-// `lydite/referral` to success on the same head unconditionally, so a required
-// check on the referral unblocks and a second `/lydite clear` reads the
-// referral as passing.
-// The clearance goes first: if the second post fails, the run fails loudly and
-// the pull request holds a clearance record beside a referral still standing,
-// which a repeated comment repairs. The other order could leave a green
-// referral with nothing recording who cleared it.
+// The rendered route writes them as two documents — the one --status-out
+// names, and its referralDocument sibling — rather than as one document
+// carrying both. Each is a single status object, which is what the relay's
+// /status route and the posting step's `jq -r .context` each read, and the
+// relay admits a clearance ref to `lydite/clearance` alone: the referral
+// document is the posting step's to write with the job's own token, and is
+// never relayed.
+//
+// The clearance goes first on both routes: if the second write or post fails,
+// the run fails loudly and the pull request holds a clearance record beside a
+// referral still standing, which a repeated comment repairs. The other order
+// could leave a green referral with nothing recording who cleared it.
 //
 // A document that cannot be written, or a post that fails, fails the run — a
 // clearance nothing recorded leaves the referral standing while the job that
 // answered the comment reports success.
 func recordClearance(ctx context.Context, client *forge.Client, repo forge.Repo, out string, s forge.Status) error {
+	resolved := s
+	resolved.Context = clearance.Context
 	if out != "" {
-		return forge.WriteStatus(out, s)
+		if err := forge.WriteStatus(out, s); err != nil {
+			return err
+		}
+		return forge.WriteStatus(referralDocument(out), resolved)
 	}
 	if err := client.PostStatus(ctx, repo, s); err != nil {
 		return err
 	}
-	resolved := s
-	resolved.Context = clearance.Context
 	return client.PostStatus(ctx, repo, resolved)
+}
+
+// referralDocument names the second document a rendered clearance writes,
+// beside the one --status-out named.
+//
+// The path is derived rather than configured so that the step posting the
+// documents computes it from the path it already passed, and a lydite that
+// can render a clearance can always render the referral resolving it. A flag
+// for the second path would make resolving the referral something a caller
+// could omit, which is the same pull request blocked on a pending gate.
+func referralDocument(out string) string {
+	ext := filepath.Ext(out)
+	return strings.TrimSuffix(out, ext) + ".referral" + ext
 }
 
 // statusOutFlag names the flag that renders the status instead of posting it.

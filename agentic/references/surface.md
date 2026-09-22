@@ -137,19 +137,22 @@ pending referral to success"). The CLI emits the two under those names: the refe
 (`lydite/clearance`), both in `internal/clearance/decide.go`, so each status is one the relay
 admits for the ref that carries it.
 
-`lydite review --publish --status-out <file>` and `lydite clearance --status-out <file>` render the
+`lydite review --publish --status-out <file>` and `lydite clearance --status-out <file>` render a
 status as a `forge.Status` document (state, context, description, target_url, sha, pull_request)
-instead of posting it, for a step that posts it through the relay. Posting directly with the job's
-own token remains the path for a repository that has not adopted the reusable workflows; the two
-are alternatives, and neither is attempted after the other. Both routes now resolve
-`lydite/referral` to success on a clearance, `lydite/clearance` posted first either way: the
-direct post does it unconditionally (`recordClearance` in `cmd/lydite/status.go`), and the relay
-route does it only against a live-read `pending` standing status, since the relay's write is
-gated per request rather than sequenced with the caller's own two posts. A repository requiring
-`lydite/referral` reads that context on either route; nothing here depends on
-`lydite/clearance` as a substitute required check. A document that cannot be written
-fails the run. `clearance` does not require `--status-out`, and a comment that clears nothing
-writes no document.
+instead of posting it, for a step that posts it. Posting directly with the job's own token remains
+the path for a repository that has not adopted the reusable workflows; the two are alternatives,
+and neither is attempted after the other.
+
+A clearance is two statuses whichever route it takes, and the rendered route is two documents:
+`--status-out <file>` carries `lydite/clearance`, and the sibling with `.referral` before that
+path's extension carries `lydite/referral` = success on the same head. Each file is one status
+object, so a reader taking `jq -r '.context'` over either reads one context. Only the clearance
+document goes to the relay — a clearance ref is admitted to `lydite/clearance` alone, and a
+`lydite/referral` body from one is a `403` — so the workflow posts the referral document itself,
+with the `statuses: write` token it already holds, whether or not the relay was reached. A
+repository requiring `lydite/referral` therefore unblocks on the relay route too. A document that
+cannot be written fails the run. `clearance` does not require `--status-out`, and a comment that
+clears nothing writes no document.
 
 **A clearance run names its pull request in the body.** `lydite-clearance.yml` runs on
 `issue_comment` from the default branch, so its OIDC `ref` is not a pull ref. A job holds

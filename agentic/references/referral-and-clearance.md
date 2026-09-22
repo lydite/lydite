@@ -274,18 +274,20 @@ the pull request's standing comment. The status is the whole record of the verdi
 stands on that context at one commit, and nothing else stores it. A clearance is its own status,
 **`lydite/clearance`** (`clearance.ClearanceContext`), written under different authority from the
 verdict, and `clearance.Decide` reads the referral status to decide whether there is anything to
-clear. Both routes now move `lydite/referral` to `success` on a clearance, but not the same way.
-The direct post (no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success
-on the same head unconditionally, in that order so a partial failure never leaves a green
-referral with no clearance record, and a failure of either post fails the run; a repository
+clear. **A clearance records both statuses on the head, by either route**, `lydite/clearance`
+first so a partial failure never leaves a green referral with no clearance record: a repository
 requiring `lydite/referral` unblocks and a second `/lydite clear` answers already-passing. The
-rendered route posts `lydite/clearance` through the relay as before, and may additionally move
-`lydite/referral` from `pending` to `success` — never `failure` or `error` — gated on the relay's
-own live read of the standing status, taken with the installation token rather than trusted from
-the request (`referralResolution`/`currentStatus` in `source/cloud-services/pr-relay/src/index.ts`;
-see ADR 0051's "A clearance ref may resolve a pending referral to success"). `--status-out <file>`
-on `review --publish` and on `clearance` renders either status as a `forge.Status` document
-instead of posting it; a document that cannot be written fails the run.
+direct post (no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success, and
+a failure of either post fails the run. The rendered route writes two documents, each a single
+`forge.Status` object: the `lydite/clearance` status at the path `--status-out` names, and the
+`lydite/referral` status at the sibling with `.referral` before that path's extension —
+`lydite-status.json` beside `lydite-status.referral.json` (`referralDocument` in
+`cmd/lydite/status.go`). The split is what the relay's authority model requires: a clearance ref is
+admitted to `lydite/clearance` alone, so only the clearance document is ever relayed and the
+referral document is posted by the workflow with its own `statuses: write` token. The path is
+derived rather than configured, so a caller cannot render a clearance without rendering the
+referral it resolves. `--status-out <file>` on `review --publish` renders that command's single
+`lydite/referral` document; a document that cannot be written fails the run on either command.
 
 `review --surfaces <path>` reads a comparison `review compare` already made — the raw
 per-component findings, and the base they were measured against — instead of running it
@@ -385,7 +387,7 @@ special-cases as the many-segments wildcard.
 
 **The `reason` is a question, and the marker in it is reserved.**
 `referral.ReasonPlaceholderMarker` is the literal `TODO(lydite):`, and
-`Exemption.validate` rejects any reason carrying it *anywhere* — a reason that keeps the
+The exemptions-file parser rejects any reason carrying it *anywhere* — a reason that keeps the
 question and prefixes a sentence to it has answered nothing. The check is in
 `internal/referral` rather than in the generator because copying the block into a pull
 request is a route lydite does not control, and `validate` is the one place every route
