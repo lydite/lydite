@@ -9,6 +9,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/treesitter"
 )
 
 // scored is every function one probe file scores, keyed by name, with the whole
@@ -138,6 +139,19 @@ func TestThePythonWalkCountsWhatADR0036Predicts(t *testing.T) {
 		"Gate.allow":       4,
 		"Marker.kind":      2,
 	})
+}
+
+// A grammar complexityOf's switch does not name is refused rather than
+// answered under another's rule. Nothing in runner.Lang or treesitter.Grammar
+// can produce this today — every grammar GrammarFor returns also has a case
+// here — so the value has to be manufactured, the same way the switch itself
+// exists for a divergence that has not happened yet.
+func TestComplexityOfRefusesAGrammarWithNoCountingRule(t *testing.T) {
+	unmatched := treesitter.Grammar(99)
+	_, err := complexityOf(runner.Python, unmatched, treesitter.Func{}, nil)
+	if err == nil {
+		t.Fatal("complexityOf(unmatched grammar) = nil error, want one naming the language")
+	}
 }
 
 // A nested named function is scored in its own right, so its lines are evidence
