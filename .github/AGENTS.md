@@ -1,9 +1,10 @@
 # `.github` — the workflows and the composite actions
 
 `ci-orchestration.yml` and the `ci-*` stage workflows are **generated** from `.gt-repo.yaml`;
-edit that file and run `gt repo sync`. `lydite-pr.yml`, `lydite-baseline.yml`,
-`lydite-clearance.yml`, `dependabot-pins.yml`, `release.yml` and everything under
-`actions/` are hand-written.
+edit that file and run `gt repo sync`. `dependabot-pins.yml`, `release.yml` and everything
+under `actions/` are hand-written. lydite carries no bespoke pull-request or clearance
+workflow of its own: it calls `lydite/actions`' reusable workflows, the same call any
+consumer makes (see ADR 0051).
 
 Read [`ci.md`](../agentic/references/ci.md) before changing a workflow: which stages exist,
 why everything lydite says about a pull request is one run rather than a gt stage, how both
