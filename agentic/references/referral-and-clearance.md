@@ -274,15 +274,20 @@ the pull request's standing comment. The status is the whole record of the verdi
 stands on that context at one commit, and nothing else stores it. A clearance is its own status,
 **`lydite/clearance`** (`clearance.ClearanceContext`), written under different authority from the
 verdict, and `clearance.Decide` reads the referral status to decide whether there is anything to
-clear. What a clearance does to `lydite/referral` depends on the route. The direct post
-(no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success on the same head,
-in that order so a partial failure never leaves a green referral with no clearance record, and a
-failure of either post fails the run; a repository requiring `lydite/referral` unblocks and a
-second `/lydite clear` answers already-passing. The rendered route writes the `lydite/clearance`
-document only: the relay admits a clearance ref to that context alone, so the referral status is
-not resolved by a clearance there. `--status-out <file>` on `review --publish` and on
-`clearance` renders either status as a `forge.Status` document instead of posting it; a document
-that cannot be written fails the run.
+clear. **A clearance records both statuses on the head, by either route**, `lydite/clearance`
+first so a partial failure never leaves a green referral with no clearance record: a repository
+requiring `lydite/referral` unblocks and a second `/lydite clear` answers already-passing. The
+direct post (no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success, and
+a failure of either post fails the run. The rendered route writes two documents, each a single
+`forge.Status` object: the `lydite/clearance` status at the path `--status-out` names, and the
+`lydite/referral` status at the sibling with `.referral` before that path's extension —
+`lydite-status.json` beside `lydite-status.referral.json` (`referralDocument` in
+`cmd/lydite/status.go`). The split is what the relay's authority model requires: a clearance ref is
+admitted to `lydite/clearance` alone, so only the clearance document is ever relayed and the
+referral document is posted by the workflow with its own `statuses: write` token. The path is
+derived rather than configured, so a caller cannot render a clearance without rendering the
+referral it resolves. `--status-out <file>` on `review --publish` renders that command's single
+`lydite/referral` document; a document that cannot be written fails the run on either command.
 
 `review --surfaces <path>` reads a comparison `review compare` already made — the raw
 per-component findings, and the base they were measured against — instead of running it
