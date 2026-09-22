@@ -1,9 +1,15 @@
 ---
 about: the clearance job's checkout is the same repository the pull request belongs to, at its default branch — not a separate copy of lydite's own source
 saw:
-  - .github/workflows/lydite-clearance.yml
   - docs/adr/0015-clearance-binds-to-a-commit.md
 ---
+
+**2026-09-22: `.github/workflows/lydite-clearance.yml` (this file) was deleted on this date**
+(ADR 0051's 2026-09-22 amendment) — lydite carries no clearance workflow of its own until
+`gt#72` repoints its bulwark stage. The mechanism below (`actions/checkout` with no
+`repository:` override checks out the target repo's default branch, not a separate copy)
+still holds and applies identically to `lydite/actions`' own reusable
+`lydite-clearance.yml`.
 
 `.github/workflows/lydite-clearance.yml` runs `actions/checkout` with no `repository:`
 override, which checks out whatever repository the workflow file lives in — the same

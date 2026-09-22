@@ -6,8 +6,15 @@ saw:
   - source/cli/cmd/lydite/review.go
   - source/cli/cmd/lydite/review_compare.go
   - source/cli/cmd/lydite/review_apisurface.go
-  - .github/workflows/lydite-pr.yml
 ---
+
+**2026-09-22: the `referral`/`referral-publish` job split this note describes lived in
+`.github/workflows/lydite-pr.yml`, deleted on this date (ADR 0051's 2026-09-22 amendment) —
+lydite carries no CI shape of its own until `gt#72` repoints its bulwark stage.** Everything
+below about the Go-level exposure, `executil.RunQuietIsolatedEnv`, and the unresolved
+tamper gap is still true of the code (`internal/rustapisurface`, `review_apisurface.go`) and
+governs any future job with the same shape — a consumer's own paired comparison job feeding
+`lydite/actions`' `lydite-referral-publish.yml`, or whatever gt eventually renders here.
 
 `internal/executil`'s `runTo`/`RunQuietEnv` always build the child's environment as
 `append(os.Environ(), extraEnv...)` — they extend the calling process's own
