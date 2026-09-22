@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"lydite/lydite/internal/fixture"
@@ -308,6 +309,37 @@ func TestAMethodCarriesTheTypeItIsWrittenOn(t *testing.T) {
 		}
 		if len(funcs) != 1 || funcs[0].Name != c.want {
 			t.Errorf("%s: names = %v, want [%s]", c.path, names(funcs), c.want)
+		}
+	}
+}
+
+// A function nested inside a method takes no receiver of its own: it is a
+// helper the method declares, not a method of the class, and climbing past its
+// enclosing method to the class beneath would give it a name that collides
+// with a real method there.
+func TestAFunctionNestedInsideAMethodTakesNoReceiver(t *testing.T) {
+	for _, c := range []struct {
+		lang runner.Lang
+		path string
+		src  string
+		want []string
+	}{
+		{runner.Rust, "src/lib.rs",
+			"struct Gate;\nimpl Gate {\n    fn allow(&self) -> bool {\n        fn helper() -> bool {\n            true\n        }\n        helper()\n    }\n}\n",
+			[]string{"Gate::allow", "helper"}},
+		{runner.TypeScript, "src/a.ts",
+			"export class Gate {\n  allow(): boolean {\n    function helper(): boolean {\n      return true;\n    }\n    return helper();\n  }\n}\n",
+			[]string{"Gate.allow", "helper"}},
+		{runner.Python, "src/a.py",
+			"class Gate:\n    def allow(self):\n        def helper():\n            return True\n        return helper()\n",
+			[]string{"Gate.allow", "helper"}},
+	} {
+		funcs, _, err := ScoredFunctions(c.lang, c.path, []byte(c.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := names(funcs); !slices.Equal(got, c.want) {
+			t.Errorf("%s: names = %v, want %v", c.path, got, c.want)
 		}
 	}
 }

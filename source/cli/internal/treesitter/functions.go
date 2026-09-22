@@ -223,11 +223,18 @@ func (w *funcWalk) binding(n *gotreesitter.Node) string {
 
 // receiver is the type a method is declared on, found by walking out to the
 // nearest `impl` block or class. Empty for a free function, which is every
-// function in a file with neither.
+// function in a file with neither — and for a function nested inside another,
+// which the ascent stops at rather than climbing past: a `def` written inside
+// a method's own body is nested in that method, not a method of the class
+// itself, and continuing past it would give a helper the enclosing method's
+// class as its own receiver.
 func (w *funcWalk) receiver(n *gotreesitter.Node) string {
 	for at := n.Parent(); at != nil; at = at.Parent() {
 		if field, ok := receivers[w.g.tables()][at.Type(w.language)]; ok {
 			return w.field(at, field)
+		}
+		if functions[w.g.tables()][at.Type(w.language)] {
+			return ""
 		}
 	}
 	return ""
