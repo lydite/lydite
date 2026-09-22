@@ -7,11 +7,11 @@
 # This is the stage `ci-gate` blocks a merge on, so it holds the checks that
 # must be green to merge and nothing that takes longer than they do.
 #
-# Everything lydite says about a pull request — the referral, the scan, the
-# suites through lydite with coverage gated, and the standing comment — is
-# `lydite-pr.yml`, as one workflow run. That is the shape a consumer gets from
-# `lydite/actions`, and dogfooding a different shape here would leave the
-# shipped one unexercised.
+# lydite once said everything about a pull request — the referral, the scan,
+# the suites through lydite with coverage gated, and the standing comment —
+# through `lydite-pr.yml`, as one workflow run. That file is deleted (ADR
+# 0051's 2026-09-22 amendment) until gt governance renders the equivalent
+# call to `lydite/actions`' reusable workflows; see agentic/references/ci.md.
 name: ci-test
 
 on:
@@ -65,11 +65,11 @@ jobs:
       # merge — and it must be the fastest honest form of the suite rather than
       # the gated one.
       #
-      # The gated run lives in `lydite-pr.yml`, which owns everything lydite
-      # says about a pull request as one workflow because that is the shape a
-      # consumer gets. It cannot be a stage here: gt's CI accepts exactly
-      # preflight, build, test and end2end, so there is no stage a publish
-      # could be. The consequence is that lydite's own coverage gate does not
+      # The gated run lived in `lydite-pr.yml`, deleted until gt governance
+      # replaces it (see agentic/references/ci.md). It cannot be a stage
+      # here: gt's CI accepts exactly preflight, build, test and end2end, so
+      # there is no stage a publish could be. The consequence is that
+      # lydite's own coverage gate does not
       # block a merge, which is the state `lydite/referral` is already in and
       # for the same reason — see #34, and #75 for this gap.
       # Under the release tags as well, and that is not tidiness: with

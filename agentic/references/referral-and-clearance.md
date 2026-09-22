@@ -274,15 +274,18 @@ the pull request's standing comment. The status is the whole record of the verdi
 stands on that context at one commit, and nothing else stores it. A clearance is its own status,
 **`lydite/clearance`** (`clearance.ClearanceContext`), written under different authority from the
 verdict, and `clearance.Decide` reads the referral status to decide whether there is anything to
-clear. What a clearance does to `lydite/referral` depends on the route. The direct post
-(no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success on the same head,
-in that order so a partial failure never leaves a green referral with no clearance record, and a
-failure of either post fails the run; a repository requiring `lydite/referral` unblocks and a
-second `/lydite clear` answers already-passing. The rendered route writes the `lydite/clearance`
-document only: the relay admits a clearance ref to that context alone, so the referral status is
-not resolved by a clearance there. `--status-out <file>` on `review --publish` and on
-`clearance` renders either status as a `forge.Status` document instead of posting it; a document
-that cannot be written fails the run.
+clear. Both routes now move `lydite/referral` to `success` on a clearance, but not the same way.
+The direct post (no `--status-out`) posts `lydite/clearance` and then `lydite/referral` = success
+on the same head unconditionally, in that order so a partial failure never leaves a green
+referral with no clearance record, and a failure of either post fails the run; a repository
+requiring `lydite/referral` unblocks and a second `/lydite clear` answers already-passing. The
+rendered route posts `lydite/clearance` through the relay as before, and may additionally move
+`lydite/referral` from `pending` to `success` — never `failure` or `error` — gated on the relay's
+own live read of the standing status, taken with the installation token rather than trusted from
+the request (`referralResolution`/`currentStatus` in `source/cloud-services/pr-relay/src/index.ts`;
+see ADR 0051's "A clearance ref may resolve a pending referral to success"). `--status-out <file>`
+on `review --publish` and on `clearance` renders either status as a `forge.Status` document
+instead of posting it; a document that cannot be written fails the run.
 
 `review --surfaces <path>` reads a comparison `review compare` already made — the raw
 per-component findings, and the base they were measured against — instead of running it

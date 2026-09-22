@@ -203,14 +203,18 @@ func clearanceStatus(ref pullRequestRef, description string) forge.Status {
 // same reason publish's are, and they are not the same write.
 //
 // The rendered route writes the one document a clearance ref is trusted with,
-// `lydite/clearance`. The relay admits a clearance ref to that context only,
-// so a document for `lydite/referral` could never be posted by it, and the
-// referral is not resolved on this route.
+// `lydite/clearance`. The relay may separately move `lydite/referral` from
+// `pending` to `success` on the same ref's authority, but only against its
+// own live read of the standing status — never from anything this command
+// renders, and never a state this command chose. This function does not
+// render that second document; the caller posts it as its own request if it
+// wants the referral resolved through the relay too.
 //
 // The direct route keeps every property a repository that has not adopted the
 // reusable workflows relies on: it posts `lydite/clearance` and then resolves
-// `lydite/referral` to success on the same head, so a required check on the
-// referral unblocks and a second `/lydite clear` reads the referral as passing.
+// `lydite/referral` to success on the same head unconditionally, so a required
+// check on the referral unblocks and a second `/lydite clear` reads the
+// referral as passing.
 // The clearance goes first: if the second post fails, the run fails loudly and
 // the pull request holds a clearance record beside a referral still standing,
 // which a repeated comment repairs. The other order could leave a green
