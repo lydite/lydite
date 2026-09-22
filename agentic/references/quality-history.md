@@ -57,6 +57,25 @@ A width that cannot be established — a force-push, an unrelated history, a che
 shallow — is recorded as unknown rather than guessed. The first record on a branch is never
 a gap: nothing precedes it, and claiming one would put a break at the start of every line.
 
+**The ledger's completeness under concurrent writers comes from absorbing overlap, not from
+serializing it.** Any pipeline that writes to the state branch must not rely on its own
+`concurrency:` group to keep writers from overlapping — GitHub keeps only one pending run per
+group, so a group shared across triggers evicts a later trigger's still-queued run before it
+starts, silently, with no later run left to recover what it would have measured. A group scoped
+instead to the key that needs a guaranteed run (see
+[`scope-a-concurrency-group-to-what-must-not-evict-it`](../rules/scope-a-concurrency-group-to-what-must-not-evict-it.md))
+lets different keys run at once rather than queue, which only works if what they write to can
+take the resulting overlap. `gitstate.Write` (`source/cli/internal/gitstate/gitstate.go`) is
+built to: each attempt fetches the state branch fresh and stages against that tip, so a push
+rejected by a concurrent writer's own push is retried against the new state rather than
+swallowed. Concurrent writers therefore all land, or, when one loses the race on every attempt,
+that loss is never silent: `Write` returns an error rather than a recording, and the next
+successful append reads its own newest record's parent and writes an explicit `gap` rather than
+the two points joining as if nothing were missing. The retry cap bounds how much overlap one
+writer survives, not whether the ledger's completeness guarantee holds — more writers in flight
+at once than the cap allows makes a `gap` more likely, not the guarantee false, so a `gap` is
+expected to stay rare rather than to disappear.
+
 **An entry is keyed by commit; a baseline is keyed by tree.** Different keys for different
 reasons, and copying one onto the other would be a reflex. A baseline answers "what was
 measured for this content", which is why a pull request and the commit it becomes
