@@ -1,0 +1,9 @@
+"""A file under a `tests` directory, skipped by the directory rather than by
+its own name.
+"""
+
+
+def sample(n):
+    if n < 0:
+        return []
+    return [n for n in range(n) if n % 2 == 0]

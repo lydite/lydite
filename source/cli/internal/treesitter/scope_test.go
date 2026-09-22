@@ -313,6 +313,55 @@ func TestAFileThatDoesNotParseIsRefused(t *testing.T) {
 	}
 }
 
+// Python writes a decoration as a child of a `decorated_definition` wrapping
+// the declaration, where Rust and TypeScript write one as a preceding sibling
+// of it. A declaration above a decorated `def` resolves through that wrapper
+// to the `function_definition` inside it, whose span is the one
+// ScoredFunctions reports for the same function — the wrapper's own span
+// starts a line higher, and a gate matching the two would find no function to
+// exclude. Asked of Grammar.scope, which is the half of the resolution the
+// tree answers, whatever introducer the comment was written with.
+func TestAPythonDeclarationResolvesPastTheDecoratorsToTheDef(t *testing.T) {
+	const src = `# a comment resolved as a declaration's last line
+@cache
+@retry(3)
+def fetch(n):
+    if n > 0:
+        return n
+    return 0
+`
+	root, language, err := Python.Parse("src/a.py", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := Python.scope(commentNodes(root, language), 1, 0, language)
+	if !ok {
+		t.Fatal("the declaration covered no function, want the decorated `def`")
+	}
+	if want := (Span{First: 4, Last: 7}); got != want {
+		t.Errorf("scope = %+v, want %+v — the `def`'s own span rather than the wrapper's", got, want)
+	}
+}
+
+// The adjacency bound holds through the wrapper too: a blank line between the
+// comment and the decorator ends the walk with no match, so a declaration
+// cannot reattach to whatever function happens to follow it.
+func TestABlankLineAboveAPythonDecoratorEndsTheWalk(t *testing.T) {
+	const src = `# a comment resolved as a declaration's last line
+
+@cache
+def fetch(n):
+    return n
+`
+	root, language, err := Python.Parse("src/a.py", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := Python.scope(commentNodes(root, language), 1, 0, language); ok {
+		t.Errorf("scope = %+v, want no match across the blank line", got)
+	}
+}
+
 // A language lydite holds no tables for is an error rather than an empty
 // answer, for the reason an unparsed file is.
 func TestALanguageWithNoGrammarIsRefused(t *testing.T) {
@@ -340,6 +389,7 @@ func TestGrammarForPicksTheTablesByExtension(t *testing.T) {
 		{runner.TypeScript, "src/a.tsx", TSX, true},
 		{runner.TypeScript, "src/a.TSX", TSX, true},
 		{runner.TypeScript, "src/a.js", TypeScript, true},
+		{runner.Python, "src/a.py", Python, true},
 		{runner.Go, "a.go", 0, false},
 	} {
 		got, ok := GrammarFor(c.lang, c.file)

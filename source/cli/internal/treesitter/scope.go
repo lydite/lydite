@@ -22,6 +22,12 @@ import (
 // an `async fn` are all that node. A closure is its own expression type and is
 // deliberately absent: crap.md puts a closure's lines in the function that
 // declares it, so the enclosing function_item is the scope either way.
+//
+// Python needs only function_definition, for the same reasons over again: a
+// method, a nested `def` and an `async def` are all that node, and `lambda` is
+// its own expression type left out exactly as Rust's closure is. A decorated
+// function is a function_definition inside a decorated_definition rather than
+// a node of its own — see decorated.
 var functions = map[Grammar]map[string]bool{
 	Rust: {
 		"function_item": true,
@@ -34,16 +40,19 @@ var functions = map[Grammar]map[string]bool{
 		"arrow_function":                 true,
 		"method_definition":              true,
 	},
+	Python: {
+		"function_definition": true,
+	},
 }
 
 // decorations are the node types that attach to the declaration below them
 // rather than standing on their own.
 //
 // They sit between a doc comment and the thing it is about — `#[inline]` and
-// `#[derive(...)]` in Rust, `@decorator` in TypeScript — and a walk that
-// stopped at one would report every declaration on an attributed function as
-// covering nothing. Comments need no entry: both grammars mark them extra, so
-// the parser itself says they are not the next thing.
+// `#[derive(...)]` in Rust, `@decorator` in TypeScript and Python — and a walk
+// that stopped at one would report every declaration on an attributed function
+// as covering nothing. Comments need no entry: every grammar marks them extra,
+// so the parser itself says they are not the next thing.
 var decorations = map[Grammar]map[string]bool{
 	Rust: {
 		"attribute_item": true,
@@ -51,6 +60,30 @@ var decorations = map[Grammar]map[string]bool{
 	TypeScript: {
 		"decorator": true,
 	},
+	Python: {
+		"decorator": true,
+	},
+}
+
+// decorated is the node type that wraps a declaration together with the
+// decorations attached to it, for the one grammar that has such a wrapper.
+//
+// Rust and TypeScript write a decoration as a preceding sibling of the
+// declaration, so the walk past them is over siblings. Python's `decorator` is
+// a **child** of a `decorated_definition` holding the `def` or the `class`
+// too, so the walk steps into that wrapper and continues over its children —
+// and what it resolves to is the `function_definition` inside, never the
+// wrapper. Anchoring on the wrapper would give a declaration a span one line
+// higher than the span ScoredFunctions reports for the same function, and
+// crap's exclusion, which matches the two spans, would find no function to
+// exclude. Leaving the decorator line outside the span is what Rust already
+// does with an `#[inline]` line, which is no part of its function_item either.
+//
+// The wrapper is not in functions for the same reason it is not the anchor: it
+// wraps a `class_definition` just as readily as a `function_definition`, so a
+// table entry would score every decorated class as a function.
+var decorated = map[Grammar]string{
+	Python: "decorated_definition",
 }
 
 // tables is the Grammar whose node names this one shares. TSX is the
@@ -162,20 +195,45 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 	if last == nil {
 		return Span{}, false
 	}
-	anchor := last.NextSibling()
-	prevEnd := last.EndPoint().Row
-	for anchor != nil && decorations[g.tables()][anchor.Type(language)] {
-		if anchor.StartPoint().Row != prevEnd+1 {
-			return Span{}, false
-		}
-		prevEnd = anchor.EndPoint().Row
-		anchor = anchor.NextSibling()
+	anchor, prevEnd, ok := g.pastDecorations(last.NextSibling(), last.EndPoint().Row, language)
+	if !ok {
+		return Span{}, false
 	}
 	if anchor == nil || anchor.IsExtra() || anchor.StartPoint().Row != prevEnd+1 ||
 		!g.introducesFunction(anchor, language, anchor.StartPoint().Row) {
 		return Span{}, false
 	}
 	return span(anchor), true
+}
+
+// pastDecorations walks from n over the decorations written between a
+// declaration's comment and the declaration itself, and answers the node the
+// comment is about together with the row the last decoration ended on.
+//
+// Each decoration must begin on the row after the previous one ended, which is
+// the adjacency bound scope describes; anything else answers not ok, and the
+// declaration covers nothing. Where the grammar wraps the decorations and the
+// declaration in one node — Python's decorated_definition — the walk steps
+// into the wrapper and carries on over its children, so what comes back is the
+// declaration itself and the wrapper is never the anchor.
+func (g Grammar) pastDecorations(n *gotreesitter.Node, prevEnd uint32,
+	language *gotreesitter.Language) (*gotreesitter.Node, uint32, bool) {
+	for n != nil {
+		wrapper := decorated[g.tables()] != "" && n.Type(language) == decorated[g.tables()]
+		if !wrapper && !decorations[g.tables()][n.Type(language)] {
+			return n, prevEnd, true
+		}
+		if n.StartPoint().Row != prevEnd+1 {
+			return nil, prevEnd, false
+		}
+		if wrapper {
+			n = n.Child(0)
+			continue
+		}
+		prevEnd = n.EndPoint().Row
+		n = n.NextSibling()
+	}
+	return nil, prevEnd, true
 }
 
 // introducesFunction reports whether n opens a function on row.

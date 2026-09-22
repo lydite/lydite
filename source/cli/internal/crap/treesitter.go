@@ -25,7 +25,9 @@ import (
 // whole report over. A file in that second group is not silently dropped —
 // skipped names it, and Measure carries the list forward rather than letting
 // it vanish from a hit map nobody double-checks.
-var walked = map[string]bool{".rs": true, ".ts": true, ".tsx": true, ".mts": true, ".cts": true}
+var walked = map[string]bool{
+	".rs": true, ".ts": true, ".tsx": true, ".mts": true, ".cts": true, ".py": true,
+}
 
 // tracked reports whether a file the coverage report describes is one this gate
 // scores, and which walk scores it.
@@ -52,9 +54,10 @@ func skipped(file string) bool {
 	return ok && runner.Runs(lang)
 }
 
-// scoreTree scores every function one Rust or TypeScript file declares, the way
-// scoreFile scores a Go one: the same span, the same exclusions from both
-// gates, and the same formula over a per-language complexity walk.
+// scoreTree scores every function one Rust, TypeScript or Python file
+// declares, the way scoreFile scores a Go one: the same span, the same
+// exclusions from both gates, and the same formula over a per-language
+// complexity walk.
 //
 // The functions come from one parse and the declarations from another, rather
 // than from a tree threaded between them, because treesitter.DeclaredExclusions
@@ -112,8 +115,12 @@ func scoreTree(lang runner.Lang, root, file string, hits map[int]int) (fileScore
 		if !lines.Measured() {
 			continue
 		}
+		complexity, err := complexityOf(lang, g, fn, language)
+		if err != nil {
+			return out, fmt.Errorf("scoring %s: %w", file, err)
+		}
 		f := Function{Name: fn.Name, File: file, Line: fn.Span.First,
-			Complexity: complexityOf(g, fn, language), Lines: lines}
+			Complexity: complexity, Lines: lines}
 		f.Value = Index(f.Complexity, lines)
 		out.scored = append(out.scored, f)
 	}
@@ -138,11 +145,26 @@ func scoredLines(hits map[int]int, f treesitter.Func) coverage.LineCount {
 }
 
 // complexityOf is the walk the grammar's own counting rules are written for.
-func complexityOf(g treesitter.Grammar, f treesitter.Func, language *gotreesitter.Language) int {
-	if g == treesitter.Rust {
-		return complexityRust(f, language)
+//
+// A grammar with no rule of its own is refused rather than counted under
+// another's. Every rule here is a list of node-type names, and a name from one
+// grammar matches nothing in another: a walk pointed at the wrong table finds
+// no decision point at all and reports every function as complexity 1. That is
+// a well-formed number nothing downstream can recognise as wrong — no error,
+// no panic, and a green suite — so the refusal is the only thing that makes a
+// grammar added without a counting rule visible.
+func complexityOf(lang runner.Lang, g treesitter.Grammar, f treesitter.Func,
+	language *gotreesitter.Language) (int, error) {
+	switch g {
+	case treesitter.Rust:
+		return complexityRust(f, language), nil
+	case treesitter.TypeScript, treesitter.TSX:
+		return complexityTypeScript(f, language), nil
+	case treesitter.Python:
+		return complexityPython(f, language), nil
+	default:
+		return 0, fmt.Errorf("%s is parsed and has no complexity counting rule", lang)
 	}
-	return complexityTypeScript(f, language)
 }
 
 // complexityRust counts a Rust function's decision points, plus one for the
@@ -246,6 +268,93 @@ func optionalCall(call *gotreesitter.Node, language *gotreesitter.Language) int 
 		}
 	}
 	return 0
+}
+
+// complexityPython counts a Python function's decision points, plus one for
+// the function itself: every construct radon's own `ComplexityVisitor`
+// increments for.
+//
+// radon rather than a rule shaped like Go's, for the reason the other two
+// walks follow their own ecosystem's tool: the number lydite reports and the
+// number `radon cc` reports should agree. Concretely that is every `if` and
+// `elif`, every conditional expression, every `for` and `while`, the `else` on
+// a loop or a `try` (which runs only when the loop was not broken out of and
+// nothing was raised — an `if`'s own `else` is the decision the `if` already
+// counted), every `except` handler, every `and` and `or`, every clause of a
+// comprehension, every `assert`, and every `match` case that is not the
+// literal `_`. A `with` is not a decision and a `finally` is unconditional, so
+// neither counts — both match radon.
+//
+// `elif` needs a node of its own where Rust's `else if` needed none, because
+// this grammar gives the chain a flat `elif_clause` per arm rather than
+// nesting an `if` inside each `else`. An `async def` and an `async for` are
+// the same nodes as their synchronous forms and need no rule either.
+func complexityPython(f treesitter.Func, language *gotreesitter.Language) int {
+	return walkComplexity(f, language, func(n *gotreesitter.Node) int {
+		switch n.Type(language) {
+		case "if_statement", "elif_clause", "conditional_expression",
+			"for_statement", "while_statement", "except_clause", "assert_statement",
+			"boolean_operator", "for_in_clause":
+			// `boolean_operator` nests, so `a and b or c` is two nodes and two
+			// decisions — which is radon's own `len(values) - 1` per operator,
+			// reached by the shape of the tree rather than by a rule.
+			return 1
+		case "else_clause":
+			return pythonLoopElse(n, language)
+		case "if_clause":
+			return pythonComprehensionFilter(n, language)
+		case "case_clause":
+			// The same rule the Rust walk applies to a `match` arm: only the
+			// literal `_` is the case control reaches once every other has been
+			// decided against, and a bare-name capture — `case other:` — is a
+			// case like any other.
+			if pythonWildcard(n, language) {
+				return 0
+			}
+			return 1
+		}
+		return 0
+	})
+}
+
+// pythonLoopElse counts the `else` on a loop or a `try`, and not the one on an
+// `if`: the first runs only when the loop ran to exhaustion or nothing was
+// raised, where the second is the branch its `if` has already been counted for.
+func pythonLoopElse(n *gotreesitter.Node, language *gotreesitter.Language) int {
+	parent := n.Parent()
+	if parent == nil {
+		return 0
+	}
+	switch parent.Type(language) {
+	case "for_statement", "while_statement", "try_statement":
+		return 1
+	}
+	return 0
+}
+
+// pythonComprehensionFilter counts a comprehension's `if`, and not a `match`
+// case's guard: this grammar spells both `if_clause`, and the guard belongs to
+// a case clause the walk has already counted one for.
+func pythonComprehensionFilter(n *gotreesitter.Node, language *gotreesitter.Language) int {
+	parent := n.Parent()
+	if parent != nil && parent.Type(language) == "case_clause" {
+		return 0
+	}
+	return 1
+}
+
+// pythonWildcard reports whether a `case` clause's pattern is the literal `_`,
+// and nothing else — the node the grammar writes as an unnamed `_` token
+// inside the clause's pattern.
+func pythonWildcard(clause *gotreesitter.Node, language *gotreesitter.Language) bool {
+	for i := range clause.ChildCount() {
+		pattern := clause.Child(i)
+		if pattern.Type(language) != "case_pattern" {
+			continue
+		}
+		return pattern.ChildCount() == 1 && pattern.Child(0).Type(language) == "_"
+	}
+	return false
 }
 
 // logical reports whether an operator node carries one of the short-circuiting

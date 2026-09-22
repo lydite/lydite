@@ -1,17 +1,17 @@
 # The complexity probes, and what the oracles said about them
 
-`rustprobe/` and `tsprobe/` carry one function per branching construct
+`rustprobe/`, `tsprobe/` and `pyprobe/` carry one function per branching construct
 [ADR 0036](../../../../docs/adr/0036-crap-scores-rust-and-typescript-from-a-hand-rolled-walk.md)
 names a counting rule for. Each table below gives the number that ADR's rules predict, worked
 out by hand from the source and not from the code that computes it — so a test asserting the
 walk's output is checking it against something derived independently — and beside it the number
 an oracle measured over the same function.
 
-The oracles are `rust-code-analysis-cli`'s cyclomatic metric and ESLint's `complexity` rule, run
-once, by hand, in a scratch directory outside this repository. Neither is a dependency: no
-manifest names them, no `.github/dependabot.yml` entry watches them, and nothing lydite ships
-invokes them. They exist to back the counting rules with a measurement — see the ADR's
-"Oracles, not dependencies".
+The oracles are `rust-code-analysis-cli`'s cyclomatic metric, ESLint's `complexity` rule and
+`radon cc`, each run once, by hand, in a scratch directory outside this repository. None is a
+dependency: no manifest names them, no `.github/dependabot.yml` entry watches them, and nothing
+lydite ships invokes them. They exist to back the counting rules with a measurement — see the
+ADR's "Oracles, not dependencies".
 
 Source files carry a `.txt` suffix and are materialised by `internal/fixture`, whose doc comment
 says why. They are not a buildable crate or package: no `Cargo.toml` and no `package.json`
@@ -161,3 +161,98 @@ two the ADR justifies on desugaring rather than on ESLint's behaviour: default p
 ESLint also reports a complexity-1 "class field initializer" for `Gate`'s `private open = false`.
 It is not a function, lydite scores no unit for it, and it is recorded here only so that its
 absence from lydite's output is not read as a missing row.
+
+## Python — `pyprobe/`
+
+`src/probe.py` is the scored file. Line numbers are its own.
+
+The counting rule is radon's, for the reason Go's is gocyclo's and TypeScript's is ESLint's: the
+number lydite reports and the number a developer gets from the tool already in their editor
+should agree. One, plus every `if` and `elif`, every conditional expression, every `for` and
+`while`, the `else` on a loop or a `try`, every `except` handler, every `and` and `or`, every
+clause of a comprehension, every `assert`, and every `match` case that is not the literal `_`. An
+`if`'s own `else`, a `with` and a `finally` count nothing. The three nesting rules are the ones
+the other two languages already carry: a `lambda` folds into the function whose span contains it
+the way a Rust closure does, a nested `def` is scored as its own unit and leaves a flat +1 behind
+in its parent, and a decorated function's span is the `def`'s own — the decorator line belongs to
+no unit, exactly as a Rust `#[inline]` line belongs to none.
+
+| Line | Function | The rule predicts | Why | `radon` | |
+|---|---|---|---|---|---|
+| 10 | `classify` | 4 | 1 + `if` + two `elif`; the `else` does not count | 4 | agrees |
+| 22 | `guarded` | 4 | 1 + `if` + `and` + `or` | 4 | agrees |
+| 29 | `pick` | 2 | 1 + a conditional expression | 2 | agrees |
+| 34 | `countdown` | 2 | 1 + `while` | 2 | agrees |
+| 43 | `first_even` | 3 | 1 + `for` + `if` | 3 | agrees |
+| 51 | `search` | 4 | 1 + `for` + its `else` + `if` | 4 | agrees |
+| 60 | `read_number` | 2 | 1 + one `except` handler | 2 | agrees |
+| 68 | `read_pair` | 4 | 1 + two `except` handlers + the `try`'s `else`; the `finally` is unconditional | 4 | agrees |
+| 82 | `regroup` | 3 | 1 + two `except*` handlers | **1** | **diverges** |
+| 93 | `evens` | 3 | 1 + the comprehension's `for` + its `if` | 3 | agrees |
+| 98 | `tally` | 2 | 1 + the lambda's `and`, which folds into this span | 2 | agrees |
+| 104 | `require_positive` | 2 | 1 + `assert` | 2 | agrees |
+| 110 | `read_file` | 1 | a `with` is not a decision | 1 | agrees |
+| 116 | `describe` | 3 | 1 + two cases; the `_` wildcard does not count | 3 | agrees |
+| 127 | `label` | 3 | 1 + two cases; `other` is a binding, not the wildcard | **2** | **diverges** |
+| 136 | `bracket` | 3 | 1 + two cases; a case's guard belongs to the case | 3 | agrees |
+| 147 | `gather` | 3 | 1 + `async for` + `if`, the same nodes as their synchronous forms | 3 | agrees |
+| 158 | `cached_band` | 2 | 1 + `if`; a decorator decides nothing | 2 | agrees |
+| 165 | `outer` | 3 | 1 + `if` + a flat 1 for the nested `def`; span is 165–175 less 168–171 | **2**, nested `def` scored separately at 2 | **diverges** |
+| 168 | `inner` | 2 | 1 + `if`, its own unit with its own span | 2 | agrees |
+| 181 | `Gate.__init__` | 1 | no branch | 1 | agrees |
+| 184 | `Gate.allow` | 4 | 1 + `if` + `or` + `and` | 4 | agrees |
+| 195 | `Marker.kind` | 2 | 1 + a conditional expression | 2 | agrees |
+
+`src/test_probe.py`, `src/gate_test.py` and `src/tests/helpers.py` are whole files lydite skips by
+path — pytest's `test_` prefix and `_test` suffix, and a `tests` directory. radon scores them
+(`band` 3 and `test_bands_are_named` 4, `test_a_gate_opens_for_an_admin` 2, `sample` 4) because,
+like the other two oracles, it has no notion of test code.
+
+radon also reports an aggregate row per class — `Gate` 4 and `Marker` 3, each the sum of its
+methods' own values. lydite scores no unit for a class, and the rows are recorded here only so
+that their absence from lydite's output is not read as missing ones. `Marker` is decorated,
+which is what makes it the probe for the wrapper rule: `decorated_definition` wraps a
+`class_definition` as readily as a `function_definition`, so lydite reads the wrapper's
+*contents* rather than treating the wrapper itself as a function.
+
+### How it was captured
+
+`radon 6.0.1` under CPython 3.14.6, installed into a scratch virtualenv outside this repository:
+
+```sh
+python3 -m venv <scratch>/venv
+<scratch>/venv/bin/pip install radon
+<scratch>/venv/bin/radon cc -s --show-closures <scratch>/pyprobe/src/probe.py
+```
+
+`--show-closures` is required for `inner`: without it radon reports `outer` alone and its nested
+`def` is absent from the output entirely, which reads identically to a function radon scored 0
+for. With it, the nested one is reported as `outer.inner` — lydite names it `inner`, the same
+bare name its own `def` gives it, which is what Rust's nested `fn` is named too.
+
+### The divergences, and which number lydite keeps
+
+**`regroup`: lydite 3, radon 1 — lydite keeps 3.** `except*` is an exception *group* handler, and
+radon's `ComplexityVisitor` branches on the AST node names `Try` and `TryExcept`, neither of
+which is the `TryStar` CPython parses `try/except*` into. Its handlers are therefore counted by
+nothing and the function scores as though it were branchless. tree-sitter spells an `except*`
+clause the same `except_clause` it spells an ordinary one, so lydite counts both and reports 3.
+This is a gap in the oracle rather than a disagreement about what a decision is.
+
+**`label`: lydite 3, radon 2 — lydite keeps 3.** radon treats any capture pattern as the
+wildcard: `case other:` and `case _:` are both `MatchAs` with no sub-pattern, so both are
+subtracted from the case count. lydite counts only the literal `_`, which is the rule its own
+Rust walk already applies to a `match` arm — and the two languages counting one construct two
+ways over a difference neither language has is worth more than agreeing with radon here.
+`describe`, whose catch-all *is* `_`, agrees with radon exactly.
+
+**`outer`: lydite 3 (and `inner` 2), radon 2 (and `outer.inner` 2) — lydite keeps 3.** Both score
+the nested `def` as its own unit and agree on its value; they differ by the flat +1 ADR 0036
+leaves in the parent for containing one. The same divergence, for the same reason, as Rust's
+`outer` against `rust-code-analysis`.
+
+**The lambda does not diverge.** radon stopped giving a `lambda` its own scoring unit
+([radon#68](https://github.com/rubik/radon/issues/68)), so its branches are counted toward the
+function containing it — which is exactly what ADR 0036's nesting rule says, reached from the
+other direction. `tally` is 2 from both, where Rust's equivalent `tally` and TypeScript's `evens`
+each diverge from their own oracle over the identical rule.

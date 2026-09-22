@@ -180,3 +180,41 @@ func TestDeclaredTestsRefusesALanguageWithNoGrammar(t *testing.T) {
 		t.Fatalf("Go came back with %v, want ErrNoGrammar", err)
 	}
 }
+
+// So is a language lydite parses and enumerates no tests for. The tables alone
+// are not the enumeration, and a file answered with an empty slice is a file
+// declaring no test — which makes every test in it new at neither revision and
+// the gate over it green without having looked.
+func TestDeclaredTestsRefusesAParsedLanguageItCannotEnumerate(t *testing.T) {
+	src := "def test_it_ships():\n    assert ships() == 1\n"
+	got, err := DeclaredTests(runner.Python, "tests/test_ships.py", []byte(src))
+	var noGrammar ErrNoGrammar
+	if !errors.As(err, &noGrammar) {
+		t.Fatalf("Python came back with %d test(s) and error %v, want ErrNoGrammar", len(got), err)
+	}
+}
+
+// pytest collects a file by a `test_` prefix, a `_test` suffix or a `tests`
+// directory, and lydite scores none of what it collects. A file matching none
+// of them is code under test, `conftest.py` included: it holds fixtures rather
+// than tests, and an unrecognised form is scored — and so visible — rather
+// than silently left out.
+func TestThePythonTestConventionsCoverWhatPytestCollects(t *testing.T) {
+	for _, c := range []struct {
+		path string
+		want bool
+	}{
+		{"src/test_probe.py", true},
+		{"src/gate_test.py", true},
+		{"tests/helpers.py", true},
+		{"src/tests/helpers.py", true},
+		{"src/probe.py", false},
+		{"src/conftest.py", false},
+		{"src/contest_helpers.py", false},
+		{"src/latest.py", false},
+	} {
+		if got := Python.TestFile(c.path); got != c.want {
+			t.Errorf("TestFile(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}

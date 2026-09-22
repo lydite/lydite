@@ -11,12 +11,13 @@ import (
 //
 // It is the half of functions that can stand on its own when nested. A named
 // function written inside another — Rust's nested `fn`, TypeScript's nested
-// `function inner() {}` — has an identity a reader would call a function in
-// its own right, so it is scored as its own unit; an arrow or an anonymous
-// `function (x) {...}` passed as a callback has none, and folds into whichever
-// unit's span contains it. `function_expression` and `generator_function` are
-// absent because a name is optional on both: which side of the line one falls
-// on is read off its own `name` field rather than off its type.
+// `function inner() {}`, Python's nested `def` — has an identity a reader
+// would call a function in its own right, so it is scored as its own unit; an
+// arrow or an anonymous `function (x) {...}` passed as a callback has none,
+// and folds into whichever unit's span contains it. `function_expression` and
+// `generator_function` are absent because a name is optional on both: which
+// side of the line one falls on is read off its own `name` field rather than
+// off its type.
 var namedFunctions = map[Grammar]map[string]bool{
 	Rust: {
 		"function_item": true,
@@ -26,11 +27,18 @@ var namedFunctions = map[Grammar]map[string]bool{
 		"generator_function_declaration": true,
 		"method_definition":              true,
 	},
+	Python: {
+		"function_definition": true,
+	},
 }
 
 // bindings are the node types that give an anonymous function the name it is
 // written under: `const f = () => {}` is a function called `f` to everyone who
 // calls it, and the tree keeps that name one level up.
+//
+// Rust and Python have none, because neither has an anonymous node in
+// functions to name: a closure and a `lambda` are both expressions that fold
+// into the unit whose span contains them.
 var bindings = map[Grammar]map[string]string{
 	Rust: {},
 	TypeScript: {
@@ -39,6 +47,7 @@ var bindings = map[Grammar]map[string]string{
 		"pair":                    "key",
 		"assignment_expression":   "left",
 	},
+	Python: {},
 }
 
 // receivers are the node types a method is written on, and the field holding
@@ -51,6 +60,9 @@ var receivers = map[Grammar]map[string]string{
 		"class_declaration": "name",
 		"class":             "name",
 	},
+	Python: {
+		"class_definition": "name",
+	},
 }
 
 // receiverSeparator is how each language writes a method's owner before its
@@ -58,6 +70,7 @@ var receivers = map[Grammar]map[string]string{
 var receiverSeparator = map[Grammar]string{
 	Rust:       "::",
 	TypeScript: ".",
+	Python:     ".",
 }
 
 // Func is one function a gate scores: the subtree a walk over it covers, the
