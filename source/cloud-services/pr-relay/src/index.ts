@@ -258,6 +258,16 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
         // resolve it; an `error` never reached a verdict, so there is none to
         // resolve — and a revision carrying no referral at all has nothing
         // standing that a clearance is answering.
+        //
+        // The read and the write below are two separate requests, so a
+        // referral re-run landing `failure` on this exact head in the gap
+        // between them is not caught — the platform's status API has no
+        // conditional write to close that window with. It is narrower than
+        // what stands today regardless: the direct-post route
+        // (`recordClearance` in `cmd/lydite/status.go`) resolves
+        // `lydite/referral` to `success` after a clearance with no live read
+        // at all, so this is a tighter check on the same exposure rather
+        // than a new one.
         const standing = await currentStatus(
           token,
           claims.repository,

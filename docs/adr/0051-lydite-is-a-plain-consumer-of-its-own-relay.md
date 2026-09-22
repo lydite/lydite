@@ -107,3 +107,25 @@ checks, per-Worker secrets, the `409`/`403`/`5xx` status ladder and its delibera
 with the comment ladder, the relay holding no state, and the allowlist as two Wrangler vars of
 exact strings with no patterns. `pr-relay`'s per-`job_workflow_ref` scoping to one context is
 unchanged for every context except this one exception.
+
+## Amendment 2026-09-22: the bespoke workflows are removed rather than rewired
+
+`lydite-pr.yml`, `lydite-baseline.yml` and `lydite-clearance.yml` are deleted, not rewritten to
+call the reusable workflows, and lydite carries no CI shape of its own until `gt` repoints it.
+
+The plain-consumer shape this ADR describes is what `gt`'s own governance is expected to render
+into this repository once `pedromvgomes/gt#72` lands and this repository's bulwark stage is
+repointed at `lydite/actions`. Hand-rewiring `lydite-pr.yml` and `lydite-clearance.yml` to call
+the reusable workflows now, only to have `gt repo sync` render the same call again days later, is
+work this repository does twice for one outcome. The three files are deleted instead:
+`lydite-pr.yml`, `lydite-baseline.yml`, `lydite-clearance.yml`.
+
+**What this gives up, named rather than left implicit:** until that repointing lands, lydite's
+own pull requests get no referral verdict, no scan (Semgrep, SCA, licence), no coverage or
+mutation gate, and no standing comment from a run of lydite against itself; `/lydite clear`
+answers nothing, because there is nothing posting `lydite/clearance` or `lydite/referral` here at
+all; and pushes to the default branch record no coverage baseline, because `lydite-baseline.yml`
+no longer runs. No branch-protection ruleset here requires `lydite/referral` (`lydite/lydite#34`)
+or `ci-gate` off this repository's own scan, so a pull request merges without triggering any of
+this — silently, not as an error. Accepted as a short, stated gap rather than patched with a
+hand-written stand-in that would only be deleted again once `gt#72` lands.
