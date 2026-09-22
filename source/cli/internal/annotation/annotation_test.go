@@ -141,18 +141,44 @@ func TestABlockCommentIsNotADeclaration(t *testing.T) {
 }
 
 // The introducer and the space after it are stripped, so a declaration reads
-// the same however tightly its author wrote it.
+// the same however tightly its author wrote it — and whichever of the two
+// introducers a language spells a line comment with.
 func TestTheIntroducerIsStrippedEitherWay(t *testing.T) {
 	t.Parallel()
 	for _, text := range []string{
 		"// " + Marker(CRAP) + "[a reason]",
 		"//" + Marker(CRAP) + "[a reason]",
 		"//\t" + Marker(CRAP) + "[a reason]",
+		"# " + Marker(CRAP) + "[a reason]",
+		"#" + Marker(CRAP) + "[a reason]",
+		"#\t" + Marker(CRAP) + "[a reason]",
 	} {
 		got, err := Declarations("a.go", CRAP, []Comment{{Line: 1, Text: text}})
 		if err != nil || got[1].Reason != "a reason" {
 			t.Errorf("Declarations(%q) = (%v, %v), want the reason", text, got, err)
 		}
+	}
+}
+
+// A reason wraps across `#` comment lines as it does across `//` ones: a
+// continuation goes through the same introducer-stripping as the line that
+// opened the declaration, so a Python reason that does not fit on one line is
+// read whole rather than left unclosed.
+func TestAReasonWrapsAcrossHashCommentLines(t *testing.T) {
+	t.Parallel()
+	got, err := Declarations("a.py", Coverage, []Comment{
+		{Line: 10, Text: "# " + Marker(Coverage) + "[the integration suite drives this against"},
+		{Line: 11, Text: "# a real broker, so the unit run measures none of it]"},
+	})
+	if err != nil {
+		t.Fatalf("Declarations: %v", err)
+	}
+	want := "the integration suite drives this against a real broker, so the unit run measures none of it"
+	if got[10].Reason != want {
+		t.Errorf("reason = %q, want %q", got[10].Reason, want)
+	}
+	if got[10].Lines != 1 {
+		t.Errorf("Lines = %d, want 1 — the reason wrapped onto line 11", got[10].Lines)
 	}
 }
 
