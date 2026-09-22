@@ -267,8 +267,8 @@ func uncoveredPaths(ctx context.Context, client *forge.Client, repo forge.Repo, 
 //
 // A templated real-sounding reason reads as though somebody had thought about
 // it, which defeats the requirement that somebody did. The opening literal is
-// reserved, so an entry landed with this text still in it fails
-// referral.Exemption.validate rather than becoming a live exemption.
+// reserved, so an entry landed with this text still in it is rejected by
+// referral.Parse rather than becoming a live exemption.
 const proposalReason = referral.ReasonPlaceholderMarker +
 	" why is a change touching only these paths safe to merge unread? " +
 	"State what this entry's paths guarantee, and nothing the schema does not check."
