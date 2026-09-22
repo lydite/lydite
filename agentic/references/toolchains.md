@@ -157,8 +157,7 @@ over: it looked for `go.mod` at exactly one path, so wardnet — whose modules l
 `sdk/wardnet-go/`, not the scan root — would silently have got nothing, and it put knowledge of Go
 toolchains into gt, which would then have needed the same for Rust and TypeScript forever. lydite
 already knows which languages a repository declares and where, so it reads each component's own
-manifest; and it is the only place that helps wardnet at all, since wardnet calls `wardnet/bulwark@v1`
-directly rather than through gt. See [ADR 0004](../../docs/adr/0004-ensure-language-toolchains.md).
+manifest. See [ADR 0004](../../docs/adr/0004-ensure-language-toolchains.md).
 
 Downloads land in the same version-keyed `~/.cache/lydite` layout every other lydite-managed
 install already uses, so a consumer caching that one path (as wardnet's workflow already does)
