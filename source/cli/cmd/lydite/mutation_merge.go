@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,7 +95,8 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, componentRows(rep, decl, inputs, mutationLabel)...)
+	problems = append(problems, componentRowsNoting(rep, decl, inputs, mutationLabel,
+		func(name string) string { return projectionNote(inputs, name) })...)
 	// A tree the shards disagree about is reported under `shards`, which is the
 	// row that says these documents are not one run. The counts still fold from
 	// the rows, because a fold that dropped them would answer a narrower
@@ -109,6 +113,66 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	rep.Add(foldedMutationRow(inputs, counts, decl))
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedMutationLabel(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
+}
+
+// projectionNote is what a shard's uploaded directory still says about a
+// component that took no row.
+//
+// Only the projection, quoted as the run's own words, and only when the log
+// survived: the run said what it was about to cost before it spent it, and a
+// reader deciding what to do about a missing row wants that figure. It is not a
+// cause and is not offered as one — a killed job, a runner that ran out of
+// memory and an upload that never arrived all leave exactly this behind, and a
+// projection is a statement made before any of them happened.
+//
+// The first shard that has the log answers. A component is one shard's
+// responsibility, so there is normally one; two would mean two jobs ran the same
+// work, which is the failure the second arm of componentRows reports and not
+// this one.
+func projectionNote(inputs []shardInput, name string) string {
+	for _, in := range inputs {
+		line, ok := shardProjection(in.dir, name)
+		if !ok {
+			continue
+		}
+		return fmt.Sprintf("and the log it left in %s says the run projected: %q — what the run said it was about to cost, not what became of it",
+			in.dir, line)
+	}
+	return ""
+}
+
+// shardProjection reads the projection out of one component's mutation log
+// inside a shard's report directory.
+//
+// The log is found by the layout openLog writes — a directory named for the
+// component, holding the log named for the command — rather than by walking
+// whatever subdirectories the artifact happens to hold, so a lone shard
+// extracted straight into the reports directory reads the same as one nested
+// under a directory of its own.
+//
+// Every failure is the same answer, which is that there is no projection to
+// quote: a missing directory, a log that cannot be opened, and a log that never
+// reached the line are all a fold that says what it said before.
+func shardProjection(dir, name string) (string, bool) {
+	f, err := os.Open(filepath.Join(dir, name, mutationLogName)) // #nosec G304 -- a shard's own report directory, under a directory named for a declared component
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	scan := bufio.NewScanner(f)
+	// A suite writes whatever it likes into this log, and a single line longer
+	// than the scanner's token limit ends the scan where it stands. The
+	// projection is one short line below those, so the limit is raised past the
+	// default until a log holding long lines is read through. The ceiling is the
+	// whole of the decision: the scanner grows its own buffer to whatever a line
+	// needs up to it.
+	scan.Buffer(nil, 1024*1024)
+	for scan.Scan() {
+		if line, ok := costProjectionIn(scan.Text()); ok {
+			return line, true
+		}
+	}
+	return "", false
 }
 
 // foldedMutationLabel names every label this fold produces itself, so
@@ -156,13 +220,14 @@ func readShardMutants(dir string, row *ui.Row) (mutantsDoc, bool) {
 // killedOf reads a component row's score back out of its value.
 //
 // It is how the fold reads a shard that wrote no mutants.json — an older
-// lydite, or one whose document did not parse — and it is how every shard's
-// elapsed time is read, because the counts document carries what became of each
-// mutant and not how long the component took to say so. A row whose value does
-// not match contributes nothing, and the summary says how many components it
-// covers, so a value this stops recognising shows up as a summary over fewer
-// components rather than as a wrong number.
-var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived) in (.+)$`)
+// lydite, or one whose document did not parse — and nothing else: the elapsed
+// time the row states is not captured, because the counts document carries that
+// span as a number and a fold reading it out of a sentence is one wording change
+// away from a wrong total. A row whose value does not match contributes nothing,
+// and the summary says how many components it covers, so a value this stops
+// recognising shows up as a summary over fewer components rather than as a wrong
+// number.
+var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived) in .+$`)
 
 // foldedMutationRow sums the shards' scores.
 //
@@ -177,18 +242,17 @@ var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived)
 // survived == 0 for the repository, so a gating row here could only restate the
 // conjunction of the rows above it — and each of those has already failed the
 // run if it had a survivor.
+//
+// The elapsed time is the sum over the components that recorded one, which is
+// machine time and not wall-clock: shards run beside each other, so no clock
+// ever read this, and it is the same quantity an unsharded run's own summary
+// reports for the same declaration. A component whose counts carried no time —
+// a shard with no document, or one an older lydite wrote — is left out of it,
+// and the row says how many contributed rather than counting them at nought.
 func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.File) ui.Row {
-	killed, total, covered := 0, 0, 0
+	killed, total, covered, timed := 0, 0, 0, 0
 	var elapsed time.Duration
 	for _, c := range decl.Components {
-		rows := rowsFor(inputs, mutationLabel(c.Name))
-		for _, row := range rows {
-			if m := killedOf.FindStringSubmatch(row.Value); m != nil {
-				if d, err := time.ParseDuration(m[4]); err == nil {
-					elapsed += d
-				}
-			}
-		}
 		if s, ok := counts.Components[c.Name]; ok {
 			// Every component the document holds ran, including one whose
 			// mutants said nothing about the suite — its row is `unmeasured`
@@ -196,9 +260,13 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			// folded run report the component count an unsharded one does.
 			n, of := s.summary().Score()
 			killed, total, covered = killed+n, total+of, covered+1
+			if d, ok := s.elapsed(); ok {
+				elapsed += d
+				timed++
+			}
 			continue
 		}
-		for _, row := range rows {
+		for _, row := range rowsFor(inputs, mutationLabel(c.Name)) {
 			m := killedOf.FindStringSubmatch(row.Value)
 			if m == nil {
 				continue
@@ -214,6 +282,19 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 	if covered == 0 {
 		return ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "no component was mutated"}
 	}
-	return ui.Row{Status: ui.StatusContext, Label: "mutation",
-		Value: fmt.Sprintf("%d of %d mutant(s) killed across %d component(s) in %s", killed, total, covered, elapsed)}
+	row := ui.Row{Status: ui.StatusContext, Label: "mutation",
+		Value: fmt.Sprintf("%d of %d mutant(s) killed across %d component(s)", killed, total, covered)}
+	switch {
+	case timed == covered:
+		row.Value += " in " + elapsed.Round(time.Second).String()
+	case timed > 0:
+		row.Value += fmt.Sprintf(" in %s, from the %d that recorded a time",
+			elapsed.Round(time.Second), timed)
+	default:
+		// Said rather than rendered as `in 0s`: a total nothing measured is
+		// indistinguishable from a run that took no time, and the shard that
+		// recorded none is the one a reader has to go and look at.
+		row.Detail = []string{"no shard recorded how long its components took"}
+	}
+	return row
 }

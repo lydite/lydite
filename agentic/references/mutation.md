@@ -333,6 +333,14 @@ failing punishes a change for its size, and capping to `unmeasured` gives a busy
 permanently amber row. A run genuinely too large dies as a CI job timeout, the shard produces no
 document, and the fold already fails a declared component with no row.
 
+What a run does instead is state its cost before paying it. Once mutants are generated it writes
+one line to the component's live log, mirrored to stderr under `--stream`: `N mutant(s), budget Xs
+each, W worker(s): at most Ys` (`costProjection` in `cmd/lydite/mutation.go`). It is a worst case,
+`ceil(mutants/workers)` times the per-mutant budget, and a projection rather than a cap. It survives
+a killed job because the log does and the final document does not. Elapsed time (baseline plus
+every mutant) is recorded afterwards as `elapsed_seconds` in each component's entry in
+`mutants.json`.
+
 The **per-mutant** timeout is a different thing, and is a multiple of what this run measured: three
 times the component's own observed baseline, with a 60-second floor for a suite too fast to measure
 and `--timeout` overriding. Without one, `TimedOut` is an outcome nothing can produce.
@@ -364,15 +372,21 @@ component with no row is a shard whose job died and one with two rows is two job
 work. That rule lives in `cmd/lydite/fold.go` with two consumers rather than in two copies that
 agree until one learns something.
 
+For a component with no row the fold says only that. When the component's uploaded mutation log
+survived and holds the projection line, it also quotes that line verbatim as what the run said it
+was about to cost. It never names a cause: a job killed at its timeout, a runner OOM and a failed
+upload leave identical absence, so a fold saying "too large" would be a guess.
+
 **The fold emits a `mutation` summary row, never `mutation(repo)`.** There is no repository-wide
 figure only a fold can compute — `survived == 0` for every component is `survived == 0` for the
 repository — so a gating row could only restate the conjunction of the rows above it. It is
-`context`, gates nothing, and carries the counts and the elapsed time that make a later budget a
-measured decision rather than a guess. A run responsible for only part of the declaration emits no
+`context`, gates nothing, and carries the counts and the elapsed time (summed as machine time,
+not wall-clock, leaving out components that recorded none and saying how many did) that make a
+later budget a measured decision rather than a guess. A run responsible for only part of the declaration emits no
 summary row, for the reason it emits no `coverage(repo)`.
 
-It reads each component's counts out of `mutants.json`, folded across shards by `foldMutants`,
-because the counts are typed data there and arithmetic over data does not care how a row happens
+It reads each component's counts and `elapsed_seconds` out of `mutants.json`, folded across
+shards by `foldMutants`, because the counts are typed data there and arithmetic over data does not care how a row happens
 to be worded. A shard that wrote no such document — an older lydite in the matrix, or one whose
 document would not parse — falls back to reading the score back out of the row that shard
 rendered, the same trade `foldedScheduleRow` already makes for `max N concurrent`.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"lydite/lydite/internal/mutation"
 )
@@ -56,7 +57,8 @@ type mutantsDoc struct {
 	Components map[string]mutantCounts `json:"components,omitempty"`
 }
 
-// mutantCounts is what became of one component's mutants.
+// mutantCounts is what became of one component's mutants, and how long that
+// took.
 //
 // It mirrors mutation.Summary rather than serialising it. Summary is the
 // in-process tally and carries no JSON tags at all; this is a stored shape its
@@ -69,18 +71,44 @@ type mutantCounts struct {
 	Survived     int `json:"survived"`
 	Unviable     int `json:"unviable"`
 	Acknowledged int `json:"acknowledged"`
+	// ElapsedSeconds is how long the component took to say all that: its
+	// baseline suite and every mutant after it, the same span its row renders.
+	//
+	// It is data here because the fold and the ledger both need the number, and
+	// the only other place it exists is a sentence the row happens to word this
+	// way today. Seconds as a float rather than a count of some unit a reader
+	// has to guess at, and never a duration string: a stored shape is parsed by
+	// readers this document outlives.
+	//
+	// Nought means no elapsed time was recorded, which is a document an older
+	// lydite wrote. A component that ran cannot produce it — a baseline suite
+	// and at least one mutant take a measurable time — so a reader may treat
+	// the two as the same answer, and must not report nought as a run that
+	// took no time.
+	ElapsedSeconds float64 `json:"elapsed_seconds,omitempty"`
 }
 
-// countsOf is one component's summary as the document stores it.
-func countsOf(s mutation.Summary) mutantCounts {
+// countsOf is one component's summary and the time it took, as the document
+// stores them.
+func countsOf(s mutation.Summary, elapsed time.Duration) mutantCounts {
 	return mutantCounts{
-		Killed:       s.Killed,
-		TimedOut:     s.TimedOut,
-		OutOfMemory:  s.OutOfMemory,
-		Survived:     s.Survived,
-		Unviable:     s.Unviable,
-		Acknowledged: s.Acknowledged,
+		Killed:         s.Killed,
+		TimedOut:       s.TimedOut,
+		OutOfMemory:    s.OutOfMemory,
+		Survived:       s.Survived,
+		Unviable:       s.Unviable,
+		Acknowledged:   s.Acknowledged,
+		ElapsedSeconds: elapsed.Seconds(),
 	}
+}
+
+// elapsed is the stored seconds back as a duration, and false where the
+// document recorded none.
+func (c mutantCounts) elapsed() (time.Duration, bool) {
+	if c.ElapsedSeconds == 0 {
+		return 0, false
+	}
+	return time.Duration(c.ElapsedSeconds * float64(time.Second)), true
 }
 
 // summary is the stored counts back as the tally every score is taken from, so
@@ -108,14 +136,14 @@ func mutantsPath(root string) string {
 // A run that ran nothing still names its tree. The document says what was
 // measured, and "this tree, and nothing on it" is an answer; a document naming
 // no tree is not one at all.
-func mutantsFrom(tree string, ran map[string]mutation.Summary) mutantsDoc {
+func mutantsFrom(tree string, ran map[string]componentMutation) mutantsDoc {
 	doc := mutantsDoc{Tree: tree}
 	if len(ran) == 0 {
 		return doc
 	}
 	doc.Components = make(map[string]mutantCounts, len(ran))
-	for name, s := range ran {
-		doc.Components[name] = countsOf(s)
+	for name, r := range ran {
+		doc.Components[name] = countsOf(r.summary, r.elapsed)
 	}
 	return doc
 }

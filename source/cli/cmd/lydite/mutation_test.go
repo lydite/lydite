@@ -66,7 +66,7 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 			decl := component.File{Components: []component.Component{{Name: "app"}}}
 			folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, mutantsDoc{}, decl)
 
-			want := formatScore(c.killed, c.denom, 1, 42*time.Second)
+			want := formatScore(c.killed, c.denom, 1)
 			if folded.Value != want {
 				t.Errorf("the fold read %q out of %q, want %q", folded.Value, row.Value, want)
 			}
@@ -74,8 +74,11 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 	}
 }
 
-func formatScore(killed, denom, components int, elapsed time.Duration) string {
-	return fmt.Sprintf("%d of %d mutant(s) killed across %d component(s) in %s", killed, denom, components, elapsed)
+// formatScore is the summary a fold renders for shards that contributed counts
+// and no elapsed time — the score alone, since a component whose time nothing
+// recorded is not one the row counts at nought seconds.
+func formatScore(killed, denom, components int) string {
+	return fmt.Sprintf("%d of %d mutant(s) killed across %d component(s)", killed, denom, components)
 }
 
 // A component declaring compose services runs its mutants one at a time: eight
@@ -112,6 +115,53 @@ func TestTheBudgetIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
 	}
 	if got := budget(long, 7*time.Second); got != 7*time.Second {
 		t.Errorf("--timeout was not honoured: %s", got)
+	}
+}
+
+// A run says what it is about to cost before it pays it, and the ceiling is
+// every mutant taking its whole budget with no worker idle. It is a projection
+// and not a cap: ADR 0027 refuses a runtime budget, and nothing reads this.
+func TestARunProjectsItsCeilingFromTheBudgetAndTheWorkers(t *testing.T) {
+	const timeout = 60 * time.Second
+	for _, c := range []struct {
+		mutants, workers int
+		want             time.Duration
+	}{
+		// Divides exactly: two rounds of four.
+		{mutants: 8, workers: 4, want: 2 * timeout},
+		// The remainder is a whole round: three mutants over two workers
+		// leaves one running alone, and the run waits for it.
+		{mutants: 9, workers: 4, want: 3 * timeout},
+		// A component publishing a port stages one mutant at a time, so its
+		// ceiling is the whole run end to end.
+		{mutants: 5, workers: 1, want: 5 * timeout},
+		// More workers than mutants buys no round that is not there.
+		{mutants: 2, workers: 8, want: timeout},
+	} {
+		if got := projectedCeiling(c.mutants, c.workers, timeout); got != c.want {
+			t.Errorf("%d mutant(s) over %d worker(s) = %s, want %s", c.mutants, c.workers, got, c.want)
+		}
+	}
+}
+
+// The line carries its own derivation, so a reader who thinks the projection is
+// wrong can see which term they disagree with rather than only the total.
+func TestTheProjectionStatesWhatItIsDerivedFrom(t *testing.T) {
+	line := costProjection(9, 4, budget(20*time.Second, 0))
+	for _, want := range []string{"9 mutant(s)", "budget 1m0s each", "4 worker(s)", "at most 3m0s"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the projection %q does not state %q", line, want)
+		}
+	}
+}
+
+// --timeout is what a mutant's budget becomes, so it is what the projection is
+// derived from too: a line stating a ceiling the run is not going to honour is
+// worse than none.
+func TestTheProjectionIsDerivedFromTheOverriddenTimeout(t *testing.T) {
+	line := costProjection(4, 2, budget(5*time.Minute, 30*time.Second))
+	if !strings.Contains(line, "budget 30s each") || !strings.Contains(line, "at most 1m0s") {
+		t.Errorf("--timeout was not projected from: %q", line)
 	}
 }
 
@@ -513,6 +563,9 @@ func TestAComponentTwoShardsMutatedFailsTheFold(t *testing.T) {
 // The summary sums the scores the shards rendered and gates nothing: survived
 // == 0 for every component is survived == 0 for the repository, so a gating row
 // could only restate the conjunction of the rows above it.
+//
+// Neither shard wrote a counts document, so neither contributed an elapsed
+// time: the row states none rather than a nought no clock ever read.
 func TestTheFoldSumsTheShardsScoresAndGatesNothing(t *testing.T) {
 	root := mergeRepo(t)
 	doc, err := runMutationMerge(t, root,
@@ -528,12 +581,61 @@ func TestTheFoldSumsTheShardsScoresAndGatesNothing(t *testing.T) {
 	if summary.Status != ui.StatusContext {
 		t.Errorf("the summary is %q; it gates nothing", summary.Status)
 	}
-	want := "10 of 11 mutant(s) killed across 2 component(s) in 2m0s"
+	want := "10 of 11 mutant(s) killed across 2 component(s)"
 	if summary.Value != want {
 		t.Errorf("summary = %q, want %q", summary.Value, want)
 	}
+	if strings.Join(summary.Detail, " ") != "no shard recorded how long its components took" {
+		t.Errorf("the summary's detail is %v, want it to say why there is no time", summary.Detail)
+	}
 	if doc.Verdict != ui.VerdictPass {
 		t.Errorf("verdict is %q, want pass", doc.Verdict)
+	}
+}
+
+// The elapsed time is read out of each shard's counts and never out of the row
+// it rendered, so the two disagreeing is a fold that answers from the data. The
+// rows here say a minute each and the documents say ninety seconds and thirty:
+// a fold still parsing prose would report 2m0s.
+func TestTheFoldTakesTheElapsedTimeFromTheCountsAndNotTheProse(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 8, ElapsedSeconds: 90}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "8 of 8 mutant(s) killed in 1m0s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Killed: 3, ElapsedSeconds: 30}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 1m0s"}))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v", err)
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "11 of 11 mutant(s) killed across 2 component(s) in 2m0s"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
+	}
+}
+
+// A shard whose document predates the elapsed time carries none, and a
+// component counted at nought seconds is a component the row would claim ran
+// instantly. It is left out of the total instead, and the row says how many
+// components the time it does report covers.
+func TestAShardThatRecordedNoElapsedTimeIsNotCountedAtNought(t *testing.T) {
+	root := mergeRepo(t)
+	doc, err := runMutationMerge(t, root,
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 8, ElapsedSeconds: 90}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "8 of 8 mutant(s) killed in 1m30s"}),
+		countsShard(t,
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Killed: 3}}},
+			ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
+	if err != nil {
+		t.Fatalf("a complete fold failed: %v", err)
+	}
+	summary, _ := rowNamed(doc, "mutation")
+	want := "11 of 11 mutant(s) killed across 2 component(s) in 1m30s, from the 1 that recorded a time"
+	if summary.Value != want {
+		t.Errorf("summary = %q, want %q", summary.Value, want)
 	}
 }
 
@@ -559,7 +661,7 @@ func TestTheFoldSumsTheShardsCountsIncludingAShardThatRanNothing(t *testing.T) {
 	root := mergeRepo(t)
 	doc, err := runMutationMerge(t, root,
 		countsShard(t,
-			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, Unviable: 2}}},
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, Unviable: 2, ElapsedSeconds: 90}}},
 			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
 		countsShard(t,
 			mutantsDoc{Tree: "abc"},
@@ -596,17 +698,17 @@ func TestTheFoldCountsAComponentWhoseMutantsSaidNothing(t *testing.T) {
 	root := mergeRepo(t)
 	doc, err := runMutationMerge(t, root,
 		countsShard(t,
-			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, ElapsedSeconds: 90}}},
 			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
 		countsShard(t,
-			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Unviable: 3}}},
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Unviable: 3, ElapsedSeconds: 30}}},
 			ui.Row{Status: ui.StatusUnmeasured, Label: mutationLabel("b"),
 				Value: "3 mutant(s), none of which says anything about the suite: 3 did not compile"}))
 	if err == nil {
 		t.Error("a survivor did not fail the fold")
 	}
 	summary, _ := rowNamed(doc, "mutation")
-	want := "7 of 8 mutant(s) killed across 2 component(s) in 1m30s"
+	want := "7 of 8 mutant(s) killed across 2 component(s) in 2m0s"
 	if summary.Value != want {
 		t.Errorf("summary = %q, want %q", summary.Value, want)
 	}
@@ -620,14 +722,17 @@ func TestAShardWithNoCountsIsReadBackFromItsRows(t *testing.T) {
 	root := mergeRepo(t)
 	doc, err := runMutationMerge(t, root,
 		countsShard(t,
-			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1}}},
+			mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 7, Survived: 1, ElapsedSeconds: 90}}},
 			ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 8 mutant(s) survived in 1m30s"}),
 		mutationShard(t, ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"}))
 	if err == nil {
 		t.Error("a survivor did not fail the fold")
 	}
 	summary, _ := rowNamed(doc, "mutation")
-	want := "10 of 11 mutant(s) killed across 2 component(s) in 2m0s"
+	// Its score comes back out of the row; its elapsed time does not, because
+	// the row's own thirty seconds is prose and the total is arithmetic over
+	// what the shards measured.
+	want := "10 of 11 mutant(s) killed across 2 component(s) in 1m30s, from the 1 that recorded a time"
 	if summary.Value != want {
 		t.Errorf("summary = %q, want the shard with no counts read back from its row", summary.Value)
 	}

@@ -348,7 +348,7 @@ type componentMutation struct {
 // above runs under. Every failure warns and none of them fails the command: the
 // mutants ran, their verdict is in the report, and losing the byproduct is not
 // a reason to discard it.
-func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]mutation.Summary) {
+func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[string]componentMutation) {
 	tree, err := gitstate.TreeSHA(context.WithoutCancel(ctx), dir, "HEAD")
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve this tree, so the mutant counts were not written: %v\n", err)
@@ -358,6 +358,15 @@ func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write the mutant counts: %v\n", err)
 	}
 }
+
+// mutationLogKind names this command's per-component log, which openLog writes
+// as `<reports>/<component>/mutation.log`. The fold reads that file back out of
+// a shard's uploaded directory, so the name is one constant rather than a
+// literal at each end.
+const (
+	mutationLogKind = "mutation"
+	mutationLogName = mutationLogKind + ".log"
+)
 
 // runMutation plans every selected component, runs its mutants and adds the
 // rows in declaration order.
@@ -377,8 +386,8 @@ func recordMutants(ctx context.Context, cmd *cobra.Command, dir string, ran map[
 // `lydite test`. Two independent bounds would multiply into components times
 // mutants, which is the quadratic oversubscription defaultConcurrency is a
 // constant rather than NumCPU to avoid.
-func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]mutation.Summary {
-	plans := planComponents(ctx, opts.root, selected, "mutation", opts.stream)
+func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, opts mutationOptions) map[string]componentMutation {
+	plans := planComponents(ctx, opts.root, selected, mutationLogKind, opts.stream)
 	for _, p := range plans {
 		defer p.log.Close()
 	}
@@ -429,15 +438,15 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	// component's mutants were generated and executed to a summary — including
 	// the run withdrawInterrupted took back, which resets the result and with it
 	// that flag.
-	var ran map[string]mutation.Summary
+	var ran map[string]componentMutation
 	for i, p := range plans {
 		if !results[i].ran {
 			continue
 		}
 		if ran == nil {
-			ran = map[string]mutation.Summary{}
+			ran = map[string]componentMutation{}
 		}
-		ran[p.c.Name] = results[i].summary
+		ran[p.c.Name] = results[i]
 	}
 	return ran
 }
@@ -682,11 +691,19 @@ func mutateComponent(ctx context.Context, p componentPlan, cfg config.Config, tc
 			"no line this change touched is both mutable and reported as executed"), log), out
 	}
 
+	timeout, workers := budget(baseline, opts.timeout), workersFor(p, opts.limit)
+	// Into the live stream, where the per-mutant lines go, and not only into
+	// the document: a run too large to finish is killed by its job timeout and
+	// writes no document at all, so a projection the document alone carried is
+	// one the reader who needs it never sees. ADR 0027 refuses a runtime
+	// budget, and this is not one — nothing here stops a run.
+	_, _ = fmt.Fprintln(log.out, costProjection(len(mutants), workers, timeout))
+
 	results, err := mutation.Execute(ctx, backend, mutants, mutation.Options{
 		Env:       childEnv(tc, c, suite),
-		Timeout:   budget(baseline, opts.timeout),
+		Timeout:   timeout,
 		MaxMemory: maxMemory,
-		Workers:   workersFor(p, opts.limit),
+		Workers:   workers,
 		Slots:     slots,
 		Log:       log.out,
 	})
@@ -818,6 +835,61 @@ func budget(baseline, override time.Duration) time.Duration {
 	// other arm returns is a branch nothing can be asked about.
 	return max(baseline*budgetFactor, minimumBudget)
 }
+
+// costProjection is what a run says it is about to cost, before it pays it.
+//
+// The basis is in the line and not only the number, because every term in it is
+// a decision lydite made for this component — how many mutants the change
+// yielded, what its own baseline bought each of them, and how many run at once
+// — and a reader who can see the derivation can argue with it.
+//
+// It is a worst case: every mutant running to the whole of its budget, with no
+// worker ever idle. A killed mutant costs a fraction of that, so a real run
+// lands well under. Stating the ceiling is not capping it — ADR 0027 refuses a
+// runtime budget, and nothing here stops a run.
+func costProjection(mutants, workers int, timeout time.Duration) string {
+	return fmt.Sprintf(costProjectionFormat,
+		mutants, timeout.Round(time.Second), staged(mutants, workers),
+		projectedCeiling(mutants, workers, timeout).Round(time.Second))
+}
+
+// costProjectionFormat is the projection's one spelling, written through
+// Sprintf here and read back through Sscanf by the fold, which finds the line
+// in a log a shard uploaded without a document. A reader holding its own copy
+// of the wording agrees with the writer until either is edited, and the
+// disagreement is silent: the fold simply stops finding the line.
+const costProjectionFormat = "%d mutant(s), budget %s each, %d worker(s): at most %s"
+
+// costProjectionIn returns the projection a mutation log carries, if it carries
+// one.
+//
+// The whole line, verbatim, because what a reader is shown is what the run
+// itself said — a projection restated in the fold's own words would be the
+// fold making a claim about a run it never saw.
+func costProjectionIn(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	var mutants, workers int
+	var budget, ceiling string
+	n, err := fmt.Sscanf(line, costProjectionFormat, &mutants, &budget, &workers, &ceiling)
+	if err != nil || n != 4 {
+		return "", false
+	}
+	return line, true
+}
+
+// projectedCeiling is the longest a run of this many mutants can take: as many
+// rounds as it takes to stage them all, each round costing a whole budget.
+func projectedCeiling(mutants, workers int, timeout time.Duration) time.Duration {
+	w := staged(mutants, workers)
+	rounds := (mutants + w - 1) / w
+	return time.Duration(rounds) * timeout
+}
+
+// staged is how many mutants actually run at once, which is the executor's own
+// clamp: never fewer than one, and never more than there are mutants to stage.
+// A projection over an unclamped count states a parallelism the run does not
+// have, which is the direction that understates the cost.
+func staged(mutants, workers int) int { return min(max(workers, 1), max(mutants, 1)) }
 
 // memoryBudget is how much memory one mutant's suite may hold before it counts
 // as killed.
@@ -982,10 +1054,11 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 		return detailed(unmeasuredRow(label, fmt.Sprintf(
 			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log), nil
 	}
-	// The elapsed time is in the value rather than under the row, because it
-	// is what a later runtime budget would be a multiple of and the fold has
-	// no other channel to read it from — mutants.json carries what became of
-	// each mutant, not how long the component took to say so.
+	// The elapsed time is in the value rather than under the row, because a
+	// reader deciding whether this component is worth mutating on every pull
+	// request reads it beside the score it bought. It is prose for that reader
+	// alone: mutants.json carries the same span as a number, and the fold and
+	// the ledger both take it from there rather than from this sentence.
 	row := ui.Row{Status: ui.StatusPass, Label: label, Log: log.Rel,
 		Value: fmt.Sprintf("%d of %d mutant(s) killed in %s", killed, total, elapsed.Round(time.Second))}
 	if a := aside(s); a != "" {

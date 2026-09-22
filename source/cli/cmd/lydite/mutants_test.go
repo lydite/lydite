@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/mutation"
@@ -62,6 +63,12 @@ func TestAComponentThatRanIsInTheCountsAndOneThatDidNotIsAbsent(t *testing.T) {
 	}
 	if app.Survived != 0 {
 		t.Errorf("a suite that killed every mutant records %d survivor(s)", app.Survived)
+	}
+	// What the component cost is measured once, by the run that paid it, and
+	// stored beside what it bought. A fold reading it back out of the row's
+	// prose would be one wording change from a silent nought.
+	if _, ok := app.elapsed(); !ok {
+		t.Errorf("the component that ran recorded no elapsed time: %+v", app)
 	}
 	if _, ok := counts.Components["web"]; ok {
 		t.Error("a component declaring `mutation: false` is present in the counts, where its zeros read as a suite that killed everything")
@@ -231,16 +238,62 @@ func TestTheFoldUnionsTheShardsCounts(t *testing.T) {
 // a mutant nothing counted.
 func TestTheStoredCountsRoundTripThroughTheSummary(t *testing.T) {
 	s := mutation.Summary{Killed: 1, TimedOut: 2, OutOfMemory: 3, Survived: 4, Unviable: 5, Acknowledged: 6}
-	if got := countsOf(s).summary(); got != s {
+	if got := countsOf(s, 90*time.Second).summary(); got != s {
 		t.Errorf("round-tripped to %+v, want %+v", got, s)
 	}
-	data, err := json.Marshal(countsOf(s))
+	data, err := json.Marshal(countsOf(s, 90*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"killed", "timed_out", "out_of_memory", "survived", "unviable", "acknowledged"} {
+	for _, key := range []string{"killed", "timed_out", "out_of_memory", "survived", "unviable", "acknowledged", "elapsed_seconds"} {
 		if !strings.Contains(string(data), `"`+key+`"`) {
 			t.Errorf("the stored shape has no %q key: %s", key, data)
 		}
+	}
+}
+
+// The elapsed time is data in the document, not a sentence a reader has to
+// parse back: a run's own span reaches a fold and the ledger through this field
+// and through nothing else. Sub-second precision survives it, because the span
+// a budget is argued from is the one that was measured rather than the one the
+// row rounded for a reader.
+func TestTheElapsedTimeRoundTripsThroughTheStoredCounts(t *testing.T) {
+	var decoded mutantCounts
+	data, err := json.Marshal(countsOf(mutation.Summary{Killed: 2}, 1500*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := decoded.elapsed()
+	if !ok {
+		t.Fatalf("a recorded elapsed time read back as unrecorded: %s", data)
+	}
+	if got != 1500*time.Millisecond {
+		t.Errorf("elapsed round-tripped to %s, want %s", got, 1500*time.Millisecond)
+	}
+}
+
+// A document an older lydite wrote carries no elapsed time at all, and nought
+// is how that arrives. It reads as unrecorded rather than as a component that
+// took no time to mutate: a baseline suite and a mutant after it cannot happen
+// instantly, so the two are one answer and neither is a measured zero.
+func TestCountsWithNoElapsedTimeReadAsUnrecorded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, mutantsName),
+		[]byte(`{"tree":"abc","components":{"app":{"killed":4,"survived":0}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readMutants(dir)
+	if err != nil {
+		t.Fatalf("a document written before the elapsed time would not read: %v", err)
+	}
+	app := doc.Components["app"]
+	if app.Killed != 4 {
+		t.Errorf("the counts read back as %+v, want the four killed mutants", app)
+	}
+	if d, ok := app.elapsed(); ok || d != 0 {
+		t.Errorf("a document carrying no elapsed time reported %s, %v; want nought and unrecorded", d, ok)
 	}
 }

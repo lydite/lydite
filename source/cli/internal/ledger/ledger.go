@@ -248,8 +248,8 @@ type CRAP struct {
 	Worst float64 `json:"worst"`
 }
 
-// Mutation is the six outcomes a mutation run sorts every mutant into, exactly
-// as mutants.json stores them.
+// Mutation is the six outcomes a mutation run sorts every mutant into and the
+// time it took to do it, exactly as mutants.json stores them.
 //
 // Acknowledged is here for the reason the other five are: a `//lydite:equivalent`
 // declaration is a fact about a mutant that existed only on a line the change
@@ -263,6 +263,20 @@ type Mutation struct {
 	Survived     int `json:"survived"`
 	Unviable     int `json:"unviable"`
 	Acknowledged int `json:"acknowledged"`
+	// ElapsedSeconds is how long the run took to sort them: the component's
+	// baseline suite and every mutant after it, machine time rather than
+	// wall-clock. It is what a runtime budget would later be argued from, and
+	// nothing else here can be: a mutation run is not recomputable after the
+	// merge, so a cost nobody wrote down is a cost nobody can ever measure.
+	//
+	// Nought means the run recorded no elapsed time, which is every record
+	// written before this field and every one whose mutants.json carried none.
+	// A run that happened cannot produce it, so absent and nought are one
+	// answer, and neither is a run that took no time. It is a plain float and
+	// not a pointer for that reason — the six counts beside it are the shape
+	// this struct exists to keep whole, and a nought here is already
+	// unambiguous.
+	ElapsedSeconds float64 `json:"elapsed_seconds,omitempty"`
 }
 
 // Gap is a break in the history, and what the writer could establish about it.
