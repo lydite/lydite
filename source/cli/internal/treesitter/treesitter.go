@@ -16,7 +16,7 @@
 //
 // A build missing a `grammar_subset_<lang>` tag panics at that language's
 // first parse. The release tags and the module's own test invocation carry all
-// four.
+// five.
 package treesitter
 
 import (

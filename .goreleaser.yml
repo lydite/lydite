@@ -45,6 +45,7 @@ builds:
       - grammar_subset_rust
       - grammar_subset_typescript
       - grammar_subset_tsx
+      - grammar_subset_python
 
 # One archive so consumers get everything, plus a raw uncompressed binary for
 # curl-and-run / CI usage that doesn't want an extraction step.
