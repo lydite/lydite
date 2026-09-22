@@ -682,7 +682,7 @@ jobs:
         if: matrix.component != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lydite-reports-nested-${{ matrix.slug }}-a
+          name: proving-ground-reports-nested-${{ matrix.slug }}-a
           path: shards
           include-hidden-files: true
 
@@ -690,7 +690,7 @@ jobs:
         if: matrix.component != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lydite-reports-nested-${{ matrix.slug }}-b
+          name: proving-ground-reports-nested-${{ matrix.slug }}-b
           path: mutation-shards
           include-hidden-files: true
 
@@ -698,8 +698,29 @@ jobs:
         if: matrix.component != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: lydite-reports-nested-${{ matrix.slug }}-*
+          pattern: proving-ground-reports-nested-${{ matrix.slug }}-*
           path: nested-reports
+
+      # The artifact name becomes the downloaded directory's name, and
+      # `publish` keys its flat-versus-nested choice on a `lydite-reports-*`
+      # directory existing at all. These artifacts carry the proving ground's
+      # own prefix instead, because the `lydite` job's `publish` globs
+      # `lydite-reports-*` across the whole workflow run and would otherwise
+      # fold this fixture's components into the repository's own verdict. The
+      # directories are named back here, so what the fold discovers is exactly
+      # what a consumer's two producing jobs would leave it.
+      - name: name the downloaded directories as publish discovers them (proving ground)
+        if: matrix.component != ''
+        shell: bash
+        env:
+          ROOT: nested-reports
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for dir in "${ROOT}"/proving-ground-reports-*/; do
+            base="$(basename "${dir%/}")"
+            mv "${ROOT}/${base}" "${ROOT}/lydite-reports-${base#proving-ground-reports-}"
+          done
 
       # A directory with no document at all, uploaded alone: the exact shape
       # of the regression this leg exists to catch, where a job wrote logs and
@@ -716,15 +737,36 @@ jobs:
         if: matrix.component != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: lydite-reports-docless-${{ matrix.slug }}
+          name: proving-ground-reports-docless-${{ matrix.slug }}
           path: docless-source
 
       - name: download the documentless report (proving ground)
         if: matrix.component != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: lydite-reports-docless-${{ matrix.slug }}*
+          pattern: proving-ground-reports-docless-${{ matrix.slug }}*
           path: docless-reports
+
+      # The artifact name becomes the downloaded directory's name, and
+      # `publish` keys its flat-versus-nested choice on a `lydite-reports-*`
+      # directory existing at all. These artifacts carry the proving ground's
+      # own prefix instead, because the `lydite` job's `publish` globs
+      # `lydite-reports-*` across the whole workflow run and would otherwise
+      # fold this fixture's components into the repository's own verdict. The
+      # directories are named back here, so what the fold discovers is exactly
+      # what a consumer's two producing jobs would leave it.
+      - name: name the downloaded directories as publish discovers them (proving ground)
+        if: matrix.component != ''
+        shell: bash
+        env:
+          ROOT: docless-reports
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for dir in "${ROOT}"/proving-ground-reports-*/; do
+            base="$(basename "${dir%/}")"
+            mv "${ROOT}/${base}" "${ROOT}/lydite-reports-${base#proving-ground-reports-}"
+          done
 
       - name: lydite publish (one shard, proving ground)
         if: matrix.component != ''
