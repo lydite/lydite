@@ -273,14 +273,14 @@ func TestClearRendersTheStatusDocumentInsteadOfPostingIt(t *testing.T) {
 	if len(got) != len(want) {
 		t.Errorf("the document carries %d field(s): %+v", len(got), got)
 	}
-	// Only the clearance document is written: the relay admits a clearance
-	// ref to lydite/clearance alone, so the referral is not resolved here.
+	// The clearance document and the referral document, and nothing posted
+	// from here: both statuses are the posting step's to write.
 	entries, err := os.ReadDir(filepath.Dir(out))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || forge.posts != 0 {
-		t.Errorf("wrote %d file(s) and made %d post(s), want the one document and no posts", len(entries), forge.posts)
+	if len(entries) != 2 || forge.posts != 0 {
+		t.Errorf("wrote %d file(s) and made %d post(s), want the two documents and no posts", len(entries), forge.posts)
 	}
 	// The reply is the commenter's answer and is posted whichever route the
 	// status takes: rendering a document says nothing to the person who asked.
@@ -357,6 +357,84 @@ func TestTheStatusOutFlagIsWiredIntoTheCommand(t *testing.T) {
 	}
 	if got := readRenderedStatus(t, out)["context"]; got != "lydite/clearance" {
 		t.Errorf("context = %#v, want lydite/clearance", got)
+	}
+}
+
+// A rendered clearance resolves the referral it cleared, exactly as the direct
+// route does: the second document names lydite/referral on the same head, with
+// the same description and the same revision, at the sibling path derived from
+// --status-out. Without it a consumer's pull request holds a clearance record
+// beside a referral still pending, and nothing merges.
+func TestARenderedClearanceAlsoRendersTheResolvedReferral(t *testing.T) {
+	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+	t.Setenv("GITHUB_SERVER_URL", "https://example.invalid")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	t.Setenv("GITHUB_RUN_ID", "12")
+
+	out := filepath.Join(t.TempDir(), "rendered", "lydite-status.json")
+	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), out); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	referralDoc := filepath.Join(filepath.Dir(out), "lydite-status.referral.json")
+	got := readRenderedStatus(t, referralDoc)
+	want := map[string]any{
+		"state":        "success",
+		"context":      "lydite/referral",
+		"description":  "cleared by @pedromvgomes at " + shortSHA(head),
+		"target_url":   "https://example.invalid/lydite/lydite/actions/runs/12",
+		"sha":          head,
+		"pull_request": float64(40),
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("%s = %#v, want %#v", key, got[key], value)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("the referral document carries %d field(s): %+v", len(got), got)
+	}
+	// Two documents, one object each: the step that posts them reads each
+	// with `jq -r .context`, and neither carries a list.
+	if ctx := readRenderedStatus(t, out)["context"]; ctx != "lydite/clearance" {
+		t.Errorf("the clearance document's context = %#v, want lydite/clearance", ctx)
+	}
+	if len(forge.published) != 0 {
+		t.Errorf("the status was posted as well as rendered: %+v", forge.published)
+	}
+}
+
+// A command that clears nothing resolves nothing, so neither document exists:
+// a rendered referral success is the one thing the posting step must never be
+// handed on a comment that cleared nothing.
+func TestACommandThatClearsNothingRendersNoReferralDocument(t *testing.T) {
+	forge := &fakeForge{permission: "read", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	out := filepath.Join(t.TempDir(), "lydite-status.json")
+	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "passer-by", commented), out); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	sibling := filepath.Join(filepath.Dir(out), "lydite-status.referral.json")
+	if _, err := os.Stat(sibling); err == nil {
+		t.Fatalf("a refused command rendered a referral document at %s", sibling)
+	}
+}
+
+// The sibling is derived from whatever --status-out names, so the step that
+// posts it can compute the path without lydite telling it.
+func TestTheReferralDocumentIsTheSiblingOfTheClearanceDocument(t *testing.T) {
+	for _, c := range []struct{ out, want string }{
+		{"lydite-status.json", "lydite-status.referral.json"},
+		{"/tmp/run/status.json", "/tmp/run/status.referral.json"},
+		{"status", "status.referral"},
+		{"/tmp/run.d/status", "/tmp/run.d/status.referral"},
+	} {
+		if got := referralDocument(c.out); got != c.want {
+			t.Errorf("referralDocument(%q) = %q, want %q", c.out, got, c.want)
+		}
 	}
 }
 

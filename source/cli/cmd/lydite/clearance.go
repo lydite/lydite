@@ -44,12 +44,16 @@ verdict, so the clearance does not travel with the branch.
 The input is the webhook payload the platform delivers, which a workflow
 writes to the path in GITHUB_EVENT_PATH.
 
---status-out <file> renders the ` + clearance.ClearanceContext + ` commit status as a document
-instead of posting it, for a step that posts it under lydite's App identity;
-the ` + clearance.Context + ` status is not resolved on that route. Posting here is the
-path for a repository that has not adopted the reusable workflows: it posts
-` + clearance.ClearanceContext + ` and then resolves ` + clearance.Context + ` to success on the
-same head. The two are alternatives, not a ladder. A comment that clears nothing writes no document.`,
+A clearance records two statuses on the head by either route: ` + clearance.ClearanceContext + `,
+which says who cleared the revision, and ` + clearance.Context + ` resolved to success,
+which is the gate a merge waits on.
+
+--status-out <file> renders them as documents instead of posting them, for a
+step that posts them: the ` + clearance.ClearanceContext + ` status at <file>, and the
+` + clearance.Context + ` status at the sibling <file> with .referral before its
+extension. Posting here is the path for a repository that has not adopted the
+reusable workflows. The two routes are alternatives, not a ladder. A comment
+that clears nothing writes no document.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClearance(cmd.Context(), cmd, dir, eventPath, statusOut, noColor)
 		},
@@ -57,7 +61,8 @@ same head. The two are alternatives, not a ladder. A comment that clears nothing
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload to answer (defaults to GITHUB_EVENT_PATH)")
 	cmd.Flags().StringVar(&statusOut, "status-out", "",
-		"render the "+clearance.ClearanceContext+" status as a JSON document at this path for another step to post, instead of posting it here")
+		"render the "+clearance.ClearanceContext+" status as a JSON document at this path, and the "+clearance.Context+
+			" status it resolves at the .referral sibling, for another step to post instead of posting them here")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
 	return cmd
 }
