@@ -68,12 +68,12 @@ security tool.
 ## A fresh repository, starting at 0.1.0
 
 The move is a fresh repository rather than a GitHub transfer. A transfer would preserve history,
-releases, and a redirect that keeps `uses: wardnet/bulwark@v1` resolving — but it would resolve to
+releases, and a redirect that keeps the old action reference resolving — but it would resolve to
 the monorepo, whose root `action.yml` has moved to `lydite/actions`, so a deprecating shim would
 be needed anyway. With a single consumer, that machinery buys nothing: the old repo stays up until
 the new one is stable, its consumers are then repointed by hand, and it is dropped.
 
-The first release is 0.1.0, not a 3.0.0 continuing bulwark's line. Version continuity exists for
+The first release is 0.1.0, not a 3.0.0 continuing the predecessor's line. Version continuity exists for
 consumers who pin, and the only consumer is the author — who, after the migration, pins
 `lydite/actions/scan@v1` while the CLI version resolves as `latest` and is never written down
 anywhere. Continuity would therefore be signalling to nobody.
@@ -82,15 +82,15 @@ Against that, `0.x` says something true: the quality-history storage layout desc
 is not settled, and will likely be reworked once there is real data in it. It also leaves 1.0.0
 free to mean something — the release where the dashboard ships — which is a marker available only
 once. And carrying 3.0.0 forward would make "what happened to 1 and 2?" a permanent question, and
-so make bulwark a permanent part of lydite's public story, which is the opposite of what the
-rename in ADR 0011 was for.
+so make the tool lydite replaced a permanent part of its public story, which is the opposite of
+what the rename was for.
 
 The accepted cost is that `0.1.0` understates a scanner that has been hardening across six
 repositories for a long time. That is a presentation problem for the README, and it expires at
 1.0.0.
 
 `lydite/actions` still starts at `v1.0.0`. Its version denotes the action's input interface, which
-genuinely is stable — inherited unchanged from bulwark — and it is the ref consumers type. A `0.x`
+genuinely is stable — inherited unchanged — and it is the ref consumers type. A `0.x`
 CLI beneath a `v1` action is not an inconsistency; decoupling the two lines is what the repository
 split was for.
 

@@ -34,9 +34,7 @@
 // which directories, so it reads every go.mod under the scan root rather than
 // one at a fixed path — the mistake that made gt's short-lived `setup-go`
 // step (19e4b77, reverted in a0ed107) a no-op for wardnet, whose modules live
-// under wctl/ and sdk/wardnet-go/. It is also the only place that helps
-// wardnet at all, since wardnet calls wardnet/bulwark@v1 directly rather than
-// through gt.
+// under wctl/ and sdk/wardnet-go/.
 package toolchain
 
 import (

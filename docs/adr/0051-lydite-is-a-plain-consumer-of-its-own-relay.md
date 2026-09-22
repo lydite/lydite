@@ -114,8 +114,8 @@ unchanged for every context except this one exception.
 call the reusable workflows, and lydite carries no CI shape of its own until `gt` repoints it.
 
 The plain-consumer shape this ADR describes is what `gt`'s own governance is expected to render
-into this repository once `pedromvgomes/gt#72` lands and this repository's bulwark stage is
-repointed at `lydite/actions`. Hand-rewiring `lydite-pr.yml` and `lydite-clearance.yml` to call
+into this repository once `pedromvgomes/gt#72` lands and this repository's lydite stage is
+enabled. Hand-rewiring `lydite-pr.yml` and `lydite-clearance.yml` to call
 the reusable workflows now, only to have `gt repo sync` render the same call again days later, is
 work this repository does twice for one outcome. The three files are deleted instead:
 `lydite-pr.yml`, `lydite-baseline.yml`, `lydite-clearance.yml`.

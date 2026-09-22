@@ -7,12 +7,17 @@ gt renders `ci-orchestration.yml`, which calls one workflow per stage: `ci-prefl
 proving ground). `ci-gate` is the single check branch protection requires, and it waits on all
 of them — so **what runs in a gt stage is what blocks a merge.**
 
-**`lydite-pr.yml`, `lydite-baseline.yml` and `lydite-clearance.yml` are deleted** (ADR 0051's
-2026-09-22 amendment) rather than rewired to call `lydite/actions`' reusable workflows — `gt`
-governance is expected to render the equivalent call once `pedromvgomes/gt#72` repoints this
-repository's bulwark stage at `lydite/actions`. Until then, lydite says **nothing** about its own
-pull requests: no referral, no scan, no gated suites, no standing comment, no coverage baseline
-recorded on push to the default branch, and no `/lydite clear`. The rest of this section
+**`gt CI` carries the lydite stage.** `ci-orchestration.yml`'s `lydite` job calls
+`lydite/actions`' reusable workflow through `pedromvgomes/gt`, and `lydite-clearance.yml`
+answers a `/lydite clear` comment through gt's reusable clearance. Both are rendered from
+`.gt-repo.yaml` by `gt repo sync`, so neither is edited here. The referral, the scan, the
+gated suites and the standing comment are one run of that reusable workflow, and this
+repository is a plain consumer of it (ADR 0051).
+
+`ci-test.yml` keeps the plain `go build` and `go test -race`, which is what `ci-gate` blocks a
+merge on.
+
+The rest of this section
 describes what those three files did, kept for whatever replaces them to be checked against —
 none of it currently runs. `ci-test.yml` keeps the plain `go build` and `go test -race`, so the
 Go suite is the one thing lydite's own merge gate still covers.
