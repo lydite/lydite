@@ -12,7 +12,7 @@
 # this one a few at a time, so the two coexist for a long while. Two workflows
 # sharing a display name make the Actions list ambiguous and every check read
 # as "CI / …" from one of two places. The `gt ` prefix matches the reusable
-# workflows this calls — gt attest, gt bulwark, gt sync.
+# workflows this calls — gt attest, gt lydite, gt sync.
 name: gt CI
 
 on:
@@ -54,7 +54,7 @@ jobs:
   # Reports whether this exact tree already passed the gate, so a push that
   # merely squashed an already-validated PR does not run everything again.
   attest:
-    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v1
+    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v2
     # A called workflow may only narrow these. Granting less than
     # reusable-attest declares fails the run at parse time, before any job
     # starts — so ci-gate never reports and every PR blocks.
@@ -155,7 +155,7 @@ jobs:
   conventional-commits:
     needs: [attest]
     if: needs.attest.outputs.validated != 'true'
-    uses: pedromvgomes/gt/.github/workflows/reusable-conventional-commits.yml@v1
+    uses: pedromvgomes/gt/.github/workflows/reusable-conventional-commits.yml@v2
     permissions:
       contents: read
       pull-requests: read
@@ -163,13 +163,33 @@ jobs:
   governance:
     needs: [attest]
     if: needs.attest.outputs.validated != 'true'
-    uses: pedromvgomes/gt/.github/workflows/reusable-governance.yml@v1
+    uses: pedromvgomes/gt/.github/workflows/reusable-governance.yml@v2
+
+  lydite:
+    needs: [attest]
+    # No skip guard, unlike the stages above: this job is the only publisher
+    # of the required lydite/referral status, and that status has to be fresh
+    # for whatever SHA branch protection is evaluating. reusable-attest.yml
+    # walks a merge_group ref back to its queued PR's head, so an
+    # already-validated PR tree can report `validated` true on the queue's own
+    # commit too — skipping on that would leave lydite/referral unpublished
+    # for a SHA no earlier run ever reported it under, stalling the queue
+    # entry on a check nothing can report. `!cancelled()` alone: still runs
+    # when a dependency fails, since a real referral verdict on a failing tree
+    # is more useful than none.
+    if: "!cancelled()"
+    uses: pedromvgomes/gt/.github/workflows/reusable-lydite.yml@v2
+    permissions:
+      contents: read
+      statuses: write
+      id-token: write
+      pull-requests: write
 
   # The single required check. `if: always()` so it still reports when a stage
   # was skipped, and a skipped stage passes — that is the point of preflight.
   ci-gate:
     name: ci-gate
-    needs: [attest, preflight, build, test, end2end, conventional-commits, governance]
+    needs: [attest, preflight, build, test, end2end, conventional-commits, governance, lydite]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
