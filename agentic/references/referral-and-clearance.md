@@ -382,7 +382,7 @@ special-cases as the many-segments wildcard.
 
 **The `reason` is a question, and the marker in it is reserved.**
 `referral.ReasonPlaceholderMarker` is the literal `TODO(lydite):`, and
-`Exemption.validate` rejects any reason carrying it *anywhere* — a reason that keeps the
+The exemptions-file parser rejects any reason carrying it *anywhere* — a reason that keeps the
 question and prefixes a sentence to it has answered nothing. The check is in
 `internal/referral` rather than in the generator because copying the block into a pull
 request is a route lydite does not control, and `validate` is the one place every route
