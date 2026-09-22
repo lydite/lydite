@@ -13,8 +13,9 @@ already measured through.
 ## Applies to
 
 `Runner.Producer` and any `<lang>Scope` helper in `source/cli/internal/runner/runner.go` — today
-only `goScope` for `go-test`; Rust's and JavaScript's runners take denominator-moving arguments
-too but do not yet fold them in (tracked in `coverage.md`).
+only `goScope` for `go-test`; Rust's, JavaScript's and Python's runners take denominator-moving
+arguments too — pytest-cov's `--cov=<path>` among them — but do not yet fold them in (tracked in
+`coverage.md`).
 
 ## Example
 

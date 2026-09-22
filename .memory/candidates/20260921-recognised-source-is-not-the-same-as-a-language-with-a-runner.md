@@ -1,5 +1,5 @@
 ---
-about: runner.Lang now includes languages lydite recognises as source but runs nothing for; runner.Runs is what separates them, and the enumerated scannedLang is what keeps a runner-less language out of langEnabled's silent opt-out
+about: runner.Lang includes languages lydite recognises as source but may run nothing for (Shell today); runner.Runs is what separates them, and the enumerated scannedLang is what keeps a runner-less language out of langEnabled's silent opt-out
 saw:
   - source/cli/internal/runner/runner.go
   - source/cli/internal/orphan/orphan.go
@@ -7,10 +7,10 @@ saw:
   - source/cli/internal/crap/treesitter.go
 ---
 
-`runner.SourceExts()` and `LangForExt` answer "is this file source", and now cover `Python` and
-`Shell` (`.py`, `.sh`, `.bash`) though no runner implies either. `runner.Runs(lang)` is derived from
+`runner.SourceExts()` and `LangForExt` answer "is this file source", and cover `Python` and
+`Shell` (`.py`, `.sh`, `.bash`); Python has a runner (`python-pytest`), Shell has none. `runner.Runs(lang)` is derived from
 the registry and is the only answer to "is there a runner". Code that reaches a `Lang` through a
-runner never meets the runner-less ones; code that reaches it from a path (`orphan.sourceOf`,
+runner never meets a runner-less one; code that reaches it from a path (`orphan.sourceOf`,
 `orphan.Unscanned`, `crap.skipped`) must ask `Runs` before treating the file as something a gate
 could act on.
 

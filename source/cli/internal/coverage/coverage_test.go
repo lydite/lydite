@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/runner"
 )
 
@@ -291,5 +292,102 @@ func TestAnEmbeddedTraversalInAnSFPathIsRefused(t *testing.T) {
 	// both sides of the figure instead.
 	if got.Lines != (LineCount{Covered: 1, Total: 1}) {
 		t.Errorf("Lines = %+v, want {1 1} — the raw DA record, unexcluded because secret.rs was never opened", got.Lines)
+	}
+}
+
+// A Python component is measured from the lcov pytest-cov writes, read the same
+// way Rust's and TypeScript's is: LF and LH are the component's counts, and
+// every DA line is a key the patch gate can intersect a diff with.
+func TestMeasureReadsAPythonComponentsLCOV(t *testing.T) {
+	got := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, nil)
+	if got.Lines != (LineCount{Covered: 26, Total: 33}) {
+		t.Errorf("Lines = %+v, want {26 33} — coverage.py's own LF and LH over both files", got.Lines)
+	}
+	for _, file := range []string{"scope.py", "test_scope.py"} {
+		if _, ok := got.Hits[file]; !ok {
+			t.Errorf("Hits keys = %v, want %s", keys(got.Hits), file)
+		}
+	}
+	// Executed carries the same lines, which is what bounds a mutation run.
+	if len(got.Executed) != len(got.Hits) {
+		t.Errorf("Executed keys = %v, Hits keys = %v", keys(got.Executed), keys(got.Hits))
+	}
+}
+
+// `[lydite:exclude_from_coverage]` is not available in a Python component, and
+// the probe carries a declaration above an uncovered function to hold that
+// exactly. A declaration's reach is the span of the function beneath it and
+// lydite has no Python parse tables to read that span from, so the measurement
+// deducts nothing — and does not fail, which is what asking a grammar lydite
+// does not have would do to every Python file the report names.
+func TestAPythonDeclarationDeductsNothingAndFailsNothing(t *testing.T) {
+	honoured := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, nil)
+	// `provision`, the function the probe's declaration sits above.
+	declared := []int{9, 10, 11, 12, 13, 14, 15}
+	if got := hasLines(honoured.Hits["scope.py"], declared...); len(got) != len(declared) {
+		t.Errorf("Hits speaks for %v, want all of %v — the declared function is still measured", got, declared)
+	}
+	if len(honoured.Unused) != 0 {
+		t.Errorf("Unused = %v, want none: no Python declaration is read, so none is reported unmatched either", honoured.Unused)
+	}
+	withheld := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, withdrawn)
+	if withheld.Lines != honoured.Lines {
+		t.Errorf("Lines = %+v with the declaration present and %+v with it withdrawn; in Python the two are one measurement", honoured.Lines, withheld.Lines)
+	}
+}
+
+// Only a language lydite holds no parse tables for skips the exclusion scan.
+// Rust and TypeScript still reach the parser — including .tsx, whose tables are
+// not .ts's — so the language that cannot be scanned is not paid for by
+// loosening the two that can.
+func TestOnlyAGrammarlessLanguageSkipsTheExclusionScan(t *testing.T) {
+	root := t.TempDir()
+	for _, c := range []struct {
+		file   string
+		lang   runner.Lang
+		source string
+		want   int
+	}{
+		{"lib.rs", runner.Rust, "// [lydite:exclude_from_coverage][measured elsewhere]\npub fn f() -> i64 {\n    1\n}\n", 3},
+		{"a.ts", runner.TypeScript, "// [lydite:exclude_from_coverage][measured elsewhere]\nexport function f(): number {\n  return 1;\n}\n", 3},
+		{"a.tsx", runner.TypeScript, "// [lydite:exclude_from_coverage][measured elsewhere]\nexport function f(): number {\n  return 1;\n}\n", 3},
+		{"scope.py", runner.Python, "# [lydite:exclude_from_coverage][measured elsewhere]\ndef f():\n    return 1\n", 0},
+	} {
+		t.Run(c.file, func(t *testing.T) {
+			path := write(t, root, c.file, c.source)
+			got, err := lcovExclusions(path, c.file, c.lang, annotation.Coverage)
+			if err != nil {
+				t.Fatalf("lcovExclusions: %v", err)
+			}
+			if len(got.Lines) != c.want {
+				t.Errorf("Lines = %v, want %d of them", got.Lines, c.want)
+			}
+			if len(got.Unused) != 0 {
+				t.Errorf("Unused = %v, want none — the declaration covers the function below it", got.Unused)
+			}
+		})
+	}
+}
+
+// pytest-cov writes its "SF:" records relative to the directory the invocation
+// ran in, which is the component's own. A producer writing them absolute is
+// read the same way: a path resolving under the component is keyed as git names
+// the file, never as an absolute key no changed path can match.
+func TestAnAbsolutePythonSFPathIsKeyedTheWayGitNamesTheFile(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "svc/scope.py", "def f():\n    return 1\n")
+	abs := filepath.Join(root, "svc", "scope.py")
+	write(t, root, "svc/.lydite-reports/coverage/lcov.info",
+		"SF:"+filepath.ToSlash(abs)+"\nDA:1,1\nDA:2,1\nLF:2\nLH:2\nend_of_record\n")
+
+	got, err := Measure(context.Background(), root, "svc", ".lydite-reports/coverage/lcov.info", runner.Python, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Hits["svc/scope.py"]; !ok {
+		t.Errorf("Hits keys = %v, want svc/scope.py", keys(got.Hits))
+	}
+	if got.Lines != (LineCount{Covered: 2, Total: 2}) {
+		t.Errorf("Lines = %+v, want {2 2}", got.Lines)
 	}
 }

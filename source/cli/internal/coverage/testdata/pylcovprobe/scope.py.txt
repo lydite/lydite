@@ -1,0 +1,38 @@
+"""The shapes a coverage scope has to survive, in Python."""
+
+
+def add(a, b):
+    return a + b
+
+
+# [lydite:exclude_from_coverage][measured by the integration suite]
+def provision(count):
+    total = 0
+    for i in range(count):
+        total += i
+    if total > 10:
+        return total
+    return -1
+
+
+def tally(values):
+    def double(value):
+        return value * 2
+
+    return [double(value) for value in values]
+
+
+def widest(values):
+    return max(values, key=abs)
+
+
+class Counter:
+    def __init__(self):
+        self.value = 0
+
+    def bump(self, by=1):
+        self.value += by
+        return self.value
+
+    def read(self):
+        return self.value

@@ -221,6 +221,99 @@ func TestAnOverrideProducerReadsTheComponentDirectoryNotTheWorkspaceRoot(t *test
 	}
 }
 
+// stubInterpreter puts a python3 ahead of any real one on PATH, answering the
+// version lookup with the given lines — one per package asked about, in the
+// order pythonProducer asks, and empty where the package is not installed.
+// The suite must answer the same on a machine with no Python at all as on one
+// whose Python happens to carry pytest.
+//
+// It returns the file the stub records its own argv into, NUL-separated
+// because one of the arguments is a multi-line script.
+func stubInterpreter(t *testing.T, lines ...string) string {
+	t.Helper()
+	bin := t.TempDir()
+	argv := filepath.Join(bin, "argv")
+	script := "#!/bin/sh\nprintf '%s\\0' \"$@\" > '" + argv + "'\nprintf '%s\\n'"
+	for _, line := range lines {
+		script += " '" + line + "'"
+	}
+	if err := os.WriteFile(filepath.Join(bin, "python3"), []byte(script+"\n"), 0o700); err != nil { // #nosec G306 -- a stub that has to be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	return argv
+}
+
+// recordedArgv reads back the arguments stubInterpreter's python3 was called
+// with.
+func recordedArgv(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path) // #nosec G304 -- a path this test itself made
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+}
+
+// A Python component's producer is the pytest that ran the suite and the
+// coverage.py that recorded its lines, read back out of the interpreter the
+// invocation itself runs through. Neither is pinned, so this is the only way
+// to know what measured it.
+func TestAPythonProducerNamesPytestAndCoverage(t *testing.T) {
+	stubInterpreter(t, "8.3.4", "7.6.1")
+	dir := t.TempDir()
+	if got := registry[PythonPytest].Producer(dir, dir, "", "3.13.1"); got != "pytest 8.3.4, coverage 7.6.1" {
+		t.Errorf("producer = %q, want both halves named", got)
+	}
+}
+
+// The lookup runs the interpreter in isolated mode. The directory it runs in
+// belongs to the tree under scan, and without -I `python -c` puts that
+// directory first on sys.path: importlib.metadata imports stdlib modules
+// lazily and scans sys.path for *.dist-info, so the tree would choose both what
+// the lookup executes — in a process holding lydite's own environment — and
+// which version it reports.
+func TestAPythonProducerAsksInIsolatedMode(t *testing.T) {
+	argv := stubInterpreter(t, "8.3.4", "7.6.1")
+	dir := t.TempDir()
+	if got := registry[PythonPytest].Producer(dir, dir, "", "3.13.1"); got == "" {
+		t.Fatal("producer is empty, want the stub's own answer")
+	}
+	got := recordedArgv(t, argv)
+	if len(got) < 2 || got[0] != "-I" || got[1] != "-c" {
+		t.Errorf("argv = %q, want -I ahead of -c", got)
+	}
+}
+
+// Either half unidentifiable is no answer: a producer naming pytest alone
+// compares equal to itself across the coverage.py bump that changed what a
+// line means, which is the comparison a producer exists to prevent.
+func TestAPythonProducerIsEmptyWithoutEitherHalf(t *testing.T) {
+	for _, answer := range [][]string{{"8.3.4", ""}, {"", "7.6.1"}, {"", ""}} {
+		stubInterpreter(t, answer...)
+		dir := t.TempDir()
+		if got := registry[PythonPytest].Producer(dir, dir, "", "3.13.1"); got != "" {
+			t.Errorf("producer = %q for %q, want nothing when a half is unidentifiable", got, answer)
+		}
+	}
+}
+
+// An interpreter lydite cannot reach — no python3 on PATH, or one that answers
+// with something other than a version per package — names nothing rather than
+// naming what it guessed.
+func TestAPythonProducerIsEmptyWithoutAnInterpreter(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	if got := registry[PythonPytest].Producer(dir, dir, "", "3.13.1"); got != "" {
+		t.Errorf("producer = %q, want nothing when there is no interpreter", got)
+	}
+
+	stubInterpreter(t, "8.3.4")
+	if got := registry[PythonPytest].Producer(dir, dir, "", "3.13.1"); got != "" {
+		t.Errorf("producer = %q, want nothing when a half went unanswered", got)
+	}
+}
+
 // writePackage stages one package.json under root/node_modules, the way
 // installs does but for a single named version — used where the fixture also
 // needs a lockfile beside it, which installs' own root has no room for.

@@ -33,7 +33,7 @@ exclude is where a repository says so.
 **A file counts only when its extension is one lydite recognises as source**: the
 `internal/runner` `Lang` constants' extension sets, which include `.py`, `.sh` and `.bash`
 (`runner.Python`, `runner.Shell`) beside Go, Rust and TypeScript. Whether a runner exists for a
-language (`runner.Runs`) is a separate question: whether a component claims a file is a path
+language (`runner.Runs`) is a separate question — Python has one, Shell has none: whether a component claims a file is a path
 question that needs no runner. A component declaring a raw `command:` claims every file under its
 directory like any other component, and a recognised file no component claims is an orphan,
 cleared by a component covering it or an `excludes` entry. A runner whose language has no

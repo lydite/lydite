@@ -9,10 +9,10 @@
 // the unit, and where its report lands is the invocation's to say.
 //
 // One artefact per language, and both quantities come out of it. Go's coverage
-// profile serves the aggregate and the patch gate; Rust's and TypeScript's
-// lcov does the same. Two artefacts per language is what produced a
-// cargo-llvm-cov invocation naming two exports with one flag, which the tool
-// refuses to parse.
+// profile serves the aggregate and the patch gate; the lcov Rust, TypeScript
+// and Python each write does the same. Two artefacts per language is what
+// produced a cargo-llvm-cov invocation naming two exports with one flag, which
+// the tool refuses to parse.
 package coverage
 
 import (
@@ -129,7 +129,7 @@ func Measure(ctx context.Context, root, dir, report string, lang runner.Lang, en
 	switch lang {
 	case runner.Go:
 		return measureGo(ctx, root, unitDir, dir, reportPath, env)
-	case runner.Rust, runner.TypeScript:
+	case runner.Rust, runner.TypeScript, runner.Python:
 		return measureLCOV(data, unitDir, dir, lang)
 	default:
 		return Report{}, fmt.Errorf("no coverage report format for %q", lang)
@@ -160,8 +160,8 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 	return goProfile(GoModuleProfile{Profile: reportPath, ModuleName: name, RelDir: relDir(dir)}, root)
 }
 
-// measureLCOV reads an lcov trace, which is what both cargo-llvm-cov and
-// Istanbul emit natively.
+// measureLCOV reads an lcov trace, which is what cargo-llvm-cov, Istanbul and
+// coverage.py all emit natively.
 //
 // The counts come from the LF and LH records rather than from counting the DA
 // lines, and the difference is real: measured against the proving ground's
@@ -172,9 +172,9 @@ func measureGo(ctx context.Context, root, unitDir, dir, reportPath string, env [
 //
 // The source each "SF:" record names is parsed, because that is the only thing
 // that can say how far a `[lydite:exclude_from_coverage]` declaration reaches:
-// every function record lcov's two producers emit is a start line with no end.
-// The language is carried in for that alone — the report is read the same way
-// whichever of the two wrote it.
+// a function record cargo-llvm-cov or Istanbul emits is a start line with no
+// end. The language is carried in for that alone — the report is read the same
+// way whichever producer wrote it.
 func measureLCOV(data []byte, unitDir, dir string, lang runner.Lang) (Report, error) {
 	rep, err := lcovReport(data, unitDir, func(file string) (exclusions, error) {
 		// A path prefixHits is about to drop is not this component's file — a
@@ -198,7 +198,7 @@ func measureLCOV(data []byte, unitDir, dir string, lang runner.Lang) (Report, er
 		// Named with the component's directory already on it, because the hits
 		// beside it are prefixed below and an unused declaration a reader
 		// cannot open is one they cannot act on.
-		return excludedLCOVLines(joined, path.Join(relDir(dir), file), lang, annotation.Coverage)
+		return lcovExclusions(joined, path.Join(relDir(dir), file), lang, annotation.Coverage)
 	})
 	if err != nil {
 		return Report{}, err

@@ -137,6 +137,12 @@ Each language provisions differently, and only one of the three downloads anythi
   rustup — nvm/fnm/volta are all optional and mutually exclusive. The `.tar.gz` is taken over the
   `.tar.xz` purely because Go's standard library decompresses gzip and not xz.
 
+**Python is not provisioned.** There is no pin and no download: a `python-pytest` component runs
+whatever `python3`, pytest and pytest-cov resolve on `PATH`, at the same cost as any `command:`
+component. On a machine with a different interpreter the suite runs under that one, and a `uv` or
+`poetry` install lands in a `.venv` that `python3` on `PATH` is not, so such a component reaches the
+venv through a declared `env:` or a raw `command:`.
+
 **Provisioning failures warn; they do not fail the scan.** This step is preparation, not a gate,
 and falling through to "whatever is on PATH" is exactly today's behavior — turning a working scan
 into a hard failure over a network blip would be a regression, and if the toolchain really is

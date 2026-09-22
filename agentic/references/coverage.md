@@ -124,11 +124,13 @@ same argument that keeps a types-only TypeScript package from being reported.
   `not compared — the measured scope changed, from <old> to <new>` rather than the generic
   `measured by X, baseline by Y`, which names a toolchain change.
 - **No other runner folds its declared scope in.** vitest's `--coverage.include` and
-  `--coverage.exclude`, jest's `--collectCoverageFrom`, and cargo-llvm-cov's `-p` and its nextest
-  filter expressions each move a denominator the same way and none of them reaches the producer
-  string, so a scope change declared for one of those runners reads as a real regression or
-  improvement against a baseline recorded over the old scope. It is the same class of problem
-  ADR 0025 closes for a toolchain or dependency bump, closed for Go and open for the other three.
+  `--coverage.exclude`, jest's `--collectCoverageFrom`, cargo-llvm-cov's `-p` and its nextest
+  filter expressions, and a declared `--cov=<path>` pytest-cov adds to the `--cov=.` the
+  instrumented variant already carries, each move a denominator the same way and none of them
+  reaches the producer string, so a scope change declared for one of those runners reads as a real
+  regression or improvement against a baseline recorded over the old scope. It is the same class
+  of problem ADR 0025 closes for a toolchain or dependency bump, closed for Go and open for every
+  other runner.
 - **`v4`, so every consumer takes one clean cache miss.** `gitstate.StatePath`'s directory is keyed
   to the metric and to the unit it is measured over; entries recorded under the old per-language
   percentages are a different quantity, and are simply never found. A gained field bumps it too
@@ -299,6 +301,10 @@ tolerance wide enough to hide a 2.2-point artefact hides a genuine two-point reg
 The language and global figures blend units that are not quite identical — a Go profile counts
 statements where lcov counts lines, and the global figure blends across languages. This is accepted
 and stated rather than hidden; the alternative is the mean ADR 0007 rejected.
+
+**lcov is also Python's format.** pytest-cov writes it with `SF:` paths relative to the component
+directory. Python has no exclusion scan, so `[lydite:exclude_from_coverage]` is unavailable there:
+lydite holds no Python grammar to find the annotation with.
 
 **A component with no measurable lines is unmeasured, never 0%.** An empty Go profile, a crate
 llvm-cov reports zero lines for, an lcov with no `LF` records — each is reported with its reason,

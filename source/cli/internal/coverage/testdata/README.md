@@ -1,17 +1,25 @@
 # The captured lcov reports
 
-`rust-lcov.info`, `ts-lcov-v8.info` and `ts-lcov-istanbul.info` are verbatim output of the
-tools lydite pins, over the two probe trees beside them. They are the evidence
+`rust-lcov.info`, `ts-lcov-v8.info`, `ts-lcov-istanbul.info` and `python-lcov.info` are verbatim
+output of the tools lydite pins, over the probe trees beside them. They are the evidence
 [ADR 0034](../../../../docs/adr/0034-an-exclusion-declaration-is-scoped-by-a-parser-in-every-language.md)
 decides on, and a test that wants an lcov reads one of them rather than writing its own: a
 hand-written report matches its author's reading of the format, which is the one thing it must
 not be evidence for.
 
-Each probe carries the shapes a scope has to survive — a free function, a method, a generic, a
-closure and a nested function item — and two of them carry a real
-`[lydite:exclude_from_coverage]` declaration. The declaration is a `//` line comment and not the
-language's own doc comment (`///`, `/** */`) because `annotation.body` strips `//` and nothing
-else, so those are the only comments a declaration can be written in today.
+Each probe carries the shapes a scope has to survive in its own language — a free function, a
+method, a nested function and a closure everywhere, plus a generic in the two that have one —
+one function the suite never calls, and a real `[lydite:exclude_from_coverage]` declaration. In
+Rust and TypeScript the declaration is a `//`
+line comment and not the language's own doc comment (`///`, `/** */`) because `annotation.body`
+strips `//` and nothing else, so those are the only comments a declaration can be written in
+today.
+
+`pylcovprobe`'s declaration is a `#` comment, and it is there to hold the opposite property: a
+Python component's measurement reads no declaration at all, because the deduction's reach is a
+function span and `internal/treesitter` holds no Python tables. Nothing is deducted and nothing
+is reported unmatched, which is what
+`TestAPythonDeclarationDeductsNothingAndFailsNothing` pins.
 
 Source files carry a `.txt` suffix and are materialised by `internal/fixture`, whose doc comment
 says why.
@@ -39,3 +47,19 @@ vitest run --coverage --coverage.provider=istanbul --coverage.reporter=lcovonly 
 Both providers are captured because lydite supports both, and they disagree: the `FN` and `DA`
 lines are identical, and the *names* in the `FN` records are not. v8 names the two class methods
 `bump` and `read`; istanbul names the same two `(anonymous_5)` and `(anonymous_6)`.
+
+Python, with pytest-cov and coverage.py, the argv `internal/runner`'s `buildPytest` derives,
+run in the probe directory:
+
+```sh
+python3 -m pytest --cov=. --cov-report=lcov:.lydite-reports/coverage/lcov.info \
+  --junitxml=.lydite-reports/junit.xml
+```
+
+No deviation at all, so `python-lcov.info` is what lydite reads in anger. `SF:` is relative to
+the directory the invocation ran in, which is the component's own — unlike cargo-llvm-cov's
+absolute paths, and the reason no `--remap-path-prefix` equivalent was needed. Both the module
+and the test module are in the report, because `--cov=.` measures the tree the component
+declares. coverage.py's `FN` records carry an end line as well as a start (`FN:4,5,add`), which
+neither of the other two producers emits; lydite reads a span off a parser regardless, so the
+extra field changes nothing about how the trace is read.

@@ -405,13 +405,24 @@ func TestMtsAndCtsAreWalkedAsTypeScript(t *testing.T) {
 	}
 }
 
-// A script is a language no runner runs, so this gate has nothing to score and
-// nothing to report as skipped.
+// A shell script is a language no runner runs, so this gate has nothing to
+// score and nothing to report as skipped: no component's suite can produce
+// coverage for it, and naming it would be a row about a gap nothing left.
 func TestAScriptPathIsNotReportedSkipped(t *testing.T) {
-	for _, file := range []string{"a.py", "a.sh", "a.bash"} {
+	for _, file := range []string{"a.sh", "a.bash"} {
 		if skipped(file) {
 			t.Errorf("skipped(%q) = true, want false", file)
 		}
+	}
+}
+
+// A Python file is a language a runner runs and this gate holds no grammar for,
+// so it is named skipped rather than dropped out of the hit map in silence — the
+// same answer a .jsx file gets, and for the same reason: a file scored by
+// nothing must not read as one this gate had nothing to say about.
+func TestAPythonPathIsReportedSkipped(t *testing.T) {
+	if !skipped("src/scope.py") {
+		t.Error(`skipped("src/scope.py") = false, want true — python has a runner and this gate no grammar`)
 	}
 }
 
