@@ -6,8 +6,8 @@
 # marker and the CLI's disagree is a comment that stops being edited and starts
 # being duplicated.
 #
-# Outside the gt pipeline, as `lydite-pr.yml` is. gt's CD stages are disabled in
-# this repository and `release.yml` is already hand-written for the same reason.
+# Outside the gt pipeline. gt's CD stages are disabled in this repository and
+# `release.yml` is already hand-written for the same reason.
 #
 # It sets no secrets. `workers-secrets-sync.yml` does that, manually, because
 # rotating a credential is a decision somebody takes rather than something every

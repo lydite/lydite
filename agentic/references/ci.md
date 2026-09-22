@@ -7,17 +7,26 @@ gt renders `ci-orchestration.yml`, which calls one workflow per stage: `ci-prefl
 proving ground). `ci-gate` is the single check branch protection requires, and it waits on all
 of them — so **what runs in a gt stage is what blocks a merge.**
 
-**Everything lydite says about a pull request is `lydite-pr.yml`, and it is not a gt stage.**
-The referral, the scan and the gated suites run in parallel and a `publish` job renders one
-standing comment from all three (see [surface.md](surface.md)). It cannot be a stage: `gt repo config`
-accepts exactly `preflight, build, test, end2end`, so there is no stage a publish could be, and
-`statuses: write` cannot be granted to a called stage. The consequence is stated rather than
-hidden — lydite's own coverage gate does not block a merge, which is the state `lydite/referral`
-is already in and for the same reason ([#34](https://github.com/lydite/lydite/issues/34)).
-A coverage regression and a scan finding are advisory here for the same reason; what that
-costs and what closes it is [#75](https://github.com/lydite/lydite/issues/75). `ci-test.yml`
-keeps the plain `go build` and `go test -race`, so the Go suite is the one thing lydite's own
-merge gate still covers.
+**`lydite-pr.yml`, `lydite-baseline.yml` and `lydite-clearance.yml` are deleted** (ADR 0051's
+2026-09-22 amendment) rather than rewired to call `lydite/actions`' reusable workflows — `gt`
+governance is expected to render the equivalent call once `pedromvgomes/gt#72` repoints this
+repository's bulwark stage at `lydite/actions`. Until then, lydite says **nothing** about its own
+pull requests: no referral, no scan, no gated suites, no standing comment, no coverage baseline
+recorded on push to the default branch, and no `/lydite clear`. The rest of this section
+describes what those three files did, kept for whatever replaces them to be checked against —
+none of it currently runs. `ci-test.yml` keeps the plain `go build` and `go test -race`, so the
+Go suite is the one thing lydite's own merge gate still covers.
+
+**Everything lydite once said about a pull request was `lydite-pr.yml`, and it was not a gt
+stage.** The referral, the scan and the gated suites ran in parallel and a `publish` job
+rendered one standing comment from all three (see [surface.md](surface.md)). It could not be a
+stage: `gt repo config` accepts exactly `preflight, build, test, end2end`, so there was no stage
+a publish could be, and `statuses: write` could not be granted to a called stage. The
+consequence was stated rather than hidden — lydite's own coverage gate did not block a merge,
+which is the state `lydite/referral` is already in and for the same reason
+([#34](https://github.com/lydite/lydite/issues/34)). A coverage regression and a scan finding
+were advisory here for the same reason; what that costs and what closes it is
+[#75](https://github.com/lydite/lydite/issues/75).
 
 **`referral` only compares and holds no credential; `referral-publish` decides and publishes,
 and runs a binary the change under review could not have written.** A component that opts a

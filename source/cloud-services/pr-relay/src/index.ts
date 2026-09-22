@@ -73,6 +73,13 @@ const ROUTES = ["/comment", "/review", "/status"];
 const REFERRAL_CONTEXT = "lydite/referral";
 const CLEARANCE_CONTEXT = "lydite/clearance";
 
+// The two referral states this relay reasons about by name, spelled as
+// `internal/clearance`'s own `State` values: a standing referral waiting on a
+// person, and the verdict a clearance resolves it to. Every other state is a
+// verdict this route never authors and never moves.
+const REFERRAL_PENDING = "pending";
+const REFERRAL_RESOLVED = "success";
+
 /**
  * What the relay talks to.
  *
@@ -172,7 +179,7 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     if (error) {
       return json(400, { error });
     }
-    const refused = statusAuthorityError(payload.context as string, claims, env);
+    const refused = statusAuthorityError(payload, claims, env);
     if (refused) {
       // 403 and not 400: the payload is well formed, and what is refused is
       // the job asking. Deterministic either way — the same job retrying
@@ -239,8 +246,42 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
       if (!pr) {
         return json(403, { error: NO_SUCH_PULL });
       }
-      if (payload.sha !== pr.head?.sha) {
+      const head = pr.head?.sha;
+      if (!head || payload.sha !== head) {
         return json(403, { error: "the sha submitted is not this pull request's head" });
+      }
+      if (referralResolution(payload, claims, env)) {
+        // The one thing a clearance ref may do to the referral context, and
+        // the whole of what admits it: the status this revision is actually
+        // carrying, read with the installation token rather than taken from
+        // the body. A `failure` is the isolation gate and a comment does not
+        // resolve it; an `error` never reached a verdict, so there is none to
+        // resolve — and a revision carrying no referral at all has nothing
+        // standing that a clearance is answering.
+        //
+        // The read and the write below are two separate requests, so a
+        // referral re-run landing `failure` on this exact head in the gap
+        // between them is not caught — the platform's status API has no
+        // conditional write to close that window with. It is narrower than
+        // what stands today regardless: the direct-post route
+        // (`recordClearance` in `cmd/lydite/status.go`) resolves
+        // `lydite/referral` to `success` after a clearance with no live read
+        // at all, so this is a tighter check on the same exposure rather
+        // than a new one.
+        const standing = await currentStatus(
+          token,
+          claims.repository,
+          head,
+          REFERRAL_CONTEXT,
+          deps.fetcher,
+        );
+        if (standing !== REFERRAL_PENDING) {
+          return json(403, {
+            error: `a clearance resolves a ${REFERRAL_PENDING} ${REFERRAL_CONTEXT}, and this revision carries ${
+              standing ?? "none"
+            }`,
+          });
+        }
       }
       await postStatus(token, claims.repository, payload, deps.fetcher);
       return json(200, {
@@ -425,12 +466,15 @@ function statusPayloadError(payload: StatusRequest): string | undefined {
  * the status a human Clearance acts on, are admitted only from a
  * `job_workflow_ref` named in the allowlist for that context.
  *
- * The pairing is exclusive in both directions. An allowlisted referral workflow
- * may post the referral context and nothing else, and a clearance workflow the
- * clearance context and nothing else, so that being trusted to author one
- * verdict is never being trusted to author the other. A job whose ref is in
- * neither list is unaffected outside the gated contexts: the `lydite/` namespace
- * check is the whole of what governs the rest.
+ * The pairing is exclusive in both directions, with one narrow exception. An
+ * allowlisted referral workflow may post the referral context and nothing else;
+ * a clearance workflow may post the clearance context outright, and may
+ * additionally ask to move the referral context from `pending` to `success` —
+ * `referralResolution`'s condition, and nothing wider. That attempt is admitted
+ * here only as an attempt: what it actually turns on is the status standing on
+ * the revision, which needs the installation token and so is read in `handle`.
+ * A job whose ref is in neither list is unaffected outside the gated contexts:
+ * the `lydite/` namespace check is the whole of what governs the rest.
  *
  * The clearance ref's authority is the whole of `clearanceRun`'s condition and
  * not the allowlist alone: an allowlisted callee reached from a `push` or a
@@ -438,10 +482,11 @@ function statusPayloadError(payload: StatusRequest): string | undefined {
  * the status a human Clearance acts on is not theirs to author.
  */
 function statusAuthorityError(
-  context: string,
+  payload: StatusRequest,
   claims: ActionsClaims,
   env: Env,
 ): string | undefined {
+  const context = payload.context as string;
   const named = claims.job_workflow_ref ?? "";
   const referral = allowlisted(env.REFERRAL_WORKFLOW_REFS, named);
   const clearance = allowlisted(env.CLEARANCE_WORKFLOW_REFS, named);
@@ -459,7 +504,10 @@ function statusAuthorityError(
   }
   const permitted = referral ? REFERRAL_CONTEXT : clearance ? CLEARANCE_CONTEXT : undefined;
   if (permitted) {
-    return context === permitted ? undefined : `${named} may post ${permitted} only`;
+    if (context === permitted || referralResolution(payload, claims, env)) {
+      return undefined;
+    }
+    return `${named} may post ${permitted} only`;
   }
   if (context === REFERRAL_CONTEXT || context === CLEARANCE_CONTEXT) {
     // Naming the ref is what makes this actionable: an allowlist is edited by
@@ -470,6 +518,34 @@ function statusAuthorityError(
     } is not one`;
   }
   return undefined;
+}
+
+/**
+ * Whether this request is the one move a clearance run may make on the referral
+ * context: `pending` to `success`, and nothing else.
+ *
+ * It exists because the alternative is the required check being unsatisfiable
+ * from the relay route at all — a clearance ref may post `lydite/clearance`
+ * only, so a `/lydite clear` on a relay consumer would record a clearance
+ * nothing acts on, and a repository requiring `lydite/referral` would stay
+ * blocked after every clearance, forever.
+ *
+ * One-directional in both senses. The state has to be `success`: a clearance
+ * never authors a `failure`, an `error` or a fresh `pending` under a context
+ * whose verdict is another ref's to reach, so any other state is refused
+ * outright and the standing status is never even read. And the authority is the
+ * whole of `clearanceRun`'s condition, not the allowlist alone, so a referral
+ * workflow — which runs beside the pull request's own code — never reaches this
+ * at all. Ordering against `lydite/clearance` is the caller's: one `/status`
+ * request writes one context, and the relay holds no state with which to know
+ * what a previous request did.
+ */
+function referralResolution(payload: StatusRequest, claims: ActionsClaims, env: Env): boolean {
+  return (
+    payload.context === REFERRAL_CONTEXT &&
+    payload.state === REFERRAL_RESOLVED &&
+    clearanceRun(claims, env).run
+  );
 }
 
 /**
@@ -551,6 +627,45 @@ async function pullRequest(
     throw new Error(`resolving the pull request answered ${response.status}`);
   }
   return (await response.json()) as PullRequest;
+}
+
+/** As much of `GET /commits/:sha/status` as the standing referral is read from. */
+interface CombinedStatus {
+  statuses?: { context?: string; state?: string }[];
+}
+
+/**
+ * The state a context is currently standing at on a revision, or nothing when
+ * that revision carries no such status.
+ *
+ * The combined status answers one entry per context, each the most recent
+ * status posted under it, which is exactly "what does this check say right
+ * now". Read with the installation token and on the revision `handle` resolved,
+ * because the point of the read is that it is the platform's answer rather than
+ * the caller's: a request cannot assert the state it is about to be allowed to
+ * move. Any failure other than a missing revision throws and reaches the caller
+ * as the route's `502`, so a transient outage stays retryable rather than
+ * reading as a refusal.
+ */
+async function currentStatus(
+  token: string,
+  repository: string,
+  sha: string,
+  context: string,
+  fetcher: typeof fetch,
+): Promise<string | undefined> {
+  const response = await fetcher(
+    `${GITHUB_API}/repos/${repository}/commits/${encodeURIComponent(sha)}/status`,
+    { headers: apiHeaders(`Bearer ${token}`) },
+  );
+  if (response.status === 404) {
+    return undefined;
+  }
+  if (!response.ok) {
+    throw new Error(`reading the standing status answered ${response.status}`);
+  }
+  const combined = (await response.json()) as CombinedStatus;
+  return (combined.statuses ?? []).find((status) => status.context === context)?.state;
 }
 
 /**
