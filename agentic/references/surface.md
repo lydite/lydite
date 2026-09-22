@@ -126,22 +126,28 @@ matches only if that exact SHA is allowlisted, and a refusal names the ref it sa
 be pasted. Consumers pin the floating major tag and this repository pins an exact SHA; both have to
 be allowlisted. A ref in both lists holds neither authority and is refused.
 
-Each ref is trusted for one context. A referral ref may post `lydite/referral` only, and a
-clearance ref `lydite/clearance` only. The CLI emits the two under
-those names: the referral verdict is `clearance.Context` (`lydite/referral`) and a clearance is
-`clearance.ClearanceContext` (`lydite/clearance`), both in `internal/clearance/decide.go`, so each
-status is one the relay admits for the ref that carries it.
+Each ref is trusted for one context, with one narrow, one-directional exception. A referral ref
+may post `lydite/referral` only; a clearance ref may post `lydite/clearance` outright, and may
+additionally move `lydite/referral` from `pending` to `success` — never to `failure` or `error`,
+and never when the standing status is anything but `pending` on a live read the relay takes with
+the installation token, never from the request body (`referralResolution`/`currentStatus` in
+`source/cloud-services/pr-relay/src/index.ts`; see ADR 0051's "A clearance ref may resolve a
+pending referral to success"). The CLI emits the two under those names: the referral verdict is
+`clearance.Context` (`lydite/referral`) and a clearance is `clearance.ClearanceContext`
+(`lydite/clearance`), both in `internal/clearance/decide.go`, so each status is one the relay
+admits for the ref that carries it.
 
 `lydite review --publish --status-out <file>` and `lydite clearance --status-out <file>` render the
 status as a `forge.Status` document (state, context, description, target_url, sha, pull_request)
 instead of posting it, for a step that posts it through the relay. Posting directly with the job's
 own token remains the path for a repository that has not adopted the reusable workflows; the two
-are alternatives, and neither is attempted after the other. The two
-routes are not equivalent for a clearance: the direct post also resolves `lydite/referral` to
-success (after posting `lydite/clearance`), while the rendered document is `lydite/clearance` only,
-because the relay admits a clearance ref to that context alone. On the relay route the referral
-status is not resolved by a clearance, so a repository requiring `lydite/referral` needs its gate
-to read `lydite/clearance`; that belongs to the reusable-workflow slice. A document that cannot be written
+are alternatives, and neither is attempted after the other. Both routes now resolve
+`lydite/referral` to success on a clearance, `lydite/clearance` posted first either way: the
+direct post does it unconditionally (`recordClearance` in `cmd/lydite/status.go`), and the relay
+route does it only against a live-read `pending` standing status, since the relay's write is
+gated per request rather than sequenced with the caller's own two posts. A repository requiring
+`lydite/referral` reads that context on either route; nothing here depends on
+`lydite/clearance` as a substitute required check. A document that cannot be written
 fails the run. `clearance` does not require `--status-out`, and a comment that clears nothing
 writes no document.
 

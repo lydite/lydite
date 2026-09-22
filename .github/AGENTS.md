@@ -2,9 +2,11 @@
 
 `ci-orchestration.yml` and the `ci-*` stage workflows are **generated** from `.gt-repo.yaml`;
 edit that file and run `gt repo sync`. `dependabot-pins.yml`, `release.yml` and everything
-under `actions/` are hand-written. lydite carries no bespoke pull-request or clearance
-workflow of its own: it calls `lydite/actions`' reusable workflows, the same call any
-consumer makes (see ADR 0051).
+under `actions/` are hand-written. lydite carries no `lydite-pr.yml`, `lydite-baseline.yml`
+or `lydite-clearance.yml` of its own — deleted rather than rewired to call `lydite/actions`'
+reusable workflows, so this repository posts no referral verdict, no scan, no coverage
+baseline and no clearance on its own pull requests until `gt`'s governance (`gt#72`)
+repoints the bulwark stage at `lydite/actions` (see ADR 0051's 2026-09-22 amendment).
 
 Read [`ci.md`](../agentic/references/ci.md) before changing a workflow: which stages exist,
 why everything lydite says about a pull request is one run rather than a gt stage, how both
