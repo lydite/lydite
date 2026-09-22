@@ -517,11 +517,21 @@ function gatedEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
+// What `GET /commits/:sha/status` answers: the state each context is standing
+// at on that revision, and what reached the endpoint. A stub given no
+// `Standing` throws when the read is attempted, which is how a path that must
+// never read the platform is held to it.
+interface Standing {
+  states?: Record<string, string>;
+  read?: { url: string; init?: RequestInit }[];
+}
+
 // Answers `GET /pulls/:n` for every number in `pulls` (a missing number is a
 // 404) and records each status and comment write.
 function pullStub(
   pulls: Record<number, { state: string; sha: string }>,
   written: { url: string; init?: RequestInit }[] = [],
+  standing?: Standing,
 ): typeof fetch {
   return (async (url: unknown, init?: RequestInit) => {
     const target = String(url);
@@ -530,6 +540,18 @@ function pullStub(
     }
     if (target.includes("/access_tokens")) {
       return Response.json({ token: "ghs_test" });
+    }
+    if (/\/commits\/[^/]+\/status$/.test(target)) {
+      if (!standing) {
+        throw new Error(`the relay read a standing status it should not have: ${target}`);
+      }
+      standing.read?.push({ url: target, init });
+      return Response.json({
+        statuses: Object.entries(standing.states ?? {}).map(([context, state]) => ({
+          context,
+          state,
+        })),
+      });
     }
     const pull = /\/pulls\/(\d+)$/.exec(target);
     if (pull) {
@@ -906,6 +928,156 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         pullStub(open7),
       );
       expect(response.status).toBe(403);
+    });
+  });
+
+  describe("a clearance resolving a pending referral", () => {
+    const resolve = { ...referral, state: "success", pull_request: 7 };
+
+    async function resolveReferral(
+      standing?: Standing,
+      body: unknown = resolve,
+      ref = CLEARANCE_REF,
+    ) {
+      const written: { url: string; init?: RequestInit }[] = [];
+      const token = await keys.sign(
+        claims({ job_workflow_ref: ref, ...clearanceClaims }),
+      );
+      const response = await send(
+        "/status",
+        token,
+        body,
+        gatedEnv(),
+        pullStub(open7, written, standing),
+      );
+      return { response, written };
+    }
+
+    // The narrow exception: the required check is satisfiable from the relay
+    // route, because a clearance may move the referral the change is gated on
+    // from the state naming no verdict to the one another ref already reached.
+    it("moves a pending referral to success", async () => {
+      const { response, written } = await resolveReferral({
+        states: { "lydite/referral": "pending" },
+      });
+      expect(response.status).toBe(200);
+      expect(written).toHaveLength(1);
+      expect(JSON.parse(String(written[0]?.init?.body))).toMatchObject({
+        state: "success",
+        context: "lydite/referral",
+      });
+    });
+
+    // The isolation gate is the author's to clear by changing the code, and a
+    // comment does not resolve it — on the relay route exactly as on the
+    // direct-post route.
+    it("never touches a standing failure or error", async () => {
+      for (const state of ["failure", "error"]) {
+        const { response, written } = await resolveReferral({
+          states: { "lydite/referral": state },
+        });
+        expect(response.status).toBe(403);
+        expect(written).toHaveLength(0);
+      }
+    });
+
+    // A revision carrying no referral at all has nothing standing for a
+    // clearance to be answering, so there is nothing to resolve.
+    it("refuses a revision carrying no referral", async () => {
+      const { response, written } = await resolveReferral({
+        states: { "lydite/clearance": "success" },
+      });
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    });
+
+    // The state admitted is the platform's answer for the revision the relay
+    // resolved, read with the installation token: a request cannot assert the
+    // state it is about to be allowed to move.
+    it("reads the standing state from the platform with the app's token", async () => {
+      const read: { url: string; init?: RequestInit }[] = [];
+      const { response } = await resolveReferral({
+        states: { "lydite/referral": "pending" },
+        read,
+      });
+      expect(response.status).toBe(200);
+      expect(read).toHaveLength(1);
+      expect(read[0]?.url).toBe(
+        "https://api.github.com/repos/lydite/proving-ground/commits/abc123/status",
+      );
+      expect(
+        (read[0]?.init?.headers as Record<string, string> | undefined)?.authorization,
+      ).toBe("Bearer ghs_test");
+    });
+
+    // The revision is still the pull request's own head, and a body naming
+    // another is refused before the platform is asked anything about it.
+    it("refuses a sha that is not the head, without reading anything", async () => {
+      const read: { url: string; init?: RequestInit }[] = [];
+      const { response, written } = await resolveReferral(
+        { states: { "lydite/referral": "pending" }, read },
+        { ...resolve, sha: "someone-elses-sha" },
+      );
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+      expect(read).toHaveLength(0);
+    });
+
+    // One direction only. A clearance authors no verdict of its own under the
+    // referral context, so any state but `success` is refused outright — and
+    // the standing status is not even read, since no answer to that read would
+    // admit the write.
+    it("refuses every state but success, without reading anything", async () => {
+      for (const state of ["pending", "failure", "error"]) {
+        const read: { url: string; init?: RequestInit }[] = [];
+        const { response, written } = await resolveReferral(
+          { states: { "lydite/referral": "pending" }, read },
+          { ...resolve, state },
+        );
+        expect(response.status).toBe(403);
+        expect(written).toHaveLength(0);
+        expect(read).toHaveLength(0);
+      }
+    });
+
+    // The exception is the clearance ref's alone. A referral workflow runs
+    // beside the pull request's own code and derives its pull request from its
+    // own ref, so a referral ref presenting a clearance run's shape reaches
+    // none of this.
+    it("is not offered to a referral workflow", async () => {
+      const read: { url: string; init?: RequestInit }[] = [];
+      const { response, written } = await resolveReferral(
+        { states: { "lydite/referral": "pending" }, read },
+        resolve,
+        REFERRAL_REF,
+      );
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+      expect(read).toHaveLength(0);
+    });
+
+    // The three claims clearance authority is conditioned on govern the
+    // exception too: an allowlisted callee reached from another event is a run
+    // whoever can open a pull request controls.
+    it("is not offered to a clearance ref on another event", async () => {
+      for (const claim of [
+        { ref: "refs/heads/main", event_name: "push" },
+        { ref: "refs/pull/7/merge", event_name: "pull_request" },
+      ]) {
+        const written: { url: string; init?: RequestInit }[] = [];
+        const token = await keys.sign(
+          claims({ job_workflow_ref: CLEARANCE_REF, ...claim }),
+        );
+        const response = await send(
+          "/status",
+          token,
+          resolve,
+          gatedEnv(),
+          pullStub(open7, written),
+        );
+        expect(response.status).toBe(403);
+        expect(written).toHaveLength(0);
+      }
     });
   });
 });
