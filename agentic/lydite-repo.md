@@ -68,7 +68,7 @@ go build ./...                 # build the binary
 go test -race ./...            # run tests
 
 # The shipped shape (see mutation.md for why: gotreesitter's grammar_subset tags).
-go build -tags 'grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx' ./...
+go build -tags 'grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx grammar_subset_python' ./...
 golangci-lint run ./...        # lint — must be clean before a PR
 go run ./cmd/lydite            # run the CLI locally
 go run ./cmd/lydite review     # referral verdict for the current branch (exit 2 = refer)
