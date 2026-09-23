@@ -67,7 +67,9 @@ reader to skim past it.
 
 An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
 to detect one: the author declares it in a `[lydite:exclude_from_mutation][<reason>]` comment
-**beside** the mutant. All three languages spell a line comment `//`, so one form covers them. The declaration
+**beside** the mutant. The marker is read out of whichever comment form a language uses —
+`internal/annotation`'s `body` strips either a `//` or a `#` introducer — and the three languages
+mutation runs against, Rust, TypeScript and TSX, all spell theirs `//`. The declaration
 covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
 least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
 call, and the innermost is what somebody annotating that line is looking at. Deciding by
@@ -107,7 +109,8 @@ grammar tables are the only input.
 
 **The shipped build is a `grammar_subset`.** `gotreesitter` embeds all 206 of its grammars
 unless the `grammar_subset` build tag turns the wildcard embed off, and each
-`grammar_subset_<lang>` tag turns one blob back on — 15MB against 33MB for the same binary. A
+`grammar_subset_<lang>` tag turns one blob back on — 21MB against 40MB for the same binary, with
+Rust's, TypeScript's, TSX's and Python's own tags turned on. A
 build without them is correct and larger; a build with `grammar_subset` and a language's own
 tag missing panics at that language's first parse, which is why `ci-test` runs the suite under
 the exact tag list `go build` uses (see the root [`AGENTS.md`](../../AGENTS.md) Commands

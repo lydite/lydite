@@ -306,8 +306,9 @@ statements where lcov counts lines, and the global figure blends across language
 and stated rather than hidden; the alternative is the mean ADR 0007 rejected.
 
 **lcov is also Python's format.** pytest-cov writes it with `SF:` paths relative to the component
-directory. Python has no exclusion scan, so `[lydite:exclude_from_coverage]` is unavailable there:
-lydite holds no Python grammar to find the annotation with.
+directory. `[lydite:exclude_from_coverage]` works there exactly as it does for Rust and
+TypeScript: `lcovExclusions` finds Python's grammar through `treesitter.GrammarFor` and runs the
+same scan.
 
 **A component with no measurable lines is unmeasured, never 0%.** An empty Go profile, a crate
 llvm-cov reports zero lines for, an lcov with no `LF` records — each is reported with its reason,

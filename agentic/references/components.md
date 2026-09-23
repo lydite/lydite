@@ -178,9 +178,9 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
 |---|---|
 | suite and JUnit report | yes |
 | coverage | yes, through lcov |
-| `[lydite:exclude_from_coverage]` | no — lydite holds no Python grammar |
-| CRAP | files are reported skipped |
-| mutation | unmeasured — no generator or backend for Python |
+| `[lydite:exclude_from_coverage]` | yes |
+| CRAP | yes — real scores, exactly as Rust's and TypeScript's, and `[lydite:exclude_from_crap]` works |
+| mutation | unmeasured — no generator or backend for Python ([#221](https://github.com/lydite/lydite/issues/221)) |
 | scan | unmeasured — no scanner |
 | toolchain | not pinned or provisioned (see [`toolchains.md`](toolchains.md)) |
 
