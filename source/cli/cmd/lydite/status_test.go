@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/forge"
+	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
 )
 
@@ -31,6 +34,49 @@ func headEvent(t *testing.T, dir string, number int) (path, head string) {
 		t.Fatal(err)
 	}
 	return path, head
+}
+
+// A clearance's fingerprint lives in the status description and nowhere else,
+// and forge clips that description to the platform's cap on the way out — so
+// the fingerprint has to survive the write and not merely the composition. Both
+// documents a clearance records carry it, because both are written from one
+// document.
+func TestARecordedClearanceCarriesTheFingerprintThroughTheWrite(t *testing.T) {
+	headSHA := "4c2eaea1f2b3c4d5e6f708192a3b4c5d6e7f8091"
+	want := referral.Fingerprint([]string{"src/auth.go"}, nil)
+	// Longer than any login the platform issues: the attribution is what gives
+	// way to the budget, and asserting that needs a handle that spends it.
+	handle := strings.Repeat("handle", 40)
+	description := clearance.WithFingerprint(
+		fmt.Sprintf("cleared by @%s at %s", handle, shortSHA(headSHA)), want)
+
+	out := filepath.Join(t.TempDir(), "lydite-status.json")
+	if err := recordClearance(context.Background(), nil, forge.Repo{}, out,
+		clearanceStatus(pullRequestRef{SHA: headSHA, Number: 7}, description)); err != nil {
+		t.Fatalf("recording the clearance: %v", err)
+	}
+
+	for _, path := range []string{out, referralDocument(out)} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading the recorded status: %v", err)
+		}
+		var got struct {
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("the recorded status is not JSON: %v: %s", err, raw)
+		}
+		if n := len([]rune(got.Description)); n > clearance.DescriptionLimit {
+			t.Errorf("%s: the description is %d characters, past the cap of %d: %q",
+				filepath.Base(path), n, clearance.DescriptionLimit, got.Description)
+		}
+		fingerprint, ok := clearance.FingerprintIn(got.Description)
+		if !ok || fingerprint != want {
+			t.Errorf("%s: the recorded description reads back as %q, %v; want %q, true",
+				filepath.Base(path), fingerprint, ok, want)
+		}
+	}
 }
 
 // The rendered document is the whole write, so it carries every field the step

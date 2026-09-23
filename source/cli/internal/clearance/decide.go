@@ -23,6 +23,80 @@ const Context = "lydite/referral"
 // one of these two names.
 const ClearanceContext = "lydite/clearance"
 
+// DescriptionLimit is the platform's cap on a status description, in
+// characters, and the length forge clips a status to on the way out.
+//
+// The budget is spent here rather than at the write because the fingerprint is
+// the description's tail: text composed past the cap loses the fingerprint to
+// that clip, when the human half is what can spare its last few characters.
+const DescriptionLimit = 140
+
+// fingerprintOpen and fingerprintClose delimit the fingerprint a clearance's
+// description carries.
+//
+// Nothing follows the fingerprint, so a reader takes the last opening marker
+// in a description ending in the closing one, and the value between them may
+// hold neither a bracket nor a space. Brackets in the human half — which a
+// platform login cannot contain, and which a future wording could — therefore
+// name nothing.
+const (
+	fingerprintOpen  = " [fp:"
+	fingerprintClose = "]"
+)
+
+// WithFingerprint composes the description a clearance is recorded under: who
+// cleared what, then the fingerprint of the decision they cleared.
+//
+// A clearance names one commit, and a commit status keyed by SHA is durable
+// for as long as the commit is — so a later run recomputing the same
+// fingerprint compares against this text and needs no store of its own. See
+// docs/adr/0053-a-clearance-carries-forward-when-the-decision-it-was-given-for-is-unchanged.md.
+//
+// An empty fingerprint appends nothing, which reads back as absent. "Nothing
+// recorded a fingerprint" and "the fingerprint recorded was empty" are
+// different answers, and a comparison that cannot be made must refuse rather
+// than treat absence as agreement.
+//
+// The human half is what gives way when the two do not fit: a cut fingerprint
+// is a value that compares unequal to the decision it was taken over, while a
+// cut attribution is still legible.
+func WithFingerprint(description, fingerprint string) string {
+	if fingerprint == "" {
+		return description
+	}
+	suffix := fingerprintOpen + fingerprint + fingerprintClose
+	room := DescriptionLimit - len([]rune(suffix))
+	if room <= 0 {
+		return suffix
+	}
+	if runes := []rune(description); len(runes) > room {
+		return string(runes[:room-1]) + "…" + suffix
+	}
+	return description + suffix
+}
+
+// FingerprintIn reads the fingerprint back out of a status description.
+//
+// The second return distinguishes a description that carries no fingerprint
+// field at all — every clearance recorded by a lydite that wrote none, and any
+// description the platform truncated past its closing marker — from one whose
+// field is empty. Both are unusable for a comparison, and both have to be
+// refusable as such rather than read as a match.
+func FingerprintIn(description string) (string, bool) {
+	if !strings.HasSuffix(description, fingerprintClose) {
+		return "", false
+	}
+	open := strings.LastIndex(description, fingerprintOpen)
+	if open < 0 {
+		return "", false
+	}
+	value := description[open+len(fingerprintOpen) : len(description)-len(fingerprintClose)]
+	if strings.ContainsAny(value, " []") {
+		return "", false
+	}
+	return value, true
+}
+
 // State is a commit status state.
 type State string
 
