@@ -103,8 +103,7 @@ def collides(name):
 
 
 def uploads_named(path):
-    """Return every (name, decidable) artifact this file's steps upload under,
-    where `decidable` is False for a name Undecidable could not resolve."""
+    """Return every artifact name this file's steps upload under."""
     with open(path, encoding="utf-8") as fh:
         lines = fh.readlines()
     results = []
