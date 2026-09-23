@@ -10,7 +10,8 @@ import (
 	"lydite/lydite/internal/treesitter"
 )
 
-// Rust and TypeScript are parsed with tree-sitter, through a pure-Go runtime.
+// Rust, TypeScript and Python are parsed with tree-sitter, through a pure-Go
+// runtime.
 //
 // Which parse tables read a file, and how a tree that will not parse is
 // reported, are internal/treesitter's — the coverage gates ask the same two
@@ -54,6 +55,37 @@ var negateOps = map[string]string{
 // tree without types.
 var arithmeticOps = map[string]string{"+": "-", "-": "+", "*": "/", "/": "*", "%": "*"}
 
+// booleanOps swaps one short-circuiting conjunction for the other, which
+// widens or narrows the set of inputs a branch is taken for the way a
+// relational bound's own shift does. It is reported under its own operator
+// kind all the same: a conjunction swap is not a relational shift, and a
+// report naming it ConditionalBoundary would have a reader expecting a
+// `<`-to-`<=` off-by-one at a line that holds no comparison.
+//
+// The table is reached only from a node type written for it. Rust's and
+// TypeScript's `&&` and `||` are tokens of the same `binary_expression` a
+// relational comparison is, so that node is offered the comparison tables and
+// this one is Python's `boolean_operator` alone.
+var booleanOps = map[string]string{"and": "or", "or": "and"}
+
+// swap is one operator's rewrite table: which Operator the mutant is reported
+// as, and the tokens it replaces.
+type swap struct {
+	operator Operator
+	table    map[string]string
+}
+
+// comparisonSwaps are the rewrites offered to a relational, equality or
+// arithmetic token.
+var comparisonSwaps = []swap{
+	{ConditionalBoundary, boundaryOps},
+	{NegateConditional, negateOps},
+	{ArithmeticOperator, arithmeticOps},
+}
+
+// booleanSwaps are the rewrites offered to a conjunction.
+var booleanSwaps = []swap{{ConditionalConnective, booleanOps}}
+
 // literalKind is what sort of value a literal node holds, which is all that is
 // needed to pick a substitute of the same type.
 type literalKind int
@@ -82,9 +114,9 @@ type grammar struct {
 	// carry a declaration; a block comment's text does not begin with the
 	// marker, so it is refused by the text rather than by a second rule.
 	comment string
-	// binary is the node type of an infix expression, whose `operator` field
-	// is the token the three operator rewrites replace.
-	binary string
+	// binary are the infix expressions this language writes, each naming the
+	// field the operator rewrites replace a token of.
+	binary []binaryKind
 	// returns are the node types that carry a returned value.
 	returns []string
 	// statement is the node type wrapping one expression used as a statement.
@@ -104,12 +136,44 @@ type grammar struct {
 	literals map[string]literalKind
 }
 
-// rustGrammar and tsGrammar are the two tables, verified against the grammars
-// themselves rather than read off documentation.
+// binaryKind is one infix node type, the field its operator tokens are in, and
+// the rewrites those tokens are offered.
+//
+// A field rather than a search of the text between the operands: the field is
+// the grammar's own answer about which bytes are the operator, and its node's
+// range measures them exactly. Arity is part of that answer — a Python chain,
+// `a < b < c`, is one node whose field holds both tokens, where every other
+// infix node in the catalogue holds one.
+//
+// The swaps are per node type because a token's meaning is the node's: `and`
+// is not a relational bound and `<` is not a conjunction, so neither is looked
+// up in the other's table.
+type binaryKind struct {
+	nodeType string
+	field    string
+	multiple bool
+	swaps    []swap
+}
+
+// infixKind is the rule for one node type, when the language writes an infix
+// expression as that node.
+func (g grammar) infixKind(nodeType string) (binaryKind, bool) {
+	for _, kind := range g.binary {
+		if kind.nodeType == nodeType {
+			return kind, true
+		}
+	}
+	return binaryKind{}, false
+}
+
+// rustGrammar, tsGrammar and pythonGrammar are the tables, verified against
+// the grammars themselves rather than read off documentation.
 var rustGrammar = grammar{
-	tables:    treesitter.Rust,
-	comment:   "line_comment",
-	binary:    "binary_expression",
+	tables:  treesitter.Rust,
+	comment: "line_comment",
+	binary: []binaryKind{
+		{nodeType: "binary_expression", field: "operator", swaps: comparisonSwaps},
+	},
 	returns:   []string{"return_expression"},
 	statement: "expression_statement",
 	removable: map[string]bool{
@@ -127,9 +191,11 @@ var rustGrammar = grammar{
 }
 
 var tsGrammar = grammar{
-	tables:    treesitter.TypeScript,
-	comment:   "comment",
-	binary:    "binary_expression",
+	tables:  treesitter.TypeScript,
+	comment: "comment",
+	binary: []binaryKind{
+		{nodeType: "binary_expression", field: "operator", swaps: comparisonSwaps},
+	},
 	returns:   []string{"return_statement"},
 	statement: "expression_statement",
 	removable: map[string]bool{
@@ -161,6 +227,47 @@ var tsxGrammar = grammar{
 	literals:  tsGrammar.literals,
 }
 
+// pythonGrammar is the catalogue read under the Python tables, where the infix
+// expressions Rust and TypeScript each write as one node are three: arithmetic
+// and bitwise in `binary_operator`, the word conjunctions in
+// `boolean_operator`, and every relational and equality token in
+// `comparison_operator`, whose `operators` field holds one token per link of a
+// chain.
+//
+// `boolean_operator` nests for a chain — `a and b or c` is two nodes — so its
+// `operator` field is singular like the other two, and only
+// `comparison_operator` is read for several tokens at once.
+//
+// `expression_statement` is the wrapper a deletion applies to, and the runtime
+// collapses one holding a single named child into that child, so a deletion
+// reaches only a statement whose wrapper survives in the tree.
+var pythonGrammar = grammar{
+	tables:  treesitter.Python,
+	comment: "comment",
+	binary: []binaryKind{
+		{nodeType: "binary_operator", field: "operator", swaps: comparisonSwaps},
+		{nodeType: "boolean_operator", field: "operator", swaps: booleanSwaps},
+		{nodeType: "comparison_operator", field: "operators", multiple: true, swaps: comparisonSwaps},
+	},
+	returns:   []string{"return_statement"},
+	statement: "expression_statement",
+	removable: map[string]bool{
+		"call":                 true,
+		"assignment":           true,
+		"augmented_assignment": true,
+	},
+	// `True` and `False` are node types in this grammar rather than one
+	// boolean node carrying its text, so both appear, spelled the way the
+	// grammar names them.
+	literals: map[string]literalKind{
+		"true":    boolLiteral,
+		"false":   boolLiteral,
+		"integer": intLiteral,
+		"float":   floatLiteral,
+		"string":  stringLiteral,
+	},
+}
+
 // grammarFor picks the operator catalogue for one file, off the same tables
 // answer every other reader of a tree-sitter tree resolves.
 //
@@ -180,6 +287,8 @@ func grammarFor(lang runner.Lang, file string) (grammar, bool) {
 		return tsGrammar, true
 	case treesitter.TSX:
 		return tsxGrammar, true
+	case treesitter.Python:
+		return pythonGrammar, true
 	default:
 		// Tables with no catalogue beside them. A grammar added below and not
 		// here must yield no mutants rather than the last catalogue written.
@@ -200,8 +309,8 @@ func grammarFor(lang runner.Lang, file string) (grammar, bool) {
 // could read exactly once.
 type ErrUnparsed = treesitter.ErrUnparsed
 
-// GenerateTreeSitter produces every mutant for one Rust or TypeScript file,
-// restricted to the given 1-indexed lines.
+// GenerateTreeSitter produces every mutant for one Rust, TypeScript or Python
+// file, restricted to the given 1-indexed lines.
 //
 // The same contract GenerateGo has, and the same bounds: the lines are the
 // intersection of the change and what coverage reports as executed, and the
@@ -285,9 +394,10 @@ func (t *tsGen) visit(n *gotreesitter.Node) {
 	if n == nil || t.g.tables.TestModule(n, t.src, t.lang) {
 		return
 	}
-	switch typ := n.Type(t.lang); {
-	case typ == t.g.binary:
-		t.binary(n)
+	typ := n.Type(t.lang)
+	switch kind, infix := t.g.infixKind(typ); {
+	case infix:
+		t.binary(n, kind)
 	case slicesContains(t.g.returns, typ):
 		t.returns(n)
 	case typ == t.g.statement:
@@ -300,27 +410,44 @@ func (t *tsGen) visit(n *gotreesitter.Node) {
 
 // binary emits the operator swaps that apply to one infix expression.
 //
-// The operator is taken from the tree's own `operator` field rather than found
-// in the text between the operands. Its node's byte range measures the source
-// exactly, which is what lets the mutant carry the bytes it actually replaced.
-func (t *tsGen) binary(n *gotreesitter.Node) {
-	op := n.ChildByFieldName("operator", t.lang)
-	if op == nil {
-		return
-	}
-	text := op.Text(t.src)
-	for _, swap := range []struct {
-		operator Operator
-		table    map[string]string
-	}{
-		{ConditionalBoundary, boundaryOps},
-		{NegateConditional, negateOps},
-		{ArithmeticOperator, arithmeticOps},
-	} {
-		if to, ok := swap.table[text]; ok {
-			t.emit(swap.operator, op, to)
+// The operators are taken from the tree's own field rather than found in the
+// text between the operands. Each token's node has a byte range measuring the
+// source exactly, which is what lets the mutant carry the bytes it actually
+// replaced — and what makes a chained comparison one mutant per token rather
+// than one mutant over a span covering both.
+func (t *tsGen) binary(n *gotreesitter.Node, kind binaryKind) {
+	for _, op := range t.operators(n, kind) {
+		text := op.Text(t.src)
+		for _, swap := range kind.swaps {
+			if to, ok := swap.table[text]; ok {
+				t.emit(swap.operator, op, to)
+			}
 		}
 	}
+}
+
+// operators is every token in one infix node's operator field, read at the
+// arity the field is declared with.
+//
+// A singular field is one ChildByFieldName away. A repeated one is not:
+// ChildByFieldName returns the first child in a field and nothing else, so a
+// chain whose field holds several tokens would be mutated at its first link
+// and left alone everywhere after it. The walk over FieldNameForChild is what
+// reaches the rest, there being no ChildrenByFieldName in the runtime.
+func (t *tsGen) operators(n *gotreesitter.Node, kind binaryKind) []*gotreesitter.Node {
+	if !kind.multiple {
+		if op := n.ChildByFieldName(kind.field, t.lang); op != nil {
+			return []*gotreesitter.Node{op}
+		}
+		return nil
+	}
+	var out []*gotreesitter.Node
+	for i := range n.ChildCount() {
+		if c := n.Child(i); c != nil && n.FieldNameForChild(i, t.lang) == kind.field {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // returns substitutes a returned value where a plausible substitute is
@@ -394,8 +521,17 @@ func (t *tsGen) emit(op Operator, n *gotreesitter.Node, mutated string) {
 func substituteLiteral(kind literalKind, text string) (string, bool) {
 	switch kind {
 	case boolLiteral:
-		if text == "false" {
+		// The substitute is the other half of the pair the source is written
+		// in: Python spells its booleans `True` and `False`, where Rust and
+		// TypeScript spell them lower-case, and a mutant carrying the other
+		// language's spelling is a name error rather than a decision reversed.
+		switch text {
+		case "false":
 			return "true", true
+		case "False":
+			return "True", true
+		case "True":
+			return "False", true
 		}
 		return "false", true
 	case intLiteral:
