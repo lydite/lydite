@@ -122,10 +122,10 @@ resolving [#112](https://github.com/lydite/lydite/issues/112) and the shape [#49
 settled for it.
 
 **Recording never read the exit code, so `--no-gate` changes nothing about what reaches the
-ledger.** The `mutate` matrix job in `lydite-baseline.yml` invokes `lydite mutation --no-gate`, and
-its `mutants.json` feeds `lydite test record` exactly as it would bare — a survivor is recorded
-either way. What the flag changes is the workflow around that recording: a survivor on the merge
-commit no longer turns `lydite-baseline` red, since nothing there gates on it any more. See
+ledger.** A `mutate` matrix job invoking `lydite mutation --no-gate` feeds its `mutants.json` to
+`lydite test record` exactly as it would bare — a survivor is recorded either way. What the flag
+changes is the workflow around that recording: a survivor on the merge commit no longer turns the
+recording run red, since nothing there gates on it any more. See
 [ADR 0048](../../docs/adr/0048-a-post-merge-mutation-run-records-its-survivors.md).
 
 **A finding count is per gate, and that is not a refinement of "per component" — it is the only
@@ -154,13 +154,26 @@ answer, and a claim outside every component would have nowhere to go. The projec
 the same reason it carries the components.
 
 **The channel is `scan.json`**, read out of each `--reports` directory beside the measurements;
-`measurements.json` keeps its single writer. `lydite-baseline.yml` therefore runs a `scan` job beside
-its measure matrix, with **no `--diff-base`** — on the default branch there is no change to scope to,
-so the count is the repository's standing total — and `record` needs it while keeping
+`measurements.json` keeps its single writer. A recording workflow therefore runs a `scan` job
+beside its measure matrix, with **no `--diff-base`** — on the default branch there is no change to
+scope to, so the count is the repository's standing total — and `record` needs it while keeping
 `if: !cancelled()`, because a red scan on the default branch is the most interesting thing a finding
 history can hold and no later run can fill the hole. A measurements document is still required and a
 scan document is not: only the first names the tree that binds the recording to the checkout. See
 [ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md).
+
+**No workflow in this repository currently runs `lydite test record` at all.** `lydite-baseline.yml`
+was this repository's own recording workflow — `plan` → `measure` (the same matrix without
+`--affected`, since ADR 0016 requires the default-branch run to be complete) → one `record` job, the
+only job granted `contents: write` — and it no longer exists here: it was deleted rather than
+rewired when this repository became a plain consumer of `lydite/actions` through `gt` (ADR 0051).
+`lydite/actions`' own reusable `lydite-baseline.yml` exists and works, but nothing gt renders into
+this repository's stage calls it yet (tracked as `pedromvgomes/gt#76`, external to this repository).
+Pushes to the default branch here record no coverage baseline and append nothing to the ledger until
+that route is restored. The description above of what a recording workflow does — the shard shape,
+the `scan` job beside the measure matrix, the `mutate` job's `--no-gate` — is kept as reference
+material for whatever calls `lydite test record` next, not as a description of a route running
+today.
 
 **The dashboard is not this slice.** `source/web/` is still empty, the hosted read path is
 [ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work, and per-finding
