@@ -308,7 +308,12 @@ in a repository whose only `pnpm-lock.yaml` is at the root installs from that
 root rather than installing nothing. `typescript.install` is unaffected by this
 walk: the override still replaces detection entirely and still runs in the
 component's own directory, since a repository that authored one said where it
-meant it to run by declaring the component there. Several components resolving
+meant it to run by declaring the component there. [ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md)
+decides this changes in a later slice — the override will attempt `WorkspaceRoot`
+first and run there, coalesced, falling back to the component's own directory
+only where no root resolves — but that fix has not landed, and the override
+still runs uncoalesced in the component's own directory whenever it is set.
+Several components resolving
 the same root share one install: the first to reach it runs the frozen install,
 and every other one waits and then finds it already done, rather than each
 mutating the same `node_modules` tree on its own schedule. That install runs

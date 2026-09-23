@@ -76,6 +76,12 @@ coverage:
                           # loosening the aggregate knob never weakens the untested-new-code check
 ```
 
+`typescript.install` replaces the whole install; a component that needs one extra command beyond
+an otherwise-normal install — a browser download, a codegen step — declares it in that
+component's own `setup:` instead (see [components.md](components.md)), which runs after the
+install rather than instead of it. See
+[ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
+
 Omitting the file, or omitting a section/key within it, keeps that value at its default — see
 `internal/config/config_test.go` for the exact merge semantics.
 
