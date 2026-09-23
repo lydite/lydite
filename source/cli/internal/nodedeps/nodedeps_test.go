@@ -39,6 +39,129 @@ func TestManager(t *testing.T) {
 	}
 }
 
+// packageManager adds an exact version to the manager the lockfile identifies
+// and never overrides it: an absent field leaves lockfile detection as the
+// answer, ambiguous lockfiles stay refused, and a field that disagrees with
+// its lockfile or cannot be read as a pin is an error rather than a guess.
+func TestPackageManager(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		manifest  string // "" writes no package.json
+		lockfiles []string
+		want      Declared
+		wantOK    bool
+		wantErr   bool
+	}{
+		{
+			name:      "a pinned version",
+			manifest:  `{"packageManager":"pnpm@8.15.4"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			want:      Declared{Name: "pnpm", Version: "8.15.4"},
+			wantOK:    true,
+		},
+		{
+			name:      "an integrity hash is carried apart from the version",
+			manifest:  `{"packageManager":"yarn@4.1.0+sha512.abc123"}`,
+			lockfiles: []string{"yarn.lock"},
+			want:      Declared{Name: "yarn", Version: "4.1.0", Hash: "sha512.abc123"},
+			wantOK:    true,
+		},
+		{
+			name:      "a prerelease",
+			manifest:  `{"packageManager":"npm@11.0.0-pre.1"}`,
+			lockfiles: []string{"package-lock.json"},
+			want:      Declared{Name: "npm", Version: "11.0.0-pre.1"},
+			wantOK:    true,
+		},
+		{
+			name:      "no field",
+			manifest:  `{"name":"app"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+		},
+		{
+			name:      "no package.json",
+			lockfiles: []string{"pnpm-lock.yaml"},
+		},
+		{
+			// The field only adds a version to a manager the lockfile names;
+			// with no lockfile there is no install for it to pin.
+			name:     "no lockfile",
+			manifest: `{"packageManager":"pnpm@8.15.4"}`,
+		},
+		{
+			// Ambiguity keeps the meaning Manager gives it.
+			name:      "ambiguous lockfiles",
+			manifest:  `{"packageManager":"pnpm@8.15.4"}`,
+			lockfiles: []string{"pnpm-lock.yaml", "yarn.lock"},
+		},
+		{
+			name:      "a field disagreeing with its lockfile",
+			manifest:  `{"packageManager":"yarn@4.1.0"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "an unrecognised manager",
+			manifest:  `{"packageManager":"bun@1.1.0"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "no version",
+			manifest:  `{"packageManager":"pnpm"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "a range is not a pin",
+			manifest:  `{"packageManager":"pnpm@^8.15.4"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "a partial version is not a pin",
+			manifest:  `{"packageManager":"pnpm@8"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "no name",
+			manifest:  `{"packageManager":"@8.15.4"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
+			name:      "a manifest that is not JSON",
+			manifest:  `{"packageManager":`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, lf := range tc.lockfiles {
+				write(t, dir, lf)
+			}
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(tc.manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, ok, err := PackageManager(dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("PackageManager error = %v, want error %v", err, tc.wantErr)
+			}
+			want := tc.want
+			if tc.wantOK {
+				want.Source = filepath.Join(dir, "package.json")
+			}
+			if ok != tc.wantOK || got != want {
+				t.Fatalf("PackageManager = (%+v, %v), want (%+v, %v)", got, ok, want, tc.wantOK)
+			}
+		})
+	}
+}
+
 // A workspace root is found by presence, not by an unambiguous answer: a root
 // carrying two lockfiles is still the root its packages share.
 func TestHasLockfileIsPresenceNotResolution(t *testing.T) {

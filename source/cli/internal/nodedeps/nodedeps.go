@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -106,6 +108,79 @@ func WorkspaceRoot(dir, scanRoot string) (string, bool) {
 			return "", false
 		}
 	}
+}
+
+// Declared is the package manager a workspace's package.json names in its
+// `packageManager` field, and the exact version it pins.
+type Declared struct {
+	// Name is the manager, one of Managers().
+	Name string
+	// Version is the exact version the field pins ("8.15.4"), with any
+	// integrity hash removed.
+	Version string
+	// Hash is the integrity hash the field carries after `+`
+	// ("sha512.<hex>"), verbatim, or "" when it carries none.
+	Hash string
+	// Source is the package.json the field was read from, for messages.
+	Source string
+}
+
+// exactVersion is the only version form `packageManager` admits: Corepack
+// installs exactly what it names, so a range there is not a pin.
+var exactVersion = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+
+// PackageManager reads the `packageManager` field of root's package.json —
+// the field Corepack itself reads — and reports false with no error when the
+// field is absent, which leaves Manager's lockfile detection as the answer.
+//
+// root is a directory WorkspaceRoot resolved: the manifest declaring the
+// manager for a whole workspace sits beside the lockfile it resolves, so this
+// reads that one file and never walks for another.
+//
+// The field only ever adds a version to a manager the lockfile already
+// identified; it never overrides one. A root whose lockfiles are ambiguous
+// stays refused exactly as Manager refuses it, and a field naming a manager
+// other than the one its lockfile identifies is an error rather than a choice
+// between them — a package.json saying yarn beside a pnpm-lock.yaml is a
+// misconfigured repository, and installing with either manager writes a
+// lockfile the other half of it does not use. A field that is present but
+// cannot be read as `<name>@<exact version>[+<hash>]` is an error too: it is
+// a pin the repository meant, and falling back to an unpinned manager would
+// ignore it without saying so.
+func PackageManager(root string) (Declared, bool, error) {
+	source := filepath.Join(root, "package.json")
+	// #nosec G304 -- root is a workspace root resolved from the repository's own component declaration, not a scanned file's contents
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return Declared{}, false, nil
+	}
+	var manifest struct {
+		PackageManager *string `json:"packageManager"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return Declared{}, false, fmt.Errorf("%s: %w", source, err)
+	}
+	if manifest.PackageManager == nil {
+		return Declared{}, false, nil
+	}
+	field := *manifest.PackageManager
+	name, pin, found := strings.Cut(field, "@")
+	version, hash, _ := strings.Cut(pin, "+")
+	if !found || name == "" || !exactVersion.MatchString(version) {
+		return Declared{}, false, fmt.Errorf("%s: packageManager %q is not <name>@<exact version>[+<hash>]", source, field)
+	}
+	if !slices.Contains(Managers(), name) {
+		return Declared{}, false, fmt.Errorf("%s: packageManager names %q, which is not one of %s",
+			source, name, strings.Join(Managers(), ", "))
+	}
+	detected, ok := Manager(root)
+	if !ok {
+		return Declared{}, false, nil
+	}
+	if detected != name {
+		return Declared{}, false, fmt.Errorf("%s: packageManager names %s, but the lockfile beside it is %s's", source, name, detected)
+	}
+	return Declared{Name: name, Version: version, Hash: hash, Source: source}, true, nil
 }
 
 // within reports whether dir is root or lies below it.
