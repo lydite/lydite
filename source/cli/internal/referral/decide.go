@@ -1,5 +1,12 @@
 package referral
 
+import (
+	"fmt"
+	"hash/fnv"
+	"sort"
+	"strings"
+)
+
 // Evidence is what a caller measured, outside this package, for an
 // exemption's conditions to be tested against.
 //
@@ -175,4 +182,39 @@ func Uncovered(paths []string, exemptions []Exemption) []string {
 		}
 	}
 	return out
+}
+
+// Fingerprint hashes the reasons Decide referred on: the uncovered paths and
+// the disqualifications, together. Neither is sorted on the way out of
+// Decide — Uncovered walks ch.Paths and Disqualifications walks the diff's
+// own order — so both are sorted here before hashing, making the result
+// independent of the order either slice arrived in.
+//
+// A disqualification's identity for this purpose is Kind and Path, matching
+// disqualify.go's own doc comment; Evidence is the text of what was found,
+// not part of what a disqualification is.
+//
+// Uncovered alone would read "fully exempt" and "referred purely by a
+// disqualifier" as the same fingerprint, since the latter also leaves
+// Uncovered empty — see docs/adr/0053. Hashing both closes that.
+//
+// The hash is short and not cryptographically sensitive: it exists to detect
+// that the same reasons recomputed on a different tree, not to resist a
+// deliberate collision.
+func Fingerprint(uncovered []string, disqualifications []Disqualification) string {
+	paths := append([]string(nil), uncovered...)
+	sort.Strings(paths)
+
+	keys := make([]string, len(disqualifications))
+	for i, d := range disqualifications {
+		keys[i] = d.Kind + "\x00" + d.Path
+	}
+	sort.Strings(keys)
+
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.Join(paths, "\x1f")))
+	_, _ = h.Write([]byte{0x1e})
+	_, _ = h.Write([]byte(strings.Join(keys, "\x1f")))
+
+	return fmt.Sprintf("%016x", h.Sum64())
 }
