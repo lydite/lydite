@@ -1,6 +1,7 @@
 # Toolchains
 
-> **The reference for `internal/toolchain`** — the Go, Rust and Node runtimes lydite provisions.
+> **The reference for `internal/toolchain`** — the Go, Rust and Node runtimes lydite
+> provisions, and the pnpm or yarn a TypeScript workspace pins alongside Node.
 
 lydite provisions every tool it *runs* — gosec/govulncheck via `go install` into a version-keyed
 cache, cargo-audit/cargo-deny via `cargo install`, Biome via npm, Semgrep via pipx — under the
@@ -48,6 +49,7 @@ easy to get wrong and invisible in argv:
 | Go | the `go` and `toolchain` directives in the component's own `go.mod`, higher of the two |
 | Rust | `channel` in the component's `rust-toolchain.toml`, else the legacy bare `rust-toolchain` |
 | TypeScript | `engines.node` in the component's `package.json`, else `.nvmrc` (component, then scan root) |
+| pnpm / yarn | `packageManager` in the workspace root's `package.json` |
 
 Those files are already authoritative and already enforced by the language's own tooling, so a
 second copy in lydite's config could only agree redundantly or drift silently — and a stale
@@ -136,6 +138,51 @@ Each language provisions differently, and only one of the three downloads anythi
   read from that release's `SHASUMS256.txt`. There is no assumable equivalent of GOTOOLCHAIN or
   rustup — nvm/fnm/volta are all optional and mutually exclusive. The `.tar.gz` is taken over the
   `.tar.xz` purely because Go's standard library decompresses gzip and not xz.
+- **pnpm and yarn** are provisioned the same way Node is: downloaded, from `registry.npmjs.org`
+  rather than `nodejs.org`, into the same version-keyed `~/.cache/lydite` layout, checksum-verified
+  before a byte is unpacked. `internal/nodedeps.PackageManager` reads a TypeScript workspace root's
+  `package.json` for `packageManager` (`<name>@<exact version>[+<hash>]`, the field Corepack itself
+  reads), and a component whose workspace names pnpm or yarn there gets a second
+  `toolchain.Requirement` — carried on `Requirement.Manager`, since a TypeScript component can need
+  both a Node and a package manager and `Lang` is `TypeScript` for either — for that manager
+  alongside its Node one. Neither manager needs anything from the runner beyond the Node
+  `internal/toolchain` already provisions: `packageManager` is honoured whether or not Corepack is
+  installed at all, and a runner with no ambient pnpm reaches the exact release a workspace pins
+  the same way it reaches the exact Node that workspace pins.
+
+  Corepack is not the mechanism, for the same reason Node itself is not assumed present: Corepack's
+  shims live inside Node's own install directory, which on a runner is not lydite's to write into,
+  and fetching the registry tarball directly is no less reliable than asking Corepack to fetch the
+  same tarball on lydite's behalf. `internal/toolchain.downloadPackageManager` resolves the pinned
+  version's document from the registry (`@yarnpkg/cli-dist` rather than the `yarn` package, for a
+  Yarn 2+ pin — the package Corepack itself resolves it to), verifies the tarball against the
+  registry's own digest for that version — SHA-512 from `dist.integrity` when the version publishes
+  one, the SHA-1 `dist.shasum` every version carries otherwise — and unpacks it behind a wrapper
+  script that execs the package's own entry point under `node`, so it resolves the same provisioned
+  Node the rest of the component's environment does rather than whatever `node` happens to be on
+  the ambient PATH.
+
+  **A package manager's declared version is an exact pin, never a floor.** Everywhere else in this
+  file "satisfied" means "at least the declared version" — an ambient Go 1.26.6 satisfies a
+  `go 1.26` directive, a newer patch and all. A package manager is different: Corepack enforces
+  `packageManager` by refusing to run any release but the one named, because a newer pnpm can
+  resolve and write a lockfile the pinned one would not, so lydite's own `satisfied` predicate
+  requires the ambient version to equal the pin exactly, in either direction — an ambient release
+  one patch newer than the pin is provisioned past exactly as one patch older is.
+
+  npm needs none of this: it ships inside every Node release, so an npm pin is answered by the Node
+  requirement beside it and `internal/toolchain` provisions nothing further for it.
+
+  A `packageManager` field lydite cannot read is a hard error at requirement-resolution time, not a
+  silent fallback to the lockfile-only detection `internal/nodedeps.Manager` already does — the same
+  stance this file takes on a missing rustup: a field that is malformed, or that names a manager
+  other than the one the workspace's own lockfile identifies, is a misconfigured repository, and
+  guessing which of the two the repository meant risks installing with the wrong one and writing a
+  lockfile the other half of the workspace does not use. `internal/nodedeps.Install` also checks a
+  detected manager's binary against the composed PATH before running it, so a manager
+  `internal/toolchain` failed to provision fails with a named `"<manager>: not on PATH — lydite
+  could not provision it"` rather than exec's bare "executable file not found in $PATH" surfacing
+  from inside the install step.
 
 **Python is not provisioned.** There is no pin and no download: a `python-pytest` component runs
 whatever `python3`, pytest and pytest-cov resolve on `PATH`, at the same cost as any `command:`

@@ -61,6 +61,11 @@ toolchain:
                           # (air-gapped runners, or images that preprovision everything)
   # go/rust/node: deliberately unset. The versions come from the repo's own
   # manifests — see toolchains.md. These keys exist only as a local override.
+  # There is no toolchain.pnpm or toolchain.yarn: a package manager's version
+  # is read exclusively from packageManager in the workspace's own
+  # package.json, with no config override at all — a repo whose pin needs
+  # changing is a repo whose packageManager field needs changing, not
+  # lydite's config (see toolchains.md).
 coverage:
   tolerance: 0.1         # pp a coverage figure may dip below its baseline before the gate fails;
                           # absorbs sub-tenth measurement noise ("86.1% vs baseline 86.1%,
