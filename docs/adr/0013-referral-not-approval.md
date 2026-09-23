@@ -68,10 +68,15 @@ holding the maintainer's token *is* the maintainer, and no server-side mechanism
 distinguishes them.
 
 Comments have no such restriction, so clearance is a comment. The trust is
-conventional at first, and unlike an approval it has somewhere to go: a comment can
-carry a code from an authenticator app, which an agent holding the token still cannot
-produce. Verification runs from the base branch, so the check and its secret are never
-the pull request's to edit.
+conventional, and stays conventional: an agent holding the token still passes as the
+maintainer.
+
+> **Superseded in one detail by [ADR 0052](0052-an-authenticator-code-cannot-bind-a-clearance-on-its-own.md).**
+> A comment carrying a code from a standard authenticator app was once expected to close
+> this — see [#25](https://github.com/lydite/lydite/issues/25) — but it does not: the code
+> cannot bind itself to the pull request or commit it clears, so an agent that can read the
+> comment can lift and replay it inside its validity window. The gap this section describes
+> stands.
 
 Because comments have no equivalent of `dismiss_stale_reviews_on_push`, a clearance
 names the revision it was given for, and the commit status *is* the record. A push

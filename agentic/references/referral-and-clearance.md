@@ -316,7 +316,9 @@ Six properties are load-bearing:
 - **The commenter must have push permission**, read from the platform rather than from
   the comment. The repository is public, so without it any account could clear anything.
   This is a floor and not the whole trust — whoever holds the credentials satisfies it,
-  which is what [#25](https://github.com/lydite/lydite/issues/25) closes.
+  and that gap stands: closing it needs a factor bindable to the revision being cleared,
+  which a standard authenticator code cannot supply — see
+  [ADR 0052](../../docs/adr/0052-an-authenticator-code-cannot-bind-a-clearance-on-its-own.md).
 - **A head that moved after the comment is refused.** A status created after the comment
   cannot be one the person read. Both timestamps are the platform's, so neither is the
   author's to set. `/lydite clear <sha>` names a revision explicitly and overrides the

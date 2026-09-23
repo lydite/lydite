@@ -37,8 +37,9 @@ func (c *Client) HeadSHA(ctx context.Context, repo Repo, number int) (string, er
 // This is read about the commenter rather than taken from the comment, which
 // is what makes it usable as a floor: nothing an author writes can produce
 // it. It is not the whole of the trust — whoever holds the repository's
-// credentials satisfies it — and the authenticator code in #25 is what
-// closes that.
+// credentials satisfies it — and that residual gap stands: an authenticator
+// code cannot close it (ADR 0052), because it cannot bind itself to the
+// revision it clears.
 func (c *Client) CanWrite(ctx context.Context, repo Repo, user string) (bool, error) {
 	var perm struct {
 		Permission string `json:"permission"`

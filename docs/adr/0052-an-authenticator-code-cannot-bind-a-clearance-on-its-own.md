@@ -57,7 +57,7 @@ Even setting the race aside, three pieces of real infrastructure stand between #
   writing arbitrary ref content under the App's identity — is a real widening of what the
   vendor-operated relay can do, for every consumer of it, not only for this feature.
 - **The secret cannot live where #25 puts it.** #25 says only "verification runs from the base
-  branch," which reads as the clearance job's own CI process holding the secret. But the Q1
+  branch," which reads as the clearance job's own CI process holding the secret. But this ADR's
   adversary holds a write-scoped token — enough to push a new workflow to any branch and dispatch
   it via the API on that ref — and an ordinary repository or organization Actions secret is
   readable by any workflow that adversary can run, regardless of which branch it lives on. A

@@ -36,10 +36,13 @@ from clearing anything.
 
 It is not the whole trust and does not pretend to be: whoever holds the
 repository's credentials can post the comment, an agent included. That is the
-conventional trust ADR 0013 accepts and
-[#25](https://github.com/lydite/lydite/issues/25) closes with a code from an
-authenticator app. The distinction worth keeping is that #25 then hardens a
-boundary that exists, rather than building the first one.
+conventional trust ADR 0013 accepts, and it remains the trust: closing it needs
+a factor bindable to the revision being cleared, which a standard authenticator
+code cannot supply.
+
+> **Superseded in one detail by [ADR 0052](0052-an-authenticator-code-cannot-bind-a-clearance-on-its-own.md).**
+> [#25](https://github.com/lydite/lydite/issues/25) was expected to close this gap with a
+> code from an authenticator app; it does not, for the reason above, and is not being built.
 
 Permission is evidence lydite reads *about* the commenter, so it satisfies
 ADR 0014's rule that nothing an author asserts may remove a referral.
