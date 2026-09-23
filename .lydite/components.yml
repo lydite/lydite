@@ -44,11 +44,14 @@ components:
 # build a crate that is deliberately not one; leaving them undeclared is what
 # this line says out loud.
 #
-# The last two are scripts no runner runs: the installer that ships with every
-# release, and the CI helper that asserts on the proving-ground fixture. Each is
-# exercised by the workflow that invokes it, not by a suite.
+# The last three are scripts no runner runs: the installer that ships with
+# every release, the CI helper that asserts on the proving-ground fixture, and
+# the CI helper that guards against an artifact colliding with publish's
+# glob (whose own --selftest exercises it, run as a CI step rather than a
+# suite). Each is exercised by the workflow that invokes it, not by a suite.
 excludes:
   - "source/cli/internal/**/*-pin/**"
   - "source/cli/internal/mutation/testdata/**"
   - "scripts/install.sh"
   - ".github/assert-proving-ground.py"
+  - ".github/assert-no-lydite-reports-collision.py"

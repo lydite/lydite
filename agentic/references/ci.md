@@ -17,10 +17,9 @@ repository is a plain consumer of it (ADR 0051).
 `ci-test.yml` keeps the plain `go build` and `go test -race`, which is what `ci-gate` blocks a
 merge on.
 
-The rest of this section
-describes what those three files did, kept for whatever replaces them to be checked against —
-none of it currently runs. `ci-test.yml` keeps the plain `go build` and `go test -race`, so the
-Go suite is the one thing lydite's own merge gate still covers.
+The rest of this section describes what `lydite-pr.yml` and `lydite-baseline.yml` did — neither
+exists in this repository any more, both superseded by the lydite stage above — kept for
+whatever replaces them to be checked against.
 
 **Everything lydite once said about a pull request was `lydite-pr.yml`, and it was not a gt
 stage.** The referral, the scan and the gated suites ran in parallel and a `publish` job
