@@ -19,6 +19,23 @@ permissions:
   contents: read
 
 jobs:
+  # `publish` (in `lydite/actions`) folds every artifact in the run matching
+  # `lydite-reports-*` into this repository's own verdict, regardless of which
+  # job produced it — the collision that once folded a proving-ground fixture
+  # into a PR's real verdict. The proving-ground legs below exercise what
+  # `publish` does with a fixture already renamed out of that glob's way; this
+  # job is the one that would catch a future upload landing back inside it.
+  no-lydite-reports-collision:
+    name: no artifact collides with publish's glob
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: no upload-artifact step names an artifact publish would fold
+        run: python3 .github/assert-no-lydite-reports-collision.py
+
   # lydite's own repository cannot exercise the cargo runners. `source/web/` is
   # empty and the only Cargo.toml files are pin manifests, which are
   # deliberately not components — so without a foreign repository they would
