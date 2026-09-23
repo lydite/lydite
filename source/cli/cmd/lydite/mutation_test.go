@@ -400,19 +400,23 @@ func TestAComponentTheChangeDoesNotTouchIsRefusedBeforeAnythingRuns(t *testing.T
 }
 
 // Go needs no worker directory: an overlay names the mutated file wherever it
-// is written. Rust and TypeScript have no such instruction, so their mutants
-// run in a copy of the repository — and one git lists no file in has nothing
-// to copy, which is said out loud rather than reported as a component whose
-// suite killed everything.
+// is written. Rust, TypeScript and Python have no such instruction, so their
+// mutants run in a copy of the repository — and one git lists no file in has
+// nothing to copy, which is said out loud rather than reported as a component
+// whose suite killed everything.
 func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
 	goComponent := component.Component{Name: "cli", Dir: ".", Runner: "go-test"}
 	web := component.Component{Name: "web", Dir: ".", Runner: "vitest"}
+	py := component.Component{Name: "py", Dir: ".", Runner: "python-pytest"}
 
 	if needsWorktree([]component.Component{goComponent}) {
 		t.Error("a Go component asked for a worker directory")
 	}
 	if !needsWorktree([]component.Component{goComponent, web}) {
 		t.Error("a TypeScript component did not ask for a worker directory")
+	}
+	if !needsWorktree([]component.Component{goComponent, py}) {
+		t.Error("a Python component did not ask for a worker directory")
 	}
 
 	none := func(context.Context, string) error { return nil }
@@ -429,6 +433,13 @@ func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
 	}
 	if _, ok := backend.(mutation.Tree); !ok {
 		t.Errorf("TypeScript got %T, want the worker-directory backend", backend)
+	}
+	backend, err = backendFor(runner.Python, t.TempDir(), "py", runner.Invocation{}, runner.Invocation{}, []string{"py/a.py"}, none)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(mutation.Tree); !ok {
+		t.Errorf("Python got %T, want the worker-directory backend", backend)
 	}
 	if _, err := backendFor(runner.Rust, t.TempDir(), "rust", runner.Invocation{}, runner.Invocation{}, nil, none); err == nil {
 		t.Error("a scan root git lists no file under was given a worker directory to copy nothing into")
