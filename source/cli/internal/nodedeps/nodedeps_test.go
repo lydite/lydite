@@ -215,22 +215,14 @@ func TestOverrideReplacesDetection(t *testing.T) {
 	}
 }
 
-// An override applies to a root no lockfile identifies — that is most of why
-// it exists.
-// corepack may already be enabled, or absent on an older Node; treating it
-// as fatal would fail a repository over a step that had nothing to do.
-func TestOnlyCorepackIsOptional(t *testing.T) {
+// yarn is provisioned by internal/toolchain the same way pnpm is, upstream of
+// Commands being called, so there is nothing left for a corepack step to do.
+func TestYarnIsASingleCommand(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "yarn.lock")
 	cmds := Commands(dir, "")
-	if len(cmds) != 2 {
-		t.Fatalf("Commands = %v, want corepack then yarn", cmds)
-	}
-	if !cmds[0].Optional {
-		t.Error("corepack enable must be optional")
-	}
-	if cmds[1].Optional {
-		t.Error("the install itself must not be optional")
+	if len(cmds) != 1 || cmds[0].Argv[0] != "yarn" {
+		t.Fatalf("Commands = %v, want a single yarn command", cmds)
 	}
 }
 
@@ -448,6 +440,39 @@ func TestAFailedInstallIsNotTakenAsDone(t *testing.T) {
 
 	if got := invocations(t, runs); got != 2 {
 		t.Errorf("pnpm ran %d times, want each caller to retry a failed install", got)
+	}
+}
+
+// A manager task 2 was supposed to have provisioned but did not reach this
+// component's environment fails with a name and a reason, not exec's bare
+// "executable file not found in $PATH".
+func TestAnAbsentManagerFailsWithAName(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	// A PATH composed for the child that carries no pnpm at all, and this
+	// process's own PATH left untouched — the failure must come from the
+	// composed env, not from whatever this test binary happens to have.
+	env := []string{"PATH=" + t.TempDir()}
+
+	err := Install(context.Background(), root, root, "", env, io.Discard)
+	if err == nil {
+		t.Fatal("Install reported success with pnpm absent from the composed PATH")
+	}
+	if !strings.Contains(err.Error(), "pnpm: not on PATH") {
+		t.Errorf("Install error = %q, want it to name pnpm and say it is not on PATH", err.Error())
+	}
+}
+
+// The manager PATH check only applies to lydite's own detected-manager
+// commands. An override is authored by whoever configured the repository,
+// and lydite has no business validating a shell command it did not build.
+func TestAnOverrideIsNotCheckedAgainstPATH(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	cwd := filepath.Join(t.TempDir(), "cwd")
+	env := []string{"PATH=" + t.TempDir()}
+
+	if err := Install(context.Background(), root, root, "pwd > "+cwd, env, io.Discard); err != nil {
+		t.Fatalf("Install: %v", err)
 	}
 }
 

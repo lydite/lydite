@@ -239,12 +239,38 @@ type Command struct {
 	// Argv is the program and its arguments, passed as argv with no shell —
 	// except the override, which is a shell invocation by construction.
 	Argv []string
-	// Optional marks a step whose failure is not the install failing.
-	// `corepack enable` is the case: it may already be enabled, or absent on
-	// an older Node, and the install that follows works either way. Treating
-	// it as fatal would turn a working repository into a failing one over a
-	// step that had nothing to do.
-	Optional bool
+}
+
+// managers names the package managers Commands can detect and internal/toolchain
+// provisions — the argv[0]s Install checks for on PATH before running them, so
+// an absent one fails with a name and a reason rather than exec's bare
+// "executable file not found in $PATH".
+var managers = map[string]bool{"npm": true, "yarn": true, "pnpm": true}
+
+// managerOnPath reports an error naming manager when it cannot be found on the
+// PATH env composes — the PATH the child Install is about to run under, which
+// is not necessarily this process's own.
+//
+// npm ships with every Node lydite provisions, so it is always there; yarn
+// and pnpm are what internal/toolchain provisions separately when
+// packageManager pins one. A manager still missing at this point means that
+// provisioning did not happen or did not reach this component's environment,
+// and the reader needs to know which manager and why — not exec's bare
+// "executable file not found in $PATH", which names neither.
+func managerOnPath(manager string, env []string) error {
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			dirs = filepath.SplitList(v)
+		}
+	}
+	for _, d := range dirs {
+		info, err := os.Stat(filepath.Join(d, manager)) // #nosec G703 -- d comes from this process's own PATH or a PATH this package composed from its own provisioning output; manager is one of the fixed names in the managers table, not user input
+		if err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: not on PATH — lydite could not provision it; see the warning above, or install it manually", manager)
 }
 
 // Commands is what installing at root takes, in order, or nothing when no
@@ -272,10 +298,7 @@ func Commands(root, override string) []Command {
 	case "npm":
 		return []Command{{Argv: []string{"npm", "ci"}}}
 	case "yarn":
-		return []Command{
-			{Argv: []string{"corepack", "enable"}, Optional: true},
-			{Argv: []string{"yarn", "install", "--immutable"}},
-		}
+		return []Command{{Argv: []string{"yarn", "install", "--immutable"}}}
 	case "pnpm":
 		return []Command{{Argv: []string{"pnpm", "install", "--frozen-lockfile"}}}
 	default:
@@ -324,9 +347,14 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 		return installedUnder(root, v.([]string), env)
 	}
 	for _, cmd := range Commands(root, override) {
+		if managers[cmd.Argv[0]] {
+			if err := managerOnPath(cmd.Argv[0], env); err != nil {
+				return err
+			}
+		}
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
 		res := executil.RunOutput(ctx, root, env, out, cmd.Argv[0], cmd.Argv[1:]...)
-		if !res.Ok() && !cmd.Optional {
+		if !res.Ok() {
 			// Only success is recorded, so the next component resolving this
 			// root installs again: a root whose install failed has no tree to
 			// share, and skipping would hand it a second failure it cannot
