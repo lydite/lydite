@@ -257,8 +257,11 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	for _, req := range reqs {
 		// The manager is part of the key: a Node and a package manager are both
 		// TypeScript, and a pin of one coinciding with a floor of the other
-		// would otherwise hand the package manager the runtime's answer.
-		key := string(req.Lang) + "\x00" + req.Manager + "\x00" + req.Version + "\x00" + req.Raw
+		// would otherwise hand the package manager the runtime's answer. The
+		// declared hash is part of it too: two workspaces pinning the same
+		// manager version under different hashes must each have their own
+		// hash checked, not share whichever one resolved first.
+		key := string(req.Lang) + "\x00" + req.Manager + "\x00" + req.Version + "\x00" + req.Raw + "\x00" + req.Hash
 		// Rust's answer is per directory, not per channel. rustup resolves a
 		// toolchain by walking up from the directory cargo runs in, so two
 		// components declaring the same thing — or declaring nothing — can

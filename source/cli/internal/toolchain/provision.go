@@ -475,10 +475,10 @@ type declaredHash struct {
 // declaredAlgos are the algorithms a declared hash may name, with the digest
 // each computes. Corepack accepts whatever Node's crypto.createHash does;
 // these are the ones a `packageManager` field is written with.
+// #nosec G401 -- nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- a hash the repository itself chose to pin; the registry's own SHA-512 is checked beside it
 var declaredAlgos = map[string]func([]byte) []byte{
-	// #nosec G401 -- a hash the repository itself chose to pin; the registry's own SHA-512 is checked beside it
-	"sha1":   func(b []byte) []byte { s := sha1.Sum(b); return s[:] },
-	"sha224": func(b []byte) []byte { s := sha256.Sum224(b); return s[:] },
+	"sha1":   func(b []byte) []byte { s := sha1.Sum(b); return s[:] },      // nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1
+	"sha224": func(b []byte) []byte { s := sha256.Sum224(b); return s[:] }, // nosemgrep: go.lang.security.audit.crypto.sha224-hash.sha224-hash
 	"sha256": func(b []byte) []byte { s := sha256.Sum256(b); return s[:] },
 	"sha384": func(b []byte) []byte { s := sha512.Sum384(b); return s[:] },
 	"sha512": func(b []byte) []byte { s := sha512.Sum512(b); return s[:] },
@@ -588,7 +588,7 @@ func verifyDist(data []byte, dist registryDist) error {
 	if dist.Shasum == "" {
 		return fmt.Errorf("%s publishes no digest to verify it against", dist.Tarball)
 	}
-	sum := sha1.Sum(data) // #nosec G401 -- the registry's own digest for a version predating its integrity field; SHA-512 is used whenever one is published
+	sum := sha1.Sum(data) // #nosec G401 -- nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- the registry's own digest for a version predating its integrity field; SHA-512 is used whenever one is published
 	if got := hex.EncodeToString(sum[:]); !strings.EqualFold(got, dist.Shasum) {
 		return fmt.Errorf("checksum mismatch for %s: got sha1 %s, want %s", dist.Tarball, got, dist.Shasum)
 	}

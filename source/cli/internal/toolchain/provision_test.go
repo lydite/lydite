@@ -178,8 +178,12 @@ func TestBinEntry(t *testing.T) {
 }
 
 func TestBinEntryNeedsAManifest(t *testing.T) {
-	if _, err := binEntry(t.TempDir(), "pnpm"); err == nil {
+	got, err := binEntry(t.TempDir(), "pnpm")
+	if err == nil {
 		t.Fatal("binEntry found an entry in a package with no package.json")
+	}
+	if got != "" {
+		t.Errorf("binEntry returned %q alongside its error, want none", got)
 	}
 }
 
@@ -391,6 +395,64 @@ func TestEnsureUsesAnAmbientManagerOnlyAtTheExactPin(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "using ambient pnpm 8.15.4 (matches 8.15.4 pinned in package.json (packageManager))") {
 		t.Errorf("log should say the ambient pnpm matched the pin, got %q", log.String())
+	}
+}
+
+// Two workspaces pinning the same version under different hashes must not
+// share Ensure's cached resolution: each has its own hash checked and its own
+// cache directory, not whichever one happened to resolve first.
+func TestEnsureVerifiesEachWorkspacesOwnDeclaredHash(t *testing.T) {
+	isolatedCache(t)
+	root := t.TempDir()
+	hashA := "sha512." + strings.Repeat("a", 128)
+	hashB := "sha512." + strings.Repeat("b", 128)
+	write(t, root, "a/package.json", `{"name":"a","packageManager":"pnpm@8.15.4+`+hashA+`"}`)
+	write(t, root, "a/pnpm-lock.yaml", "lockfileVersion: '6.0'\n")
+	write(t, root, "b/package.json", `{"name":"b","packageManager":"pnpm@8.15.4+`+hashB+`"}`)
+	write(t, root, "b/pnpm-lock.yaml", "lockfileVersion: '6.0'\n")
+	fakeNode(t, fakeToolchainBin(t), "v22.0.0")
+
+	declaredA, err := parseDeclaredHash(hashA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaredB, err := parseDeclaredHash(hashB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirA, err := cacheRoot(managerCacheKey("pnpm", "8.15.4", declaredA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unpackManager(pnpmTarball(t, "8.15.4"), dirA, "pnpm"); err != nil {
+		t.Fatal(err)
+	}
+	dirB, err := cacheRoot(managerCacheKey("pnpm", "8.15.4", declaredB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unpackManager(pnpmTarball(t, "8.15.4"), dirB, "pnpm"); err != nil {
+		t.Fatal(err)
+	}
+
+	units := []Unit{
+		{Name: "a", Lang: runner.TypeScript, Dir: "a"},
+		{Name: "b", Lang: runner.TypeScript, Dir: "b"},
+	}
+	envs, err := Ensure(context.Background(), root, units, Overrides{}, nil)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	envA, envB := envs.For("a"), envs.For("b")
+	if envA == nil || envB == nil {
+		t.Fatalf("Ensure returned no environment for one workspace: a=%+v b=%+v", envA, envB)
+	}
+	wantA, wantB := filepath.Join(dirA, "bin"), filepath.Join(dirB, "bin")
+	if !slices.Contains(envA.PathDirs, wantA) {
+		t.Errorf("workspace a's PathDirs = %q, want its own hash's cache %q", envA.PathDirs, wantA)
+	}
+	if !slices.Contains(envB.PathDirs, wantB) {
+		t.Errorf("workspace b's PathDirs = %q, want its own hash's cache %q — sharing a's resolution means b's hash was never checked", envB.PathDirs, wantB)
 	}
 }
 
