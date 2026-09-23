@@ -771,7 +771,7 @@ func backendFor(lang runner.Lang, root, dir string, build, suite runner.Invocati
 		// file wherever it is written, so every other path resolves in the
 		// component's own tree and nothing is copied.
 		return mutation.Go{Dir: filepath.Join(root, filepath.FromSlash(dir)), Build: build, Suite: suite}, nil
-	case runner.Rust, runner.TypeScript:
+	case runner.Rust, runner.TypeScript, runner.Python:
 		// A scan root whose files git lists none of has nothing to copy, and
 		// a worker holding an empty tree would report every mutant unviable
 		// with a compiler error nobody could act on.
@@ -1270,7 +1270,7 @@ func detailed(row ui.Row, log *componentLog, lines ...string) ui.Row {
 func needsWorktree(selected []component.Component) bool {
 	for _, c := range selected {
 		switch langOf(c) {
-		case runner.Rust, runner.TypeScript:
+		case runner.Rust, runner.TypeScript, runner.Python:
 			return true
 		}
 	}

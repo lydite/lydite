@@ -50,6 +50,10 @@ const (
 	// NegateConditional inverts a relational or equality test, so a branch
 	// is taken exactly when it should not be.
 	NegateConditional Operator = "negate-conditional"
+	// ConditionalConnective swaps one short-circuiting logical connective for
+	// the other (`and` to `or`), widening or narrowing which inputs take a
+	// branch without inverting any test it is written over.
+	ConditionalConnective Operator = "conditional-connective"
 	// ArithmeticOperator swaps one arithmetic operator for another.
 	ArithmeticOperator Operator = "arithmetic-operator"
 	// RemoveStatement deletes a statement outright.
@@ -65,6 +69,7 @@ const (
 var Operators = []Operator{
 	ConditionalBoundary,
 	NegateConditional,
+	ConditionalConnective,
 	ArithmeticOperator,
 	RemoveStatement,
 	ReplaceReturn,
@@ -399,7 +404,7 @@ func Generate(lang runner.Lang, path string, src []byte, lines map[int]bool) ([]
 	switch lang {
 	case runner.Go:
 		return GenerateGo(path, src, lines)
-	case runner.Rust, runner.TypeScript:
+	case runner.Rust, runner.TypeScript, runner.Python:
 		return GenerateTreeSitter(lang, path, src, lines)
 	default:
 		return nil, nil, ErrNoGenerator{Lang: lang}

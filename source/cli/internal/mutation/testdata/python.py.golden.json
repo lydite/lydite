@@ -1,0 +1,294 @@
+[
+  {
+    "path": "python.py",
+    "line": 6,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 179,
+    "length": 21,
+    "original": "total = score + bonus",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 6,
+    "column": 19,
+    "operator": "arithmetic-operator",
+    "offset": 193,
+    "length": 1,
+    "original": "+",
+    "mutated": "-"
+  },
+  {
+    "path": "python.py",
+    "line": 7,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 214,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003c="
+  },
+  {
+    "path": "python.py",
+    "line": 7,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 214,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003e="
+  },
+  {
+    "path": "python.py",
+    "line": 8,
+    "column": 9,
+    "operator": "remove-statement",
+    "offset": 228,
+    "length": 10,
+    "original": "log(total)",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 9,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 254,
+    "length": 1,
+    "original": "0",
+    "mutated": "1"
+  },
+  {
+    "path": "python.py",
+    "line": 10,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 269,
+    "length": 2,
+    "original": "==",
+    "mutated": "!="
+  },
+  {
+    "path": "python.py",
+    "line": 11,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 292,
+    "length": 3,
+    "original": "100",
+    "mutated": "0"
+  },
+  {
+    "path": "python.py",
+    "line": 16,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 347,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003e"
+  },
+  {
+    "path": "python.py",
+    "line": 16,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 347,
+    "length": 2,
+    "original": "\u003e=",
+    "mutated": "\u003c"
+  },
+  {
+    "path": "python.py",
+    "line": 17,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 369,
+    "length": 4,
+    "original": "True",
+    "mutated": "False"
+  },
+  {
+    "path": "python.py",
+    "line": 18,
+    "column": 14,
+    "operator": "conditional-boundary",
+    "offset": 387,
+    "length": 1,
+    "original": "\u003e",
+    "mutated": "\u003e=",
+    "reason": "the two spellings of this bound agree for every score"
+  },
+  {
+    "path": "python.py",
+    "line": 18,
+    "column": 14,
+    "operator": "negate-conditional",
+    "offset": 387,
+    "length": 1,
+    "original": "\u003e",
+    "mutated": "\u003c=",
+    "reason": "the two spellings of this bound agree for every score"
+  },
+  {
+    "path": "python.py",
+    "line": 19,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 497,
+    "length": 5,
+    "original": "False",
+    "mutated": "True"
+  },
+  {
+    "path": "python.py",
+    "line": 20,
+    "column": 12,
+    "operator": "replace-return",
+    "offset": 514,
+    "length": 5,
+    "original": "False",
+    "mutated": "True"
+  },
+  {
+    "path": "python.py",
+    "line": 32,
+    "column": 16,
+    "operator": "conditional-boundary",
+    "offset": 1048,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003c="
+  },
+  {
+    "path": "python.py",
+    "line": 32,
+    "column": 16,
+    "operator": "negate-conditional",
+    "offset": 1048,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003e="
+  },
+  {
+    "path": "python.py",
+    "line": 32,
+    "column": 24,
+    "operator": "conditional-boundary",
+    "offset": 1056,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003c="
+  },
+  {
+    "path": "python.py",
+    "line": 32,
+    "column": 24,
+    "operator": "negate-conditional",
+    "offset": 1056,
+    "length": 1,
+    "original": "\u003c",
+    "mutated": "\u003e="
+  },
+  {
+    "path": "python.py",
+    "line": 36,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 1094,
+    "length": 22,
+    "original": "scaled = score * 2 / 3",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 36,
+    "column": 24,
+    "operator": "arithmetic-operator",
+    "offset": 1113,
+    "length": 1,
+    "original": "/",
+    "mutated": "*"
+  },
+  {
+    "path": "python.py",
+    "line": 36,
+    "column": 20,
+    "operator": "arithmetic-operator",
+    "offset": 1109,
+    "length": 1,
+    "original": "*",
+    "mutated": "/"
+  },
+  {
+    "path": "python.py",
+    "line": 37,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 1121,
+    "length": 12,
+    "original": "counter += 1",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 38,
+    "column": 20,
+    "operator": "conditional-connective",
+    "offset": 1153,
+    "length": 3,
+    "original": "and",
+    "mutated": "or"
+  },
+  {
+    "path": "python.py",
+    "line": 38,
+    "column": 15,
+    "operator": "negate-conditional",
+    "offset": 1148,
+    "length": 2,
+    "original": "!=",
+    "mutated": "=="
+  },
+  {
+    "path": "python.py",
+    "line": 39,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 1179,
+    "length": 6,
+    "original": "\"pass\"",
+    "mutated": "\"\""
+  },
+  {
+    "path": "python.py",
+    "line": 40,
+    "column": 15,
+    "operator": "conditional-connective",
+    "offset": 1200,
+    "length": 2,
+    "original": "or",
+    "mutated": "and"
+  },
+  {
+    "path": "python.py",
+    "line": 41,
+    "column": 16,
+    "operator": "replace-return",
+    "offset": 1225,
+    "length": 2,
+    "original": "\"\"",
+    "mutated": "\"lydite\""
+  },
+  {
+    "path": "python.py",
+    "line": 42,
+    "column": 12,
+    "operator": "replace-return",
+    "offset": 1239,
+    "length": 3,
+    "original": "1.5",
+    "mutated": "0.0"
+  }
+]

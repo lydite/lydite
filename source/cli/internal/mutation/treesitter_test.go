@@ -57,9 +57,9 @@ func goldensOf(mutants []Mutant) []golden {
 	return out
 }
 
-// Rust and TypeScript are parsed through a pre-1.0 dependency whose grammar
-// tables are regenerated on a schedule, and a bump changes which mutants
-// exist. This repository declares no Rust component, so its own CI cannot
+// Rust, TypeScript and Python are parsed through a pre-1.0 dependency whose
+// grammar tables are regenerated on a schedule, and a bump changes which
+// mutants exist. This repository declares no Rust component, so its own CI cannot
 // otherwise see that change and it would reach a consumer unobserved: a mutant
 // that stopped being generated is a gate that quietly stopped asking, and one
 // whose byte range moved is a splice into the wrong place.
@@ -74,6 +74,7 @@ func TestTheGoldenMutantsAreUnchanged(t *testing.T) {
 		{"rust.rs", runner.Rust},
 		{"typescript.ts", runner.TypeScript},
 		{"component.tsx", runner.TypeScript},
+		{"python.py", runner.Python},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			src := fixture(t, c.file)
@@ -255,6 +256,10 @@ func TestASubstituteIsADifferentValueAndNotADifferentSpelling(t *testing.T) {
 		{stringLiteral, `"x"`, `""`},
 		{boolLiteral, "true", "false"},
 		{boolLiteral, "false", "true"},
+		// A substitute keeps the spelling its own language uses: `false` in a
+		// Python mutant is a name error rather than a decision reversed.
+		{boolLiteral, "True", "False"},
+		{boolLiteral, "False", "True"},
 		// A literal whose value cannot be read is treated as non-zero, which
 		// is the answer that holds for every literal anyone writes.
 		{intLiteral, "1u32", "0"},
@@ -293,6 +298,93 @@ func TestOnlyRequestedLinesAreMutated(t *testing.T) {
 	}
 	if len(some) >= len(all) {
 		t.Errorf("restricting to one line kept %d of %d mutants", len(some), len(all))
+	}
+}
+
+// A chained comparison is one node whose operators field holds a token per
+// link, and a mutant's identity is the token it replaces rather than the node
+// that carried it: each link is mutated at its own byte range.
+//
+// What the chain does not get is its own exclusion. A declaration on that line
+// attaches to every mutant tied for the shortest replaced text, so two
+// single-character bounds are covered together — sites.go's tie-break, stated
+// beside the fixture's own chain, and not a property of this extraction.
+func TestEachLinkOfAChainedComparisonIsItsOwnMutant(t *testing.T) {
+	src := []byte("def banded(low, score, high):\n    return low < score < high\n")
+	mutants, _, err := GenerateTreeSitter(runner.Python, "banded.py", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsets := map[int]bool{}
+	for _, m := range mutants {
+		if m.Original != "<" {
+			t.Errorf("%s replaces %q, and the chain holds only `<`", m, m.Original)
+		}
+		offsets[m.Offset] = true
+	}
+	// A boundary shift and a negation per link, at two distinct offsets.
+	if len(mutants) != 4 || len(offsets) != 2 {
+		t.Errorf("%d mutant(s) at %d offset(s), want 4 at 2", len(mutants), len(offsets))
+	}
+}
+
+// A conjunction is swapped for the other conjunction, and for nothing else: a
+// token is only ever looked up in the table written for the node type it
+// belongs to, so `and` is not offered a relational bound's shift and `<` is
+// not offered a conjunction's.
+func TestAConjunctionIsSwappedForTheOtherAndNothingElse(t *testing.T) {
+	src := []byte("def taken(a, b, c):\n    return a and b or c < 1\n")
+	mutants, _, err := GenerateTreeSitter(runner.Python, "taken.py", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, m := range mutants {
+		seen[m.Original]++
+		switch m.Original {
+		case "and":
+			if m.Mutated != "or" || m.Operator != ConditionalConnective {
+				t.Errorf("%s, want `or` as a conditional-connective swap", m)
+			}
+		case "or":
+			if m.Mutated != "and" || m.Operator != ConditionalConnective {
+				t.Errorf("%s, want `and` as a conditional-connective swap", m)
+			}
+		case "<":
+			if m.Mutated != "<=" && m.Mutated != ">=" {
+				t.Errorf("%s, want the relational tables' own answers", m)
+			}
+		default:
+			t.Errorf("%s replaces a token this expression does not hold", m)
+		}
+	}
+	// `a and b or c` nests, so both conjunctions are reached, and each is one
+	// swap where the relational token is a shift and a negation.
+	if seen["and"] != 1 || seen["or"] != 1 || seen["<"] != 2 {
+		t.Errorf("mutants by token = %v, want one per conjunction and two for `<`", seen)
+	}
+}
+
+// A call, an assignment and an augmented assignment each reach their deletion
+// even though the tree holds none of them wrapped in an `expression_statement`
+// — the runtime collapses that wrapper into its one named child, so the
+// removable node itself is what `module` or `block` parents directly.
+func TestARemovableNodeIsReachedThroughItsCollapsedWrapper(t *testing.T) {
+	src := []byte("def run(x):\n    log(x)\n    total = x\n    total += 1\n    return total\n")
+	mutants, _, err := GenerateTreeSitter(runner.Python, "run.py", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := map[string]bool{}
+	for _, m := range mutants {
+		if m.Operator == RemoveStatement {
+			removed[m.Original] = true
+		}
+	}
+	for _, want := range []string{"log(x)", "total = x", "total += 1"} {
+		if !removed[want] {
+			t.Errorf("remove-statement mutants = %v, want one deleting %q", removed, want)
+		}
 	}
 }
 
