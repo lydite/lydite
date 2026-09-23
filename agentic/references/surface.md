@@ -83,8 +83,9 @@ is an extra sink rather than a redirection. A failing row shows its `Detail` if 
 refused comment is no surface at all — which is what this exists to prevent.
 
 **`review --publish` writes the commit status and no comment.** The status is the record a
-clearance acts on and has to land early, so `lydite-pr.yml`'s `referral` job has no `needs` and
-publishes within seconds of a push (ADR 0015). Its verdict reaches the comment by the route
+clearance acts on and has to land early, so the referral job — `lydite/actions`'
+`lydite-referral-publish.yml` — has no `needs` and publishes within seconds of a push (ADR
+0015). Its verdict reaches the comment by the route
 every other command's results take — the document it wrote — because rendering it twice would be
 two derivations of one answer. `ui.Marker` is `<!-- lydite:results -->`: one comment per change,
 upserted by the marker rather than by author, which is what lets the relay and the fallback hand
@@ -111,11 +112,15 @@ payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it
 so a caller can no more author a status on another commit or under another tool's check name than
 it can name another repository. The two gated
 contexts are posted only by an isolated job, which the relay tells apart by the OIDC
-`job_workflow_ref` and by nothing else: `lydite-pr.yml` has one job holding `id-token: write`
-today, and OIDC carries no job identity, so `environment`, audience and `ref` cannot tell the
-isolated job from one running the pull request's own code. A local same-repo reusable workflow is
-never allowlisted, because its ref is controlled by the pull request; an external callee in
-`lydite/actions` cannot be edited by the pull request's author.
+`job_workflow_ref` and by nothing else — OIDC carries no job identity, so `environment`, audience
+and `ref` cannot tell an isolated job from one running the pull request's own code inside the same
+workflow file. `lydite/actions` gives the isolated job its own reusable workflow file instead:
+`lydite-referral-publish.yml` for the referral and `lydite-clearance.yml` for a clearance, each
+separate from `lydite.yml`'s own referral-computing, test and publish jobs, which run the pull
+request's own code and hold no such credential (ADR 0051's "The reusable workflows split so the
+relay can tell a job apart by file"). A local same-repo reusable workflow is never allowlisted,
+because its ref is controlled by the pull request; an external callee in `lydite/actions` cannot
+be edited by the pull request's author.
 
 The allowlist is two Wrangler vars, `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`, each
 a comma- or newline-separated list of exact
@@ -185,7 +190,8 @@ closing it.** Recording a coverage baseline is a push to the `lydite` branch and
 and `statuses: write`, and has no endpoint that commits anything. `lydite test record` takes the
 coverage write out of the gating job the same way, and
 neither closes the rest: a recording job holds a pushing token whatever command it runs, so it
-belongs on a tree that has already merged — which is where `lydite-baseline.yml` runs it.
+belongs on a tree that has already merged, never in the job computing or gating a pull request's
+own verdict.
 
 - **RS256 is fixed, not read from the token.** Honouring a token's own `alg` is how a verifier
   accepts `alg: none`.
