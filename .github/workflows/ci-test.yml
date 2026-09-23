@@ -24,11 +24,11 @@ permissions:
   # the repository for anyone who can open a pull request from a branch.
   contents: read
 
-# The grammar tables mutation parses Rust and TypeScript with, stated once for
-# both steps below. gotreesitter embeds all 206 of its grammars unless
-# `grammar_subset` turns the wildcard embed off, and each `grammar_subset_<lang>`
-# tag turns one blob back on. `.goreleaser.yml` carries the same list, because a
-# release build is not this workflow's to run.
+# The grammar tables mutation and CRAP parse Rust, TypeScript and Python with,
+# stated once for both steps below. gotreesitter embeds all 206 of its grammars
+# unless `grammar_subset` turns the wildcard embed off, and each
+# `grammar_subset_<lang>` tag turns one blob back on. `.goreleaser.yml` carries
+# the same list, because a release build is not this workflow's to run.
 env:
   LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx grammar_subset_python
 
