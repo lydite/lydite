@@ -125,6 +125,39 @@ func TestTheTypeScriptProbeEnumeratesEveryScoredFunction(t *testing.T) {
 	})
 }
 
+// The spans the Python probe predicts. `tally` holds a callback lambda that
+// folds into it — no row of its own — where `scale`, a lambda bound to a name
+// at the top level, is a row. `cached` begins at its `def` and not at the
+// `@memoize` above it: a decorator line belongs to no function, the same as a
+// Rust attribute and a TypeScript decorator.
+func TestThePythonProbeEnumeratesEveryScoredFunction(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "crap", "testdata", "pyprobe"))
+	assertUnits(t, "src/probe.py", probe(t, runner.Python, tree, "src/probe.py"), []unit{
+		{name: "classify", span: Span{First: 7, Last: 16}},
+		{name: "guarded", span: Span{First: 19, Last: 23}},
+		{name: "first_even", span: Span{First: 26, Last: 31}},
+		{name: "scan", span: Span{First: 34, Last: 41}},
+		{name: "countdown", span: Span{First: 44, Last: 48}},
+		{name: "read_number", span: Span{First: 51, Last: 56}},
+		{name: "settle", span: Span{First: 59, Last: 70}},
+		{name: "open_all", span: Span{First: 73, Last: 79}},
+		{name: "evens", span: Span{First: 82, Last: 84}},
+		{name: "pick", span: Span{First: 87, Last: 89}},
+		{name: "describe", span: Span{First: 92, Last: 100}},
+		{name: "label", span: Span{First: 103, Last: 109}},
+		{name: "positive", span: Span{First: 112, Last: 115}},
+		{name: "tally", span: Span{First: 118, Last: 120}},
+		{name: "outer", span: Span{First: 123, Last: 133}, nested: 1},
+		{name: "inner", span: Span{First: 126, Last: 129}},
+		{name: "memoize", span: Span{First: 136, Last: 138}},
+		{name: "cached", span: Span{First: 142, Last: 146}},
+		{name: "scale", span: Span{First: 149, Last: 149}},
+		{name: "Gate.__init__", span: Span{First: 155, Last: 156}},
+		{name: "Gate.allow", span: Span{First: 158, Last: 162}},
+		{name: "Gate.build", span: Span{First: 165, Last: 170}},
+	})
+}
+
 // Test code is not scored, and a whole file of it yields nothing rather than
 // an error: it is a file with nothing to score, not one lydite could not read.
 func TestTestCodeIsNotEnumerated(t *testing.T) {
@@ -138,6 +171,9 @@ func TestTestCodeIsNotEnumerated(t *testing.T) {
 		{runner.TypeScript, "tsprobe", "src/probe.test.ts"},
 		{runner.TypeScript, "tsprobe", "src/gate.spec.ts"},
 		{runner.TypeScript, "tsprobe", "src/__tests__/helpers.ts"},
+		{runner.Python, "pyprobe", "src/test_probe.py"},
+		{runner.Python, "pyprobe", "src/probe_test.py"},
+		{runner.Python, "pyprobe", "tests/helpers.py"},
 	} {
 		tree := fixture.Tree(t, filepath.Join("..", "crap", "testdata", c.probe))
 		if got := probe(t, c.lang, tree, c.rel); len(got) != 0 {

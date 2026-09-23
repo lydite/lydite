@@ -34,6 +34,22 @@ var functions = map[Grammar]map[string]bool{
 		"arrow_function":                 true,
 		"method_definition":              true,
 	},
+	// function_definition is every `def`: a method in a class body, a `def`
+	// nested in another, and an `async def`, which carries an extra `async`
+	// token and is otherwise that node. decorated_definition is deliberately
+	// absent although it is what a decorated `def` is written as — it wraps a
+	// decorated `class` too, and a table keyed by node type alone cannot tell
+	// the two apart, so naming it here would score every decorated class as a
+	// function of its own. Grammar.scope reaches through it instead; see
+	// enclosures.
+	//
+	// A lambda is here on the rule TypeScript's arrow_function follows: it is a
+	// unit where it is a declaration with a name bound to it, and folds into
+	// the function whose span contains it where it is a callback.
+	Python: {
+		"function_definition": true,
+		"lambda":              true,
+	},
 }
 
 // decorations are the node types that attach to the declaration below them
@@ -50,6 +66,34 @@ var decorations = map[Grammar]map[string]bool{
 	},
 	TypeScript: {
 		"decorator": true,
+	},
+	Python: {
+		"decorator": true,
+	},
+}
+
+// enclosures are the node types the walk to a declaration's anchor steps
+// inside rather than stopping at, because what the declaration is written
+// above is that node's own first child rather than its next sibling.
+//
+// Python is the one grammar needing them, for two reasons at once.
+// `@app.route` above a `def` is a decorated_definition holding every
+// decorator and then the function itself, where Rust's `#[inline]` and
+// TypeScript's `@log` precede the declaration as siblings of it. And the
+// first comment of an indented suite is lifted out of the block onto the
+// statement introducing it, so a comment above the first method of a class
+// has the whole class body as its next sibling.
+//
+// Stepping inside is what keeps the span the function's own, which is the
+// span ScoredFunctions reports for the same function and so the only one an
+// exclusion can match. Stopping at the enclosing node instead would answer
+// with the whole class body for a declaration above one method of it, and
+// with a span a decorator line wider for a declaration above a decorated
+// function.
+var enclosures = map[Grammar]map[string]bool{
+	Python: {
+		"decorated_definition": true,
+		"block":                true,
 	},
 }
 
@@ -164,7 +208,17 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 	}
 	anchor := last.NextSibling()
 	prevEnd := last.EndPoint().Row
-	for anchor != nil && decorations[g.tables()][anchor.Type(language)] {
+	for anchor != nil {
+		if enclosures[g.tables()][anchor.Type(language)] {
+			// An enclosure begins exactly where its first child does, so the
+			// adjacency that child has to satisfy is checked on it rather than
+			// twice.
+			anchor = anchor.Child(0)
+			continue
+		}
+		if !decorations[g.tables()][anchor.Type(language)] {
+			break
+		}
 		if anchor.StartPoint().Row != prevEnd+1 {
 			return Span{}, false
 		}

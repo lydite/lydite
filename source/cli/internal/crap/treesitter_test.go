@@ -105,6 +105,59 @@ func TestTheTypeScriptWalkCountsWhatADR0036Predicts(t *testing.T) {
 	})
 }
 
+// Every Python counting rule, likewise. Two of the numbers radon disagrees
+// with, and the README says why lydite keeps its own: `label` counts an arm
+// bound to a name where radon reads every irrefutable pattern as the wildcard,
+// and `outer` keeps a flat one for the nested `def` radon only scores apart.
+func TestThePythonWalkCountsWhatADR0036Predicts(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "pyprobe"))
+	assertComplexity(t, "src/probe.py", scored(t, runner.Python, tree, "src/probe.py"), map[string]int{
+		"classify":      4,
+		"guarded":       4,
+		"first_even":    3,
+		"scan":          4,
+		"countdown":     2,
+		"read_number":   2,
+		"settle":        4,
+		"open_all":      2,
+		"evens":         3,
+		"pick":          2,
+		"describe":      3,
+		"label":         3,
+		"positive":      2,
+		"tally":         2,
+		"outer":         3,
+		"inner":         2,
+		"memoize":       1,
+		"cached":        2,
+		"scale":         1,
+		"Gate.__init__": 1,
+		"Gate.allow":    4,
+		"Gate.build":    2,
+	})
+}
+
+// A decorated `def` is a decorated_definition wrapping the function, where
+// Rust's attribute and TypeScript's decorator precede one as siblings. The
+// span lydite scores is the function's own either way — the decorator lines
+// are nobody's function — so a decorated method is still declared on the class
+// that holds it and a decorated function is still named by its own `def`.
+func TestAPythonDecoratorLeavesTheFunctionItDecoratesScored(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "pyprobe"))
+	got := scored(t, runner.Python, tree, "src/probe.py")
+	cached, ok := got["cached"]
+	if !ok {
+		t.Fatalf("cached was not scored; scored %v", names(got))
+	}
+	// `@memoize` is on line 141 and `def cached` on 142.
+	if cached.Line != 142 {
+		t.Errorf("cached begins at line %d, want 142 — the `def`, not its decorator", cached.Line)
+	}
+	if _, ok := got["Gate.build"]; !ok {
+		t.Errorf("a decorated method was not qualified by its class; scored %v", names(got))
+	}
+}
+
 // A nested named function is scored in its own right, so its lines are evidence
 // about it and leave the span of the function containing it. Without that, a
 // well-tested nested function would carry its parent's coverage figure and the
@@ -282,6 +335,9 @@ func TestTestCodeIsNotScored(t *testing.T) {
 		{runner.TypeScript, "tsprobe", "src/probe.test.ts"},
 		{runner.TypeScript, "tsprobe", "src/gate.spec.ts"},
 		{runner.TypeScript, "tsprobe", "src/__tests__/helpers.ts"},
+		{runner.Python, "pyprobe", "src/test_probe.py"},
+		{runner.Python, "pyprobe", "src/probe_test.py"},
+		{runner.Python, "pyprobe", "tests/helpers.py"},
 	} {
 		tree := fixture.Tree(t, filepath.Join("testdata", c.probe))
 		out, err := scoreTree(c.lang, tree, c.rel, covering(400, 1))
@@ -382,9 +438,9 @@ func TestARustOrTypeScriptFileThatCannotBeReadIsAnErrorNamingIt(t *testing.T) {
 // false bool — a mutant that swapped the empty string for anything else would
 // pass every test that only checked the bool half of tracked's answer.
 func TestAnUnwalkedExtensionTracksAsTheEmptyLanguage(t *testing.T) {
-	lang, walked := tracked("src/component.py")
+	lang, walked := tracked("src/component.jsx")
 	if walked {
-		t.Fatalf("walked = true for a .py file, want false")
+		t.Fatalf("walked = true for a .jsx file, want false")
 	}
 	if lang != "" {
 		t.Errorf("lang = %q for an untracked extension, want the empty string", lang)
@@ -416,13 +472,17 @@ func TestAScriptPathIsNotReportedSkipped(t *testing.T) {
 	}
 }
 
-// A Python file is a language a runner runs and this gate holds no grammar for,
-// so it is named skipped rather than dropped out of the hit map in silence — the
-// same answer a .jsx file gets, and for the same reason: a file scored by
-// nothing must not read as one this gate had nothing to say about.
-func TestAPythonPathIsReportedSkipped(t *testing.T) {
-	if !skipped("src/scope.py") {
-		t.Error(`skipped("src/scope.py") = false, want true — python has a runner and this gate no grammar`)
+// A Python file is walked, so it is not named skipped: a skipped row says a
+// file this gate could have scored went unscored, and a `.py` file is scored.
+// Reporting it both ways at once would have every Python component carrying a
+// gap it does not have.
+func TestAPythonPathIsWalkedRatherThanSkipped(t *testing.T) {
+	lang, ok := tracked("src/scope.py")
+	if !ok || lang != runner.Python {
+		t.Errorf(`tracked("src/scope.py") = %q, %v, want python, true`, lang, ok)
+	}
+	if skipped("src/scope.py") {
+		t.Error(`skipped("src/scope.py") = true, want false — this gate holds Python tables`)
 	}
 }
 

@@ -290,6 +290,154 @@ func TestADeclarationWithNoReasonIsRefused(t *testing.T) {
 	}
 }
 
+// pyComment is a comment standing where a declaration would be written. The
+// token it would carry is not in it: reading a `#` comment's body is
+// internal/annotation's half of the answer, and the half under test here is
+// the tree walk — which node a comment attaches to in the one grammar that
+// holds a declaration's decorations inside a wrapper rather than before it.
+const pyComment = "# a declaration would be written here"
+
+// pyScope resolves the comment beginning on line to the span it covers,
+// through Grammar.scope over a real parse.
+func pyScope(t *testing.T, src string, line int) (Span, bool) {
+	t.Helper()
+	root, language, err := Python.Parse("a.py", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := commentNodes(root, language)
+	if comments[line] == nil {
+		t.Fatalf("no comment begins on line %d of:\n%s", line, src)
+	}
+	return Python.scope(comments, line, 0, language)
+}
+
+// A declaration covers the whole `def` written below it in Python too — and a
+// decorated one, whose `@memoize` is a child of the decorated_definition
+// holding the function rather than a sibling preceding it, the way Rust's
+// `#[inline]` and TypeScript's `@log` are. The span is the `def`'s own in
+// every case, which is the span ScoredFunctions reports for the same
+// function: two answers that have to be one span, or an exclusion matches
+// nothing it was written for.
+func TestAPythonDeclarationCoversTheFunctionBelowIt(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+		line int
+		want Span
+	}{
+		{
+			name: "a module-level def",
+			src:  pyComment + "\ndef f(n):\n    return n\n",
+			line: 1, want: Span{First: 2, Last: 3},
+		},
+		{
+			name: "a method",
+			src:  "class C:\n    " + pyComment + "\n    def f(self):\n        return 1\n",
+			line: 2, want: Span{First: 3, Last: 4},
+		},
+		{
+			// The first comment of an indented suite is lifted out of the
+			// block onto the `class` itself, so what follows it in the tree
+			// is the whole class body. Answering with that body's span would
+			// have one declaration cover every method written under it.
+			name: "the first of two methods",
+			src: "class C:\n    " + pyComment + "\n    def f(self):\n        return 1\n" +
+				"\n    def g(self):\n        return 2\n",
+			line: 2, want: Span{First: 3, Last: 4},
+		},
+		{
+			name: "a def nested in another",
+			src:  "def outer():\n    " + pyComment + "\n    def inner():\n        return 1\n",
+			line: 2, want: Span{First: 3, Last: 4},
+		},
+		{
+			name: "a decorated def, reached through the wrapper",
+			src:  pyComment + "\n@memoize\ndef f(n):\n    return n\n",
+			line: 1, want: Span{First: 3, Last: 4},
+		},
+		{
+			name: "a def behind a stack of decorators",
+			src:  pyComment + "\n@memoize\n@trace\ndef f(n):\n    return n\n",
+			line: 1, want: Span{First: 4, Last: 5},
+		},
+		{
+			name: "a decorated method",
+			src:  "class C:\n    " + pyComment + "\n    @staticmethod\n    def f():\n        return 1\n",
+			line: 2, want: Span{First: 4, Last: 5},
+		},
+		{
+			name: "an async def",
+			src:  pyComment + "\nasync def f(n):\n    return n\n",
+			line: 1, want: Span{First: 2, Last: 3},
+		},
+		{
+			name: "a lambda bound to a name",
+			src:  pyComment + "\nf = lambda n: n + 1\n",
+			line: 1, want: Span{First: 2, Last: 2},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pyScope(t, c.src, c.line)
+			if !ok {
+				t.Fatalf("covered nothing, want %+v", c.want)
+			}
+			if got != c.want {
+				t.Errorf("span = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// A decorated class is the same decorated_definition wrapper a decorated
+// function is, and introduces no function of its own. A declaration above one
+// covers nothing rather than silently covering every method in it — the
+// answer an `impl` block already gets in Rust.
+func TestAPythonDeclarationReachingNoFunctionCoversNothing(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+		line int
+	}{
+		{
+			name: "above a decorated class",
+			src:  pyComment + "\n@dataclass\nclass C:\n    v: int\n",
+			line: 1,
+		},
+		{
+			name: "above a plain class",
+			src:  pyComment + "\nclass C:\n    v = 1\n",
+			line: 1,
+		},
+		{
+			// Python permits a blank line between a decorator and the `def`
+			// it decorates. The walk is bounded to adjacent lines there too:
+			// a declaration separated from what follows reattached to
+			// whatever happened to come next once, with no line holding the
+			// token changed to show it.
+			name: "with a blank line between the decorator and the def",
+			src:  pyComment + "\n@memoize\n\ndef f(n):\n    return n\n",
+			line: 1,
+		},
+		{
+			name: "inside a function body",
+			src:  "def f(n):\n    " + pyComment + "\n    return n\n",
+			line: 2,
+		},
+		{
+			name: "at the end of the file, with nothing below it",
+			src:  "def f(n):\n    return n\n\n\n" + pyComment + "\n",
+			line: 5,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got, ok := pyScope(t, c.src, c.line); ok {
+				t.Errorf("covered %+v, want nothing", got)
+			}
+		})
+	}
+}
+
 // A file the tables refuse is an error and never an empty answer. The two are
 // indistinguishable to a caller and mean opposite things, and each caller
 // decides which of them it can live with.
@@ -340,6 +488,7 @@ func TestGrammarForPicksTheTablesByExtension(t *testing.T) {
 		{runner.TypeScript, "src/a.tsx", TSX, true},
 		{runner.TypeScript, "src/a.TSX", TSX, true},
 		{runner.TypeScript, "src/a.js", TypeScript, true},
+		{runner.Python, "src/a.py", Python, true},
 		{runner.Go, "a.go", 0, false},
 	} {
 		got, ok := GrammarFor(c.lang, c.file)

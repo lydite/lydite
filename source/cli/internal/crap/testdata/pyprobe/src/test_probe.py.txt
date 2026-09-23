@@ -1,0 +1,16 @@
+"""A file pytest collects by its `test_` prefix, which lydite scores nothing
+of. It branches, so a walk that reached it is recognisable by what it reports.
+"""
+
+from probe import classify
+
+
+def band(n):
+    if n < 0:
+        return "under"
+    return "over" if n > 10 else "within"
+
+
+def test_classify_names_each_band():
+    assert classify(0) == "zero"
+    assert band(-1) == "under"

@@ -26,6 +26,14 @@ var namedFunctions = map[Grammar]map[string]bool{
 		"generator_function_declaration": true,
 		"method_definition":              true,
 	},
+	// Python has no anonymous `def`: every function_definition carries a name
+	// field, so a `def` written inside another is a unit of its own, the way
+	// Rust's nested `fn` is. A lambda is the language's one anonymous form and
+	// is absent here for that reason — which side of the line one falls on is
+	// read off the name it is bound to rather than off its type.
+	Python: {
+		"function_definition": true,
+	},
 }
 
 // bindings are the node types that give an anonymous function the name it is
@@ -39,6 +47,12 @@ var bindings = map[Grammar]map[string]string{
 		"pair":                    "key",
 		"assignment_expression":   "left",
 	},
+	// `f = lambda x: x + 1` is a function called `f`. A lambda is the only
+	// Python node a binding has anything to say about, since every `def`
+	// carries its own name.
+	Python: {
+		"assignment": "left",
+	},
 }
 
 // receivers are the node types a method is written on, and the field holding
@@ -51,6 +65,9 @@ var receivers = map[Grammar]map[string]string{
 		"class_declaration": "name",
 		"class":             "name",
 	},
+	Python: {
+		"class_definition": "name",
+	},
 }
 
 // receiverSeparator is how each language writes a method's owner before its
@@ -58,6 +75,7 @@ var receivers = map[Grammar]map[string]string{
 var receiverSeparator = map[Grammar]string{
 	Rust:       "::",
 	TypeScript: ".",
+	Python:     ".",
 }
 
 // Func is one function a gate scores: the subtree a walk over it covers, the

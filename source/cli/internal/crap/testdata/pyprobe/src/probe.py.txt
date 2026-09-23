@@ -1,0 +1,170 @@
+"""Every branching construct ADR 0036 names a Python counting rule for, one
+function per shape, so a complexity walk can be checked against a number
+derived by hand in the README beside this file.
+"""
+
+
+def classify(n):
+    """An if/elif/elif/else chain; the else counts nothing."""
+    if n == 0:
+        return "zero"
+    elif n == 1:
+        return "one"
+    elif n == 2:
+        return "two"
+    else:
+        return "many"
+
+
+def guarded(user, admin):
+    """An if, an `and` and an `or`."""
+    if admin or (user is not None and len(user) > 0):
+        return True
+    return False
+
+
+def first_even(items):
+    """A for and an if."""
+    for item in items:
+        if item % 2 == 0:
+            return item
+    return 0
+
+
+def scan(items):
+    """A for whose else runs only when nothing broke out of it."""
+    for item in items:
+        if item < 0:
+            break
+    else:
+        return "all positive"
+    return "found one"
+
+
+def countdown(n):
+    """A while."""
+    while n > 0:
+        n -= 1
+    return n
+
+
+def read_number(text):
+    """One except clause."""
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def settle(text):
+    """Two except clauses, an else that counts and a finally that does not."""
+    try:
+        value = int(text)
+    except ValueError:
+        return 0
+    except TypeError:
+        return -1
+    else:
+        return value
+    finally:
+        text = None
+
+
+def open_all(paths):
+    """A with, which counts nothing, and a for, which counts."""
+    total = 0
+    with memoryview(b"") as view:
+        for path in paths:
+            total += len(path) + len(view)
+    return total
+
+
+def evens(items):
+    """A comprehension's own loop and its filter."""
+    return [n for n in items if n % 2 == 0]
+
+
+def pick(a, b):
+    """A conditional expression."""
+    return a if a > b else b
+
+
+def describe(cmd):
+    """Two cases and a bare wildcard, which counts nothing."""
+    match cmd:
+        case "go":
+            return "moving"
+        case "stop":
+            return "halted"
+        case _:
+            return "unknown"
+
+
+def label(cmd):
+    """Two cases; `other` is a binding, not the wildcard."""
+    match cmd:
+        case "go":
+            return "moving"
+        case other:
+            return other
+
+
+def positive(n):
+    """An assert, which is a raise behind a condition."""
+    assert n > 0, "n must be positive"
+    return n
+
+
+def tally(items):
+    """A lambda used as a callback, whose branches fold into this function."""
+    return list(filter(lambda n: n % 2 == 0 and n > 0, items))
+
+
+def outer(n):
+    """A nested def, scored in its own right, leaving a flat one here."""
+
+    def inner(m):
+        if m > 0:
+            return m
+        return 0
+
+    if n > 0:
+        return inner(n)
+    return 0
+
+
+def memoize(fn):
+    """A decorator, returning the function it was given."""
+    return fn
+
+
+@memoize
+def cached(n):
+    """A decorated function: the decorator itself counts nothing."""
+    if n > 0:
+        return n
+    return 0
+
+
+scale = lambda factor: factor * 2  # noqa: E731
+
+
+class Gate:
+    """A class, so a method is scored under the name it is called by."""
+
+    def __init__(self):
+        self.open = False
+
+    def allow(self, user, admin):
+        """A method, with an if, an `or` and an `and`."""
+        if admin or (user is not None and len(user) > 0):
+            self.open = True
+        return self.open
+
+    @staticmethod
+    def build(admin):
+        """A decorated method, still declared on the class that holds it."""
+        gate = Gate()
+        if admin:
+            gate.open = True
+        return gate

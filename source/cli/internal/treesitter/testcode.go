@@ -1,6 +1,7 @@
 package treesitter
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -22,7 +23,7 @@ type testCode struct {
 	// module is the node type of a module whose contents are the suite, or
 	// empty for a language that puts none inside the file it tests.
 	//
-	// Rust needs it and the other two do not: `#[cfg(test)] mod tests` sits
+	// Rust needs it and the others do not: `#[cfg(test)] mod tests` sits
 	// inside the file under test, so no path rule can see it.
 	module string
 	// attribute is the attribute, whitespace removed, that marks such a
@@ -38,6 +39,9 @@ var testConventions = map[Grammar]testCode{
 	},
 	TypeScript: {
 		file: typeScriptTestFile,
+	},
+	Python: {
+		file: pythonTestFile,
 	},
 }
 
@@ -143,6 +147,23 @@ type DeclaredTest struct {
 	Unreadable bool
 }
 
+// ErrNoTestEnumeration reports a language whose files this package parses and
+// whose tests it cannot enumerate.
+//
+// It is neither ErrNoGrammar, which is a language with no tables at all, nor
+// ErrUnparsed, which is a file the tables could not read: this is a file read
+// perfectly by a grammar no test-declaration walk was written for. The three
+// answer opposite questions and a caller that got an empty slice instead of
+// this one would report a file full of tests as declaring none, which is a
+// new-test gate that goes green on every file in the language.
+type ErrNoTestEnumeration struct {
+	Lang runner.Lang
+}
+
+func (e ErrNoTestEnumeration) Error() string {
+	return fmt.Sprintf("no test-declaration walk for %q", e.Lang)
+}
+
 // DeclaredTests is every test one file declares, in the order the tree
 // declares them.
 //
@@ -152,7 +173,11 @@ type DeclaredTest struct {
 //
 // A file the grammar could not read is ErrUnparsed and never an empty answer.
 // A parse failure is not a file that declares no tests, and a gate reading it
-// as one goes green on the change that broke the parser.
+// as one goes green on the change that broke the parser. A grammar that read
+// the file but has no enumeration written for it is ErrNoTestEnumeration, for
+// the same reason: a language gains tables here for the gates that only need
+// spans, and the gate that needs names must hear about it rather than be told
+// the file declares nothing.
 func DeclaredTests(lang runner.Lang, p string, src []byte) ([]DeclaredTest, error) {
 	g, ok := GrammarFor(lang, p)
 	if !ok {
@@ -168,6 +193,8 @@ func DeclaredTests(lang runner.Lang, p string, src []byte) ([]DeclaredTest, erro
 		w.rust(root, nil, g.TestFile(p))
 	case TypeScript:
 		w.typeScript(root, "", false)
+	default:
+		return nil, ErrNoTestEnumeration{Lang: lang}
 	}
 	return w.out, nil
 }
@@ -457,6 +484,21 @@ func typeScriptTestFile(p string) bool {
 		return true
 	}
 	return strings.HasPrefix(p, "__tests__/") || strings.Contains(p, "/__tests__/")
+}
+
+// pythonTestFile recognises pytest's own default discovery rules: a `test_`
+// prefix or a `_test` suffix on the module name, and a `tests/` directory.
+//
+// The two filename forms are what pytest collects without configuration, so a
+// file lydite calls the suite is a file pytest would have run. The directory
+// is Rust's `tests/` rule asked of the layout every Python project that
+// separates its suite from its package uses.
+func pythonTestFile(p string) bool {
+	stem := strings.TrimSuffix(path.Base(p), path.Ext(p))
+	if strings.HasPrefix(stem, "test_") || strings.HasSuffix(stem, "_test") {
+		return true
+	}
+	return strings.HasPrefix(p, "tests/") || strings.Contains(p, "/tests/")
 }
 
 // compact removes every space from an attribute, so one form is recognised

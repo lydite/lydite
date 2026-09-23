@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"lydite/lydite/internal/fixture"
@@ -178,5 +179,57 @@ func TestDeclaredTestsRefusesALanguageWithNoGrammar(t *testing.T) {
 	var noGrammar ErrNoGrammar
 	if !errors.As(err, &noGrammar) {
 		t.Fatalf("Go came back with %v, want ErrNoGrammar", err)
+	}
+}
+
+// A language whose files this package parses and whose tests it cannot
+// enumerate is named too. Python gained tables for the gates that need spans
+// and no test-declaration walk, and an empty slice there would read as a file
+// declaring no tests — a new-test gate that goes green over every Python file
+// in a repository, on the day somebody lists the language and never again.
+func TestDeclaredTestsRefusesAGrammarWithNoEnumeration(t *testing.T) {
+	_, err := DeclaredTests(runner.Python, "tests/test_thing.py",
+		[]byte("def test_thing():\n    assert True\n"))
+	var none ErrNoTestEnumeration
+	if !errors.As(err, &none) {
+		t.Fatalf("Python came back with %v, want ErrNoTestEnumeration", err)
+	}
+	if !strings.Contains(none.Error(), "python") {
+		t.Errorf("Error() = %q, want it to name the language", none.Error())
+	}
+}
+
+// Python's suite is told from the code it tests by pytest's own two default
+// discovery names and by the directory a project separates its tests into.
+// Without this, TestFile answers false for every one of them and a Python
+// suite is scored and mutated as though it shipped.
+func TestPythonTestFilesAreRecognisedByPytestsOwnConventions(t *testing.T) {
+	for _, p := range []string{
+		"tests/helpers.py",
+		"src/tests/helpers.py",
+		"src/test_probe.py",
+		"src/probe_test.py",
+		"test_probe.py",
+		"probe_test.py",
+	} {
+		if !Python.TestFile(p) {
+			t.Errorf("TestFile(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{
+		"src/probe.py",
+		"src/conftest.py",
+		// `latest.py` ends in `test` and is not one: the suffix pytest
+		// collects is `_test`, and matching the bare word would stop scoring
+		// an ordinary module.
+		"src/latest.py",
+		// A directory named for something else that merely begins the same
+		// way is not the suite either.
+		"testing/probe.py",
+		"src/attestations/probe.py",
+	} {
+		if Python.TestFile(p) {
+			t.Errorf("TestFile(%q) = true, want false", p)
+		}
 	}
 }

@@ -1,0 +1,10 @@
+"""A file under `tests/` whose own name matches neither pytest prefix nor
+suffix: the directory alone is what marks it the suite, so nothing in its
+body can prove the skip.
+"""
+
+
+def sample(values):
+    if not values:
+        return 0
+    return max(values) if len(values) > 1 else values[0]

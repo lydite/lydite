@@ -175,3 +175,86 @@ the first time either one is edited for its own gate's reason.
 - This repository's own `cloud-services` component (TypeScript) is scored by its own CI for the
   first time as of the pull request landing this ADR. Its first baseline reads `new`; the number is
   reported in that pull request's body rather than excluded away.
+
+## Amendment (2026-09-23): Python's counting rule, with radon as its oracle
+
+This extends the decision above to a third language. It is an amendment rather than an ADR of
+its own because nothing above is restated: the walk starts at 1, a nested named function is its
+own unit and an anonymous one folds, test code is not scored, and the counting rule is validated
+against that ecosystem's own tool as an oracle rather than pinned as a dependency. Only *the
+counting rule* is language-specific, and this names Python's.
+
+### Python
+
+One, plus:
+
+- Every `if_statement` and every `elif_clause`. An `if`'s `else_clause` counts nothing: it is the
+  unconditional remainder, the same thing Go's `complexity()` says about a `default` clause.
+- Every `for_statement` and `while_statement` — `async for` is the same node with an extra
+  `async` token, and needs no rule of its own.
+- Every `else_clause` **on a loop or on a `try`**, which are not that unconditional remainder:
+  `for ... else` runs its else exactly when the loop finished without `break`, and `try ... else`
+  exactly when nothing was raised. The grammar gives all three elses one node type and says which
+  is which by what holds them, so the rule is read off the parent.
+- Every `except_clause`, each one separately, the way TypeScript's `catch` counts. A
+  `finally_clause` counts nothing — it runs on every path.
+- Every `boolean_operator` whose operator is `and` or `or`, matching Go's `&&`/`||` exactly.
+- Every `conditional_expression`, Python's ternary.
+- Every `for_in_clause` and every `if_clause` **written inside a comprehension**. A comprehension
+  is a loop and an optional filter with the syntax compressed, and compressing it does not remove
+  either branch. `if_clause` is also how a `match` case writes its guard, which the case already
+  counts, so the rule is read off the parent there too.
+- Every `assert_statement`. It is `if not x: raise AssertionError` with the branch spelled
+  shorter, which is the same ground this ADR counts Rust's `?` on. radon counts it by default and
+  offers `--no-assert` to stop; the default is the number a developer sees.
+- Every `case_clause` whose pattern is not the bare, unguarded `_`, exactly as Rust's `match` arm
+  rule reads. A bare-identifier catch-all (`case other:`) still counts, and a guarded wildcard
+  (`case _ if ready:`) counts because it can be reached and declined. radon diverges here in the
+  opposite direction from `rust-code-analysis`: it reads every irrefutable pattern as the
+  wildcard, so its number for a `match` with a name-binding catch-all is one lower. lydite keeps
+  its own, and the measurement is in `testdata/README.md`.
+- A `with_statement` counts nothing: it is a call and a cleanup, and no control flow chooses
+  between two paths there.
+
+**Nesting.** A `def` nested inside another `def` — which Python permits — is scored as its own
+independent function, with the parent's span excluding its lines and the parent's complexity
+gaining the flat +1, exactly as Rust's nested `fn` is. A `lambda` is the language's one anonymous
+function form, and folds into whichever unit's span contains it when it is written as a callback,
+exactly as a TypeScript arrow does. Python has no anonymous `def` and no named `lambda`, so the
+name test this ADR already states sorts the two without a rule of its own.
+
+**A decorator is not part of the function it decorates.** Python writes a decorated `def` as a
+`decorated_definition` holding every decorator and then the function, where Rust's `#[inline]`
+and TypeScript's `@log` precede the declaration as siblings of it. The scored span is the
+function's own in every language — a decorator line belongs to no function — so the wrapper is
+stepped inside rather than scored: naming it a function-introducing node instead would score
+every decorated *class* as a function too, since one node type covers both.
+
+**The oracle is radon**, version 6.0.1, run once by hand over `pyprobe/`, with its numbers
+recorded in `testdata/README.md` beside the fixtures. mccabe, which flake8 carries, was run over
+the same probes and is not the oracle: it counts no `and`, no `or`, no conditional expression, no
+comprehension and no `match` at all, so agreeing with it would make Python the one language here
+whose short-circuiting operators are free.
+
+### Test code
+
+A whole file whose module name carries pytest's `test_` prefix or `_test` suffix, or which sits
+under a `tests/` directory. Those two filenames are what pytest collects without configuration,
+so a file lydite calls the suite is a file pytest would have run; the directory is the same rule
+Rust's `tests/` already gets.
+
+There is no in-file equivalent of Rust's `#[cfg(test)] mod`: Python has no form that puts the
+suite inside the module under test, so the path rule is the whole of the classification.
+
+### Consequence
+
+- `internal/crap` gains a third per-language walk, and `complexityOf` becomes an exhaustive
+  switch that panics on a grammar with no counting rule. A fallback branch there would count one
+  language by another's rules — no error, no parse failure, a plausible number under a heading
+  naming the wrong language — which is the one failure in that package nothing downstream can
+  detect.
+- `treesitter.DeclaredTests` gains the same refusal, as `ErrNoTestEnumeration`. A grammar reaches
+  this package for the gates that need spans before anything enumerates its tests, and an empty
+  slice there reads as a file declaring none: a new-test gate green over every file in the
+  language, on the day somebody lists it and never again. Python is that grammar today; reading
+  a Python test declaration is not part of this amendment.

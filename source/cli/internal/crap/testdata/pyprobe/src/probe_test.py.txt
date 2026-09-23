@@ -1,0 +1,11 @@
+"""A file pytest collects by its `_test` suffix, which lydite scores nothing
+of. The suffix is the other of the two names pytest discovers unconfigured.
+"""
+
+from probe import guarded
+
+
+def test_guarded_admits_an_admin():
+    assert guarded(None, True)
+    if guarded("root", False):
+        assert True
