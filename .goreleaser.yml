@@ -30,9 +30,10 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
-    # The grammar tables mutation parses Rust and TypeScript with. gotreesitter
-    # embeds all 206 of its grammars by default, which is 20MB of blobs in a
-    # binary that parses three languages — measured at 45MB against 25MB here.
+    # The grammar tables mutation and CRAP parse Rust, TypeScript and Python
+    # with. gotreesitter embeds all 206 of its grammars by default, which is
+    # ~19MB of blobs in a binary that parses four languages — measured at
+    # 21MB against 40MB here.
     #
     # Both halves of the tag list are load-bearing. `grammar_subset` switches
     # the wildcard embed off; each `grammar_subset_<lang>` tag switches one
