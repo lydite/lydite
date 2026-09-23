@@ -38,9 +38,10 @@ already follows. `carriedScore` is the one implementation of which entry a compo
 both the row a run renders and the document it hands the fold; two copies would have one tree
 report one figure sharded and another unsharded.
 
-**All three languages, and none of them by a pinned tool.** Go walks `go/ast` in-process; Rust and
-TypeScript walk the same function-span and construct tables `internal/treesitter` already builds
-for exclusion resolution ([ADR 0034](../../docs/adr/0034-an-exclusion-declaration-is-scoped-by-a-parser-in-every-language.md)).
+**All four languages, and none of them by a pinned tool.** Go walks `go/ast` in-process; Rust,
+TypeScript and Python walk the same function-span and construct tables `internal/treesitter`
+already builds for exclusion resolution
+([ADR 0034](../../docs/adr/0034-an-exclusion-declaration-is-scoped-by-a-parser-in-every-language.md)).
 No language costs a tool, a pin, an install or a staleness risk — see
 [ADR 0036](../../docs/adr/0036-crap-scores-rust-and-typescript-from-a-hand-rolled-walk.md) for why
 a hand-rolled walk was chosen over the pinned-tool candidates that exist for each language, and for
@@ -54,8 +55,9 @@ language *is* known and whose score could not be taken is the opposite, and is a
 `range`, every non-default `case`, every communicating `select` clause, and every `&&` and `||`.
 A number lydite reports and a number a developer gets from either agree, which is most of what
 makes a threshold arguable. Rust and TypeScript each get their own rule, chosen against their own
-ecosystem's tool rather than restated from Go's — see ADR 0036 for both in full. A closure counts
-towards the function that declares it in every language, because the coverage half of the score is
+ecosystem's tool rather than restated from Go's — see ADR 0036 for both in full. Python's rule is
+matched to radon's cyclomatic count instead, the tool that ecosystem already reaches for. A closure
+counts towards the function that declares it in every language, because the coverage half of the score is
 that function's whole line span and contains the closure's lines — excluding its branches would
 score one span's coverage against another span's complexity.
 
@@ -86,16 +88,17 @@ its mutants by lines coverage reports as executed, so reading `Hits` there would
 declaration silence a second gate — and a function whose coverage is taken in another process has
 not thereby become unmutable. A language with no declaration form has one map under both names.
 
-**Go's own attachment carries a stated limit, and Rust, TypeScript and TSX carry the same one
-asked of a syntax tree instead.** A function written directly beneath an existing declaration — no
-blank line, no doc comment of its own — takes that declaration, because `go/parser` attaches the
+**Go's own attachment carries a stated limit, and Rust, TypeScript, TSX and Python carry the same
+one asked of a syntax tree instead.** A function written directly beneath an existing declaration —
+no blank line, no doc comment of its own — takes that declaration, because `go/parser` attaches the
 group to the nearer declaration; the new function is excluded and the old one returns to being
 counted, and nothing refers the change because the diff adds no line holding the token. What
 bounds it is that gofmt separates declarations with a blank line and the shape is unusual. Closing
 it properly means naming the function inside the token, which is a grammar change rather than a
-rule this one can make. In Rust, TypeScript and TSX the declaration is a `//` line comment written
-*above* the function it covers, exactly as in Go — never inside its body — and the walk carries
-the identical bound: past the declaration's own reason lines, known exactly from how many comment
+rule this one can make. In Rust, TypeScript and TSX the declaration is a `//` line comment, and in
+Python a `#` line comment, written *above* the function it covers, exactly as in Go — never inside
+its body — and the walk carries the identical bound: past the declaration's own reason lines, known
+exactly from how many comment
 lines `annotation.Declarations` already recorded resolving it rather than re-derived by asking the
 tree a second time, only a decoration is skipped, and only when it starts on the very next line. A
 blank line, or any comment that is not the declaration's own continuation, ends the walk without a

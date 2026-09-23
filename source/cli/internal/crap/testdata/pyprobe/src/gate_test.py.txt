@@ -1,0 +1,9 @@
+"""A whole file with pytest's `_test` suffix, skipped by the same rule."""
+
+from .probe import Gate
+
+
+def test_a_gate_opens_for_an_admin():
+    gate = Gate()
+    if not gate.allow("root", True):
+        raise AssertionError("an admin was refused")

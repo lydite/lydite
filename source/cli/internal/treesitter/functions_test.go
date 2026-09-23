@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"lydite/lydite/internal/fixture"
@@ -125,6 +126,40 @@ func TestTheTypeScriptProbeEnumeratesEveryScoredFunction(t *testing.T) {
 	})
 }
 
+// The spans and the nesting the Python probe predicts. A decorated function's
+// span is the `def`'s own, the decorator line above it belonging to no unit —
+// the same place a Rust `#[inline]` line sits. A nested `def` is a unit of its
+// own, a `lambda` folds into the function holding it, and a method is named by
+// the class it is written on.
+func TestThePythonProbeEnumeratesEveryScoredFunction(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("..", "crap", "testdata", "pyprobe"))
+	assertUnits(t, "src/probe.py", probe(t, runner.Python, tree, "src/probe.py"), []unit{
+		{name: "classify", span: Span{First: 10, Last: 19}},
+		{name: "guarded", span: Span{First: 22, Last: 26}},
+		{name: "pick", span: Span{First: 29, Last: 31}},
+		{name: "countdown", span: Span{First: 34, Last: 40}},
+		{name: "first_even", span: Span{First: 43, Last: 48}},
+		{name: "search", span: Span{First: 51, Last: 57}},
+		{name: "read_number", span: Span{First: 60, Last: 65}},
+		{name: "read_pair", span: Span{First: 68, Last: 79}},
+		{name: "regroup", span: Span{First: 82, Last: 90}},
+		{name: "evens", span: Span{First: 93, Last: 95}},
+		{name: "tally", span: Span{First: 98, Last: 101}},
+		{name: "require_positive", span: Span{First: 104, Last: 107}},
+		{name: "read_file", span: Span{First: 110, Last: 113}},
+		{name: "describe", span: Span{First: 116, Last: 124}},
+		{name: "label", span: Span{First: 127, Last: 133}},
+		{name: "bracket", span: Span{First: 136, Last: 144}},
+		{name: "gather", span: Span{First: 147, Last: 154}},
+		{name: "cached_band", span: Span{First: 158, Last: 162}},
+		{name: "outer", span: Span{First: 165, Last: 175}, nested: 1},
+		{name: "inner", span: Span{First: 168, Last: 171}},
+		{name: "Gate.__init__", span: Span{First: 181, Last: 182}},
+		{name: "Gate.allow", span: Span{First: 184, Last: 187}},
+		{name: "Marker.kind", span: Span{First: 195, Last: 196}},
+	})
+}
+
 // Test code is not scored, and a whole file of it yields nothing rather than
 // an error: it is a file with nothing to score, not one lydite could not read.
 func TestTestCodeIsNotEnumerated(t *testing.T) {
@@ -138,6 +173,9 @@ func TestTestCodeIsNotEnumerated(t *testing.T) {
 		{runner.TypeScript, "tsprobe", "src/probe.test.ts"},
 		{runner.TypeScript, "tsprobe", "src/gate.spec.ts"},
 		{runner.TypeScript, "tsprobe", "src/__tests__/helpers.ts"},
+		{runner.Python, "pyprobe", "src/test_probe.py"},
+		{runner.Python, "pyprobe", "src/gate_test.py"},
+		{runner.Python, "pyprobe", "src/tests/helpers.py"},
 	} {
 		tree := fixture.Tree(t, filepath.Join("..", "crap", "testdata", c.probe))
 		if got := probe(t, c.lang, tree, c.rel); len(got) != 0 {
@@ -271,6 +309,37 @@ func TestAMethodCarriesTheTypeItIsWrittenOn(t *testing.T) {
 		}
 		if len(funcs) != 1 || funcs[0].Name != c.want {
 			t.Errorf("%s: names = %v, want [%s]", c.path, names(funcs), c.want)
+		}
+	}
+}
+
+// A function nested inside a method takes no receiver of its own: it is a
+// helper the method declares, not a method of the class, and climbing past its
+// enclosing method to the class beneath would give it a name that collides
+// with a real method there.
+func TestAFunctionNestedInsideAMethodTakesNoReceiver(t *testing.T) {
+	for _, c := range []struct {
+		lang runner.Lang
+		path string
+		src  string
+		want []string
+	}{
+		{runner.Rust, "src/lib.rs",
+			"struct Gate;\nimpl Gate {\n    fn allow(&self) -> bool {\n        fn helper() -> bool {\n            true\n        }\n        helper()\n    }\n}\n",
+			[]string{"Gate::allow", "helper"}},
+		{runner.TypeScript, "src/a.ts",
+			"export class Gate {\n  allow(): boolean {\n    function helper(): boolean {\n      return true;\n    }\n    return helper();\n  }\n}\n",
+			[]string{"Gate.allow", "helper"}},
+		{runner.Python, "src/a.py",
+			"class Gate:\n    def allow(self):\n        def helper():\n            return True\n        return helper()\n",
+			[]string{"Gate.allow", "helper"}},
+	} {
+		funcs, _, err := ScoredFunctions(c.lang, c.path, []byte(c.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := names(funcs); !slices.Equal(got, c.want) {
+			t.Errorf("%s: names = %v, want %v", c.path, got, c.want)
 		}
 	}
 }

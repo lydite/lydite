@@ -166,14 +166,15 @@ func excludedGoLines(path, name string, gate annotation.Gate) (exclusions, error
 // gate: the parser's answer for a language lydite holds tree-sitter tables for,
 // and nothing at all for a language it does not.
 //
-// Python is the second kind, and the consequence is that
-// `[lydite:exclude_from_coverage]` is not available in a Python component.
-// A declaration's reach is the span of the function it sits above, only a parser
-// can say where that span ends, and internal/treesitter has no Python tables —
-// so asking for its exclusions answers ErrNoGrammar for every file the report
-// names, which would fail the measurement of a component over a feature the
-// language does not have. Skipped here rather than absorbed in
-// excludedLCOVLines, whose contract stays what it reads for the two languages
+// A declaration's reach is the span of the function it sits above and only a
+// parser can say where that span ends, so a language internal/treesitter holds
+// no tables for answers ErrNoGrammar for every file the report names — which
+// would fail the measurement of a component over a feature the language does
+// not have. The skip is what makes `[lydite:exclude_from_coverage]` available
+// in a language exactly when lydite can resolve what it covers, and it turns on
+// for a new language the moment GrammarFor answers for it, with nothing here to
+// remember to change. Skipped here rather than absorbed in
+// excludedLCOVLines, whose contract stays what it reads for the languages
 // that do have tables: a file those tables cannot parse is no exclusion, and
 // every other answer from the parser — a declaration with no reason, above all —
 // is still an error that fails the measurement.
@@ -188,9 +189,9 @@ func lcovExclusions(path, name string, lang runner.Lang, gate annotation.Gate) (
 	return excludedLCOVLines(path, name, lang, gate)
 }
 
-// excludedLCOVLines is the lines of one Rust or TypeScript source file that a
-// declaration for gate covers. name is what the report keys the file by, as it
-// is for Go.
+// excludedLCOVLines is the lines of one Rust, TypeScript or Python source file
+// that a declaration for gate covers. name is what the report keys the file by,
+// as it is for Go.
 //
 // The same question excludedGoLines answers, asked of a language whose report
 // is lcov. It is a parser that answers it in both, because the alternative is a

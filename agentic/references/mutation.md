@@ -67,7 +67,10 @@ reader to skim past it.
 
 An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
 to detect one: the author declares it in a `[lydite:exclude_from_mutation][<reason>]` comment
-**beside** the mutant. All three languages spell a line comment `//`, so one form covers them. The declaration
+**beside** the mutant. Go, Rust, TypeScript and TSX — the mutation-capable languages — spell a line
+comment `//`; Python, which `internal/annotation` also parses for the crap and coverage
+declarations, spells it `#`. `annotation.body` strips either, so one function still covers every
+language's declaration line. The declaration
 covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
 least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
 call, and the innermost is what somebody annotating that line is looking at. Deciding by
@@ -87,7 +90,7 @@ falls on exactly one shape: a relational operator whose two ends are not equally
 
 The reason is required, and its absence is an error rather than a silent non-honouring. What counts
 as a comment is each language's own parser to say, never a scan of the bytes: one scan would have
-to lex three languages correctly to be right once. `internal/annotation` holds the token and the
+to lex four languages correctly to be right once. `internal/annotation` holds the token and the
 rule, and is a **leaf** — `internal/referral` decides what merges unread and must not link a
 language parser to obtain one string.
 
@@ -107,11 +110,13 @@ grammar tables are the only input.
 
 **The shipped build is a `grammar_subset`.** `gotreesitter` embeds all 206 of its grammars
 unless the `grammar_subset` build tag turns the wildcard embed off, and each
-`grammar_subset_<lang>` tag turns one blob back on — 15MB against 33MB for the same binary. A
-build without them is correct and larger; a build with `grammar_subset` and a language's own
-tag missing panics at that language's first parse, which is why `ci-test` runs the suite under
-the exact tag list `go build` uses (see the root [`AGENTS.md`](../../AGENTS.md) Commands
-section).
+`grammar_subset_<lang>` tag turns one blob back on — 15MB against 33MB for the same binary. Five
+tags ship today: `grammar_subset_rust`, `_typescript` and `_tsx` for mutation's own two grammars,
+plus `_python` for crap.md's Python walk (a ~60KB blob) — mutation reads none of it, since Python
+has no mutation backend or generator (issue #221). A build without them is correct and larger; a
+build with `grammar_subset` and a language's own tag missing panics at that language's first
+parse, which is why `ci-test` runs the suite under the exact tag list `go build` uses (see the
+root [`AGENTS.md`](../../AGENTS.md) Commands section).
 
 **The node types are the whole of what lydite knows per language**, held in one `grammar` table
 each: the infix node whose `operator` field the three operator rewrites replace, the return node,

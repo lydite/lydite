@@ -178,9 +178,9 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
 |---|---|
 | suite and JUnit report | yes |
 | coverage | yes, through lcov |
-| `[lydite:exclude_from_coverage]` | no — lydite holds no Python grammar |
-| CRAP | files are reported skipped |
-| mutation | unmeasured — no generator or backend for Python |
+| `[lydite:exclude_from_coverage]` | yes — `internal/treesitter` holds a Python grammar |
+| CRAP | yes — `internal/treesitter` walks Python's function spans |
+| mutation | unmeasured — no generator or backend for Python (issue #221, not an oversight) |
 | scan | unmeasured — no scanner |
 | toolchain | not pinned or provisioned (see [`toolchains.md`](toolchains.md)) |
 

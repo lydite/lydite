@@ -1,0 +1,196 @@
+"""Every branching construct the Python counting rule names, one function per
+shape, so a complexity walk can be checked against a number derived by hand in
+the README beside this file.
+"""
+
+from functools import lru_cache
+from typing import final
+
+
+def classify(n):
+    """An `if`/`elif` chain; the `else` is not a decision of its own."""
+    if n < 0:
+        return "negative"
+    elif n == 0:
+        return "zero"
+    elif n < 10:
+        return "small"
+    else:
+        return "large"
+
+
+def guarded(a, b, c):
+    """One `if`, one `and` and one `or`."""
+    if a and b or c:
+        return 1
+    return 0
+
+
+def pick(a, b):
+    """A conditional expression."""
+    return a if a > b else b
+
+
+def countdown(n):
+    """A plain `while`."""
+    steps = 0
+    while n > 0:
+        n -= 1
+        steps += 1
+    return steps
+
+
+def first_even(items):
+    """A `for`, with an `if` in its body."""
+    for item in items:
+        if item % 2 == 0:
+            return item
+    return None
+
+
+def search(items, wanted):
+    """A `for` with an `else`, which is a decision beside the loop's own."""
+    for item in items:
+        if item == wanted:
+            return "found"
+    else:
+        return "exhausted"
+
+
+def read_number(text):
+    """One `except` handler."""
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def read_pair(text):
+    """Two `except` handlers and an `else`; the `finally` is unconditional."""
+    try:
+        left, right = text.split(",")
+    except ValueError:
+        return (0, 0)
+    except AttributeError:
+        return (0, 0)
+    else:
+        return (int(left), int(right))
+    finally:
+        text = None
+
+
+def regroup(work):
+    """`except*` handlers, which radon's own visitor does not recognise."""
+    try:
+        work()
+    except* ValueError:
+        return "value"
+    except* TypeError:
+        return "type"
+    return "ok"
+
+
+def evens(items):
+    """A comprehension, with a filter clause of its own."""
+    return [n for n in items if n % 2 == 0]
+
+
+def tally(items):
+    """A lambda, whose branches count toward the function containing it."""
+    keep = lambda n: n > 0 and n < 100
+    return sum(filter(keep, items))
+
+
+def require_positive(n):
+    """An `assert`, which is the conditional its message describes."""
+    assert n > 0, "n must be positive"
+    return n
+
+
+def read_file(path):
+    """A `with`, which is not a decision point."""
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def describe(n):
+    """A `match` whose catch-all is the literal `_`, which does not count."""
+    match n:
+        case 0:
+            return "zero"
+        case 1:
+            return "one"
+        case _:
+            return "many"
+
+
+def label(n):
+    """A `match` whose catch-all is a binding, which does count."""
+    match n:
+        case 0:
+            return "zero"
+        case other:
+            return f"n={other}"
+
+
+def bracket(n):
+    """A guarded `case`: the guard belongs to the case, not to a comprehension."""
+    match n:
+        case int() if n > 10:
+            return "large"
+        case int():
+            return "small"
+        case _:
+            return "other"
+
+
+async def gather(sources):
+    """An `async def` with an `async for`, both the nodes their synchronous
+    forms are."""
+    total = 0
+    async for item in sources:
+        if item > 0:
+            total += item
+    return total
+
+
+@lru_cache(maxsize=None)
+def cached_band(n):
+    """A decorated function: the decorator attaches, and decides nothing."""
+    if n > 10:
+        return "large"
+    return "small"
+
+
+def outer(n):
+    """A nested `def`: scored as its own function, with a flat +1 left here."""
+
+    def inner(n):
+        if n % 2 == 0:
+            return n // 2
+        return n * 3 + 1
+
+    if n > 0:
+        return inner(n)
+    return 0
+
+
+class Gate:
+    """A class, whose methods are named by the class they are written on."""
+
+    def __init__(self):
+        self.open = False
+
+    def allow(self, user, admin):
+        if admin or (user is not None and len(user) > 0):
+            self.open = True
+        return self.open
+
+
+@final
+class Marker:
+    """A decorated class: a `decorated_definition` introducing no function of
+    its own."""
+
+    def kind(self, n):
+        return "odd" if n % 2 else "even"

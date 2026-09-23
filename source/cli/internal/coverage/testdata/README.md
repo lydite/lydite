@@ -10,16 +10,15 @@ not be evidence for.
 Each probe carries the shapes a scope has to survive in its own language — a free function, a
 method, a nested function and a closure everywhere, plus a generic in the two that have one —
 one function the suite never calls, and a real `[lydite:exclude_from_coverage]` declaration. In
-Rust and TypeScript the declaration is a `//`
-line comment and not the language's own doc comment (`///`, `/** */`) because `annotation.body`
-strips `//` and nothing else, so those are the only comments a declaration can be written in
-today.
+Rust and TypeScript the declaration is a `//` line comment and not the language's own doc
+comment (`///`, `/** */`) because `annotation.body` strips `//` and nothing else among their own
+comment forms, so those are the only comments a declaration can be written in today.
 
-`pylcovprobe`'s declaration is a `#` comment, and it is there to hold the opposite property: a
-Python component's measurement reads no declaration at all, because the deduction's reach is a
-function span and `internal/treesitter` holds no Python tables. Nothing is deducted and nothing
-is reported unmatched, which is what
-`TestAPythonDeclarationDeductsNothingAndFailsNothing` pins.
+`pylcovprobe`'s declaration is a `#` comment, which `annotation.body` strips as its own
+introducer exactly as it strips `//`. A Python component's measurement takes its function out of
+the figure the same way Rust's and TypeScript's do — the deduction's reach is the span
+`internal/treesitter`'s Python tables report for the `def` beneath the declaration — which is
+what `TestAPythonDeclarationTakesItsFunctionOutOfTheFigure` pins.
 
 Source files carry a `.txt` suffix and are materialised by `internal/fixture`, whose doc comment
 says why.

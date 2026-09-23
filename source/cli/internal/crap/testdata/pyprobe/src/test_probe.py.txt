@@ -1,0 +1,18 @@
+"""A whole file with pytest's `test_` prefix, skipped by its path before
+anything in it is walked. Its functions branch so that scoring it would be
+visible.
+"""
+
+from .probe import classify
+
+
+def band(n):
+    if n < 0:
+        return "negative"
+    return "zero" if n == 0 else "positive"
+
+
+def test_bands_are_named():
+    for n in [-1, 0, 1]:
+        assert band(n) != ""
+    assert classify(0) == "zero"

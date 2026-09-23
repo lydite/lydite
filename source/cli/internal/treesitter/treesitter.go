@@ -1,9 +1,9 @@
-// Package treesitter is the parse tables lydite reads Rust, TypeScript and TSX
-// with, and the questions both the coverage gates and the mutation engine ask
-// of a syntax tree.
+// Package treesitter is the parse tables lydite reads Rust, TypeScript, TSX
+// and Python with, and the questions both the coverage gates and the mutation
+// engine ask of a syntax tree.
 //
 // Go is parsed with go/ast because the language ships its own parser and
-// nothing could be more faithful. The other two have no parser in the standard
+// nothing could be more faithful. The others have no parser in the standard
 // library and lydite must stay a single statically-linked CGO_ENABLED=0 binary
 // for four platforms, which every C-backed tree-sitter binding rules out.
 //
@@ -16,7 +16,7 @@
 //
 // A build missing a `grammar_subset_<lang>` tag panics at that language's
 // first parse. The release tags and the module's own test invocation carry all
-// four.
+// five.
 package treesitter
 
 import (
@@ -46,6 +46,8 @@ const (
 	// separate parse tables upstream and a .tsx file read by the TypeScript
 	// tables produces a tree full of errors.
 	TSX
+	// Python reads .py.
+	Python
 )
 
 // GrammarFor picks the tables for one file.
@@ -63,6 +65,8 @@ func GrammarFor(lang runner.Lang, file string) (Grammar, bool) {
 			return TSX, true
 		}
 		return TypeScript, true
+	case runner.Python:
+		return Python, true
 	default:
 		return 0, false
 	}
@@ -80,6 +84,8 @@ func (g Grammar) Language() *gotreesitter.Language {
 		return grammars.TypescriptLanguage()
 	case TSX:
 		return grammars.TsxLanguage()
+	case Python:
+		return grammars.PythonLanguage()
 	default:
 		return nil
 	}

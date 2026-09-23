@@ -22,7 +22,7 @@ type testCode struct {
 	// module is the node type of a module whose contents are the suite, or
 	// empty for a language that puts none inside the file it tests.
 	//
-	// Rust needs it and the other two do not: `#[cfg(test)] mod tests` sits
+	// Rust needs it and the others do not: `#[cfg(test)] mod tests` sits
 	// inside the file under test, so no path rule can see it.
 	module string
 	// attribute is the attribute, whitespace removed, that marks such a
@@ -38,6 +38,9 @@ var testConventions = map[Grammar]testCode{
 	},
 	TypeScript: {
 		file: typeScriptTestFile,
+	},
+	Python: {
+		file: pythonTestFile,
 	},
 }
 
@@ -152,7 +155,9 @@ type DeclaredTest struct {
 //
 // A file the grammar could not read is ErrUnparsed and never an empty answer.
 // A parse failure is not a file that declares no tests, and a gate reading it
-// as one goes green on the change that broke the parser.
+// as one goes green on the change that broke the parser. A language lydite
+// parses but enumerates no tests for — Python — is ErrNoGrammar for the same
+// reason, spelled out at the switch's default.
 func DeclaredTests(lang runner.Lang, p string, src []byte) ([]DeclaredTest, error) {
 	g, ok := GrammarFor(lang, p)
 	if !ok {
@@ -168,6 +173,14 @@ func DeclaredTests(lang runner.Lang, p string, src []byte) ([]DeclaredTest, erro
 		w.rust(root, nil, g.TestFile(p))
 	case TypeScript:
 		w.typeScript(root, "", false)
+	default:
+		// A grammar with tables but no enumeration of its own is refused, not
+		// answered with nothing. The two are opposite answers a caller cannot
+		// tell apart, and the wrong one is silently green: "new" is a set
+		// difference of declared names, so a language reported as declaring no
+		// test at either revision has no new test at either, and the gate over
+		// it passes without having looked.
+		return nil, ErrNoGrammar{Lang: lang}
 	}
 	return w.out, nil
 }
@@ -457,6 +470,24 @@ func typeScriptTestFile(p string) bool {
 		return true
 	}
 	return strings.HasPrefix(p, "__tests__/") || strings.Contains(p, "/__tests__/")
+}
+
+// pythonTestFile recognises the conventions pytest discovers a test file by: a
+// `test_` prefix or a `_test` suffix on the stem, and a `tests` directory.
+//
+// There is no module rule beside it, because Python has no in-file convention
+// for test code the way Rust's `#[cfg(test)] mod tests` is one — a test lives
+// in a file pytest collects, and nothing marks one inside a file that ships.
+// `conftest.py` is deliberately unrecognised: it holds fixtures and hooks
+// rather than tests, and an unrecognised form failing open — scored, and so
+// visible — is the direction every rule here fails in.
+func pythonTestFile(p string) bool {
+	base := path.Base(p)
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	if strings.HasPrefix(stem, "test_") || strings.HasSuffix(stem, "_test") {
+		return true
+	}
+	return strings.HasPrefix(p, "tests/") || strings.Contains(p, "/tests/")
 }
 
 // compact removes every space from an attribute, so one form is recognised

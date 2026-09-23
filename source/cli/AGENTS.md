@@ -6,7 +6,7 @@ tags — a language whose own `grammar_subset_<lang>` tag is missing panics at i
 and a bare `go test` can never see it:
 
 ```sh
-go test -race -tags 'grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx' ./...
+go test -race -tags 'grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx grammar_subset_python' ./...
 ```
 
 The scan root is the repository root *above* this one: `lydite scan --dir ../..`. A `--dir ..`

@@ -67,18 +67,20 @@ const (
 // kind of thing under the same name.
 const Prefix = "[lydite:exclude_from_"
 
-// Marker is how an author opens a declaration for one gate. Go, Rust and
-// TypeScript all spell a line comment "//", so one form covers them.
+// Marker is how an author opens a declaration for one gate. The introducer in
+// front of it is whatever the language spells a line comment with — "//" in Go,
+// Rust and TypeScript, "#" in Python — and body strips either, so one token
+// reads the same in all four.
 func Marker(g Gate) string { return Prefix + string(g) + "]" }
 
 // Comment is one comment as a language's own parser reports it: the line it
 // starts on, and its text including the introducer.
 //
 // Each language answers what a comment is, because each language already
-// knows. A scan that decided for itself has to lex three languages correctly
+// knows. A scan that decided for itself has to lex four languages correctly
 // to be right once — block comments, an apostrophe in prose, a Rust lifetime,
-// a string continuation — and every case it gets wrong either honours a
-// declaration nobody made or drops one somebody did.
+// a string continuation, a "#" inside a Python string — and every case it gets
+// wrong either honours a declaration nobody made or drops one somebody did.
 type Comment struct {
 	Line int
 	Text string
@@ -215,6 +217,25 @@ func gather(rest string, open int, next []Comment) (reason string, consumed int,
 // body is a comment's text with its introducer and the space after it removed,
 // so a declaration reads the same whether an author wrote `// [lydite:...` or
 // `//[lydite:...`.
+//
+// Either introducer, because a language spells a line comment one way or the
+// other and a declaration is one grammar across all of them: stripping only
+// `//` leaves a Python `# [lydite:...` with its `#` still on the front, where it
+// matches no marker and is silently not a declaration at all. What counts as a
+// comment is still each language's own parser's answer — nothing arrives here
+// that the language did not already call a comment — so this is the introducer
+// and nothing more.
+//
+// Both the declaration's own line and a continuation line go through it, since
+// a reason wraps onto comments written with the same introducer as the one that
+// opened it.
 func body(text string) string {
-	return strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(text, " \t"), "//"), " \t")
+	text = strings.TrimLeft(text, " \t")
+	for _, introducer := range []string{"//", "#"} {
+		if rest, ok := strings.CutPrefix(text, introducer); ok {
+			text = rest
+			break
+		}
+	}
+	return strings.TrimLeft(text, " \t")
 }

@@ -30,7 +30,7 @@ permissions:
 # tag turns one blob back on. `.goreleaser.yml` carries the same list, because a
 # release build is not this workflow's to run.
 env:
-  LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx
+  LYDITE_BUILD_TAGS: grammar_subset grammar_subset_rust grammar_subset_typescript grammar_subset_tsx grammar_subset_python
 
 jobs:
   build-test:

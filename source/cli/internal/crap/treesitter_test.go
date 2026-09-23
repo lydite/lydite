@@ -9,6 +9,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/treesitter"
 )
 
 // scored is every function one probe file scores, keyed by name, with the whole
@@ -103,6 +104,57 @@ func TestTheTypeScriptWalkCountsWhatADR0036Predicts(t *testing.T) {
 	assertComplexity(t, "src/badge.tsx", scored(t, runner.TypeScript, tree, "src/badge.tsx"), map[string]int{
 		"Badge": 4,
 	})
+}
+
+// Every Python counting rule, likewise, against the numbers derived by hand in
+// testdata/README.md. Three of them are numbers `radon` disagrees with, and the
+// README says why lydite keeps its own: `regroup` counts the `except*` handlers
+// radon's visitor does not recognise at all, `label` counts a binding catch-all
+// the way the Rust walk counts one, and `outer` keeps a flat one for the nested
+// `def` radon only scores separately.
+func TestThePythonWalkCountsWhatADR0036Predicts(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "pyprobe"))
+	assertComplexity(t, "src/probe.py", scored(t, runner.Python, tree, "src/probe.py"), map[string]int{
+		"classify":         4,
+		"guarded":          4,
+		"pick":             2,
+		"countdown":        2,
+		"first_even":       3,
+		"search":           4,
+		"read_number":      2,
+		"read_pair":        4,
+		"regroup":          3,
+		"evens":            3,
+		"tally":            2,
+		"require_positive": 2,
+		"read_file":        1,
+		"describe":         3,
+		"label":            3,
+		"bracket":          3,
+		"gather":           3,
+		"cached_band":      2,
+		"outer":            3,
+		"inner":            2,
+		"Gate.__init__":    1,
+		"Gate.allow":       4,
+		"Marker.kind":      2,
+	})
+}
+
+// A grammar complexityOf's switch does not name is refused rather than
+// answered under another's rule. Nothing in runner.Lang or treesitter.Grammar
+// can produce this today — every grammar GrammarFor returns also has a case
+// here — so the value has to be manufactured, the same way the switch itself
+// exists for a divergence that has not happened yet.
+func TestComplexityOfRefusesAGrammarWithNoCountingRule(t *testing.T) {
+	unmatched := treesitter.Grammar(99)
+	complexity, err := complexityOf(runner.Python, unmatched, treesitter.Func{}, nil)
+	if err == nil {
+		t.Fatal("complexityOf(unmatched grammar) = nil error, want one naming the language")
+	}
+	if complexity != 0 {
+		t.Errorf("complexity = %d, want 0 alongside the error — a refusal carries no number a caller could mistake for a real one", complexity)
+	}
 }
 
 // A nested named function is scored in its own right, so its lines are evidence
@@ -268,9 +320,10 @@ pub fn g(n: i64) -> i64 {
 }
 
 // Test code is scored by nothing, whether a whole file recognised by its path
-// or a `#[cfg(test)]` module inside one that is scored. Rust's lcov and
-// TypeScript's coverage reports both describe test code, where a Go profile
-// never has, so the rule Go gets from its toolchain is an explicit one here.
+// or a `#[cfg(test)]` module inside one that is scored. Rust's lcov and the
+// TypeScript and Python coverage reports all describe test code, where a Go
+// profile never has, so the rule Go gets from its toolchain is an explicit one
+// here.
 func TestTestCodeIsNotScored(t *testing.T) {
 	for _, c := range []struct {
 		lang  runner.Lang
@@ -282,6 +335,9 @@ func TestTestCodeIsNotScored(t *testing.T) {
 		{runner.TypeScript, "tsprobe", "src/probe.test.ts"},
 		{runner.TypeScript, "tsprobe", "src/gate.spec.ts"},
 		{runner.TypeScript, "tsprobe", "src/__tests__/helpers.ts"},
+		{runner.Python, "pyprobe", "src/test_probe.py"},
+		{runner.Python, "pyprobe", "src/gate_test.py"},
+		{runner.Python, "pyprobe", "src/tests/helpers.py"},
 	} {
 		tree := fixture.Tree(t, filepath.Join("testdata", c.probe))
 		out, err := scoreTree(c.lang, tree, c.rel, covering(400, 1))
@@ -382,9 +438,9 @@ func TestARustOrTypeScriptFileThatCannotBeReadIsAnErrorNamingIt(t *testing.T) {
 // false bool — a mutant that swapped the empty string for anything else would
 // pass every test that only checked the bool half of tracked's answer.
 func TestAnUnwalkedExtensionTracksAsTheEmptyLanguage(t *testing.T) {
-	lang, walked := tracked("src/component.py")
+	lang, walked := tracked("src/component.jsx")
 	if walked {
-		t.Fatalf("walked = true for a .py file, want false")
+		t.Fatalf("walked = true for a .jsx file, want false")
 	}
 	if lang != "" {
 		t.Errorf("lang = %q for an untracked extension, want the empty string", lang)
@@ -416,13 +472,42 @@ func TestAScriptPathIsNotReportedSkipped(t *testing.T) {
 	}
 }
 
-// A Python file is a language a runner runs and this gate holds no grammar for,
-// so it is named skipped rather than dropped out of the hit map in silence — the
-// same answer a .jsx file gets, and for the same reason: a file scored by
-// nothing must not read as one this gate had nothing to say about.
-func TestAPythonPathIsReportedSkipped(t *testing.T) {
-	if !skipped("src/scope.py") {
-		t.Error(`skipped("src/scope.py") = false, want true — python has a runner and this gate no grammar`)
+// A Python file is walked rather than reported skipped: the gate holds Python's
+// tables and a counting rule for them, so there is a score to take and nothing
+// to report a gap over.
+func TestAPythonPathIsWalkedRatherThanSkipped(t *testing.T) {
+	lang, walked := tracked("src/scope.py")
+	if !walked || lang != runner.Python {
+		t.Errorf("tracked(%q) = %q, %v, want python, true", "src/scope.py", lang, walked)
+	}
+	if skipped("src/scope.py") {
+		t.Error(`skipped("src/scope.py") = true, want false — it is walked`)
+	}
+}
+
+// And end to end: a Python file the hit map describes is scored beside the
+// other languages, its test files are not, and neither is named as a gap.
+func TestMeasureScoresAPythonComponent(t *testing.T) {
+	tree := fixture.Tree(t, filepath.Join("testdata", "pyprobe"))
+	rep, err := Measure(tree, coverage.LineHits{
+		"src/probe.py":         covering(200, 0),
+		"src/test_probe.py":    covering(20, 0),
+		"src/gate_test.py":     covering(10, 0),
+		"src/tests/helpers.py": covering(10, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Scored != 23 {
+		t.Fatalf("scored %d functions, want the 23 src/probe.py declares: %+v", rep.Scored, rep.Over)
+	}
+	if len(rep.Skipped) != 0 {
+		t.Errorf("skipped = %v, want nothing — every file is walked", rep.Skipped)
+	}
+	for _, f := range rep.Over {
+		if f.File != "src/probe.py" {
+			t.Errorf("%s:%s was scored, want the test files left out", f.File, f.Name)
+		}
 	}
 }
 
