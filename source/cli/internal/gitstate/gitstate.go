@@ -736,6 +736,24 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 // say, the second is a caller whose records were all already there.
 type Records func(worktree string) ([]ledger.Record, error)
 
+// attempts is how many times one recording is pushed before the run gives up,
+// and it is a bound on overlap rather than a number picked by feel.
+//
+// A push is rejected only when another run landed between this attempt's fetch
+// and its push, and each concurrent run lands exactly once — so a run racing
+// N−1 others is rejected at most N−1 times, and N runs writing at once all land
+// if and only if there are N attempts. Baseline runs are grouped per commit SHA
+// rather than sharing one group, so they overlap instead of queueing, and three
+// of them in flight at once all record.
+//
+// A fourth is not silent loss, which is what makes this a tolerance rather than
+// a cap on correctness. A push that never lands is returned as an error, so the
+// run reports a failure instead of a recording, and the next successful append
+// reads the branch's own newest record and writes the explicit gap. That is the
+// ledger's contract: not that there are no gaps, but that it never lies about
+// its own completeness.
+const attempts = 3
+
 // Write lands one recording on the state branch: the baselines for a tree, and
 // the quality-history records for the commit that produced them, in one commit.
 //
@@ -773,7 +791,6 @@ func Write(ctx context.Context, dir, sha string, snap Snapshot, records Records)
 	if !snap.Recorded() && records == nil {
 		return nil, nil
 	}
-	const attempts = 3
 	var lastErr error
 	for range attempts {
 		landed, err := pushState(ctx, dir, sha, snap, records)
