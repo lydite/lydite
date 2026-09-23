@@ -343,6 +343,61 @@ def fetch(n):
 	}
 }
 
+// Python's grammar lifts the first comment of an indented suite out of the
+// block it opens and onto the statement introducing that suite, so a
+// declaration above the first of two methods in a class has the whole class
+// body — the block holding both methods — as its very next sibling, not the
+// first method alone. Stopping there instead of stepping inside it, the way a
+// decorated_definition wrapper already is, would resolve the span to both
+// methods: introducesFunction's own row check still finds the first method
+// starting on the right row from inside the block, so the widened span passes
+// silently rather than failing outright — the same failure an `impl` block or
+// a decorated class is refused for by name, reached through a different node.
+func TestAPythonDeclarationAboveTheFirstOfTwoMethodsCoversOnlyThatMethod(t *testing.T) {
+	const src = `class C:
+    # a comment resolved as a declaration's last line
+    def f(self):
+        return 1
+
+    def g(self):
+        return 2
+`
+	root, language, err := Python.Parse("src/a.py", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := Python.scope(commentNodes(root, language), 2, 0, language)
+	if !ok {
+		t.Fatal("the declaration covered no function, want f alone")
+	}
+	if want := (Span{First: 3, Last: 4}); got != want {
+		t.Errorf("scope = %+v, want %+v — f's own span, not the block holding both methods", got, want)
+	}
+}
+
+// The same lifted-comment shape applies whether or not the first statement is
+// decorated: the walk steps through the block and then through the
+// decorated_definition wrapper in one pass, landing on the def itself.
+func TestAPythonDeclarationAboveAClasssFirstDecoratedMethodResolvesToItAlone(t *testing.T) {
+	const src = `class C:
+    # a comment resolved as a declaration's last line
+    @staticmethod
+    def f():
+        return 1
+`
+	root, language, err := Python.Parse("src/a.py", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := Python.scope(commentNodes(root, language), 2, 0, language)
+	if !ok {
+		t.Fatal("the declaration covered no function, want the decorated method")
+	}
+	if want := (Span{First: 4, Last: 5}); got != want {
+		t.Errorf("scope = %+v, want %+v", got, want)
+	}
+}
+
 // The adjacency bound holds through the wrapper too: a blank line between the
 // comment and the decorator ends the walk with no match, so a declaration
 // cannot reattach to whatever function happens to follow it.

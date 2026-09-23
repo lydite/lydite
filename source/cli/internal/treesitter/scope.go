@@ -65,25 +65,47 @@ var decorations = map[Grammar]map[string]bool{
 	},
 }
 
-// decorated is the node type that wraps a declaration together with the
-// decorations attached to it, for the one grammar that has such a wrapper.
+// decorated are the node types the walk steps *inside* rather than treating as
+// the anchor or a decoration to skip past, for the one grammar that wraps a
+// declaration in something other than the declaration itself.
 //
 // Rust and TypeScript write a decoration as a preceding sibling of the
-// declaration, so the walk past them is over siblings. Python's `decorator` is
-// a **child** of a `decorated_definition` holding the `def` or the `class`
-// too, so the walk steps into that wrapper and continues over its children —
-// and what it resolves to is the `function_definition` inside, never the
-// wrapper. Anchoring on the wrapper would give a declaration a span one line
-// higher than the span ScoredFunctions reports for the same function, and
-// crap's exclusion, which matches the two spans, would find no function to
-// exclude. Leaving the decorator line outside the span is what Rust already
-// does with an `#[inline]` line, which is no part of its function_item either.
+// declaration, so the walk past them is over siblings. Python needs two
+// entries, for two different reasons it wraps something around the thing a
+// comment is actually about:
 //
-// The wrapper is not in functions for the same reason it is not the anchor: it
-// wraps a `class_definition` just as readily as a `function_definition`, so a
-// table entry would score every decorated class as a function.
-var decorated = map[Grammar]string{
-	Python: "decorated_definition",
+//   - `decorated_definition` — Python's `decorator` is a **child** of this
+//     node, which also holds the `def` or the `class` it decorates, so the
+//     walk steps into it and continues over its children, resolving to the
+//     `function_definition` inside rather than to the wrapper. Anchoring on
+//     the wrapper would give a declaration a span one line higher than the
+//     span ScoredFunctions reports for the same function, and crap's
+//     exclusion, which matches the two spans, would find no function to
+//     exclude. Leaving the decorator line outside the span is what Rust
+//     already does with an `#[inline]` line, no part of its function_item.
+//   - `block` — the grammar lifts the *first* comment of an indented suite
+//     out of the block it opens and onto the statement introducing that
+//     suite, so a comment above the first of two methods in a class has the
+//     whole class body — the `block` holding both methods — as its very next
+//     sibling, not the first method alone. Stopping at `block` instead of
+//     stepping into it would resolve the declaration's span to both methods:
+//     `introducesFunction`'s own row check happens to still find the first
+//     method starting on the right row from inside the block and returns
+//     true, but `span(anchor)` then reports the whole block's span, wider
+//     than any function ScoredFunctions ever produces on its own — the same
+//     silent-widening failure an `impl` block or a decorated class is refused
+//     for by name, arrived at from a different node instead of avoided.
+//
+// Neither wrapper is in functions for the same reason it is not the anchor:
+// `decorated_definition` wraps a `class_definition` just as readily as a
+// `function_definition`, and `block` is the body of every compound statement,
+// not only a class's — a table entry for either would score something that is
+// not a function of its own.
+var decorated = map[Grammar]map[string]bool{
+	Python: {
+		"decorated_definition": true,
+		"block":                true,
+	},
 }
 
 // tables is the Grammar whose node names this one shares. TSX is the
@@ -213,14 +235,15 @@ func (g Grammar) scope(comments map[int]*gotreesitter.Node, line, lines int, lan
 // running out of siblings without a match, and does not need to: scope treats
 // a nil anchor as no match either way, so a third return carrying that
 // distinction would be a bool nothing ever reads before a nil check has
-// already settled the answer. Where the grammar wraps the decorations and the
-// declaration in one node — Python's decorated_definition — the walk steps
-// into the wrapper and carries on over its children, so what comes back is the
-// declaration itself and the wrapper is never the anchor.
+// already settled the answer. Where the grammar wraps the declaration in
+// something else — Python's decorated_definition, or the block a comment's
+// first line inside a suite is lifted onto — the walk steps into the wrapper
+// and carries on over its children, so what comes back is the declaration
+// itself and the wrapper is never the anchor.
 func (g Grammar) pastDecorations(n *gotreesitter.Node, prevEnd uint32,
 	language *gotreesitter.Language) (*gotreesitter.Node, uint32) {
 	for n != nil {
-		wrapper := decorated[g.tables()] != "" && n.Type(language) == decorated[g.tables()]
+		wrapper := decorated[g.tables()][n.Type(language)]
 		if !wrapper && !decorations[g.tables()][n.Type(language)] {
 			return n, prevEnd
 		}
