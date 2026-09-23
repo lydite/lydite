@@ -67,8 +67,10 @@ const (
 // kind of thing under the same name.
 const Prefix = "[lydite:exclude_from_"
 
-// Marker is how an author opens a declaration for one gate. Go, Rust and
-// TypeScript all spell a line comment "//", so one form covers them.
+// Marker is how an author opens a declaration for one gate. It is the same text
+// in every language, read out of whatever that language calls a comment — only
+// the introducer in front of it differs, and body is the one place that knows
+// which spellings a line comment takes.
 func Marker(g Gate) string { return Prefix + string(g) + "]" }
 
 // Comment is one comment as a language's own parser reports it: the line it
@@ -213,8 +215,19 @@ func gather(rest string, open int, next []Comment) (reason string, consumed int,
 }
 
 // body is a comment's text with its introducer and the space after it removed,
-// so a declaration reads the same whether an author wrote `// [lydite:...` or
-// `//[lydite:...`.
+// so a declaration reads the same whether an author wrote `// [lydite:...`,
+// `//[lydite:...`, `# [lydite:...` or `#[lydite:...`.
+//
+// Both line-comment spellings, because the introducer is the one part of a
+// comment a language gets to name for itself: a declaration written in Python
+// opens the same token as one written in Go, and stripping only `//` would
+// leave the hash in front of it so the token never sits at the body's start and
+// the declaration is silently not one.
 func body(text string) string {
-	return strings.TrimLeft(strings.TrimPrefix(strings.TrimLeft(text, " \t"), "//"), " \t")
+	text = strings.TrimLeft(text, " \t")
+	rest, ok := strings.CutPrefix(text, "//")
+	if !ok {
+		rest = strings.TrimPrefix(text, "#")
+	}
+	return strings.TrimLeft(rest, " \t")
 }

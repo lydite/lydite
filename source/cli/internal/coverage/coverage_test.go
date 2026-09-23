@@ -297,9 +297,11 @@ func TestAnEmbeddedTraversalInAnSFPathIsRefused(t *testing.T) {
 
 // A Python component is measured from the lcov pytest-cov writes, read the same
 // way Rust's and TypeScript's is: LF and LH are the component's counts, and
-// every DA line is a key the patch gate can intersect a diff with.
+// every DA line is a key the patch gate can intersect a diff with. Measured
+// with the probe's declaration withdrawn, so the figure here is the tool's own
+// and what the declaration deducts from it is its own test's subject.
 func TestMeasureReadsAPythonComponentsLCOV(t *testing.T) {
-	got := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, nil)
+	got := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, withdrawn)
 	if got.Lines != (LineCount{Covered: 26, Total: 33}) {
 		t.Errorf("Lines = %+v, want {26 33} — coverage.py's own LF and LH over both files", got.Lines)
 	}
@@ -314,32 +316,48 @@ func TestMeasureReadsAPythonComponentsLCOV(t *testing.T) {
 	}
 }
 
-// `[lydite:exclude_from_coverage]` is not available in a Python component, and
-// the probe carries a declaration above an uncovered function to hold that
-// exactly. A declaration's reach is the span of the function beneath it and
-// lydite has no Python parse tables to read that span from, so the measurement
-// deducts nothing — and does not fail, which is what asking a grammar lydite
-// does not have would do to every Python file the report names.
-func TestAPythonDeclarationDeductsNothingAndFailsNothing(t *testing.T) {
+// A declaration in Python takes its function out of both sides of the
+// component's figure, the way it does in Rust and TypeScript: the probe carries
+// one above `provision`, whose seven lines — 9 to 15, its `def` line included —
+// leave the coverage.py report's own LF of 33 and LH of 26 as 26 and 25.
+func TestAPythonDeclarationDeductsItsFunction(t *testing.T) {
 	honoured := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, nil)
+	if honoured.Lines != (LineCount{Covered: 25, Total: 26}) {
+		t.Errorf("Lines = %+v, want {25 26}", honoured.Lines)
+	}
 	// `provision`, the function the probe's declaration sits above.
 	declared := []int{9, 10, 11, 12, 13, 14, 15}
-	if got := hasLines(honoured.Hits["scope.py"], declared...); len(got) != len(declared) {
-		t.Errorf("Hits speaks for %v, want all of %v — the declared function is still measured", got, declared)
+	if got := hasLines(honoured.Hits["scope.py"], declared...); got != nil {
+		t.Errorf("Hits still speaks for %v", got)
+	}
+	// Present again in Executed: a coverage declaration answers the coverage
+	// gates and nothing else, and mutation bounds its mutants by that map.
+	if got := hasLines(honoured.Executed["scope.py"], declared...); len(got) != len(declared) {
+		t.Errorf("Executed speaks for %v, want all of %v", got, declared)
 	}
 	if len(honoured.Unused) != 0 {
-		t.Errorf("Unused = %v, want none: no Python declaration is read, so none is reported unmatched either", honoured.Unused)
+		t.Errorf("Unused = %v, want none: the declaration covers the function below it", honoured.Unused)
 	}
+
 	withheld := measureProbe(t, "pylcovprobe", "python-lcov.info", runner.Python, withdrawn)
-	if withheld.Lines != honoured.Lines {
-		t.Errorf("Lines = %+v with the declaration present and %+v with it withdrawn; in Python the two are one measurement", honoured.Lines, withheld.Lines)
+	if withheld.Lines != (LineCount{Covered: 26, Total: 33}) {
+		t.Errorf("with the declaration withdrawn, Lines = %+v, want {26 33} — the tool's own LF and LH", withheld.Lines)
+	}
+	if got := hasLines(withheld.Hits["scope.py"], declared...); len(got) != len(declared) {
+		t.Errorf("with the declaration withdrawn, Hits speaks for %v, want all of %v", got, declared)
 	}
 }
 
 // Only a language lydite holds no parse tables for skips the exclusion scan.
-// Rust and TypeScript still reach the parser — including .tsx, whose tables are
-// not .ts's — so the language that cannot be scanned is not paid for by
-// loosening the two that can.
+// Every language whose report is lcov reaches the parser — Rust, TypeScript
+// including .tsx, whose tables are not .ts's, and Python — so a declaration
+// means the same thing in all of them, and the skip is not paid for by any of
+// them.
+//
+// runner.Shell is the one language in the shipped set GrammarFor has no tables
+// for, and it stands here for the next language lydite learns to run before it
+// learns to parse: the same source text, declaring the same thing, excluding
+// nothing rather than failing the measurement.
 func TestOnlyAGrammarlessLanguageSkipsTheExclusionScan(t *testing.T) {
 	root := t.TempDir()
 	for _, c := range []struct {
@@ -351,7 +369,10 @@ func TestOnlyAGrammarlessLanguageSkipsTheExclusionScan(t *testing.T) {
 		{"lib.rs", runner.Rust, "// [lydite:exclude_from_coverage][measured elsewhere]\npub fn f() -> i64 {\n    1\n}\n", 3},
 		{"a.ts", runner.TypeScript, "// [lydite:exclude_from_coverage][measured elsewhere]\nexport function f(): number {\n  return 1;\n}\n", 3},
 		{"a.tsx", runner.TypeScript, "// [lydite:exclude_from_coverage][measured elsewhere]\nexport function f(): number {\n  return 1;\n}\n", 3},
-		{"scope.py", runner.Python, "# [lydite:exclude_from_coverage][measured elsewhere]\ndef f():\n    return 1\n", 0},
+		// Two lines and not three: a Python function's span ends on its last
+		// statement, with no closing brace to carry a line of its own.
+		{"scope.py", runner.Python, "# [lydite:exclude_from_coverage][measured elsewhere]\ndef f():\n    return 1\n", 2},
+		{"run.sh", runner.Shell, "# [lydite:exclude_from_coverage][measured elsewhere]\nf() {\n  return 1\n}\n", 0},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			path := write(t, root, c.file, c.source)

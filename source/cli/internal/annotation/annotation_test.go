@@ -91,6 +91,23 @@ func TestAReasonWrapsAcrossCommentLines(t *testing.T) {
 	}
 }
 
+// A reason wraps the same way in a language that opens a comment with "#":
+// the introducer is stripped from every continuation line, not only from the
+// one the token sits on, or the hash rides into the middle of the reason.
+func TestAReasonWrapsAcrossHashCommentLines(t *testing.T) {
+	t.Parallel()
+	got, err := Declarations("scope.py", Coverage, []Comment{
+		{Line: 8, Text: "# " + Marker(Coverage) + "[measured by the integration"},
+		{Line: 9, Text: "# suite]"},
+	})
+	if err != nil {
+		t.Fatalf("Declarations: %v", err)
+	}
+	if got[8].Reason != "measured by the integration suite" || got[8].Lines != 1 {
+		t.Errorf("Declaration = %+v, want the joined reason over one wrapped line", got[8])
+	}
+}
+
 // A continuation must be the very next line. A language's parser hands over
 // every comment in the file, so the next entry may be pages away — and a reason
 // that swallowed it would silence a declaration nobody wrote and eat the prose
@@ -141,13 +158,18 @@ func TestABlockCommentIsNotADeclaration(t *testing.T) {
 }
 
 // The introducer and the space after it are stripped, so a declaration reads
-// the same however tightly its author wrote it.
+// the same however tightly its author wrote it — and in either line-comment
+// spelling, because a declaration is the same declaration in a language that
+// opens a comment with "//" and in one that opens it with "#".
 func TestTheIntroducerIsStrippedEitherWay(t *testing.T) {
 	t.Parallel()
 	for _, text := range []string{
 		"// " + Marker(CRAP) + "[a reason]",
 		"//" + Marker(CRAP) + "[a reason]",
 		"//\t" + Marker(CRAP) + "[a reason]",
+		"# " + Marker(CRAP) + "[a reason]",
+		"#" + Marker(CRAP) + "[a reason]",
+		"#\t" + Marker(CRAP) + "[a reason]",
 	} {
 		got, err := Declarations("a.go", CRAP, []Comment{{Line: 1, Text: text}})
 		if err != nil || got[1].Reason != "a reason" {
