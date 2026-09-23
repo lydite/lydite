@@ -442,3 +442,89 @@ func TestGoRequirementDoesNotClimbAboveTheScanRoot(t *testing.T) {
 		t.Errorf("requirement = %+v, want unpinned: the only go.mod is outside the scan root", got)
 	}
 }
+
+// A workspace pinning pnpm or yarn needs that release as well as a Node, and
+// the two are separate requirements for one component: the runtime first,
+// then the package manager, read from the package.json beside the lockfile a
+// package of the workspace installs from.
+func TestAPinnedPackageManagerIsASecondRequirement(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"name":"root","packageManager":"pnpm@9.0.0-rc.1+sha512.abc"}`)
+	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, filepath.Join(dir, "packages", "ui"), "package.json", `{"name":"ui","engines":{"node":">=22"}}`)
+
+	unit := Unit{Name: "ui", Lang: runner.TypeScript, Dir: "packages/ui"}
+	reqs, err := Requirements(dir, []Unit{unit}, Overrides{Node: "24"})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("got %d requirements, want the Node and the package manager: %+v", len(reqs), reqs)
+	}
+	if reqs[0].Manager != "" || reqs[0].Version != "v24" {
+		t.Errorf("first requirement = %+v, want the Node, overridden", reqs[0])
+	}
+	want := Requirement{
+		Unit: unit, Lang: runner.TypeScript, Manager: "pnpm",
+		Version: "v9.0.0-rc.1", Raw: "9.0.0-rc.1", Source: "package.json (packageManager)",
+	}
+	if reqs[1] != want {
+		t.Errorf("second requirement = %+v, want %+v — pinned exactly, and untouched by the Node override", reqs[1], want)
+	}
+}
+
+// npm ships inside every Node, and a workspace with no lockfile has no
+// install to pin a manager for, so neither yields a second requirement.
+func TestOnlyAProvisionedManagerIsRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"npm", map[string]string{
+			"package.json":      `{"packageManager":"npm@10.2.0"}`,
+			"package-lock.json": "{}",
+		}},
+		{"no lockfile", map[string]string{"package.json": `{"packageManager":"pnpm@8.15.4"}`}},
+		{"no packageManager", map[string]string{"package.json": `{}`, "yarn.lock": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				write(t, dir, name, body)
+			}
+			if req := requireOne(t, dir, runner.TypeScript, Overrides{}); req.Manager != "" {
+				t.Fatalf("got %+v, want only the Node requirement", req)
+			}
+		})
+	}
+}
+
+// A packageManager field lydite cannot read, or one its own lockfile
+// contradicts, is a pin the repository meant and got wrong. Resolving the
+// component as though nothing were pinned would install with a release
+// nobody chose.
+func TestAnUnreadablePackageManagerIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"malformed", map[string]string{
+			"package.json":   `{"packageManager":"pnpm@^8"}`,
+			"pnpm-lock.yaml": "",
+		}},
+		{"contradicted by the lockfile", map[string]string{
+			"package.json":   `{"packageManager":"yarn@4.1.0"}`,
+			"pnpm-lock.yaml": "",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				write(t, dir, name, body)
+			}
+			if _, err := Requirements(dir, []Unit{{Name: "c", Lang: runner.TypeScript, Dir: "."}}, Overrides{}); err == nil {
+				t.Fatal("Requirements accepted a packageManager it could not honour")
+			}
+		})
+	}
+}

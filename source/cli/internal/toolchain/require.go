@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/mod/modfile"
 
+	"lydite/lydite/internal/nodedeps"
 	"lydite/lydite/internal/runner"
 )
 
@@ -49,6 +50,25 @@ type Requirement struct {
 	// exists only in lydite's config is one rustup cannot see and has to be
 	// told about explicitly.
 	Overridden bool
+	// Manager names the package manager this requirement is for — "pnpm" or
+	// "yarn" — and is empty for the language runtime itself. A TypeScript
+	// component can need both a Node and a package manager, and Lang is
+	// TypeScript for the two alike, so every decision that differs between a
+	// runtime and a package manager keys on this rather than on Lang.
+	//
+	// A package manager's Version is an exact pin, never a floor: it is the
+	// version `packageManager` names, pre-release included ("v9.0.0-rc.1"),
+	// and Raw is that version as the field spelled it.
+	Manager string
+}
+
+// subject names what a requirement provisions, for a message: the package
+// manager when it is one, and otherwise the language.
+func (r Requirement) subject() string {
+	if r.Manager != "" {
+		return r.Manager
+	}
+	return string(r.Lang)
 }
 
 // Unpinned reports whether the repo stated no comparable version, in which
@@ -70,8 +90,10 @@ type Unit struct {
 	Dir string
 }
 
-// Requirements resolves what each unit needs, one Requirement per unit in the
-// same order. A unit naming a language lydite provisions no toolchain for is
+// Requirements resolves what each unit needs, in unit order: one Requirement
+// per unit, followed — for a TypeScript unit whose workspace pins pnpm or yarn
+// in `packageManager` — by a second one for that package manager, carrying the
+// same Unit. A unit naming a language lydite provisions no toolchain for is
 // skipped rather than given an unpinned requirement, so nothing probes the
 // machine on its behalf.
 //
@@ -85,7 +107,9 @@ type Unit struct {
 // rather than an error: lydite's job here is to make the toolchain more
 // likely to be right, and refusing to scan a repo because its .nvmrc is
 // malformed would be a worse outcome than scanning it with whatever is on
-// PATH.
+// PATH. A `packageManager` field is the exception, and deliberately: a field
+// that is malformed or names a manager its lockfile contradicts is refused by
+// internal/nodedeps, which is where the install that would use it is decided.
 func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, error) {
 	var out []Requirement
 	for _, u := range units {
@@ -132,8 +156,51 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 		}
 		req.Unit = u
 		out = append(out, req)
+		if u.Lang != runner.TypeScript {
+			continue
+		}
+		pm, ok, err := managerRequirement(root, dir)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			pm.Unit = u
+			out = append(out, pm)
+		}
 	}
 	return out, nil
+}
+
+// managerRequirement reads the package manager a TypeScript component's
+// workspace pins, from the `packageManager` field of the package.json beside
+// the lockfile its install runs from.
+//
+// The workspace root and not the component's own directory, because that is
+// the one place the field means anything: Corepack reads it there, and the
+// install internal/nodedeps runs for a package of a workspace runs there too.
+//
+// Only a manager lydite provisions yields a requirement. npm ships inside
+// every Node, so an npm pin is decided by the Node requirement beside it and
+// there is nothing further to install.
+func managerRequirement(root, dir string) (Requirement, bool, error) {
+	ws, ok := nodedeps.WorkspaceRoot(dir, root)
+	if !ok {
+		return Requirement{}, false, nil
+	}
+	declared, ok, err := nodedeps.PackageManager(ws)
+	if err != nil || !ok {
+		return Requirement{}, false, err
+	}
+	if _, provisioned := managerProbes[declared.Name]; !provisioned {
+		return Requirement{}, false, nil
+	}
+	return Requirement{
+		Lang:    runner.TypeScript,
+		Manager: declared.Name,
+		Version: "v" + declared.Version,
+		Raw:     declared.Version,
+		Source:  relSource(root, ws, "package.json") + " (packageManager)",
+	}, true, nil
 }
 
 // overrideKey names a language as it is spelled under `toolchain:` in

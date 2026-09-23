@@ -1,6 +1,7 @@
 // Package toolchain makes sure the language toolchain each detected
-// ecosystem needs — the Go, Rust and Node runtimes themselves — is present at
-// the version the repository declares, before any scanner runs.
+// ecosystem needs — the Go, Rust and Node runtimes themselves, and the pnpm or
+// yarn a TypeScript workspace pins in `packageManager` — is present at the
+// version the repository declares, before any scanner runs.
 //
 // This closes the one hole in lydite's otherwise complete "pin the exact
 // toolchain, don't reuse ambient installs" principle (see internal/golang).
@@ -47,6 +48,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/mod/semver"
 
 	"lydite/lydite/internal/runner"
 )
@@ -252,7 +255,10 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 	// component came first and left the rest unpinned in silence.
 	shared := map[string]*resolution{}
 	for _, req := range reqs {
-		key := string(req.Lang) + "\x00" + req.Version + "\x00" + req.Raw
+		// The manager is part of the key: a Node and a package manager are both
+		// TypeScript, and a pin of one coinciding with a floor of the other
+		// would otherwise hand the package manager the runtime's answer.
+		key := string(req.Lang) + "\x00" + req.Manager + "\x00" + req.Version + "\x00" + req.Raw
 		// Rust's answer is per directory, not per channel. rustup resolves a
 		// toolchain by walking up from the directory cargo runs in, so two
 		// components declaring the same thing — or declaring nothing — can
@@ -263,7 +269,10 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 		}
 		got, seen := shared[key]
 		if !seen {
-			resolved, err := resolveOne(ctx, root, req, ov)
+			// A package manager's requirement follows its unit's runtime one, so
+			// the runtime this unit resolved to is already in envs — and the
+			// package manager is a script that runs under it.
+			resolved, err := resolveOne(ctx, root, req, ov, envs.For(req.Unit.Name))
 			if err != nil {
 				return nil, err
 			}
@@ -274,6 +283,9 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 			return nil, err
 		}
 		env := got.env
+		if req.Manager != "" {
+			env = alongside(envs.For(req.Unit.Name), env)
+		}
 		// Only when there is something to apply, so a component with nothing
 		// to add has no entry rather than a nil one — For answers the same
 		// either way, and two shapes for one state is one more than the map
@@ -283,6 +295,34 @@ func Ensure(ctx context.Context, root string, units []Unit, ov Overrides, w io.W
 		}
 	}
 	return envs, nil
+}
+
+// alongside is one component's environment once its package manager joins the
+// runtime it already resolved: the runtime's directories and variables, then
+// the package manager's.
+//
+// A new Env, never the runtime's own modified in place, because a resolution
+// is shared — every component wanting the same Node holds the same *Env, and
+// appending one component's package manager to it would hand that package
+// manager to all of them.
+//
+// Resolved stays the runtime's. It is the toolchain a baseline records as
+// having measured a component's coverage, and a package manager measures
+// nothing; a provisioned one still reaches Key, through the version-keyed
+// directory it puts on PATH.
+func alongside(runtime, manager *Env) *Env {
+	if manager == nil || (len(manager.PathDirs) == 0 && len(manager.Vars) == 0) {
+		return runtime
+	}
+	out := &Env{}
+	if runtime != nil {
+		out.PathDirs = append(out.PathDirs, runtime.PathDirs...)
+		out.Vars = append(out.Vars, runtime.Vars...)
+		out.Resolved = runtime.Resolved
+	}
+	out.PathDirs = append(out.PathDirs, manager.PathDirs...)
+	out.Vars = append(out.Vars, manager.Vars...)
+	return out
 }
 
 // resolution is what one requirement resolved to: the environment to apply,
@@ -340,10 +380,10 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 		return logf(w, "%s\n", r.note)
 	case resolutionDisabled:
 		return logf(w, "warning: %s toolchain %s, and toolchain.enabled is false — continuing with what is on PATH\n",
-			req.Lang, r.lacking(req))
+			req.subject(), r.lacking(req))
 	case resolutionFailed:
 		return logf(w, "warning: could not provision the %s toolchain (%s): %s — continuing with what is on PATH\n",
-			req.Lang, r.lacking(req), r.note)
+			req.subject(), r.lacking(req), r.note)
 	case resolutionProvisioned:
 		// The install happened once, so it is reported once.
 		if r.note == "" || r.noted {
@@ -359,8 +399,13 @@ func (r *resolution) log(w io.Writer, req Requirement) error {
 // is present does not satisfy it. It executes and returns what happened; the
 // caller writes the line, because the line names a component and this is
 // shared between every component that wants the same toolchain.
-func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides) (resolution, error) {
-	p, ok := probes[req.Lang]
+//
+// runtime is the environment the component's language runtime resolved to,
+// nil for a runtime requirement itself. A package manager lydite installs is a
+// script run by that runtime, so confirming what was installed has to happen
+// under it.
+func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides, runtime *Env) (resolution, error) {
+	p, ok := probeFor(req)
 	if !ok {
 		return resolution{}, nil
 	}
@@ -463,7 +508,7 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 	// identity on a runner that already had it and another on a runner that
 	// installed it. Env.Resolved is a baseline's producer and half of a tool
 	// cache's key, and both compare it verbatim.
-	resolved, err := confirm(ctx, root, req, st)
+	resolved, err := confirm(ctx, root, req, st, runtime)
 	if err != nil {
 		// The install succeeded, so the environment is real and keeping it is
 		// not in question; only the identity went unestablished. The
@@ -471,15 +516,16 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides)
 		// letting an unconfirmed version read as a measured one.
 		resolved = displayRaw(req)
 		r.note += fmt.Sprintf("; warning: could not confirm %s's installed version (%v) — recording %q",
-			req.Lang, err, resolved)
+			req.subject(), err, resolved)
 	}
 	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: resolved}
 	return r, nil
 }
 
 // confirm asks the toolchain a provisioning step has just installed what
-// version it is, under the environment that step produced.
-func confirm(ctx context.Context, root string, req Requirement, st *step) (string, error) {
+// version it is, under the environment that step produced, behind the
+// runtime's own directories when there is a runtime it runs under.
+func confirm(ctx context.Context, root string, req Requirement, st *step, runtime *Env) (string, error) {
 	dir := componentDir(root, req)
 	if req.Lang == runner.Rust {
 		// rustup's answer, for the same reason the satisfied check takes it:
@@ -496,11 +542,15 @@ func confirm(ctx context.Context, root string, req Requirement, st *step) (strin
 		}
 		return display(active), nil
 	}
-	p, ok := probes[req.Lang]
+	p, ok := probeFor(req)
 	if !ok {
-		return "", fmt.Errorf("lydite has no %s probe", req.Lang)
+		return "", fmt.Errorf("lydite has no %s probe", req.subject())
 	}
-	version, err := probeUnder(ctx, p, st, dir)
+	under := st
+	if runtime != nil {
+		under = &step{pathDirs: append(append([]string{}, st.pathDirs...), runtime.PathDirs...), vars: st.vars}
+	}
+	version, err := probeUnder(ctx, p, under, dir)
 	if err != nil {
 		return "", err
 	}
@@ -517,8 +567,13 @@ func componentDir(root string, req Requirement) string {
 
 // provision dispatches to the per-language provisioner. Each one differs in
 // kind, not just in URL: Go delegates to its own GOTOOLCHAIN mechanism, Rust
-// delegates to rustup, and only Node is downloaded and unpacked by lydite.
+// delegates to rustup, and Node and the package managers are downloaded and
+// unpacked by lydite. A package manager is dispatched before the language,
+// because its Lang is the TypeScript its Node requirement also carries.
 func provision(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
+	if req.Manager != "" {
+		return provisionPackageManager(ctx, req, ambient, present)
+	}
 	switch req.Lang {
 	case runner.Go:
 		return provisionGo(ctx, req, ambient, present)
@@ -538,9 +593,18 @@ func provision(ctx context.Context, req Requirement, ambient string, present boo
 // satisfied reports whether the ambient toolchain is good enough to use
 // as-is. An unpinned requirement is satisfied by any present toolchain — the
 // repo named no floor, so there is nothing to be too old for.
+//
+// A package manager's version is a pin rather than a floor, and only that
+// exact version satisfies it. `packageManager` is what Corepack enforces by
+// refusing to run any other release, and a newer pnpm can resolve and write a
+// lockfile the pinned one would not — so an ambient release differing in
+// either direction is provisioned past, not accepted.
 func satisfied(req Requirement, ambient string, present bool) bool {
 	if !present {
 		return false
+	}
+	if req.Manager != "" {
+		return ambient != "" && semver.Compare(ambient, req.Version) == 0
 	}
 	if req.Unpinned() {
 		return true
@@ -569,6 +633,9 @@ func declaredBy(req Requirement) string {
 		}
 		return "no version declared by this repo"
 	}
+	if req.Manager != "" {
+		return fmt.Sprintf("matches %s pinned in %s", displayRaw(req), req.Source)
+	}
 	return fmt.Sprintf("satisfies %s from %s", displayRaw(req), req.Source)
 }
 
@@ -589,6 +656,9 @@ func shortfall(req Requirement, ambient string, present bool) string {
 	}
 	if req.Unpinned() {
 		return "is unusable"
+	}
+	if req.Manager != "" {
+		return fmt.Sprintf("is %s, not the pinned %s", display(ambient), displayRaw(req))
 	}
 	return fmt.Sprintf("is %s, older than the declared %s", display(ambient), displayRaw(req))
 }

@@ -1,10 +1,16 @@
 package toolchain
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1" // #nosec G505 -- only for a registry version publishing no SHA-512 integrity; see verifyDist
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -356,6 +362,213 @@ func nodeArch() string {
 		return "x64"
 	}
 	return runtime.GOARCH
+}
+
+// npmRegistry is where a package manager's pinned release is fetched from,
+// and the only host its tarball may be fetched from.
+const npmRegistry = "https://registry.npmjs.org/"
+
+// provisionPackageManager makes the pnpm or yarn release a workspace pins in
+// `packageManager` available as a command.
+//
+// Downloaded from the npm registry into the version-keyed cache, the way Node
+// is, rather than enabled through Corepack: Corepack's shims are written into
+// Node's own install directory, which on a runner is not lydite's to modify,
+// and what it fetches is the same registry tarball this fetches.
+//
+// satisfied has already established that the ambient release is absent or is
+// not the pinned one, so there is no "already good enough" check here.
+func provisionPackageManager(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
+	version := req.Raw
+	dir, err := cacheRoot(req.Manager + "-" + version)
+	if err != nil {
+		return nil, err
+	}
+	if err := installOnce(dir, func(staging string) error {
+		return downloadPackageManager(ctx, req.Manager, version, staging)
+	}); err != nil {
+		return nil, fmt.Errorf("%s %s (pinned in %s) could not be installed from %s: %w",
+			req.Manager, version, req.Source, npmRegistry, err)
+	}
+	note := fmt.Sprintf("typescript: installed %s %s (pinned in %s; ", req.Manager, version, req.Source)
+	if present {
+		note += "ambient " + display(ambient) + " is not the pinned release)"
+	} else {
+		note += "none was on PATH)"
+	}
+	return &step{pathDirs: []string{filepath.Join(dir, "bin")}, note: note}, nil
+}
+
+// registryPackage is the npm package a manager's release is published as.
+// Yarn 2 and later is not the `yarn` package, which stops at 1.x: it is
+// @yarnpkg/cli-dist, which is where Corepack fetches it from too.
+func registryPackage(manager, version string) string {
+	if manager == "yarn" && !olderThan("v"+version, "v2") {
+		return "@yarnpkg/cli-dist"
+	}
+	return manager
+}
+
+// registryVersion is the subset of the npm registry's document for one
+// published version that lydite reads.
+type registryVersion struct {
+	Dist registryDist `json:"dist"`
+}
+
+// registryDist is where a published version's tarball is and what it hashes
+// to.
+type registryDist struct {
+	Tarball string `json:"tarball"`
+	// Integrity is a Subresource Integrity string ("sha512-<base64>"), which
+	// may carry more than one space-separated digest.
+	Integrity string `json:"integrity"`
+	// Shasum is the SHA-1 hex digest every published version carries,
+	// including those older than the registry's integrity field.
+	Shasum string `json:"shasum"`
+}
+
+// downloadPackageManager fetches a package manager's release tarball into
+// staging, taking its digest from the registry's own document for that
+// version rather than from anything alongside the tarball.
+//
+// [lydite:exclude_from_coverage][reached only when the pinned release is not
+// already on PATH or in the cache; exercising it means downloading a package
+// manager, and a test that did would measure registry.npmjs.org]
+func downloadPackageManager(ctx context.Context, manager, version, staging string) error {
+	pkg := registryPackage(manager, version)
+	doc, err := download.Fetch(ctx, npmRegistry+pkg+"/"+version)
+	if err != nil {
+		return err
+	}
+	var meta registryVersion
+	if err := json.Unmarshal(doc, &meta); err != nil {
+		return fmt.Errorf("%s@%s: %w", pkg, version, err)
+	}
+	if !strings.HasPrefix(meta.Dist.Tarball, npmRegistry) {
+		return fmt.Errorf("%s@%s names its tarball at %q, outside %s", pkg, version, meta.Dist.Tarball, npmRegistry)
+	}
+	data, err := download.Fetch(ctx, meta.Dist.Tarball)
+	if err != nil {
+		return err
+	}
+	if err := verifyDist(data, meta.Dist); err != nil {
+		return err
+	}
+	return unpackManager(data, staging, manager)
+}
+
+// verifyDist checks a tarball against the digest the registry publishes for
+// it, before a byte of it is unpacked.
+//
+// SHA-512 from the integrity field when there is one, which is the strength
+// Node's own SHASUMS256.txt check gives; the SHA-1 shasum only when the
+// registry publishes nothing stronger. A version publishing neither is
+// refused rather than trusted, for the reason download.Verified gives: this
+// archive is about to be put on PATH and executed.
+func verifyDist(data []byte, dist registryDist) error {
+	for field := range strings.FieldsSeq(dist.Integrity) {
+		encoded, ok := strings.CutPrefix(field, "sha512-")
+		if !ok {
+			continue
+		}
+		want, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return fmt.Errorf("%s publishes an unreadable integrity %q: %w", dist.Tarball, field, err)
+		}
+		got := sha512.Sum512(data)
+		if !bytes.Equal(got[:], want) {
+			return fmt.Errorf("checksum mismatch for %s: got sha512-%s, want %s",
+				dist.Tarball, base64.StdEncoding.EncodeToString(got[:]), field)
+		}
+		return nil
+	}
+	if dist.Shasum == "" {
+		return fmt.Errorf("%s publishes no digest to verify it against", dist.Tarball)
+	}
+	sum := sha1.Sum(data) // #nosec G401 -- the registry's own digest for a version predating its integrity field; SHA-512 is used whenever one is published
+	if got := hex.EncodeToString(sum[:]); !strings.EqualFold(got, dist.Shasum) {
+		return fmt.Errorf("checksum mismatch for %s: got sha1 %s, want %s", dist.Tarball, got, dist.Shasum)
+	}
+	return nil
+}
+
+// unpackManager lays a verified package manager tarball out in staging: the
+// package itself under package/, and under bin/ an executable named for the
+// command that runs its entry point with node.
+//
+// A wrapper rather than the entry point itself on PATH. The entry is a
+// `#!/usr/bin/env node` script whose name is not the command's ("pnpm.cjs",
+// "yarn.js"), and running it through node explicitly resolves node the way
+// every other command in the component's environment does — from the PATH
+// that environment composes, where a provisioned Node comes first.
+//
+// The wrapper finds the package relative to itself, because installOnce
+// unpacks into a staging directory and renames it into place afterwards.
+func unpackManager(data []byte, staging, command string) error {
+	pkgDir := filepath.Join(staging, "package")
+	// Every registry tarball wraps its content in one top-level directory —
+	// "package/" for most, "yarn-v1.22.19/" for yarn's own.
+	if err := download.ExtractTarGz(data, pkgDir, 1); err != nil {
+		return err
+	}
+	entry, err := binEntry(pkgDir, command)
+	if err != nil {
+		return err
+	}
+	binDir := filepath.Join(staging, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		return err
+	}
+	// Parameter expansion rather than dirname, so the wrapper needs nothing
+	// from PATH but the node it exists to run.
+	wrapper := "#!/bin/sh\n" +
+		"case \"$0\" in */*) here=\"${0%/*}\" ;; *) here=. ;; esac\n" +
+		"exec node \"$here\"/" + shellQuote("../package/"+entry) + " \"$@\"\n"
+	return os.WriteFile(filepath.Join(binDir, command), []byte(wrapper), 0o755) // #nosec G306 -- an executable wrapper is the point
+}
+
+// binEntry is the file a package's `bin` field runs as command, relative to
+// the package directory.
+//
+// npm's own two spellings are both read: a bare string is the package's one
+// command, and an object maps each command it installs to its file. A path
+// escaping the package, or naming no file in it, is refused — this is what the
+// wrapper hands to node.
+func binEntry(pkgDir, command string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(pkgDir, "package.json")) // #nosec G304 -- pkgDir is a staging directory this package just unpacked a verified archive into
+	if err != nil {
+		return "", err
+	}
+	var manifest struct {
+		Bin json.RawMessage `json:"bin"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", fmt.Errorf("package.json: %w", err)
+	}
+	var entry string
+	if json.Unmarshal(manifest.Bin, &entry) != nil {
+		var commands map[string]string
+		if json.Unmarshal(manifest.Bin, &commands) != nil {
+			return "", fmt.Errorf("package.json declares no bin for %s", command)
+		}
+		entry = commands[command]
+	}
+	if entry == "" {
+		return "", fmt.Errorf("package.json declares no bin for %s", command)
+	}
+	entry = path.Clean(entry)
+	if !filepath.IsLocal(filepath.FromSlash(entry)) {
+		return "", fmt.Errorf("package.json's bin for %s is %q, outside the package", command, entry)
+	}
+	if info, err := os.Stat(filepath.Join(pkgDir, filepath.FromSlash(entry))); err != nil || info.IsDir() {
+		return "", fmt.Errorf("package.json's bin for %s is %q, which the package does not contain", command, entry)
+	}
+	return entry, nil
+}
+
+// shellQuote renders s as one single-quoted shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // step is one ecosystem's contribution to the resolved environment.
