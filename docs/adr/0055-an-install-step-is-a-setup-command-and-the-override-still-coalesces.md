@@ -38,12 +38,17 @@ on the one component that needs a browser is the whole answer to #248's case. It
 component and no other, never touches `typescript.install`, and leaves the install every sibling
 shares exactly as detection chose it.
 
-The extension case is two components under one workspace that both need the step. The browser
-download lands in a cache outside the repository tree (`~/.cache/ms-playwright`), and two concurrent
-`playwright install` runs race on it. That is the collision
-[ADR 0050](0050-a-component-declares-the-paths-it-occupies.md) exists for — a directory a `setup:`
-writes that lydite cannot see — and declaring the shared path in both components' `occupies:` makes
-the scheduler run them one after the other. Nothing about an install step needs a lock of its own.
+The extension case is two components under one workspace that both need the step. Left to its
+default, the browser download lands in a cache outside the repository tree (`~/.cache/ms-playwright`),
+and `occupies:` cannot name that: `validateOccupies` (`internal/component/component.go:455-476`)
+rejects any entry that is absolute, `~`-prefixed, or escapes the scan root — the same rule
+[ADR 0050](0050-a-component-declares-the-paths-it-occupies.md) states, "a list of paths relative to
+the scan root". The fix is to move the cache, not to widen `occupies:`: a component sets
+`PLAYWRIGHT_BROWSERS_PATH` (via its own `env:`) to a directory under the scan root, and declares that
+directory in `occupies:`. Once the cache is a path lydite can see, two components writing into the same
+one are the collision ADR 0050 exists for — a directory a `setup:` writes that lydite cannot otherwise
+see — and the scheduler runs them one after the other. Nothing about an install step needs a lock of
+its own; it needs a cache that is inside the tree `occupies:` already governs.
 
 **A dedicated composing key was rejected** — something like `install_extra:`, or a
 `typescript.install` mode that appends to detection rather than replacing it — and not only because
