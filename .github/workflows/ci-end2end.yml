@@ -33,6 +33,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # This repository's own workflows already name every artifact
+      # `proving-ground-*`, so the real run below never takes the collision,
+      # undecidable or composite-default-prefix branch — a regression that
+      # left every one of them reporting success having examined nothing
+      # would stay invisible to it. The selftest exercises each branch
+      # directly, against fixtures built for exactly that purpose.
+      - name: the checker itself catches what it exists to catch
+        run: python3 .github/assert-no-lydite-reports-collision.py --selftest
+
       - name: no upload-artifact step names an artifact publish would fold
         run: python3 .github/assert-no-lydite-reports-collision.py
 

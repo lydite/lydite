@@ -37,6 +37,7 @@ import glob
 import os
 import re
 import sys
+import tempfile
 
 WORKFLOWS_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 COLLIDING_PREFIX = "lydite-reports-"
@@ -124,9 +125,10 @@ def uploads_named(path):
     return results
 
 
-def main():
+def check(workflows_dir):
+    """Return every failure message a scan of `workflows_dir` produces."""
     failures = []
-    patterns = [os.path.join(WORKFLOWS_DIR, "*.yml"), os.path.join(WORKFLOWS_DIR, "*.yaml")]
+    patterns = [os.path.join(workflows_dir, "*.yml"), os.path.join(workflows_dir, "*.yaml")]
     for path in sorted({p for pattern in patterns for p in glob.glob(pattern)}):
         for name in uploads_named(path):
             try:
@@ -148,6 +150,102 @@ def main():
                     "existing convention for a fixture that must round-trip back to this "
                     "prefix only after its own job downloads it)"
                 )
+    return failures
+
+
+# One fixture per branch `check()` can take, and whether that branch must fail.
+# Run under `--selftest` so a change that left every branch reporting success
+# having examined nothing (an always-``False`` `collides`, an `uploads_named`
+# that stopped matching anything) is caught here rather than by this
+# repository's own workflows happening not to exercise it — every artifact
+# name here is already `proving-ground-*`, so the real run alone never takes
+# the collision, undecidable or composite-default-prefix branch at all.
+SELFTEST_FIXTURES = {
+    "collision.yml": (
+        """
+jobs:
+  fake:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: lydite-reports-nested-${{ matrix.slug }}-a
+""",
+        True,
+    ),
+    "decidable-non-collision.yml": (
+        """
+jobs:
+  fake:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: proving-ground-reports-nested-${{ matrix.slug }}-a
+""",
+        False,
+    ),
+    "undecidable.yml": (
+        """
+jobs:
+  fake:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.name }}
+""",
+        True,
+    ),
+    "composite-default-prefix.yml": (
+        """
+jobs:
+  fake:
+    steps:
+      - uses: ./.github/actions/lydite-reports
+        with:
+          name: mystage
+""",
+        True,
+    ),
+    "composite-overridden-prefix.yml": (
+        """
+jobs:
+  fake:
+    steps:
+      - uses: ./.github/actions/lydite-reports
+        with:
+          name: mystage
+          prefix: proving-ground-reports
+""",
+        False,
+    ),
+}
+
+
+def selftest():
+    """Assert `check()` decides each fixture the way its own branch requires."""
+    mistakes = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for filename, (content, must_fail) in SELFTEST_FIXTURES.items():
+            fixture_dir = os.path.join(tmp, filename)
+            os.makedirs(fixture_dir)
+            with open(os.path.join(fixture_dir, "workflow.yml"), "w", encoding="utf-8") as fh:
+                fh.write(content)
+            failures = check(fixture_dir)
+            if must_fail and not failures:
+                mistakes.append(f"{filename}: expected a failure, got none")
+            elif not must_fail and failures:
+                mistakes.append(f"{filename}: expected no failure, got {failures!r}")
+    for mistake in mistakes:
+        print(f"selftest: {mistake}", file=sys.stderr)
+    if mistakes:
+        return 1
+    print(f"selftest: check() decides all {len(SELFTEST_FIXTURES)} fixtures correctly")
+    return 0
+
+
+def main():
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
+    failures = check(WORKFLOWS_DIR)
     for failure in failures:
         print(failure, file=sys.stderr)
     if failures:
