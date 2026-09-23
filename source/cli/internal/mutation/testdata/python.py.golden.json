@@ -2,6 +2,16 @@
   {
     "path": "python.py",
     "line": 6,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 179,
+    "length": 21,
+    "original": "total = score + bonus",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 6,
     "column": 19,
     "operator": "arithmetic-operator",
     "offset": 193,
@@ -28,6 +38,16 @@
     "length": 1,
     "original": "\u003c",
     "mutated": "\u003e="
+  },
+  {
+    "path": "python.py",
+    "line": 8,
+    "column": 9,
+    "operator": "remove-statement",
+    "offset": 228,
+    "length": 10,
+    "original": "log(total)",
+    "mutated": ""
   },
   {
     "path": "python.py",
@@ -174,6 +194,16 @@
   {
     "path": "python.py",
     "line": 36,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 1094,
+    "length": 22,
+    "original": "scaled = score * 2 / 3",
+    "mutated": ""
+  },
+  {
+    "path": "python.py",
+    "line": 36,
     "column": 24,
     "operator": "arithmetic-operator",
     "offset": 1113,
@@ -190,6 +220,16 @@
     "length": 1,
     "original": "*",
     "mutated": "/"
+  },
+  {
+    "path": "python.py",
+    "line": 37,
+    "column": 5,
+    "operator": "remove-statement",
+    "offset": 1121,
+    "length": 12,
+    "original": "counter += 1",
+    "mutated": ""
   },
   {
     "path": "python.py",

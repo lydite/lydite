@@ -365,6 +365,29 @@ func TestAConjunctionIsSwappedForTheOtherAndNothingElse(t *testing.T) {
 	}
 }
 
+// A call, an assignment and an augmented assignment each reach their deletion
+// even though the tree holds none of them wrapped in an `expression_statement`
+// — the runtime collapses that wrapper into its one named child, so the
+// removable node itself is what `module` or `block` parents directly.
+func TestARemovableNodeIsReachedThroughItsCollapsedWrapper(t *testing.T) {
+	src := []byte("def run(x):\n    log(x)\n    total = x\n    total += 1\n    return total\n")
+	mutants, _, err := GenerateTreeSitter(runner.Python, "run.py", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := map[string]bool{}
+	for _, m := range mutants {
+		if m.Operator == RemoveStatement {
+			removed[m.Original] = true
+		}
+	}
+	for _, want := range []string{"log(x)", "total = x", "total += 1"} {
+		if !removed[want] {
+			t.Errorf("remove-statement mutants = %v, want one deleting %q", removed, want)
+		}
+	}
+}
+
 // update rewrites the golden files instead of comparing against them.
 var update = flag.Bool("update", false, "rewrite the golden mutant sets in testdata")
 

@@ -132,6 +132,14 @@ type grammar struct {
 	// can actually be asked about, which is what Go's own ExprStmt and
 	// IncDecStmt already restrict the operator to.
 	removable map[string]bool
+	// statementParents are the node types whose direct children stand for
+	// statements on their own, named only where `statement`'s own wrapper
+	// cannot reach a removable node: Python's runtime collapses an
+	// `expression_statement` holding a single named child into that child, so
+	// the removable node ends up a direct child of `module` or `block`
+	// instead of wrapped. A grammar whose wrapper always survives leaves this
+	// nil, and a removable node is then only ever reached through `statement`.
+	statementParents []string
 	// literals maps a literal's node type to what it holds.
 	literals map[string]literalKind
 }
@@ -238,9 +246,11 @@ var tsxGrammar = grammar{
 // `operator` field is singular like the other two, and only
 // `comparison_operator` is read for several tokens at once.
 //
-// `expression_statement` is the wrapper a deletion applies to, and the runtime
-// collapses one holding a single named child into that child, so a deletion
-// reaches only a statement whose wrapper survives in the tree.
+// `expression_statement` is the wrapper a deletion applies to, but the
+// runtime collapses one holding a single named child into that child — which
+// is every ordinary call, assignment and augmented assignment — so the
+// removable node is reached as a direct child of `module` or `block` instead,
+// through `statementParents` rather than through `statement`.
 var pythonGrammar = grammar{
 	tables:  treesitter.Python,
 	comment: "comment",
@@ -249,8 +259,9 @@ var pythonGrammar = grammar{
 		{nodeType: "boolean_operator", field: "operator", swaps: booleanSwaps},
 		{nodeType: "comparison_operator", field: "operators", multiple: true, swaps: comparisonSwaps},
 	},
-	returns:   []string{"return_statement"},
-	statement: "expression_statement",
+	returns:          []string{"return_statement"},
+	statement:        "expression_statement",
+	statementParents: []string{"module", "block"},
 	removable: map[string]bool{
 		"call":                 true,
 		"assignment":           true,
@@ -402,10 +413,26 @@ func (t *tsGen) visit(n *gotreesitter.Node) {
 		t.returns(n)
 	case typ == t.g.statement:
 		t.removeStatement(n)
+	case t.g.removable[typ] && t.inStatementPosition(n):
+		t.emit(RemoveStatement, n, "")
 	}
 	for i := range n.ChildCount() {
 		t.visit(n.Child(i))
 	}
+}
+
+// inStatementPosition reports whether n is a direct child of a node named in
+// statementParents — the position a removable node reaches only on its own,
+// for a grammar whose wrapper does not always survive to be matched by
+// `statement`.
+//
+// Asked of the node itself rather than folded into removeStatement: the two
+// paths to a removable node — wrapped, and standing for its own collapsed
+// wrapper — end in the same emit, but only one of them still has a wrapper
+// node to delete instead of the construct itself.
+func (t *tsGen) inStatementPosition(n *gotreesitter.Node) bool {
+	parent := n.Parent()
+	return parent != nil && slicesContains(t.g.statementParents, parent.Type(t.lang))
 }
 
 // binary emits the operator swaps that apply to one infix expression.
