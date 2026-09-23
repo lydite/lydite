@@ -72,12 +72,15 @@ a `statuses: write` token, consistent with why the relay exists at all (ADR 0022
 attribution forward, because the human's judgement still applies — the decision they judged is
 unchanged. No new identity field is needed.
 
-**Not equal is not silence.** The relay publishes `lydite/referral` as `failure` with a
-description naming why (what changed), the same `StateFailure` "isolation gate, unclearable"
-shape a normal referred-and-uncleared change already has. The entry drops out of the queue exactly
-as any failed required check would; the author clears again on the pull request and it re-enters.
-No new notification surface is needed — the existing status-description text already explains
-itself the way it does today.
+**Not equal is not silence.** The relay publishes `lydite/referral` as `pending` with a
+description naming why (what changed) — the same `StatePending` "standing referral, waiting on a
+person" shape a normal referred-and-uncleared change already carries, and the one state
+`clearance.Decide` accepts a `/lydite clear` comment against. `StateFailure`, the isolation gate,
+is not this: `Decide` refuses to clear it for any comment, so publishing it here would make a
+mismatched queue entry permanently unclearable and reopen the deadlock this ADR removes. The
+entry drops out of the queue exactly as any required check still pending would; the author clears
+again on the pull request and it re-enters. No new notification surface is needed — the existing
+status-description text already explains itself the way it does today.
 
 ## Load-bearing parts, in landing order
 
@@ -89,7 +92,7 @@ itself the way it does today.
    current dead end (`base-branch` evaluates to `''` on `merge_group`, so nothing is published
    today).
 4. `pr-relay`: the new `merge_group` shape — live PR resolution, live status read, compare,
-   publish success-with-attribution or failure-with-reason at the queue SHA.
+   publish success-with-attribution or pending-with-reason at the queue SHA.
 5. `lydite/actions`' `lydite.yml`: wire the `merge_group` trigger to call (3) instead of the
    current no-op.
 6. `pedromvgomes/gt#79`: no code change of lydite's required; the issue closes as resolved by
