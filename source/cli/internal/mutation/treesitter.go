@@ -267,9 +267,9 @@ var pythonGrammar = grammar{
 		"assignment":           true,
 		"augmented_assignment": true,
 	},
-	// `True` and `False` are node types in this grammar rather than one
-	// boolean node carrying its text, so both appear, spelled the way the
-	// grammar names them.
+	// Python writes its booleans `True`/`False`, but the grammar's node types
+	// for them are the lowercase `true` and `false` (two node types, not one
+	// boolean node carrying its text), so both keys below are lowercase.
 	literals: map[string]literalKind{
 		"true":    boolLiteral,
 		"false":   boolLiteral,
