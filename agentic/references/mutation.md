@@ -67,10 +67,9 @@ reader to skim past it.
 
 An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
 to detect one: the author declares it in a `[lydite:exclude_from_mutation][<reason>]` comment
-**beside** the mutant. Go, Rust, TypeScript and TSX — the mutation-capable languages — spell a line
-comment `//`; Python, which `internal/annotation` also parses for the crap and coverage
-declarations, spells it `#`. `annotation.body` strips either, so one function still covers every
-language's declaration line. The declaration
+**beside** the mutant. Go, Rust, TypeScript and TSX spell a line comment `//`; Python spells it
+`#`. `annotation.body` strips either, so one function still covers every language's declaration
+line — mutation, crap and coverage all read the same declaration through it. The declaration
 covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
 least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
 call, and the innermost is what somebody annotating that line is looking at. Deciding by
@@ -100,10 +99,10 @@ change. Kill the mutant and merge unattended; declare it unkillable and a human 
 The bound that makes it structural rather than usually-true: a mutant exists only on a changed
 line, so a declaration acknowledging one is itself on a changed line, which referral sees as added.
 
-## Rust and TypeScript are parsed with tree-sitter
+## Rust, TypeScript and Python are parsed with tree-sitter
 
 Go is parsed with `go/ast`, because the language ships its own parser and nothing could be more
-faithful. The other two have no parser in the standard library, and lydite must stay a single
+faithful. The other three have no parser in the standard library, and lydite must stay a single
 statically-linked `CGO_ENABLED=0` binary for four platforms — which every C-backed tree-sitter
 binding rules out. `github.com/odvcencio/gotreesitter` is a pure-Go tree-sitter runtime, so the
 grammar tables are the only input.
@@ -111,26 +110,47 @@ grammar tables are the only input.
 **The shipped build is a `grammar_subset`.** `gotreesitter` embeds all 206 of its grammars
 unless the `grammar_subset` build tag turns the wildcard embed off, and each
 `grammar_subset_<lang>` tag turns one blob back on — 15MB against 33MB for the same binary. Five
-tags ship today: `grammar_subset_rust`, `_typescript` and `_tsx` for mutation's own two grammars,
-plus `_python` for crap.md's Python walk (a ~60KB blob) — mutation reads none of it, since Python
-has no mutation backend or generator (issue #221). A build without them is correct and larger; a
-build with `grammar_subset` and a language's own tag missing panics at that language's first
-parse, which is why `ci-test` runs the suite under the exact tag list `go build` uses (see the
-root [`AGENTS.md`](../../AGENTS.md) Commands section).
+tags ship today: `grammar_subset_rust`, `_typescript` and `_tsx` for mutation's own grammars, and
+`_python` for both mutation's and crap.md's Python walk (a ~60KB blob) — a single tag serves both
+gates, since neither owns the tables. A build without them is correct and larger; a build with
+`grammar_subset` and a language's own tag missing panics at that language's first parse, which is
+why `ci-test` runs the suite under the exact tag list `go build` uses (see the root
+[`AGENTS.md`](../../AGENTS.md) Commands section).
 
 **The node types are the whole of what lydite knows per language**, held in one `grammar` table
-each: the infix node whose `operator` field the three operator rewrites replace, the return node,
-the statement node, which inner expressions a statement deletion applies to, the literal node types
-and what each holds, and the line-comment node. A table rather than a traversal per language,
-because the operators are the same five and only the names differ — a language needing its own walk
-would be evidence the catalogue had stopped being one taxonomy. Every entry was verified against the
-grammars themselves rather than read off documentation.
+each: `binary` is a small table of node type, field name and arity — Rust and TypeScript each write
+one infix node type with a singular `operator` field, and Python splits the same rewrites across
+three: `binary_operator` and `boolean_operator`, each with its own singular `operator` field, and
+`comparison_operator`, whose `operators` field holds one token per link of a chain, so `a < b < c`
+is one node yielding two independent mutants rather than one covering an ambiguous span. The table
+also holds the return node, the statement node, which inner expressions a statement deletion applies
+to, the literal node types and what each holds, and the line-comment node. A table rather than a
+traversal per language, because a language needing its own walk would be evidence the catalogue had
+stopped being one taxonomy — field and arity is as far as that catalogue has had to bend so far. Six
+operators exist today: the three shared by every grammar (`ConditionalBoundary`,
+`NegateConditional`, `ArithmeticOperator`), Python's own `ConditionalConnective` for its `and`/`or`
+swap (reported under its own kind rather than as a relational shift, since it inverts no
+comparison), plus `RemoveStatement` and `ReplaceReturn`. A conjunct-removal mutant (`a and b` → `a`)
+was considered and deliberately not shipped: Python's short-circuit semantics make it equivalent far
+more often than a token swap, dominated by the operator's own semantics rather than by a coverage
+gap — see
+[ADR 0054](../../docs/adr/0054-pythons-operators-join-the-mutation-catalogue-by-field-arity.md).
+Every entry was verified against the grammars themselves rather than read off documentation.
 
-**A whole-statement deletion is restricted to a call, an assignment or an increment.** In both
-grammars the statement node also wraps `if` and `return`, and deleting one of those is a
-control-flow change that mostly fails to compile — an unviable mutant per branch, which is noise
-about the generator rather than evidence about the tests. It is the same restriction Go's own
-`ExprStmt`/`IncDecStmt` already imposes.
+**A removable statement is reached through its wrapper, or as its wrapper's collapsed remnant.**
+Rust's and TypeScript's `expression_statement` always survives as a node to delete; Python's own
+tree-sitter runtime collapses one holding a single named child into that child, so an ordinary
+call, assignment or augmented assignment ends up a direct child of `module` or `block` instead of
+wrapped. `statementParents` names those parent node types for a grammar whose wrapper does not
+always survive, and a removable node reached that way is matched by position (a direct child of one
+of them) rather than by finding a wrapper that is no longer there.
+
+**A whole-statement deletion is restricted to a call, an assignment or an increment.** In every
+grammar, whatever wraps a statement — Rust's and TypeScript's `expression_statement`, or the
+`module`/`block` parent a collapsed one leaves behind in Python — also carries `if` and `return`,
+and deleting one of those is a control-flow change that mostly fails to compile — an unviable
+mutant per branch, which is noise about the generator rather than evidence about the tests. It is
+the same restriction Go's own `ExprStmt`/`IncDecStmt` already imposes.
 
 **`.tsx` gets its own grammar.** `<T>(x) => x` is a type assertion in TypeScript and an opening JSX
 tag in TSX, so upstream ships two parse tables and a `.tsx` file read by the TypeScript tables is a
@@ -162,11 +182,11 @@ with this one only until somebody edited it for one gate's own reason. See
 [`crap.md`](crap.md) for the other caller.
 
 **The golden fixtures are what hold the grammars.** `internal/mutation/testdata/` carries a Rust, a
-TypeScript and a TSX fixture beside the exact mutant set each produces — offsets, operators and
-replaced text, because a count alone passes on tables that have started reading a different node. A
-grammar bump changes which mutants exist, and this repository declares no Rust component, so
-`TestTheGoldenMutantsAreUnchanged` in `go test` is the only place its own CI can see that change
-before it reaches a consumer. Regenerate with
+TypeScript, a TSX and a Python fixture beside the exact mutant set each produces — offsets,
+operators and replaced text, because a count alone passes on tables that have started reading a
+different node. A grammar bump changes which mutants exist, and this repository declares no Rust
+component, so `TestTheGoldenMutantsAreUnchanged` in `go test` is the only place its own CI can see
+that change before it reaches a consumer. Regenerate with
 `go test ./internal/mutation -run Golden -update`, and read the diff: it is the record of what the
 bump changed.
 
@@ -234,10 +254,10 @@ mutating.
 
 ## Worker directories, and where containment is owed
 
-Cargo and every JavaScript runner read source from the filesystem and take no instruction about
-reading one file from somewhere else, so for Rust and TypeScript the mutated file has to exist as a
-file. `internal/mutation.Tree` is that: **one directory per concurrency slot**, reused with the
-original restored between mutants. Not one per mutant — a tree copy, and for a JavaScript workspace
+Cargo, every JavaScript runner and pytest read source from the filesystem and take no instruction
+about reading one file from somewhere else, so for Rust, TypeScript and Python the mutated file has
+to exist as a file. `internal/mutation.Tree` is that: **one directory per concurrency slot**, reused
+with the original restored between mutants. Not one per mutant — a tree copy, and for a JavaScript workspace
 a dependency install, is not affordable that often. Mutating the component's own tree in place is
 faster than either and is rejected: an interrupt leaves mutated source in the tree lydite is
 measuring, which is a repository somebody then commits.
@@ -304,10 +324,11 @@ stated rather than chosen because this repository declares no Rust component and
 it; the proving ground ([#95](https://github.com/lydite/lydite/issues/95)) is where a number could
 come from.
 
-**Rust and TypeScript get one phase, not two.** Neither has a unit both cheaper than the component
-and derivable from a file path the way a Go package directory is: a crate needs its manifest read,
-and a JavaScript test file is related to the source it exercises by convention rather than by
-structure. A second phase that narrowed wrongly would cost the run it exists to save.
+**Rust, TypeScript and Python get one phase, not two.** None of the three has a unit both cheaper
+than the component and derivable from a file path the way a Go package directory is: a crate needs
+its manifest read, a JavaScript test file is related to the source it exercises by convention rather
+than by structure, and Python has no compiled unit narrower than the component either. A second
+phase that narrowed wrongly would cost the run it exists to save.
 
 ## One concurrency bound, and serial where services are shared
 
