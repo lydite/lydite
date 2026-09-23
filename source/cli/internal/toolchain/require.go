@@ -60,6 +60,15 @@ type Requirement struct {
 	// version `packageManager` names, pre-release included ("v9.0.0-rc.1"),
 	// and Raw is that version as the field spelled it.
 	Manager string
+	// Hash is the integrity hash a package manager's `packageManager` pin
+	// carries after `+` ("sha512.<hex>"), verbatim, or "" when it carries
+	// none. It is kept apart from the digest the registry publishes because
+	// it is not the same evidence: the registry's digest comes from the host
+	// serving the tarball and vouches only that the two agree with each other,
+	// while this one is the repository's own statement of the bytes it
+	// trusts, and a republished or substituted tarball the registry's digest
+	// was rewritten to match still fails it.
+	Hash string
 }
 
 // subject names what a requirement provisions, for a message: the package
@@ -200,6 +209,7 @@ func managerRequirement(root, dir string) (Requirement, bool, error) {
 		Version: "v" + declared.Version,
 		Raw:     declared.Version,
 		Source:  relSource(root, ws, "package.json") + " (packageManager)",
+		Hash:    declared.Hash,
 	}, true, nil
 }
 

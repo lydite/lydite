@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha1" // #nosec G505 -- building the legacy registry digest a fixture is checked against
+	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
@@ -215,6 +216,106 @@ func TestVerifyDist(t *testing.T) {
 				t.Fatalf("verifyDist = %v, want error %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A declared hash is checked beside the registry's digest, never in place of
+// it: a tarball the registry's own document agrees with is still refused when
+// it is not the one the repository pinned.
+func TestVerifyTarball(t *testing.T) {
+	data := []byte("tarball")
+	s512 := sha512.Sum512(data)
+	registry := registryDist{Integrity: "sha512-" + base64.StdEncoding.EncodeToString(s512[:])}
+	badRegistry := registryDist{Integrity: "sha512-" + base64.StdEncoding.EncodeToString(make([]byte, 64))}
+	s256 := sha256.Sum256(data)
+
+	for _, tc := range []struct {
+		name     string
+		dist     registryDist
+		declared string
+		wantErr  bool
+	}{
+		{"no declared hash checks the registry's digest alone", registry, "", false},
+		{"no declared hash still fails the registry's digest", badRegistry, "", true},
+		{"a matching declared hash passes", registry, "sha512." + hex.EncodeToString(s512[:]), false},
+		{"a declared hash in upper case matches", registry, "sha512." + strings.ToUpper(hex.EncodeToString(s512[:])), false},
+		{"a matching sha256 passes", registry, "sha256." + hex.EncodeToString(s256[:]), false},
+		{"a tarball the registry vouches for but the pin does not is refused",
+			registry, "sha512." + strings.Repeat("0", 128), true},
+		{"a matching declared hash does not excuse the registry's digest",
+			badRegistry, "sha512." + hex.EncodeToString(s512[:]), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			declared, err := parseDeclaredHash(tc.declared)
+			if err != nil {
+				t.Fatalf("parseDeclaredHash(%q): %v", tc.declared, err)
+			}
+			if err := verifyTarball(data, tc.dist, declared); (err != nil) != tc.wantErr {
+				t.Fatalf("verifyTarball = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A hash lydite cannot check is refused, not skipped: skipping it installs
+// whatever the registry serves as though nothing had been pinned.
+func TestParseDeclaredHash(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		hash    string
+		want    string
+		wantErr bool
+	}{
+		{"none declared", "", "", false},
+		{"sha512", "sha512." + strings.Repeat("ab", 64), "sha512." + strings.Repeat("ab", 64), false},
+		{"sha1", "sha1." + strings.Repeat("0", 40), "sha1." + strings.Repeat("0", 40), false},
+		{"sha224", "sha224." + strings.Repeat("0", 56), "sha224." + strings.Repeat("0", 56), false},
+		{"sha384", "sha384." + strings.Repeat("0", 96), "sha384." + strings.Repeat("0", 96), false},
+		{"upper-case hex is read as lower", "sha256." + strings.Repeat("AB", 32), "sha256." + strings.Repeat("ab", 32), false},
+		{"an unknown algorithm is refused", "md5." + strings.Repeat("0", 32), "", true},
+		{"no separator is refused", "sha512", "", true},
+		{"the SRI spelling is refused", "sha512-" + strings.Repeat("0", 128), "", true},
+		{"a digest that is not hex is refused", "sha256." + strings.Repeat("zz", 32), "", true},
+		{"a digest of the wrong length is refused", "sha512." + strings.Repeat("0", 64), "", true},
+		{"a path is refused", "sha512../../../etc", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDeclaredHash(tc.hash)
+			if (err != nil) != tc.wantErr || got.String() != tc.want {
+				t.Fatalf("parseDeclaredHash(%q) = (%q, %v), want (%q, error %v)", tc.hash, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// An unpack is only verified against the hash it was installed under, so the
+// same version pinned to different bytes is a different cache directory, and a
+// pin with no hash keeps the manager-and-version key.
+func TestManagerCacheKey(t *testing.T) {
+	a, _ := parseDeclaredHash("sha512." + strings.Repeat("0", 128))
+	b, _ := parseDeclaredHash("sha512." + strings.Repeat("1", 128))
+	none := managerCacheKey("pnpm", "8.15.4", declaredHash{})
+	if none != "pnpm-8.15.4" {
+		t.Errorf("key without a declared hash = %q, want pnpm-8.15.4", none)
+	}
+	keyA, keyB := managerCacheKey("pnpm", "8.15.4", a), managerCacheKey("pnpm", "8.15.4", b)
+	if keyA == none || keyB == none || keyA == keyB {
+		t.Errorf("keys = none %q, a %q, b %q; want three distinct directories", none, keyA, keyB)
+	}
+	if strings.ContainsAny(keyA, `/\`) {
+		t.Errorf("key %q is not a single path element", keyA)
+	}
+}
+
+// A declared hash lydite cannot check stops provisioning before anything is
+// fetched or taken from the cache.
+func TestProvisionRefusesAnUncheckableHash(t *testing.T) {
+	isolatedCache(t)
+	cachedManager(t, "pnpm", "8.15.4", pnpmTarball(t, "8.15.4"))
+	req := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v8.15.4", Raw: "8.15.4",
+		Source: "package.json (packageManager)", Hash: "md5." + strings.Repeat("0", 32)}
+	if st, err := provisionPackageManager(context.Background(), req, "", false); err == nil {
+		t.Fatalf("provisionPackageManager = %+v, want a refusal of the md5 hash", st)
 	}
 }
 

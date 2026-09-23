@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1" // #nosec G505 -- only for a registry version publishing no SHA-512 integrity; see verifyDist
+	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
@@ -374,18 +375,24 @@ const npmRegistry = "https://registry.npmjs.org/"
 // Downloaded from the npm registry into the version-keyed cache, the way Node
 // is, rather than enabled through Corepack: Corepack's shims are written into
 // Node's own install directory, which on a runner is not lydite's to modify,
-// and what it fetches is the same registry tarball this fetches.
+// and what it fetches is the same registry tarball this fetches. The hash a
+// pin declares is checked the way Corepack checks it, and keys the cache
+// alongside the version.
 //
 // satisfied has already established that the ambient release is absent or is
 // not the pinned one, so there is no "already good enough" check here.
 func provisionPackageManager(ctx context.Context, req Requirement, ambient string, present bool) (*step, error) {
 	version := req.Raw
-	dir, err := cacheRoot(req.Manager + "-" + version)
+	declared, err := parseDeclaredHash(req.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s (pinned in %s) cannot be verified: %w", req.Manager, version, req.Source, err)
+	}
+	dir, err := cacheRoot(managerCacheKey(req.Manager, version, declared))
 	if err != nil {
 		return nil, err
 	}
 	if err := installOnce(dir, func(staging string) error {
-		return downloadPackageManager(ctx, req.Manager, version, staging)
+		return downloadPackageManager(ctx, req.Manager, version, declared, staging)
 	}); err != nil {
 		return nil, fmt.Errorf("%s %s (pinned in %s) could not be installed from %s: %w",
 			req.Manager, version, req.Source, npmRegistry, err)
@@ -434,7 +441,7 @@ type registryDist struct {
 // [lydite:exclude_from_coverage][reached only when the pinned release is not
 // already on PATH or in the cache; exercising it means downloading a package
 // manager, and a test that did would measure registry.npmjs.org]
-func downloadPackageManager(ctx context.Context, manager, version, staging string) error {
+func downloadPackageManager(ctx context.Context, manager, version string, declared declaredHash, staging string) error {
 	pkg := registryPackage(manager, version)
 	doc, err := download.Fetch(ctx, npmRegistry+pkg+"/"+version)
 	if err != nil {
@@ -451,10 +458,106 @@ func downloadPackageManager(ctx context.Context, manager, version, staging strin
 	if err != nil {
 		return err
 	}
-	if err := verifyDist(data, meta.Dist); err != nil {
+	if err := verifyTarball(data, meta.Dist, declared); err != nil {
 		return err
 	}
 	return unpackManager(data, staging, manager)
+}
+
+// declaredHash is a `packageManager` pin's integrity hash, parsed: the
+// algorithm it names and the digest it expects. The zero value is a pin that
+// declares none.
+type declaredHash struct {
+	algo string
+	sum  []byte
+}
+
+// declaredAlgos are the algorithms a declared hash may name, with the digest
+// each computes. Corepack accepts whatever Node's crypto.createHash does;
+// these are the ones a `packageManager` field is written with.
+var declaredAlgos = map[string]func([]byte) []byte{
+	// #nosec G401 -- a hash the repository itself chose to pin; the registry's own SHA-512 is checked beside it
+	"sha1":   func(b []byte) []byte { s := sha1.Sum(b); return s[:] },
+	"sha224": func(b []byte) []byte { s := sha256.Sum224(b); return s[:] },
+	"sha256": func(b []byte) []byte { s := sha256.Sum256(b); return s[:] },
+	"sha384": func(b []byte) []byte { s := sha512.Sum384(b); return s[:] },
+	"sha512": func(b []byte) []byte { s := sha512.Sum512(b); return s[:] },
+}
+
+// parseDeclaredHash reads a `packageManager` hash as `<algo>.<hex>`.
+//
+// An algorithm lydite does not compute, or a digest that is not hex of that
+// algorithm's length, is an error rather than a hash to skip: the repository
+// pinned the bytes it trusts, and a pin that goes unchecked installs whatever
+// the registry serves exactly as though nothing had been pinned. The same
+// validation keeps the text safe to name a cache directory with, since the
+// field is the repository's to write.
+func parseDeclaredHash(s string) (declaredHash, error) {
+	if s == "" {
+		return declaredHash{}, nil
+	}
+	algo, encoded, ok := strings.Cut(s, ".")
+	if !ok {
+		return declaredHash{}, fmt.Errorf("the declared hash %q is not <algorithm>.<hex digest>", s)
+	}
+	digest, known := declaredAlgos[algo]
+	if !known {
+		return declaredHash{}, fmt.Errorf("the declared hash names %q, not an algorithm lydite can check", algo)
+	}
+	sum, err := hex.DecodeString(encoded)
+	if err != nil || len(sum) != len(digest(nil)) {
+		return declaredHash{}, fmt.Errorf("the declared hash %q is not a hex %s digest", s, algo)
+	}
+	return declaredHash{algo: algo, sum: sum}, nil
+}
+
+// String is the hash in the `<algo>.<hex>` form the field spells it, lower
+// case, or "" for none.
+func (d declaredHash) String() string {
+	if d.algo == "" {
+		return ""
+	}
+	return d.algo + "." + hex.EncodeToString(d.sum)
+}
+
+// verify checks data against the declared digest, and passes anything when
+// none is declared.
+func (d declaredHash) verify(data []byte, what string) error {
+	if d.algo == "" {
+		return nil
+	}
+	got := declaredAlgos[d.algo](data)
+	if !bytes.Equal(got, d.sum) {
+		return fmt.Errorf("checksum mismatch for %s: got %s.%s, but packageManager pins %s",
+			what, d.algo, hex.EncodeToString(got), d)
+	}
+	return nil
+}
+
+// managerCacheKey names the cache directory a package manager release is
+// unpacked into. A declared hash is part of it, because an unpack is only
+// verified against the hash it was installed under: a repository re-pinning
+// the same version to different bytes must not be handed an unpack checked
+// against the old ones. With no hash declared the key is the manager and
+// version alone.
+func managerCacheKey(manager, version string, declared declaredHash) string {
+	key := manager + "-" + version
+	if h := declared.String(); h != "" {
+		key += "+" + h
+	}
+	return key
+}
+
+// verifyTarball checks a package manager tarball against both the digest the
+// registry publishes and the hash the repository declares, before a byte of it
+// is unpacked. Neither stands in for the other: the registry's digest is
+// checked even when a hash is declared, and a tarball the registry vouches for
+// is still refused when it is not the one the repository pinned.
+func verifyTarball(data []byte, dist registryDist, declared declaredHash) error {
+	if err := verifyDist(data, dist); err != nil {
+		return err
+	}
+	return declared.verify(data, dist.Tarball)
 }
 
 // verifyDist checks a tarball against the digest the registry publishes for

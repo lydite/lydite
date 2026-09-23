@@ -467,6 +467,7 @@ func TestAPinnedPackageManagerIsASecondRequirement(t *testing.T) {
 	want := Requirement{
 		Unit: unit, Lang: runner.TypeScript, Manager: "pnpm",
 		Version: "v9.0.0-rc.1", Raw: "9.0.0-rc.1", Source: "package.json (packageManager)",
+		Hash: "sha512.abc",
 	}
 	if reqs[1] != want {
 		t.Errorf("second requirement = %+v, want %+v — pinned exactly, and untouched by the Node override", reqs[1], want)
