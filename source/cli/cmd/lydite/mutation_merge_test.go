@@ -8,14 +8,15 @@ import (
 	"time"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
 // twoComponents is the smallest declaration a gap in the fold is visible in:
 // one component a shard reported, and one no shard did.
 var twoComponents = component.File{Components: []component.Component{
-	{Name: "a", Dir: "moda"},
-	{Name: "b", Dir: "modb"},
+	{Name: "a", Dir: "moda", Runner: runner.GoTest},
+	{Name: "b", Dir: "modb", Runner: runner.GoTest},
 }}
 
 // mutationShardDir writes one shard's report directory at dir: the document it
@@ -233,5 +234,43 @@ func TestTheProjectionIsFoundBelowALineLongerThanTheDefaultLimit(t *testing.T) {
 	got, ok := shardProjection(dir, "b")
 	if !ok || got != line {
 		t.Errorf("the projection below a long line read back as %q, %v; want %q", got, ok, line)
+	}
+}
+
+// A component declaring no suite is in no shard, so no shard reports it — and
+// that is the plan working, not a shard that died. Its row comes from the
+// declaration, and the component beside it folds from the shards as it would
+// alone.
+func TestTheMutationFoldReportsANoSuiteComponentFromItsDeclaration(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: a\n    dir: moda\n    runner: go-test\n"+
+			"  - name: scripts\n    dir: scripts\n    lang: shell\n")
+	for _, dir := range []string{"moda", "scripts"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	killed := ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "4 of 4 mutant(s) killed in 12s"}
+
+	doc, err := runMutationMerge(t, root, mutationShard(t, killed), mutationShard(t))
+	if err != nil {
+		t.Fatalf("the fold failed over a component no shard was meant to run: %v", err)
+	}
+	shards, ok := rowNamed(doc, "shards")
+	if !ok {
+		t.Fatal("the fold emitted no shards row")
+	}
+	if shards.Status != ui.StatusPass || strings.Contains(strings.Join(shards.Detail, " "), "scripts has no row") {
+		t.Errorf("shards = %+v, want a pass: no shard was meant to run scripts", shards)
+	}
+	row, ok := rowNamed(doc, mutationLabel("scripts"))
+	if !ok {
+		t.Fatal("the component declaring no suite took no row")
+	}
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, "declares no suite") {
+		t.Errorf("mutation(scripts) = %+v, want unmeasured, naming that it declares no suite", row)
+	}
+	if got, _ := rowNamed(doc, mutationLabel("a")); got.Status != killed.Status || got.Value != killed.Value {
+		t.Errorf("mutation(a) = %+v, want the shard's row folded unchanged", got)
 	}
 }

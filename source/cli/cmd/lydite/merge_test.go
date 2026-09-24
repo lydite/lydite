@@ -835,3 +835,77 @@ func TestMergeCountsARustComponentTowardTheDenominatorEvenUnmeasured(t *testing.
 		t.Errorf("crap = %q, want the Rust component counted toward the denominator alongside the Go one", got.Value)
 	}
 }
+
+// A component declaring no suite is in no shard, so no shard reports it — and
+// it is neither a shard that died nor absent from the fold. Its rows come from
+// the declaration exactly once: not zero times, and not once per shard, even
+// where a shard named it with --component and reported it anyway.
+func TestMergeReportsANoSuiteComponentFromTheDeclarationOnce(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: a\n    dir: moda\n    runner: go-test\n"+
+			"  - name: scripts\n    dir: scripts\n    lang: shell\n"+
+			"  - name: b\n    dir: modb\n    runner: go-test\n")
+	for _, dir := range []string{"moda", "modb", "scripts"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	stray := withRows(t, shardOf(t, "b", 3, 4),
+		ui.Row{Status: ui.StatusUnmeasured, Label: testLabel("scripts"), Value: "not run — " + noSuiteReason},
+		noSuiteFlakyRow("scripts"))
+	for name, shards := range map[string][]string{
+		"neither shard ran it": {shardOf(t, "a", 1, 2), shardOf(t, "b", 3, 4)},
+		"a shard reported it":  {shardOf(t, "a", 1, 2), stray},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := runMergeCmd(t, root, shards...)
+			if err != nil {
+				t.Fatalf("merge: %v\n%s", err, out)
+			}
+			for _, label := range []string{testLabel("scripts"), flakyLabel("scripts"), "coverage(scripts)", "crap(scripts)"} {
+				if n := countRows(t, out, label); n != 1 {
+					t.Errorf("%s appears %d times, want exactly once", label, n)
+					continue
+				}
+				row := jsonRowByLabel(t, out, label)
+				if row.Status != string(ui.StatusUnmeasured) || !strings.Contains(row.Value, noSuiteReason) {
+					t.Errorf("%s = %+v, want unmeasured, naming that it declares no suite", label, row)
+				}
+			}
+			if got := jsonRowByLabel(t, out, "shards"); got.Status != "pass" {
+				t.Errorf("shards = %+v, want a pass: no shard was meant to run it", got)
+			}
+			if got := jsonRowByLabel(t, out, repoLabel("coverage")); !strings.Contains(got.Value, "2 of 2 component(s)") {
+				t.Errorf("coverage(repo) = %q, want a denominator counting only what a suite could measure", got.Value)
+			}
+		})
+	}
+}
+
+// A fold over shards that measured no coverage holds no coverage row for a
+// component declaring no suite either, as the single run that did not
+// instrument would not.
+func TestMergeGivesANoSuiteComponentNoCoverageRowsTheShardsDidNotTake(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml",
+		"components:\n"+
+			"  - name: a\n    dir: moda\n    runner: go-test\n"+
+			"  - name: scripts\n    dir: scripts\n    lang: shell\n")
+	for _, dir := range []string{"moda", "scripts"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	shard := shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: testLabel("a"), Value: "passed"},
+		ungatedFlaky("a"),
+	}, nil)
+	out, err := runMergeCmd(t, root, shard)
+	if err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+	if n := countRows(t, out, "coverage(scripts)"); n != 0 {
+		t.Errorf("coverage(scripts) appears %d times, want none: no shard instrumented", n)
+	}
+	if n := countRows(t, out, testLabel("scripts")); n != 1 {
+		t.Errorf("test(scripts) appears %d times, want exactly once", n)
+	}
+}

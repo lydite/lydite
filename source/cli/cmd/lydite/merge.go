@@ -94,7 +94,8 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, componentRows(rep, decl, inputs, testLabel)...)
+	problems = append(problems, suiteRows(rep, decl, inputs, testLabel,
+		func(name string) ui.Row { return noSuiteTestRow("test", name) })...)
 	// The same rule the suite rows follow, because it is the same shape: every
 	// component takes exactly one flaky row from the shard responsible for it,
 	// whether or not that run was asked to gate. A component with none is a
@@ -103,10 +104,21 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 	// Its problems say which gate they are about. A dead shard takes both of a
 	// component's rows with it, and two identical lines under `shards` read as
 	// the fold repeating itself rather than as two rows gone.
-	for _, problem := range componentRows(rep, decl, inputs, flakyLabel) {
+	for _, problem := range suiteRows(rep, decl, inputs, flakyLabel, noSuiteFlakyRow) {
 		problems = append(problems, "flaky: "+problem)
 	}
+	// Whether the shards measured coverage at all, which is whether a
+	// component declaring no suite takes coverage rows: a single run emits
+	// them only when it instruments, and a fold over runs that did not must
+	// not hold rows no shard of it would have.
+	instrumented := anyCoverageRow(inputs, decl)
 	for _, c := range decl.Components {
+		if declaresNoSuite(c) {
+			if instrumented {
+				noSuiteCoverageRows(rep, c.Name, cfg.Coverage.Floor)
+			}
+			continue
+		}
 		for _, label := range []string{"coverage(" + c.Name + ")", "patch(" + c.Name + ")", "crap(" + c.Name + ")", "floor(" + c.Name + ")"} {
 			for _, row := range rowsFor(inputs, label) {
 				rep.Add(row)
@@ -124,7 +136,7 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 		// verdict the run it folds refused to reach, against a baseline no
 		// shard was held to.
 		rep.Add(ungatedComposedRow(repoLabel("coverage"), folded.ms, folded.carried, everything))
-	case anyCoverageRow(inputs, decl):
+	case instrumented:
 		// The shards measured and wrote no measurements, which is what a run
 		// that was never asked to gate does. A figure over the repository is
 		// composed from counts rather than from rendered rows, so it cannot be
@@ -163,6 +175,28 @@ func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports
 
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedRow(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
+}
+
+// suiteRows is componentRows over the declaration, with every component that
+// declares no suite taking the row its declaration gives it instead.
+//
+// No shard runs such a component — `test plan` places it in no shard — so it
+// is neither a component a dead shard lost nor one the fold may look for in
+// the shards' documents. Its row comes from the declaration exactly once, the
+// way the fold's scorable count does, and a shard that reported it anyway
+// (a run naming it with --component) is not read: foldedRow claims its labels,
+// so its copy is neither carried nor counted twice.
+func suiteRows(rep *ui.Report, decl component.File, inputs []shardInput, label func(string) string, noSuite func(string) ui.Row) []string {
+	var problems []string
+	for _, c := range decl.Components {
+		if declaresNoSuite(c) {
+			rep.Add(noSuite(c.Name))
+			continue
+		}
+		one := component.File{Components: []component.Component{c}}
+		problems = append(problems, componentRows(rep, one, inputs, label)...)
+	}
+	return problems
 }
 
 // foldedRow names every label the fold produces itself, so unhandledLabels can
@@ -262,6 +296,12 @@ func foldMeasured(rep *ui.Report, decl component.File, inputs []shardInput) comp
 	}
 	for _, c := range decl.Components {
 		e, ok := folded.Components[c.Name]
+		if !ok && declaresNoSuite(c) {
+			m := unmeasurableComponent(c, noSuiteReason)
+			out.ms = append(out.ms, m)
+			out.floorMs = append(out.floorMs, m)
+			continue
+		}
 		if !ok {
 			m := unmeasuredComponent(c, "no shard's measurements hold this component")
 			m.Unmeasurable = unmeasurableByDeclaration(c)

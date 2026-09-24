@@ -105,8 +105,7 @@ The matrix goes to --out; stdout carries the report.`,
 			for _, s := range shards {
 				rep.Add(s.row())
 			}
-			rep.Add(ui.Row{Status: ui.StatusPass, Label: "plan",
-				Value: fmt.Sprintf("%d shard(s) over %d component(s)", len(shards), len(file.Components))})
+			rep.Add(planRow(file, shards))
 			if err := writeMatrix(out, shards); err != nil {
 				return err
 			}
@@ -152,6 +151,28 @@ func (s shard) row() ui.Row {
 		Value: fmt.Sprintf("%d component(s)", len(s.Components))}
 	for _, c := range s.Conflicts {
 		row.Detail = append(row.Detail, fmt.Sprintf("%s and %s share %s", c.A, c.B, c.On))
+	}
+	return row
+}
+
+// planRow says how many shards the matrix holds and over how many components.
+//
+// The count is of the components some shard runs, and each one declaring no
+// suite is named beside it rather than folded into the count: a matrix over
+// fewer components than the file declares, saying nothing about the rest, is
+// indistinguishable from a planner that dropped them.
+func planRow(file component.File, shards []shard) ui.Row {
+	sharded := 0
+	for _, s := range shards {
+		sharded += len(s.Components)
+	}
+	row := ui.Row{Status: ui.StatusPass, Label: "plan",
+		Value: fmt.Sprintf("%d shard(s) over %d component(s)", len(shards), sharded)}
+	for _, c := range file.Components {
+		if declaresNoSuite(c) {
+			row.Detail = append(row.Detail,
+				c.Name+" declares no suite, so no shard runs it — `lydite test merge` reports it from the declaration")
+		}
 	}
 	return row
 }
@@ -207,9 +228,16 @@ func writeMatrix(out string, shards []shard) error {
 // no ports. Its ports are unknown, so a matrix built without them could put
 // two components that contend for one port into different jobs — which is the
 // single thing this command exists to prevent.
+//
+// A component declaring no suite is not among them. It runs nothing, so it
+// contends with nothing, and no shard runs it: `test merge` reports it from
+// the declaration.
 func planItems(root string, file component.File) ([]scheduler.Item, error) {
 	items := make([]scheduler.Item, 0, len(file.Components))
 	for _, c := range file.Components {
+		if declaresNoSuite(c) {
+			continue
+		}
 		item := scheduler.Item{Name: c.Name, Dir: path.Clean(c.Dir), Occupies: c.Occupies}
 		if c.Compose.Declared() {
 			dir := filepath.Join(root, filepath.FromSlash(c.Dir))
@@ -236,10 +264,12 @@ func planItems(root string, file component.File) ([]scheduler.Item, error) {
 //
 // Shards are ordered by the declaration position of their first member, and
 // members are in declaration order, so two runs of one declaration emit an
-// identical matrix.
+// identical matrix. A component with no item — one declaring no suite — is in
+// no shard.
 func shardsOf(components []component.Component, items []scheduler.Item) []shard {
-	// Union-find over declaration positions, so the representative of a group
-	// is the earliest component in it and the ordering falls out.
+	// Union-find over item positions, which follow declaration order, so the
+	// representative of a group is the earliest component in it and the
+	// ordering falls out.
 	parent := make([]int, len(items))
 	for i := range parent {
 		parent[i] = i
@@ -269,7 +299,11 @@ func shardsOf(components []component.Component, items []scheduler.Item) []shard 
 
 	byRoot := map[int]*shard{}
 	var order []int
-	for i, c := range components {
+	for _, c := range components {
+		i, ok := at[c.Name]
+		if !ok {
+			continue
+		}
 		root := find(i)
 		s, ok := byRoot[root]
 		if !ok {
