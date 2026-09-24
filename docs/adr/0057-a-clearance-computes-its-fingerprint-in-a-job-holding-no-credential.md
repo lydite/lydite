@@ -108,12 +108,12 @@ thing the rule forbids.
 - `clearedDecision` takes the comparison from `--surfaces` when the split's computing job gave it
   one, mirroring `review`'s own flag: reconciled against the base resolved here, never re-run, so
   the job that records the clearance executes none of the change's own code regardless of what its
-  environment holds. Given no document, it guards its comparison exactly when the invocation also
-  posts — the direct route, no `--status-out`. A clearance posted from one job therefore still
-  computes at full parity wherever no opted-in component builds untrusted code, and the split is
-  what gives the rest a process to compute in. That guard's own test is whether this invocation
-  publishes, not what happens to be in its environment; the workflow is what makes that test worth
-  anything, by denying the computing job the grants that make a stolen token useful.
+  environment holds. Given no document, it refuses to make the comparison itself unconditionally —
+  unlike `review`'s own fallback, which guards only when the invocation also publishes.
+  `runClearance` requires a credential on every invocation of `clearance`, whether or not that run
+  also posts the status directly, so there is no invocation in which computing beside it is safe;
+  `--surfaces` is the only route to a full-parity comparison for a component whose comparison runs
+  the change's own code, and the split is what gives a job somewhere credential-free to make it in.
 - A repository that declares no `api_surface` component, or whose opted-in components are Go only,
   pays nothing for this: `computeAPISurfaces` returns immediately when nothing opted in, and
   `untrustedBuild` names only Rust and TypeScript, so a Go comparison already runs beside a

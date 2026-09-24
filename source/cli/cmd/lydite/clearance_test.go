@@ -394,17 +394,15 @@ func recordedFingerprint(t *testing.T, statusOut string) string {
 	return fingerprint
 }
 
-// A clearance given a comparison document records the fingerprint the same
-// clearance records when it makes the comparison itself — which is what lets a
-// component whose comparison runs the change's own code be compared in a job
-// holding no credential and cleared in one that does. The stub the comparison
-// needs is removed before the --surfaces run, so a run that recomputed instead
-// would reach a component it could not compare and fingerprint that.
-//
-// Both sides are real computations for the same reason
-// TestAClearanceRecordsTheFingerprintTheQueueRecomputes is: a literal on each
-// side keeps agreeing with itself long after the two paths stop agreeing with
-// each other.
+// A clearance given a comparison document fingerprints the real comparison the
+// document carries, not the "could not be compared" disqualification a run
+// with no document is always guarded into — `clearance` holds the credential
+// `runClearance` requires whether or not it also posts directly, so there is
+// no invocation of the command in which it may make the comparison itself.
+// `review` reads the same document independently and reports the comparison
+// as genuinely clean, which is what corroborates that the fingerprint the
+// document-fed clearance records reflects a real comparison rather than
+// stumbling into the same "uncomputable" answer a guarded run always reaches.
 func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(t *testing.T) {
 	semverChecksStub(t, semverChecksUnbroken)
 	dir, base, headSHA := optedInCheckout(t)
@@ -415,16 +413,15 @@ func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(
 	forge.start(t)
 
 	document := comparedSurfaces(t, dir, base)
-
-	inProcess := filepath.Join(t.TempDir(), "in-process.json")
-	if _, err := runClearanceWith(t, clearanceOptions{
-		dir: dir, base: base, statusOut: inProcess, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
-	}); err != nil {
-		t.Fatalf("runClearance: %v", err)
-	}
-
 	removeSemverChecksStub(t)
+
+	// review reads the document independently of clearance, and reports the
+	// comparison as real rather than uncomputable — proving the document
+	// carries a genuine clean comparison, not one nothing could make.
+	reviewOut, _ := runReview(t, dir, base, "--surfaces", document)
+	if !strings.Contains(reviewOut, "no incompatible change against "+shortSHA(base)) {
+		t.Fatalf("review did not read the document as a real, clean comparison:\n%s", reviewOut)
+	}
 
 	// Through the command, because --surfaces is a flag a workflow runs and
 	// not only a field runClearance happens to take.
@@ -444,10 +441,20 @@ func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(
 		t.Fatalf("Execute: %v", err)
 	}
 
-	want, got := recordedFingerprint(t, inProcess), recordedFingerprint(t, fromDocument)
-	if got != want {
-		t.Errorf("a clearance given the comparison recorded %q and one that made it recorded %q, "+
-			"so no entry cleared through the document leaves the queue", got, want)
+	// No document at all is always guarded now, so it fingerprints the
+	// component as uncomputable — the opposite answer from the real
+	// comparison the document above carries.
+	noDocument := filepath.Join(t.TempDir(), "no-document.json")
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: noDocument, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	real, guarded := recordedFingerprint(t, fromDocument), recordedFingerprint(t, noDocument)
+	if real == guarded {
+		t.Errorf("a real comparison and a guarded, always-uncomputable run fingerprinted the same decision %q", real)
 	}
 }
 

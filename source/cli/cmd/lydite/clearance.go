@@ -214,7 +214,7 @@ func applyAction(ctx context.Context, cmd *cobra.Command, client *forge.Client, 
 	case clearance.KindClear:
 		description := clearance.WithFingerprint(
 			fmt.Sprintf("cleared by @%s at %s", event.Comment.User.Login, shortSHA(head)),
-			clearedFingerprint(ctx, cmd, opt, head))
+			clearedFingerprint(ctx, cmd, client, repo, event.Issue.Number, opt, head))
 		// The head is the one the platform answered for this pull request a
 		// moment ago, never anything the comment named: the poster resolves
 		// it again and refuses a document naming anything else.
@@ -266,8 +266,8 @@ func applyAction(ctx context.Context, cmd *cobra.Command, client *forge.Client, 
 // Nothing here fails the run. Answering the comment is this command's job, and
 // a fingerprint that could not be taken is not a reason to leave the referral
 // standing with the commenter told nothing.
-func clearedFingerprint(ctx context.Context, cmd *cobra.Command, opt clearanceOptions, head string) string {
-	decision, err := clearedDecision(ctx, cmd, opt, head)
+func clearedFingerprint(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, number int, opt clearanceOptions, head string) string {
+	decision, err := clearedDecision(ctx, cmd, client, repo, number, opt, head)
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"lydite: this clearance records no fingerprint, so it will not carry onto a merge-queue entry: %v\n", err)
@@ -290,8 +290,11 @@ func clearedFingerprint(ctx context.Context, cmd *cobra.Command, opt clearanceOp
 // route for a component whose comparison runs the change's own code: read here,
 // it is reconciled against what this run resolves for itself and never re-run,
 // so the job holding the credential this clearance is recorded with executes
-// none of it. A run given no document makes the comparison itself, under the
-// same guard `review` computes under.
+// none of it. A run given no document makes the comparison itself, refusing an
+// opted-in component whose comparison runs the change's own code — this
+// process always holds the token `runClearance` requires, whether or not it
+// also posts directly, so there is no invocation of `clearance` in which that
+// comparison is safe to run in-process.
 //
 // The rows both comparisons render go to a report of their own rather than to
 // the one this command writes. What this run reports is the clearance; the
@@ -303,7 +306,7 @@ func clearedFingerprint(ctx context.Context, cmd *cobra.Command, opt clearanceOp
 // recomputes under: a `versions:` condition needs the licence and SCA rows of a
 // scan document, which no comment-answering job has, and passing nothing is the
 // direction that refers.
-func clearedDecision(ctx context.Context, cmd *cobra.Command, opt clearanceOptions, head string) (referral.Decision, error) {
+func clearedDecision(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, number int, opt clearanceOptions, head string) (referral.Decision, error) {
 	// Cheapest first, and refused before anything is resolved or fetched: a
 	// decision computed over some other revision is not the decision being
 	// cleared, and recording its fingerprint would attach a person's judgement
@@ -337,14 +340,19 @@ func clearedDecision(ctx context.Context, cmd *cobra.Command, opt clearanceOptio
 			return referral.Decision{}, err
 		}
 	} else {
-		// Guarded exactly when this invocation will also publish with its own
-		// token: that is the one combination where a component's own build code
-		// — a Rust crate's build.rs, a TypeScript package's lifecycle scripts —
-		// would run inside the process that holds a writing credential. A run
-		// rendering documents for another step to post holds none, which is what
-		// lets it compute the comparison at all; see
+		// Always guarded, unlike `review`'s own fallback: `review`'s guard
+		// tests whether the invocation also publishes, because a `review` run
+		// that only renders holds no credential of its own. `runClearance`
+		// requires GITHUB_TOKEN unconditionally — reading the head, the
+		// commenter's permission, the standing referral, and posting the
+		// reply all need it — so a `clearance` process holds a credential
+		// whether or not it also posts the status directly, and there is no
+		// invocation in which running a component's own build code here is
+		// safe. A document from --surfaces is the only route to a full-parity
+		// comparison for a component whose comparison runs the change's own
+		// code; see
 		// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
-		surfaces, err = computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, opt.statusOut == "")
+		surfaces, err = computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, true)
 		if err != nil {
 			return referral.Decision{}, err
 		}
@@ -359,7 +367,18 @@ func clearedDecision(ctx context.Context, cmd *cobra.Command, opt clearanceOptio
 	}
 	decision := referral.Decide(change, file, referral.Evidence{})
 	report := ui.NewReport("cleared decision")
-	renderAPISurfaceRows(ctx, cmd, report, &decision, opt.dir, baseSHA, opt.eventPath, surfaces)
+	// Resolved live rather than read from the comment payload: an
+	// issue_comment event carries no pull_request.title at all, only the
+	// comment thread's own issue.title, which is the pull request's title
+	// only by convention. A break declared solely in the title would
+	// otherwise never be seen here. A failure to resolve it can only
+	// under-refer, so it is warned about rather than fatal.
+	title, err := client.PullRequestTitle(ctx, repo, number)
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"lydite: could not resolve the pull request's title (%v) — a break declared only there is not seen\n", err)
+	}
+	renderAPISurfaceRows(ctx, cmd, report, &decision, opt.dir, baseSHA, title, surfaces)
 	addDependencyRows(report, &decision, measureDependencies(ctx, opt.dir, baseSHA, change.Paths), baseSHA)
 	return decision, nil
 }
