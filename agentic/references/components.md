@@ -43,6 +43,12 @@ workspace compiles three times and provisions three copies of everything the sui
 **`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
 second statement of the language could only disagree with the first.
 
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides to relax this: a component may declare `lang:` directly where no runner already implies
+one — refused beside `runner:` for the reason above, optional beside `command:`, and required
+alone to form a "scanned but not tested" component. That decision is design only; the field does
+not exist yet, and this section still describes the codebase as it is.
+
 **A component's name may hold only letters, digits, `.`, `_` and `-`.** It is not merely a label: it
 is a `--component` value inside a comma-separated list, the name of a CI matrix job, and the suffix of
 that job's artifact, so it has to survive all three round trips and the ones it cannot survive fail
@@ -430,6 +436,12 @@ from it. Each gate either measures it, renders it `unmeasured` with a reason, or
 Every `unmeasured` row leaves the verdict `pass` and is never rendered as a gate that passed. A
 language with a runner but no scanner gets the same three scan rows with a reason naming that
 language.
+
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides that a raw `command:` component may additionally declare `lang:`, opting its `scan`,
+`licence` and `findings` rows into that language's checks while the test-side table above stays
+unchanged. That decision is design only and not yet built; this table still describes what a raw
+`command:` component gets today.
 
 ## Output: captured, not streamed
 
