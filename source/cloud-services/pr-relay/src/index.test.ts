@@ -1106,9 +1106,22 @@ type Clearance = {
 
 // What the pull request's own change touches, which for an unbatched entry is
 // also what the queue commit touches: the queue replays one change onto the base
-// tip, so the two comparisons name the same paths whichever merge method built
-// the entry.
+// tip, so the two comparisons name the same paths at the same blobs whichever
+// merge method built the entry.
 const ENTRY_PATHS = ["src/auth.go", "README.md"];
+
+// A file a comparison reports, as a test writes it: a bare path takes the blob
+// the same path holds in every other comparison, and the object form is how a
+// test says two comparisons name one path at different content.
+type ComparedFile = string | { filename: string; sha: string };
+
+// The blob a path holds unless a test names another, so the two comparisons of an
+// unbatched entry agree on content as well as on paths.
+function comparedFiles(entries: ComparedFile[]): { filename: string; sha: string }[] {
+  return entries.map((entry) =>
+    typeof entry === "string" ? { filename: entry, sha: `blob-of-${entry}` } : entry,
+  );
+}
 
 // What each call the route makes is recorded in, so a test can assert that a
 // read never happened as well as that it did.
@@ -1118,15 +1131,15 @@ interface QueueCalls {
   compared?: string[];
 }
 
-// What the platform answers about the revisions: the paths each comparison
+// What the platform answers about the revisions: the files each comparison
 // reports — the queue commit's own change and the pull request's — and the
 // answers that are no comparison at all: a revision GitHub does not have, a
-// comparison carrying no file list, and a change too wide for it to list files
-// for.
+// comparison carrying no file list, a change too wide for it to list files for,
+// and a file list naming no blob for a path.
 interface QueueTree {
-  queued?: string[];
-  own?: string[];
-  comparison?: "missing" | "unlisted" | "wide";
+  queued?: ComparedFile[];
+  own?: ComparedFile[];
+  comparison?: "missing" | "unlisted" | "wide" | "blobless";
 }
 
 // The platform's own cap on the files one comparison reports.
@@ -1174,10 +1187,16 @@ function queueStub(
       if (tree.comparison === "unlisted") {
         return Response.json({ status: "ahead" });
       }
-      const paths =
+      const changed =
         comparison[2] === PR_HEAD ? (tree.own ?? ENTRY_PATHS) : (tree.queued ?? ENTRY_PATHS);
-      const files = tree.comparison === "wide" ? filler(COMPARE_FILE_LIMIT) : paths;
-      return Response.json({ files: files.map((filename) => ({ filename })) });
+      if (tree.comparison === "blobless") {
+        const nameOnly = comparedFiles(changed).map(({ filename }) => ({ filename }));
+        return Response.json({ files: nameOnly });
+      }
+      const files = comparedFiles(
+        tree.comparison === "wide" ? filler(COMPARE_FILE_LIMIT) : changed,
+      );
+      return Response.json({ files });
     }
     if (target.endsWith("/pulls/7")) {
       return Response.json({ state: "open", head: { sha: PR_HEAD } });
@@ -1354,9 +1373,32 @@ describe("carrying a clearance onto a merge-queue entry", () => {
     expect(read).toHaveLength(0);
   });
 
+  // The batch a path-only comparison cannot see: an earlier entry touching only
+  // files this pull request also touches names the same paths at other content,
+  // and the fingerprint agrees there too, so the blob shas are the only thing
+  // that tells the two trees apart.
+  it("publishes pending for a queue commit naming this change's paths at other content", async () => {
+    const { response, written, read } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [{ filename: "src/auth.go", sha: "blob-of-somebody-elses-edit" }, "README.md"] },
+    );
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("batches more than one change");
+    expect(read).toHaveLength(0);
+  });
+
   // A batch that could not be checked is not a batch that was ruled out.
   it("publishes pending when the comparison answers nothing usable", async () => {
-    for (const comparison of ["missing", "unlisted", "wide"] as const) {
+    for (const comparison of ["missing", "unlisted", "wide", "blobless"] as const) {
       const { response, written, read } = await compare(
         cleared,
         entry,
@@ -1372,9 +1414,10 @@ describe("carrying a clearance onto a merge-queue entry", () => {
     }
   });
 
-  // The paths and not the commits: a squash or a rebase gives the replayed
-  // change new shas, and an entry whose tree is the pull request's own change is
-  // the entry one clearance speaks for however the platform built it.
+  // The files and not the commits: a squash or a rebase gives the replayed
+  // change new commit shas, and an entry whose tree is the pull request's own
+  // change is the entry one clearance speaks for however the platform built it,
+  // in whatever order the file list arrives.
   it("compares the change a queue commit makes, whatever order the platform lists it in", async () => {
     const { response, written } = await compare(
       cleared,

@@ -889,11 +889,20 @@ async function queueOutcome(
  * queue commit's change is therefore measured against the pull request's own, and
  * anything wider is refused before the clearance is read.
  *
- * The changed paths are compared and not the commits: the queue's merge method
+ * The changed files are compared and not the commits: the queue's merge method
  * decides whether a commit survives the replay at all — squash folds the change
- * into one new commit, rebase rewrites every sha — while the tree the entry
+ * into one new commit, rebase rewrites every commit sha — while the tree the entry
  * produces has to be this pull request's change and nothing else whichever method
  * built it.
+ *
+ * Each file's blob sha is compared alongside its path, because the paths alone do
+ * not identify a change. An earlier entry touching only files the last pull
+ * request also touches produces the same path list at different content, and the
+ * fingerprint agrees there too — it hashes paths and disqualification kinds, never
+ * what a line says — so a path-only comparison carries the clearance onto content
+ * its clearer never saw for precisely the batch it is meant to catch. Two
+ * comparisons agree when they name the same files at the same blobs, and nothing
+ * weaker.
  *
  * Both comparisons are three-dot and from the base tip the ref's own name
  * carries, which is the revision the platform replayed the group onto. The body's
@@ -917,12 +926,19 @@ async function queueBatching(
   if (!base) {
     return `${queueRef} carries no base revision, so this entry's own change cannot be told from a batched one`;
   }
-  const queued = await comparedPaths(token, repository, base, sha, fetcher);
-  const own = await comparedPaths(token, repository, base, head, fetcher);
+  // Neither comparison depends on the other's answer, and both are refused
+  // together, so they are asked for together.
+  const [queued, own] = await Promise.all([
+    comparedFiles(token, repository, base, sha, fetcher),
+    comparedFiles(token, repository, base, head, fetcher),
+  ]);
   if (!queued || !own) {
     return "this queue entry could not be compared against the pull request's own change, so nothing rules out a batch";
   }
-  if (queued.length !== own.length || queued.some((path, at) => path !== own[at])) {
+  if (
+    queued.length !== own.length ||
+    queued.some((file, at) => file.filename !== own[at]?.filename || file.sha !== own[at]?.sha)
+  ) {
     return "this queue entry batches more than one change, so one pull request's clearance does not speak for it";
   }
   return undefined;
@@ -935,26 +951,34 @@ const COMPARE_FILE_LIMIT = 300;
 
 /** As much of `GET /compare/:base...:head` as a batch is detected from. */
 interface Comparison {
-  files?: { filename?: string }[];
+  files?: { filename?: string; sha?: string }[];
+}
+
+/** One file a comparison reports: its path, and the blob that path holds at the head. */
+interface ComparedFile {
+  filename: string;
+  sha: string;
 }
 
 /**
- * The paths one revision changes against another, sorted, or nothing when the
- * platform answered no usable list.
+ * The files one revision changes against another — each path and the blob it
+ * holds — sorted by path, or nothing when the platform answered no usable list.
  *
- * Nothing rather than an empty list in both the cases that matter: a revision
- * this repository does not have, and a change too wide for the platform to list
- * files for. An empty list is a real answer — a comparison finding no changed
- * file — and collapsing the two would read "nothing to compare" as "the two
- * agree".
+ * Nothing rather than an empty list in the cases that matter: a revision this
+ * repository does not have, a change too wide for the platform to list files for,
+ * and an entry naming no path or no blob sha. An empty list is a real answer — a
+ * comparison finding no changed file — and collapsing the two would read "nothing
+ * to compare" as "the two agree". A file whose blob the platform did not name is
+ * the same refusal for the same reason: a file that cannot be compared by content
+ * is one a caller could otherwise match by path alone.
  */
-async function comparedPaths(
+async function comparedFiles(
   token: string,
   repository: string,
   base: string,
   head: string,
   fetcher: typeof fetch,
-): Promise<string[] | undefined> {
+): Promise<ComparedFile[] | undefined> {
   const response = await fetcher(
     `${GITHUB_API}/repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(
       head,
@@ -971,7 +995,18 @@ async function comparedPaths(
   if (!comparison.files || comparison.files.length >= COMPARE_FILE_LIMIT) {
     return undefined;
   }
-  return comparison.files.map((file) => file.filename ?? "").sort();
+  const files: ComparedFile[] = [];
+  for (const file of comparison.files) {
+    if (!file.filename || !file.sha) {
+      return undefined;
+    }
+    files.push({ filename: file.filename, sha: file.sha });
+  }
+  // Code-unit order, not a collation: two paths a locale reads as equal would
+  // sort unstably, and the comparison is by index.
+  return files.sort((one, other) =>
+    one.filename < other.filename ? -1 : one.filename > other.filename ? 1 : 0,
+  );
 }
 
 /**

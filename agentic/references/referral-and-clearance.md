@@ -494,20 +494,34 @@ condition, or against a declared API break, that held at pull-request time there
 differently at queue time and goes back to a person rather than being silently trusted forward.
 Measuring either at queue time is worth doing and is not this path's to do — see the referral
 job's own `--reports`, in `queueDecision`'s own doc comment. The command then submits a
-`queueRequest` (`QueueRef`, `PullRequest`, `SHA`, `BaseSHA`, `Fingerprint`) to the relay, minting
-its own Actions OIDC token for the relay's origin — it holds no writing token by design, since it
-is the job that parses diff evidence and the relay is what writes, the same split every other
-relay-fronted job keeps.
+`queueRequest` (`QueueRef`, `PullRequest`, `SHA`, `BaseSHA`, `Fingerprint`, `Referred`) to the
+relay, minting its own Actions OIDC token for the relay's origin — it holds no writing token by
+design, since it is the job that parses diff evidence and the relay is what writes, the same split
+every other relay-fronted job keeps. `Referred` is `decision.Referred`: whether the recomputed
+decision refers at all, which is what lets the relay answer an unreferred entry without reading
+any clearance.
 
 **`pr-relay`'s `POST /merge-group`** (`source/cloud-services/pr-relay/src/index.ts`) is the one
-relay route that composes a verdict rather than relaying a caller's own. Given the verified OIDC
-claim, it resolves the *pull request's own head*, live, through `GET /pulls/:n` with the
-installation token — never the queue ref's own embedded SHA. That SHA (`base_sha` in the
-`merge_group` payload, and the trailing revision in the ref's `pr-<n>-<sha>` segment) is the base
-branch's tip the entry was replayed onto, not the pull request's head; reading it as a head is a
-common misreading the route is written to avoid entirely by never touching it for that purpose.
-With the real head in hand, it reads the `lydite/clearance` status standing there
-(`standingStatus`) and — before trusting it as evidence at all — checks that status's own
+relay route that composes a verdict rather than relaying a caller's own. `queueOutcome` gives
+three answers, ordered by what each has to establish first. An entry whose submitted `referred` is
+`false` is published `success` immediately and reads no clearance at all: a clearance is only ever
+given against a referral, so for a change every exemption covers there is none to compare against
+and nothing to wait for, which is the commonest change there is and the deadlock ADR 0053 exists
+to remove. That answer speaks for the whole queue commit even when the platform batched it, since
+the decision behind it was recomputed over the queue's own tree against the base tip and every
+batched change is inside that diff. Absence is not that claim — a payload saying nothing about
+`referred` is compared, and a `referred` that is not a boolean is refused outright.
+
+A referred entry is the path that needs a clearance, and the route resolves the *pull request's own
+head*, live, through `GET /pulls/:n` with the installation token — never the queue ref's own
+embedded SHA. That SHA (`base_sha` in the `merge_group` payload, and the trailing revision in the
+ref's `pr-<n>-<sha>` segment) is the base branch's tip the entry was replayed onto, not the pull
+request's head; reading it as a head is a common misreading the route is written to avoid entirely
+by never touching it for that purpose. With the real head in hand, `queueBatching` establishes
+that the queue commit carries this pull request's change and nothing else — a clearance speaks for
+one pull request, so a batched entry answers `pending` before any clearance is read, as described
+below. Only then does the route read the `lydite/clearance` status standing on that head
+(`standingStatus`) and — before trusting it as evidence at all — check that status's own
 `creator.login` equals the lydite App's bot identity, `lydite[bot]`
 (`APP_STATUS_CREATOR`). This is not the same check as matching the `lydite/clearance` context
 name: a context name is not evidence of who wrote it, and a fingerprint embedded in a description
@@ -543,9 +557,18 @@ own while the tree the decision is recomputed over holds every earlier entry's c
 disqualifications, so an earlier entry whose referral reasons happen to be a subset of the last
 entry's own could leave the group's fingerprint equal to the last entry's clearance. The relay's
 `queueBatching` rules this out before the clearance is even read: it compares the queue commit's
-changed paths, from the ref's own embedded base (never the request body's `base_sha`, which the
-caller could choose to defeat the check), against the pull request's own changed paths from that
-same base, and answers `pending` naming the batch on any difference or on an unusable comparison
-— changed paths rather than commits, because a squash or rebase merge method changes which
-commits survive the replay but not the tree the entry has to hold.
+changed files, from the ref's own embedded base (never the request body's `base_sha`, which the
+caller could choose to defeat the check), against the pull request's own changed files from that
+same base — the two comparisons run concurrently, neither depending on the other's answer — and
+answers `pending` naming the batch on any difference or on an unusable comparison. Changed files
+rather than commits, because a squash or rebase merge method changes which commits survive the
+replay but not the tree the entry has to hold. And each file's *blob sha* alongside its path, from
+the same `files` array `comparedFiles` reads the names out of: a path list alone does not identify
+a change, so an earlier entry editing only files the last pull request also edits produces an
+identical path list at different content — and since `Fingerprint` hashes paths and
+disqualification kinds rather than what any line says, it agrees there too. A path-only comparison
+would therefore carry the clearance forward on content its clearer never saw for precisely the
+batch this check exists to catch. Two comparisons agree only when they name the same files at the
+same blobs; a file the platform reported with no blob sha makes the comparison unusable, which is
+the same `pending` as no comparison at all.
 
