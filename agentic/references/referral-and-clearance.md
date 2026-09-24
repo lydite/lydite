@@ -140,10 +140,13 @@ Both API-surface `Disqualification` kinds are the first ones `internal/referral`
 derived from the line-level diff evidence `Disqualifications` computes everything else from.
 `internal/referral` still imports nothing about git history or webhooks — it never reads a
 commit message or a PR title itself. `breakDeclaration`, in `cmd/lydite`, is what reads the
-declaration (through `declaration.Declared`, over the pull request title from
-`internal/forge.PullRequestEvent` and over every commit in `base..HEAD` from
-`internal/gitstate.CommitMessages`) and hands `review` only the resulting
-`referral.Disqualification` to append. The fact of the declaration crosses the package boundary
+declaration (through `declaration.Declared`, over a title the caller resolves and over every
+commit in `base..HEAD` from `internal/gitstate.CommitMessages`) and hands `review` only the
+resulting `referral.Disqualification` to append. The title itself is resolved differently by
+each caller: `review` reads `pull_request.title` off the webhook payload
+(`internal/forge.PullRequestEvent`), while `clearance` resolves it live through
+`client.PullRequestTitle` (`GET /pulls/:n`), because an `issue_comment` payload carries no
+`pull_request.title` of its own. The fact of the declaration crosses the package boundary
 already decided; the evidence-only computation inside `internal/referral` never touches it.
 
 The declaration is a claim, not evidence, so it obeys the rule two paragraphs up: it may only
@@ -540,14 +543,60 @@ would make a mismatched queue entry permanently unclearable and reopen the exact
 mechanism removes. The entry then drops out of the queue exactly as any required check still
 pending would, and the author clears the pull request again to re-enter it.
 
-**The known limitation.** `/lydite clear` (`cmd/lydite/clearance.go`'s `applyAction`,
-`KindClear` branch) does not yet compute or embed a fingerprint at clear time, so no real
-clearance recorded today carries one, and every *referred* entry's merge-queue comparison
-currently answers `pending` regardless of whether the decision actually held. This does not
-affect an *unreferred* entry (a fully exempt change) — `queueOutcome` in the relay publishes
-`success` for those directly, since a clearance is only ever given against a referral and there
-is none to carry forward or wait on. Tracked in
-[lydite/lydite#254](https://github.com/lydite/lydite/issues/254).
+**`/lydite clear` computes and embeds the fingerprint, at full `review` parity.**
+`cmd/lydite/clearance.go`'s `applyAction` (`KindClear` branch) calls `clearedFingerprint`, which
+recomputes `clearedDecision` — the same evidence `review` decides on: `referral.Changes` against
+the resolved base, the base commit's own `.lydite/exemptions.yml`, the break declaration (title
+and commit messages), the API-surface comparison of every opted-in component, and the dependency
+delta of every manifest the change touches — and hashes `Uncovered`/`Disqualifications` with the
+same `referral.Fingerprint` `review` and `clearance queue` both use.
+[ADR 0057](../../docs/adr/0057-a-clearance-computes-its-fingerprint-in-a-job-holding-no-credential.md)
+closes [lydite/lydite#254](https://github.com/lydite/lydite/issues/254) this way, having rejected
+the narrower "paths and disqualifiers only" fingerprint discussed there as one that would not
+describe the decision a person actually cleared.
+
+Three things make this safe to compute inside the job that answers the comment, which holds
+`statuses: write` and `pull-requests: write` on every invocation of `clearance` (unlike `review`,
+whose in-process fallback is guarded only when the run also publishes):
+
+- **`checkoutIsHead`** refuses before resolving anything else when the checkout is not at the
+  revision being cleared — a job answering a comment is free to have checked out the default
+  branch, and a decision recomputed there is not the decision anyone was asked about.
+- **The in-process API-surface comparison is guarded unconditionally.** `clearedDecision` calls
+  `computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, true)` — the `guardCredential` argument is always
+  `true` here, never conditioned on `--status-out` the way `review`'s own fallback is, because
+  `runClearance` requires `GITHUB_TOKEN` on every invocation regardless of whether that invocation
+  also posts. **`--surfaces <file>`** (mirroring `review`'s own flag) is the route around the
+  guard: it reads a comparison a separate, credential-free job already made with `review
+  compare`, reconciles it against the base resolved here through `reconcileSurfaces` (never
+  re-running it), and is the only way a component whose comparison runs the change's own code
+  (`untrustedBuild`) gets a full-parity fingerprint. Given neither a readable `--surfaces` document
+  nor an opted-out component, `uncomputableSurfaces` records the comparison as a disqualification
+  naming why — the same "could not run" shape [the rule](../rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
+  above requires — rather than silently treating it as clean. The two-job split this enables (a computing job holding no credential, a
+  posting job that never re-runs the comparison) lands in `lydite/actions`' `lydite-clearance.yml`,
+  not in this repository's own diff.
+- **The pull request's title is resolved live**, through `client.PullRequestTitle` (`GET
+  /repos/:o/:r/pulls/:n`), never read off the comment payload: an `issue_comment` event's
+  `event.Issue.Title` is the comment thread's own title, which is the pull request's only by
+  convention, and `review`'s own `pullRequestTitle(eventPath)` has no equivalent to read at clear
+  time. A failure to resolve it is a warning, not a fatal error — under-declaring a break can only
+  under-refer, never falsely clear one.
+
+A fingerprint that could not be computed at all (an unreadable base, an unresolvable checkout) is
+recorded as empty rather than failing the clear: `clearance.WithFingerprint` appends nothing, so
+the referral still resolves on this head, and the clearance simply does not carry forward to a
+merge-queue entry — named on stderr every time, so a clearance that quietly stopped travelling is
+never indistinguishable from one that legitimately re-refers.
+
+**What still does not carry forward.** `queueDecision` (`cmd/lydite/mergequeue.go`) still calls
+`referral.Decide` alone against the zero `referral.Evidence{}` — never `computeAPISurfaces`, never
+`measureDependencies` — so however faithfully `/lydite clear` computed the fingerprint, an entry
+referred for a declared API break or an added dependency fingerprints differently at queue time
+and goes back to a person. That gap is unchanged by ADR 0057 and is the referral job's `--reports`
+to close, not `clearedDecision`'s. This does not affect an *unreferred* entry (a fully exempt
+change) — `queueOutcome` in the relay publishes `success` for those directly, since a clearance is
+only ever given against a referral and there is none to carry forward or wait on.
 
 **The merge-queue batching caveat — closed.** A queue ref that groups more than one pull request
 into one entry only names the *last* `pr-N-sha` segment (`QueueEntry` in
