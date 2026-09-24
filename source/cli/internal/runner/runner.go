@@ -1529,19 +1529,14 @@ func goScope(args []string) string {
 // provider is looked for in order and the first one installed wins, since a
 // workspace carries the one its config selects.
 //
-// Read from the same directory Install actually wrote to: dir's own
-// node_modules for a component with its own lockfile, the workspace root
-// WorkspaceRoot resolves for one nested in a workspace whose install hoists
-// its packages above the component, or dir itself when override names
-// typescript.install — an override always runs there regardless of any
-// lockfile above it, so resolving a workspace root for it would read from a
-// tree the install never touched.
+// Read from the same directory Install actually wrote to: the workspace root
+// WorkspaceRoot resolves — for a detected install nested in a workspace whose
+// install hoists its packages above the component, or for an override that
+// coalesces onto that same root — or dir itself only when no root resolves.
 func jsProducer(dir, scanRoot, override, run string, providers ...string) string {
 	root := dir
-	if override == "" {
-		if r, ok := nodedeps.WorkspaceRoot(dir, scanRoot); ok {
-			root = r
-		}
+	if r, ok := nodedeps.WorkspaceRoot(dir, scanRoot); ok {
+		root = r
 	}
 	version, ok := nodedeps.PackageVersion(root, run)
 	if !ok {
