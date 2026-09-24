@@ -126,6 +126,13 @@ dependabot:
     note: |
       Semgrep (internal/semgrep).
   - ecosystem: pip
+    directory: /source/cli/internal/shell/shellcheck-pin
+    note: |
+      ShellCheck (internal/shell), through shellcheck-py, the PyPI
+      distribution of the upstream static binary. Installed via pipx the way
+      Semgrep is, and read at runtime from this manifest, so a bump carries
+      no mirror.
+  - ecosystem: pip
     directory: /.github/workflows/proving-ground-pyyaml
     note: |
       PyYAML, installed by the proving-ground coverage gate's one-component
