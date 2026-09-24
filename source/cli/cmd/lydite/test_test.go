@@ -2265,3 +2265,63 @@ func TestAnUnshardedRunReportsANoSuiteComponentFromItsDeclaration(t *testing.T) 
 		t.Errorf("crap(fixture) = %+v, want its own score", row)
 	}
 }
+
+// A floor row names a floor that is configured. With none configured there is
+// no floor to say cannot apply, so a component declaring no suite takes only
+// its coverage and complexity rows.
+func TestANoSuiteComponentTakesAFloorRowOnlyWhenAFloorIsConfigured(t *testing.T) {
+	unset := ui.NewReport("test")
+	noSuiteCoverageRows(unset, "scripts", 0)
+	var labels []string
+	for _, r := range unset.Rows() {
+		labels = append(labels, r.Label)
+	}
+	if want := []string{"coverage(scripts)", "crap(scripts)"}; fmt.Sprint(labels) != fmt.Sprint(want) {
+		t.Errorf("rows with no floor = %v, want %v", labels, want)
+	}
+
+	set := ui.NewReport("test")
+	noSuiteCoverageRows(set, "scripts", 10)
+	row := rowByLabel(t, set, "floor(scripts)")
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, "10.0%") || !strings.Contains(row.Value, noSuiteReason) {
+		t.Errorf("floor(scripts) = %+v, want unmeasured, naming the floor and the no-suite reason", row)
+	}
+}
+
+// A selection holding only components that declare no suite measures nothing,
+// so it answers nothing about the repository: a composed coverage row or a
+// baseline row there would describe a measurement no component took part in.
+func TestASelectionOfOnlyNoSuiteComponentsTakesNoComposedRows(t *testing.T) {
+	own := []component.Component{{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell}}
+	file := component.File{Components: own}
+	rep := ui.NewReport("test")
+	addTestCoverageRows(context.Background(), newRootCmd(), rep, t.TempDir(), file, own, nil, config.Default(),
+		coverageOptions{Instrument: true})
+	var labels []string
+	for _, r := range rep.Rows() {
+		labels = append(labels, r.Label)
+	}
+	if want := []string{"coverage(scripts)", "crap(scripts)"}; fmt.Sprint(labels) != fmt.Sprint(want) {
+		t.Errorf("rows = %v, want only the declaration's own %v", labels, want)
+	}
+}
+
+// A run that selected nothing still takes a coverage and complexity row per
+// component it is responsible for: a coverage section that disappeared when
+// nothing was affected would read as one that measured everything and passed.
+func TestCoverageRowsReportEvenWhenNothingWasSelected(t *testing.T) {
+	root := affectedRepo(t)
+	commitChange(t, root, "", "")
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	for _, name := range []string{"a", "b"} {
+		for _, label := range []string{"coverage(" + name + ")", "crap(" + name + ")"} {
+			if row := jsonRowByLabel(t, out, label); row.Status != string(ui.StatusUnmeasured) {
+				t.Errorf("%s = %+v, want unmeasured: the component's suite never ran", label, row)
+			}
+		}
+	}
+}
