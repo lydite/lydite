@@ -53,6 +53,13 @@ type queueRequest struct {
 	// Fingerprint is referral.Fingerprint over the reasons the recomputed
 	// decision refers on, and the whole of what the relay compares.
 	Fingerprint string `json:"fingerprint"`
+	// Referred is whether the recomputed decision refers at all. False means
+	// there is nothing to compare: a clearance is only ever given against a
+	// referral, so an entry that refers for nothing has none to carry forward
+	// and the relay publishes success on its own merits. The decision is
+	// recomputed over the queue's own tree against the base tip, so this speaks
+	// for every change the queue commit holds and not only this entry's.
+	Referred bool `json:"referred"`
 }
 
 // queueAnswer is what the relay answers: the status it wrote, or why it wrote
@@ -108,7 +115,9 @@ and submits that fingerprint to the relay, which resolves the originating pull
 request from this run's own ref, reads the fingerprint the clearance recorded
 there, compares the two and publishes ` + clearance.Context + ` at the queue revision:
 success carrying the same attribution forward when the decision is unchanged,
-and pending naming what changed when it is not.
+and pending naming what changed when it is not. A recomputed decision that does
+not refer at all has no clearance to carry, and is published success on its own
+merits.
 
 This job holds no writing token, by design: it reads the change's own diff to
 recompute the decision, and the relay is what writes. --relay is therefore
@@ -200,6 +209,7 @@ func runQueue(ctx context.Context, cmd *cobra.Command, client doer, opt queueOpt
 		SHA:         event.MergeGroup.HeadSHA,
 		BaseSHA:     baseSHA,
 		Fingerprint: fingerprint,
+		Referred:    decision.Referred,
 	})
 	if err != nil {
 		return err
@@ -244,9 +254,8 @@ func queueReasons(d referral.Decision) string {
 	case !d.Referred:
 		// No reasons at all. A decision that refers for nothing has a
 		// fingerprint no clearance can carry, because a clearance is only ever
-		// given against a referral — so this entry needs its verdict published
-		// on its own merits rather than carried forward, which is the relay's
-		// to answer and not something this body may claim.
+		// given against a referral — so the submission says the decision does
+		// not refer and the relay publishes the entry on its own merits.
 		return "no referral"
 	default:
 		return fmt.Sprintf("%d uncovered path(s), %d disqualification(s)",

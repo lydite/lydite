@@ -162,16 +162,19 @@ func (e MergeGroupEvent) BaseBranch() string {
 // branch's and are not parsed; and when the queue groups several pull requests
 // into one ref, the entry named is the one the platform put last.
 //
-// A group carrying more than one change is only partly covered by this design.
-// The number read names the last pull request, so the clearance compared against
+// A group carrying more than one change would otherwise be only partly covered:
+// the number read names the last pull request, so the clearance compared against
 // is that one's, while the tree the decision is recomputed over holds every
 // earlier entry's change too. referral.Fingerprint hashes the set of uncovered
 // paths and the set of (Kind, Path) disqualifications, so an earlier entry whose
-// referral reasons are a subset of the last's leaves the group's fingerprint
-// equal to the last's own clearance — and that clearance then carries forward
-// onto a revision holding content the clearer never saw. Nothing here detects a
-// batch, so a repository queueing more than one entry per queue commit is
-// outside what this comparison speaks for.
+// referral reasons are a subset of the last's could leave the group's
+// fingerprint equal to the last's own clearance — and that clearance would then
+// carry forward onto a revision holding content the clearer never saw. The
+// relay's own `queueBatching` (source/cloud-services/pr-relay/src/index.ts)
+// closes this: it compares the queue commit's changed paths against BaseSHA
+// against the pull request's own, from the same base, and answers `pending`
+// rather than trusting a comparison when they differ — this type carries
+// BaseSHA precisely so that check has a base to measure from.
 //
 // A ref that is not a queue ref, or whose last segment names no entry, is an
 // error. This path exists for one event and the ref is the only place that

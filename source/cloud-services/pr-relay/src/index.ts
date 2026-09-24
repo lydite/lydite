@@ -88,6 +88,16 @@ interface QueueRequest {
   base_sha?: string;
   /** The fingerprint of the reasons the recomputed decision refers on. */
   fingerprint?: string;
+  /**
+   * Whether the recomputed decision refers at all.
+   *
+   * False is the ordinary case — a change every exemption covers, tripping no
+   * disqualifier — and there is no clearance for it to carry forward, because a
+   * clearance is only ever given against a referral. Absent is not false: a
+   * submission that does not say goes through the comparison, whose worst answer
+   * is a `pending` a person can clear.
+   */
+  referred?: boolean;
 }
 
 const JWKS = "https://token.actions.githubusercontent.com/.well-known/jwks";
@@ -191,12 +201,15 @@ const production: Deps = {
  * relaying one. A merge queue replays the change onto a fresh base, so the
  * revision it builds carries no clearance and can be given none — its ref
  * belongs to no pull request, so there is no surface a clearing comment could be
- * typed at. The entry submits the fingerprint of the decision recomputed on the
- * queue's own tree; the relay resolves the originating pull request live, reads
- * the fingerprint the clearance recorded on that pull request's real head,
- * compares, and publishes the referral at the queue revision. The job that
- * submits therefore still holds no writing token, which is the reason the relay
- * exists at all.
+ * typed at. The entry submits the decision recomputed on the queue's own tree:
+ * whether it refers at all, and the fingerprint of the reasons it refers on. An
+ * entry that refers for nothing is published `success` on its own merits, since
+ * no clearance was ever given for it; for every other entry the relay resolves
+ * the originating pull request live, checks that the queue commit holds that
+ * pull request's change and nothing batched beside it, reads the fingerprint the
+ * clearance recorded on that pull request's real head, compares, and publishes
+ * the referral at the queue revision. The job that submits therefore still holds
+ * no writing token, which is the reason the relay exists at all.
  *
  * That covers those four writes and nothing else. The coverage gate runs the
  * repository's own tests and its `setup`/`teardown` shell, and on a pull
@@ -301,31 +314,17 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     const token = await installationToken(jwt, installation, claims.repository, deps.fetcher);
 
     if (route === QUEUE_ROUTE) {
-      // The pull request's own head, live: the queue ref's trailing revision is
-      // the base tip the entry was replayed onto, not a head, and nothing in
-      // the body is a revision the clearance may be read off. A pull request
-      // this repository does not have is a pull request `GET /pulls/:n` answers
-      // nothing for.
-      const pr = await pullRequest(token, claims.repository, pull, deps.fetcher);
-      const head = pr?.head?.sha;
-      if (!head) {
-        return json(403, { error: NO_SUCH_PULL });
+      const outcome = await queueOutcome(token, claims.repository, pull, payload, deps.fetcher);
+      if ("error" in outcome) {
+        return json(403, outcome);
       }
-      const cleared = await standingStatus(
-        token,
-        claims.repository,
-        head,
-        CLEARANCE_CONTEXT,
-        deps.fetcher,
-      );
-      const verdict = queueVerdict(cleared, payload.fingerprint as string, pull);
       await postStatus(
         token,
         claims.repository,
-        { ...verdict, context: REFERRAL_CONTEXT, sha: payload.sha },
+        { ...outcome, context: REFERRAL_CONTEXT, sha: payload.sha },
         deps.fetcher,
       );
-      return json(200, verdict);
+      return json(200, outcome);
     }
 
     if (route === "/comment") {
@@ -673,18 +672,21 @@ function referralResolution(payload: StatusRequest, claims: ActionsClaims, env: 
 const MERGE_GROUP_EVENT = "merge_group";
 const QUEUE_REF_PREFIX = `${BRANCH_REF}gh-readonly-queue/`;
 
-// The segment of a queue ref that names one entry. The trailing revision is
-// the base branch's tip the entry was replayed onto — never the pull request's
-// head — so it is matched to be discarded, and the head is resolved live.
-// Mirrors `queueEntryPattern` in `source/cli/internal/forge/event.go`.
-const QUEUE_ENTRY = /^pr-(\d+)-[0-9a-fA-F]{7,40}$/;
+// The segment of a queue ref that names one entry. The trailing revision is the
+// base branch's tip the entry was replayed onto and never the pull request's
+// head — the head is resolved live, and that base is what the queue commit's own
+// change is measured from. Mirrors `queueEntryPattern` in
+// `source/cli/internal/forge/event.go`.
+const QUEUE_ENTRY = /^pr-(\d+)-([0-9a-fA-F]{7,40})$/;
 
 /**
  * What is wrong with a `/merge-group` payload, or nothing.
  *
- * Every field is required because every one of them is compared: a submission
- * missing one is a comparison that cannot be made, and a comparison that cannot
- * be made must be refused rather than resolved either way.
+ * Every field naming the entry is required because every one of them is
+ * compared: a submission missing one is a comparison that cannot be made, and a
+ * comparison that cannot be made must be refused rather than resolved either
+ * way. `referred` is the one optional field — absent is the comparison, which is
+ * the answer that needs the fields above it.
  */
 function queuePayloadError(payload: QueueRequest): string | undefined {
   if (!payload.queue_ref || !payload.sha || !payload.fingerprint) {
@@ -693,6 +695,12 @@ function queuePayloadError(payload: QueueRequest): string | undefined {
   const named = payload.pull_request;
   if (typeof named !== "number" || !Number.isInteger(named) || named <= 0) {
     return "a pull request number is required";
+  }
+  if (payload.referred !== undefined && typeof payload.referred !== "boolean") {
+    // Refused rather than coerced. Every value but `false` is read as "refers",
+    // so a string or a number would resolve toward the comparison and read as a
+    // submission that had said so.
+    return "referred is a boolean when it is sent at all";
   }
   return undefined;
 }
@@ -778,33 +786,192 @@ function queueRun(claims: ActionsClaims, env: Env): ClearanceAuthority {
 }
 
 /**
- * The pull request a queue ref names, or nothing.
+ * The entry a queue ref names: the pull request, and the base branch tip the
+ * platform replayed the group onto.
  *
  * The last segment is the one read: a base branch may hold slashes, and a group
- * carrying several pull requests names the one the platform put last.
- *
- * A group of more than one is only partly covered by this design. The number read
- * names the last pull request, so the clearance compared against is that one's,
- * while the queue revision the verdict lands on holds every earlier entry's
- * change too. `referral.Fingerprint` hashes the set of uncovered paths and the set
- * of (Kind, Path) disqualifications, so an earlier entry whose referral reasons
- * are a subset of the last's leaves the group's fingerprint equal to the last's
- * own clearance — which then carries forward onto a revision holding content the
- * clearer never saw. Neither side detects a batch, so a repository queueing more
- * than one entry per queue commit is outside what this comparison speaks for.
- * `QueueEntry` in `source/cli/internal/forge/event.go` carries the same caveat.
+ * carrying several pull requests names the one the platform put last. That is why
+ * the base travels with the number — the number alone speaks for one entry of a
+ * group, and `queueBatching` measures the queue commit's own change from this
+ * base to establish that the group is one entry at all.
  */
-function queuePullRequest(ref: string): number | undefined {
+function queueEntry(ref: string): { pull: number; base: string } | undefined {
   if (!ref.startsWith(QUEUE_REF_PREFIX)) {
     return undefined;
   }
   const segments = ref.slice(QUEUE_REF_PREFIX.length).split("/");
   const match = QUEUE_ENTRY.exec(segments[segments.length - 1] ?? "");
-  if (!match?.[1]) {
+  if (!match?.[1] || !match[2]) {
     return undefined;
   }
   const number = Number(match[1]);
-  return Number.isInteger(number) && number > 0 ? number : undefined;
+  if (!Number.isInteger(number) || number <= 0) {
+    return undefined;
+  }
+  return { pull: number, base: match[2] };
+}
+
+/** The pull request a queue ref names, or nothing. */
+function queuePullRequest(ref: string): number | undefined {
+  return queueEntry(ref)?.pull;
+}
+
+/** A state and the description published beside it. */
+interface Verdict {
+  state: string;
+  description: string;
+}
+
+/**
+ * The verdict this queue entry earns, or why there is no pull request for it to
+ * earn one against.
+ *
+ * Three answers, ordered by what each needs to establish. An entry whose
+ * recomputed decision refers for nothing is published `success` and reads
+ * nothing: a clearance is only ever given against a referral, so there is none
+ * to compare against and waiting for one is the deadlock ADR 0053 removes, hit
+ * by the commonest change there is. That answer speaks for the whole queue
+ * commit even when the platform batched it, because the decision behind it was
+ * recomputed over the queue's own tree against the base tip — every batched
+ * change is inside the diff it was taken over.
+ *
+ * A referred entry is compared, and the comparison is against one pull request's
+ * clearance, so `queueBatching` has to rule out a batch before the clearance is
+ * read at all.
+ */
+async function queueOutcome(
+  token: string,
+  repository: string,
+  pull: number,
+  payload: QueueRequest,
+  fetcher: typeof fetch,
+): Promise<Verdict | { error: string }> {
+  if (payload.referred === false) {
+    return {
+      state: REFERRAL_RESOLVED,
+      description: clip(`#${pull} is not referred, so this entry merges unattended`),
+    };
+  }
+  // The pull request's own head, live: the queue ref's trailing revision is the
+  // base tip the entry was replayed onto, not a head, and nothing in the body is
+  // a revision the clearance may be read off. A pull request this repository does
+  // not have is a pull request `GET /pulls/:n` answers nothing for.
+  const pr = await pullRequest(token, repository, pull, fetcher);
+  const head = pr?.head?.sha;
+  if (!head) {
+    return { error: NO_SUCH_PULL };
+  }
+  const batched = await queueBatching(
+    token,
+    repository,
+    payload.queue_ref as string,
+    payload.sha as string,
+    head,
+    fetcher,
+  );
+  if (batched) {
+    return { state: REFERRAL_PENDING, description: clip(batched) };
+  }
+  const cleared = await standingStatus(token, repository, head, CLEARANCE_CONTEXT, fetcher);
+  return queueVerdict(cleared, payload.fingerprint as string, pull);
+}
+
+/**
+ * Why this queue entry may not be compared against one pull request's clearance,
+ * or nothing when it carries that pull request's change alone.
+ *
+ * The platform may fold several entries into one queue commit, and the ref names
+ * only the last of them. A clearance read off that pull request's head then
+ * stands in for content its clearer never saw whenever the earlier entries'
+ * referral reasons are a subset of the last's: `referral.Fingerprint` hashes the
+ * set of uncovered paths and the set of (Kind, Path) disqualifications, so the
+ * group's fingerprint equals the last entry's own and the comparison agrees. The
+ * queue commit's change is therefore measured against the pull request's own, and
+ * anything wider is refused before the clearance is read.
+ *
+ * The changed paths are compared and not the commits: the queue's merge method
+ * decides whether a commit survives the replay at all — squash folds the change
+ * into one new commit, rebase rewrites every sha — while the tree the entry
+ * produces has to be this pull request's change and nothing else whichever method
+ * built it.
+ *
+ * Both comparisons are three-dot and from the base tip the ref's own name
+ * carries, which is the revision the platform replayed the group onto. The body's
+ * `base_sha` is the caller's own assertion, and a caller choosing the base its
+ * batch is measured from is a caller choosing the answer — it would only have to
+ * name its own entry's first parent for a group of any size to measure as one
+ * change.
+ *
+ * A comparison that answers nothing usable is refused too, because a batch that
+ * could not be checked is not a batch that was ruled out.
+ */
+async function queueBatching(
+  token: string,
+  repository: string,
+  queueRef: string,
+  sha: string,
+  head: string,
+  fetcher: typeof fetch,
+): Promise<string | undefined> {
+  const base = queueEntry(queueRef)?.base;
+  if (!base) {
+    return `${queueRef} carries no base revision, so this entry's own change cannot be told from a batched one`;
+  }
+  const queued = await comparedPaths(token, repository, base, sha, fetcher);
+  const own = await comparedPaths(token, repository, base, head, fetcher);
+  if (!queued || !own) {
+    return "this queue entry could not be compared against the pull request's own change, so nothing rules out a batch";
+  }
+  if (queued.length !== own.length || queued.some((path, at) => path !== own[at])) {
+    return "this queue entry batches more than one change, so one pull request's clearance does not speak for it";
+  }
+  return undefined;
+}
+
+// The platform's own cap on the files one comparison reports, and the page size
+// asked for. A list at the cap is a list that may have been cut short, and two
+// lists that may have been cut are not a comparison.
+const COMPARE_FILE_LIMIT = 300;
+
+/** As much of `GET /compare/:base...:head` as a batch is detected from. */
+interface Comparison {
+  files?: { filename?: string }[];
+}
+
+/**
+ * The paths one revision changes against another, sorted, or nothing when the
+ * platform answered no usable list.
+ *
+ * Nothing rather than an empty list in both the cases that matter: a revision
+ * this repository does not have, and a change too wide for the platform to list
+ * files for. An empty list is a real answer — a comparison finding no changed
+ * file — and collapsing the two would read "nothing to compare" as "the two
+ * agree".
+ */
+async function comparedPaths(
+  token: string,
+  repository: string,
+  base: string,
+  head: string,
+  fetcher: typeof fetch,
+): Promise<string[] | undefined> {
+  const response = await fetcher(
+    `${GITHUB_API}/repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(
+      head,
+    )}?per_page=${COMPARE_FILE_LIMIT}`,
+    { headers: apiHeaders(`Bearer ${token}`) },
+  );
+  if (response.status === 404) {
+    return undefined;
+  }
+  if (!response.ok) {
+    throw new Error(`comparing two revisions answered ${response.status}`);
+  }
+  const comparison = (await response.json()) as Comparison;
+  if (!comparison.files || comparison.files.length >= COMPARE_FILE_LIMIT) {
+    return undefined;
+  }
+  return comparison.files.map((file) => file.filename ?? "").sort();
 }
 
 /**
@@ -828,7 +995,7 @@ function queueVerdict(
   cleared: StatusEntry | undefined,
   fingerprint: string,
   pull: number,
-): { state: string; description: string } {
+): Verdict {
   if (cleared?.state !== REFERRAL_RESOLVED) {
     return {
       state: REFERRAL_PENDING,
@@ -1010,7 +1177,7 @@ async function pullRequest(
   return (await response.json()) as PullRequest;
 }
 
-/** One entry of `GET /commits/:sha/status`: what a context says on a revision. */
+/** One entry of `GET /commits/:sha/statuses`: what a context said, and who said it. */
 interface StatusEntry {
   context?: string;
   state?: string;
@@ -1019,18 +1186,28 @@ interface StatusEntry {
   creator?: { login?: string };
 }
 
-/** As much of `GET /commits/:sha/status` as a standing status is read from. */
-interface CombinedStatus {
-  statuses?: StatusEntry[];
-}
+// The page size asked of the statuses list. The newest post under a context is
+// what a standing status is, so only the first page is read — a revision
+// carrying more than this many statuses newer than the one wanted is a revision
+// whose answer is not on the page, and the route's `pending` is what that reads
+// as.
+const STATUS_PAGE = 100;
 
 /**
  * The status a context is currently standing at on a revision, or nothing when
  * that revision carries no such status.
  *
- * The combined status answers one entry per context, each the most recent
- * status posted under it, which is exactly "what does this check say right
- * now". Read with the installation token and on the revision `handle` resolved,
+ * The list endpoint, not the combined one. `GET /commits/:sha/status`
+ * deduplicates to one entry per context but reports no `creator` on any of them,
+ * and a creator is the whole of what makes a status read back as lydite's own
+ * authority rather than as whatever any `statuses: write` token asserted — a
+ * field that is always `undefined` is a check that always fails, silently, on
+ * every real request. The list answers every status ever posted, newest first,
+ * so the first entry under the wanted context is that context's current state:
+ * the same answer the combined endpoint composes, with the identity that answer
+ * is only usable with.
+ *
+ * Read with the installation token and on the revision `handle` resolved,
  * because the point of the read is that it is the platform's answer rather than
  * the caller's: a request cannot assert the state it is about to be allowed to
  * move, nor the description a decision is compared against. Any failure other
@@ -1045,7 +1222,9 @@ async function standingStatus(
   fetcher: typeof fetch,
 ): Promise<StatusEntry | undefined> {
   const response = await fetcher(
-    `${GITHUB_API}/repos/${repository}/commits/${encodeURIComponent(sha)}/status`,
+    `${GITHUB_API}/repos/${repository}/commits/${encodeURIComponent(
+      sha,
+    )}/statuses?per_page=${STATUS_PAGE}`,
     { headers: apiHeaders(`Bearer ${token}`) },
   );
   if (response.status === 404) {
@@ -1054,8 +1233,11 @@ async function standingStatus(
   if (!response.ok) {
     throw new Error(`reading the standing status answered ${response.status}`);
   }
-  const combined = (await response.json()) as CombinedStatus;
-  return (combined.statuses ?? []).find((status) => status.context === context);
+  const posted = (await response.json()) as StatusEntry[];
+  if (!Array.isArray(posted)) {
+    return undefined;
+  }
+  return posted.find((status) => status.context === context);
 }
 
 /**

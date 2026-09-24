@@ -113,25 +113,31 @@ so a caller can no more author a status on another commit or under another tool'
 it can name another repository. `POST /merge-group` is the fourth, and the odd one out: it
 composes `lydite/referral` itself from a fingerprint comparison rather than relaying a caller's
 own verdict, because a merge-queue entry's ref belongs to no pull request and carries no
-`lydite/clearance` of its own to relay. Given a verified `merge_group` claim, it resolves the
-originating pull request's real head live (never the queue ref's own embedded SHA, which is the
-base tip the entry was replayed onto), reads the `lydite/clearance` status standing there, and
-trusts it as evidence only when that status's own `creator` login is the lydite App's bot user,
-`lydite[bot]` — a context name and a state are not enough, since anybody holding `statuses: write`
-can post under `lydite/clearance` and paste in a fingerprint they recomputed themselves; see
+`lydite/clearance` of its own to relay. The CLI submits whether the recomputed decision refers at
+all; an unreferred entry (a fully exempt change) is published `success` directly, since a
+clearance is only ever given against a referral and there is none to wait on. For a referred
+entry, given a verified `merge_group` claim, the route resolves the originating pull request's
+real head live (never the queue ref's own embedded SHA, which is the base tip the entry was
+replayed onto), rules out a batched queue commit by comparing the queue commit's changed paths
+against the pull request's own changed paths, both from that same base, and only then reads the
+`lydite/clearance` status standing there and trusts it as evidence when that status's own
+`creator` login is the lydite App's bot user, `lydite[bot]` — a context name and a state are not
+enough, since anybody holding `statuses: write` can post under `lydite/clearance` and paste in a
+fingerprint they recomputed themselves; see
 [the rule on checking a status's creator before trusting it as authority](../rules/a-status-read-back-as-authority-must-be-checked-against-its-own-creator.md).
 It then compares the recorded fingerprint against the one the CI job submitted and publishes
 `lydite/referral` at the queue revision: `success`, carrying the original clearer's own
-attribution forward, on a match; `pending`, naming why, on a mismatch, an unusable fingerprint, or
-no usable clearance at all — never `failure`, since `clearance.Decide` refuses to accept a
-clearing comment against a `failure` status and publishing one here would make a mismatched entry
-permanently unclearable. `source/cli/cmd/lydite/mergequeue.go` (`lydite clearance queue`) is the
-CLI side that submits to this route; it holds no writing token of its own, which is the reason
-this route composes and writes rather than relaying. See
+attribution forward, on a match; `pending`, naming why, on a mismatch, an unusable fingerprint,
+a batched entry, or no usable clearance at all — never `failure`, since `clearance.Decide`
+refuses to accept a clearing comment against a `failure` status and publishing one here would
+make a mismatched entry permanently unclearable. `source/cli/cmd/lydite/mergequeue.go` (`lydite
+clearance queue`) is the CLI side that submits to this route; it holds no writing token of its
+own, which is the reason this route composes and writes rather than relaying. See
 [ADR 0053](../../docs/adr/0053-a-clearance-carries-forward-when-the-decision-it-was-given-for-is-unchanged.md)
 and [`referral-and-clearance.md`](referral-and-clearance.md#a-clearance-carries-forward-across-a-merge-queue)
 for the full mechanism, including the known limitation: `/lydite clear` does not yet embed a
-fingerprint at clear time, so every merge-queue comparison currently answers `pending`
+fingerprint at clear time, so a *referred* entry's merge-queue comparison currently answers
+`pending` regardless of whether the decision held — an unreferred entry is unaffected
 ([lydite/lydite#254](https://github.com/lydite/lydite/issues/254)). The two gated
 contexts are posted only by an isolated job, which the relay tells apart by the OIDC
 `job_workflow_ref` and by nothing else — OIDC carries no job identity, so `environment`, audience

@@ -164,6 +164,62 @@ func TestQueueSubmitsTheRecomputedFingerprint(t *testing.T) {
 	}
 }
 
+// Whether the decision refers at all travels with the fingerprint, because a
+// fingerprint alone cannot say it: a change that refers for nothing has no
+// clearance to be compared against, so an entry submitting only a fingerprint
+// would wait on a clearance nobody can give. The commonest change there is —
+// one every exemption already covers — is exactly that shape.
+func TestQueueSaysWhenTheRecomputedDecisionDoesNotRefer(t *testing.T) {
+	covering := "exemptions:\n  - name: documentation\n    reason: prose changes no behaviour\n    paths: [\"docs/**\"]\n"
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello", referral.FileName: covering},
+		map[string]string{"docs/guide.md": "a paragraph"},
+	)
+	relay := newFakeRelay()
+
+	out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 12, "add1add1add1add1add1add1add1add1add1add1", "main"))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+
+	decision, err := queueDecision(context.Background(), dir, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Referred {
+		t.Fatalf("the fixture refers, so it says nothing about an unreferred entry: %+v", decision)
+	}
+	if body := submittedRequest(t, relay); body.Referred {
+		t.Error("Referred = true for a change every exemption covers, so the relay waits on a clearance nobody can give")
+	}
+	// Spelled out in the document and not merely absent from it: the relay reads
+	// an absent field as a submission that did not say, which is the comparison.
+	if !strings.Contains(relay.bodies[len(relay.bodies)-1], `"referred":false`) {
+		t.Errorf("the submission does not say the decision refers for nothing:\n%s", relay.bodies[len(relay.bodies)-1])
+	}
+	if !strings.Contains(out, "no referral") {
+		t.Errorf("the report does not say the decision refers for nothing:\n%s", out)
+	}
+}
+
+// A referred entry still says so, which is what keeps the field from reading as
+// "unreferred unless proven otherwise" on the one shape a clearance exists for.
+func TestQueueSaysWhenTheRecomputedDecisionRefers(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	relay := newFakeRelay()
+
+	out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 12, "add1add1add1add1add1add1add1add1add1add1", "main"))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if body := submittedRequest(t, relay); !body.Referred {
+		t.Error("Referred = false for a change no exemption covers, so the entry would merge unattended")
+	}
+}
+
 // The request is composed as the relay's own contract: a POST to the route,
 // carrying the OIDC token minted for the relay's origin as its audience, so a
 // token this run presents cannot be replayed against another service.

@@ -528,18 +528,24 @@ pending would, and the author clears the pull request again to re-enter it.
 
 **The known limitation.** `/lydite clear` (`cmd/lydite/clearance.go`'s `applyAction`,
 `KindClear` branch) does not yet compute or embed a fingerprint at clear time, so no real
-clearance recorded today carries one, and every merge-queue comparison currently answers
-`pending` regardless of whether the decision actually held. Tracked in
+clearance recorded today carries one, and every *referred* entry's merge-queue comparison
+currently answers `pending` regardless of whether the decision actually held. This does not
+affect an *unreferred* entry (a fully exempt change) — `queueOutcome` in the relay publishes
+`success` for those directly, since a clearance is only ever given against a referral and there
+is none to carry forward or wait on. Tracked in
 [lydite/lydite#254](https://github.com/lydite/lydite/issues/254).
 
-**The merge-queue batching caveat.** A queue ref that groups more than one pull request into one
-entry is only partly covered. `QueueEntry`'s doc comment in `internal/forge/event.go` and the
-relay's `queuePullRequest` doc comment both read only the *last* `pr-N-sha` segment off the ref,
-so the clearance compared against is the last pull request's own, while the tree the decision is
-recomputed over holds every earlier entry's change too. `referral.Fingerprint` hashes only the
-sets of uncovered paths and `(Kind, Path)` disqualifications, so an earlier entry whose referral
-reasons happen to be a subset of the last entry's own can leave the group's fingerprint equal to
-the last entry's clearance — which then carries forward onto a revision holding content the
-clearer never saw. Neither side detects a batch; a repository queueing more than one entry per
-queue commit is outside what this comparison speaks for.
+**The merge-queue batching caveat — closed.** A queue ref that groups more than one pull request
+into one entry only names the *last* `pr-N-sha` segment (`QueueEntry` in
+`internal/forge/event.go`), so the clearance compared against would be the last pull request's
+own while the tree the decision is recomputed over holds every earlier entry's change too —
+`referral.Fingerprint` hashes only the sets of uncovered paths and `(Kind, Path)`
+disqualifications, so an earlier entry whose referral reasons happen to be a subset of the last
+entry's own could leave the group's fingerprint equal to the last entry's clearance. The relay's
+`queueBatching` rules this out before the clearance is even read: it compares the queue commit's
+changed paths, from the ref's own embedded base (never the request body's `base_sha`, which the
+caller could choose to defeat the check), against the pull request's own changed paths from that
+same base, and answers `pending` naming the batch on any difference or on an unusable comparison
+— changed paths rather than commits, because a squash or rebase merge method changes which
+commits survive the replay but not the tree the entry has to hold.
 

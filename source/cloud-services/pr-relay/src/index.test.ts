@@ -517,10 +517,10 @@ function gatedEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-// What `GET /commits/:sha/status` answers: the state each context is standing
-// at on that revision, and what reached the endpoint. A stub given no
-// `Standing` throws when the read is attempted, which is how a path that must
-// never read the platform is held to it.
+// What `GET /commits/:sha/statuses` answers: one entry per status ever posted,
+// newest first, and what reached the endpoint. A stub given no `Standing` throws
+// when the read is attempted, which is how a path that must never read the
+// platform is held to it.
 interface Standing {
   states?: Record<string, string>;
   read?: { url: string; init?: RequestInit }[];
@@ -541,17 +541,14 @@ function pullStub(
     if (target.includes("/access_tokens")) {
       return Response.json({ token: "ghs_test" });
     }
-    if (/\/commits\/[^/]+\/status$/.test(target)) {
+    if (/\/commits\/[^/]+\/statuses(\?|$)/.test(target)) {
       if (!standing) {
         throw new Error(`the relay read a standing status it should not have: ${target}`);
       }
       standing.read?.push({ url: target, init });
-      return Response.json({
-        statuses: Object.entries(standing.states ?? {}).map(([context, state]) => ({
-          context,
-          state,
-        })),
-      });
+      return Response.json(
+        Object.entries(standing.states ?? {}).map(([context, state]) => ({ context, state })),
+      );
     }
     const pull = /\/pulls\/(\d+)$/.exec(target);
     if (pull) {
@@ -993,7 +990,9 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
 
     // The state admitted is the platform's answer for the revision the relay
     // resolved, read with the installation token: a request cannot assert the
-    // state it is about to be allowed to move.
+    // state it is about to be allowed to move. The list endpoint and not the
+    // combined one, because that is the only one that answers who posted each
+    // status.
     it("reads the standing state from the platform with the app's token", async () => {
       const read: { url: string; init?: RequestInit }[] = [];
       const { response } = await resolveReferral({
@@ -1003,7 +1002,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
       expect(response.status).toBe(200);
       expect(read).toHaveLength(1);
       expect(read[0]?.url).toBe(
-        "https://api.github.com/repos/lydite/proving-ground/commits/abc123/status",
+        "https://api.github.com/repos/lydite/proving-ground/commits/abc123/statuses?per_page=100",
       );
       expect(
         (read[0]?.init?.headers as Record<string, string> | undefined)?.authorization,
@@ -1105,15 +1104,43 @@ type Clearance = {
   creator?: { login?: string };
 };
 
+// What the pull request's own change touches, which for an unbatched entry is
+// also what the queue commit touches: the queue replays one change onto the base
+// tip, so the two comparisons name the same paths whichever merge method built
+// the entry.
+const ENTRY_PATHS = ["src/auth.go", "README.md"];
+
+// What each call the route makes is recorded in, so a test can assert that a
+// read never happened as well as that it did.
+interface QueueCalls {
+  written?: { url: string; init?: RequestInit }[];
+  read?: string[];
+  compared?: string[];
+}
+
+// What the platform answers about the revisions: the paths each comparison
+// reports — the queue commit's own change and the pull request's — and the
+// answers that are no comparison at all: a revision GitHub does not have, a
+// comparison carrying no file list, and a change too wide for it to list files
+// for.
+interface QueueTree {
+  queued?: string[];
+  own?: string[];
+  comparison?: "missing" | "unlisted" | "wide";
+}
+
+// The platform's own cap on the files one comparison reports.
+const COMPARE_FILE_LIMIT = 300;
+
 // Every call the queue route makes, answered locally: the originating pull
-// request, the clearance standing on its head, and the one status write. A
+// request, the two comparisons that establish the entry is one change, the
+// clearance standing on the pull request's head, and the one status write. A
 // `clearance` of undefined is a head carrying no clearance at all, and a
 // `clearance` naming no creator is one the App itself posted.
 function queueStub(
   clearance: Clearance | undefined,
-  written: { url: string; init?: RequestInit }[] = [],
-  read: string[] = [],
-  head = PR_HEAD,
+  calls: QueueCalls = {},
+  tree: QueueTree = {},
 ): typeof fetch {
   return (async (url: unknown, init?: RequestInit) => {
     const target = String(url);
@@ -1123,10 +1150,10 @@ function queueStub(
     if (target.includes("/access_tokens")) {
       return Response.json({ token: "ghs_test" });
     }
-    if (/\/commits\/[^/]+\/status$/.test(target)) {
-      read.push(target);
-      return Response.json({
-        statuses: clearance
+    if (/\/commits\/[^/]+\/statuses(\?|$)/.test(target)) {
+      calls.read?.push(target);
+      return Response.json(
+        clearance
           ? [
               {
                 context: "lydite/clearance",
@@ -1136,20 +1163,41 @@ function queueStub(
               },
             ]
           : [],
-      });
+      );
+    }
+    const comparison = /\/compare\/([^.]+)\.\.\.([^?]+)/.exec(target);
+    if (comparison) {
+      calls.compared?.push(target);
+      if (tree.comparison === "missing") {
+        return new Response("", { status: 404 });
+      }
+      if (tree.comparison === "unlisted") {
+        return Response.json({ status: "ahead" });
+      }
+      const paths =
+        comparison[2] === PR_HEAD ? (tree.own ?? ENTRY_PATHS) : (tree.queued ?? ENTRY_PATHS);
+      const files = tree.comparison === "wide" ? filler(COMPARE_FILE_LIMIT) : paths;
+      return Response.json({ files: files.map((filename) => ({ filename })) });
     }
     if (target.endsWith("/pulls/7")) {
-      return Response.json({ state: "open", head: { sha: head } });
+      return Response.json({ state: "open", head: { sha: PR_HEAD } });
     }
     if (/\/pulls\/\d+$/.test(target)) {
       return new Response("", { status: 404 });
     }
     if (target.includes("/statuses/")) {
-      written.push({ url: target, init });
+      calls.written?.push({ url: target, init });
       return Response.json({ id: 1 });
     }
     throw new Error(`the relay called something unexpected: ${target}`);
   }) as typeof fetch;
+}
+
+// A file list at the platform's cap, which is a list that may have been cut
+// short — the same answer for both comparisons, so what fails the check is the
+// truncation and not a difference between them.
+function filler(count: number): string[] {
+  return Array.from({ length: count }, (_, at) => `src/file-${at}.go`);
 }
 
 describe("carrying a clearance onto a merge-queue entry", () => {
@@ -1183,9 +1231,9 @@ describe("carrying a clearance onto a merge-queue entry", () => {
     // `null` is a run naming no job_workflow_ref at all, which `undefined`
     // cannot say: it takes the default.
     ref: string | null = MERGE_GROUP_REF,
+    tree: QueueTree = {},
   ) {
-    const written: { url: string; init?: RequestInit }[] = [];
-    const read: string[] = [];
+    const calls: Required<QueueCalls> = { written: [], read: [], compared: [] };
     const token = await keys.sign(
       claims({ job_workflow_ref: ref ?? undefined, ...queueClaims, ...claim }),
     );
@@ -1194,9 +1242,9 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       token,
       body,
       relayEnv,
-      queueStub(clearance, written, read),
+      queueStub(clearance, calls, tree),
     );
-    return { response, written, read };
+    return { response, ...calls };
   }
 
   function posted(written: { url: string; init?: RequestInit }[]) {
@@ -1210,7 +1258,7 @@ describe("carrying a clearance onto a merge-queue entry", () => {
   // The whole point: the decision the person judged is unchanged, so their
   // judgement still applies and the attribution is theirs rather than lydite's.
   it("publishes success carrying the clearer's attribution forward", async () => {
-    const { response, written, read } = await compare(cleared);
+    const { response, written, read, compared } = await compare(cleared);
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ state: "success" });
@@ -1222,7 +1270,13 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       `https://api.github.com/repos/lydite/proving-ground/statuses/${QUEUE_SHA}`,
     );
     expect(read).toEqual([
-      `https://api.github.com/repos/lydite/proving-ground/commits/${PR_HEAD}/status`,
+      `https://api.github.com/repos/lydite/proving-ground/commits/${PR_HEAD}/statuses?per_page=100`,
+    ]);
+    // Both comparisons run from the base tip the ref's own name carries, which
+    // is the one revision in this exchange the caller did not choose.
+    expect(compared).toEqual([
+      `https://api.github.com/repos/lydite/proving-ground/compare/${QUEUE_BASE}...${QUEUE_SHA}?per_page=300`,
+      `https://api.github.com/repos/lydite/proving-ground/compare/${QUEUE_BASE}...${PR_HEAD}?per_page=300`,
     ]);
     expect(posted(written)).toMatchObject({
       state: "success",
@@ -1230,6 +1284,108 @@ describe("carrying a clearance onto a merge-queue entry", () => {
     });
     expect(posted(written).description).toContain("@octocat");
     expect(posted(written).description).not.toContain("[fp:");
+  });
+
+  // The commonest change there is: one every exemption covers, referring for
+  // nothing. No clearance was ever given for it and none can be, so waiting on
+  // one is the deadlock the whole mechanism exists to remove — and nothing about
+  // a clearance is read, because there is nothing a clearance would decide.
+  it("publishes success for an entry that is not referred, reading no clearance", async () => {
+    const { response, written, read, compared } = await compare(undefined, {
+      ...entry,
+      referred: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).toBe(
+      `https://api.github.com/repos/lydite/proving-ground/statuses/${QUEUE_SHA}`,
+    );
+    expect(posted(written)).toMatchObject({
+      state: "success",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("not referred");
+    expect(read).toHaveLength(0);
+    expect(compared).toHaveLength(0);
+  });
+
+  // Absence is not a claim. A submission that says nothing about whether the
+  // decision refers is compared, which is the answer that needs a clearance —
+  // and a value that is not a boolean is refused rather than read as either.
+  it("compares an entry that does not say whether it refers, and refuses a non-boolean", async () => {
+    const said = await compare(cleared, { ...entry, referred: true });
+    expect(posted(said.written)).toMatchObject({ state: "success" });
+    expect(said.read).toHaveLength(1);
+
+    const silent = await compare(cleared, entry);
+    expect(posted(silent.written)).toMatchObject({ state: "success" });
+    expect(silent.read).toHaveLength(1);
+
+    for (const referred of ["false", 0, null]) {
+      const { response, written } = await compare(cleared, { ...entry, referred });
+      expect(response.status).toBe(400);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  // The ref names only the last entry of a group, so a clearance read off that
+  // pull request's head would stand in for every change the platform batched
+  // beside it — and it agrees whenever the earlier entries' reasons are a subset
+  // of the last's, which is exactly when the fingerprints coincide.
+  it("publishes pending for a queue commit holding more than this change", async () => {
+    const { response, written, read } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [...ENTRY_PATHS, "src/somebody-elses-entry.go"] },
+    );
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("batches more than one change");
+    // Refused before the clearance is read: the fingerprint would have matched,
+    // so a comparison made here answers `success` on content nobody cleared.
+    expect(read).toHaveLength(0);
+  });
+
+  // A batch that could not be checked is not a batch that was ruled out.
+  it("publishes pending when the comparison answers nothing usable", async () => {
+    for (const comparison of ["missing", "unlisted", "wide"] as const) {
+      const { response, written, read } = await compare(
+        cleared,
+        entry,
+        queueEnv(),
+        {},
+        MERGE_GROUP_REF,
+        { comparison },
+      );
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("nothing rules out a batch");
+      expect(read).toHaveLength(0);
+    }
+  });
+
+  // The paths and not the commits: a squash or a rebase gives the replayed
+  // change new shas, and an entry whose tree is the pull request's own change is
+  // the entry one clearance speaks for however the platform built it.
+  it("compares the change a queue commit makes, whatever order the platform lists it in", async () => {
+    const { response, written } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [...ENTRY_PATHS].reverse() },
+    );
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "success" });
   });
 
   // Not equal is not silence, and it is never the isolation gate: `pending` is
