@@ -828,6 +828,12 @@ func TestQueueFailsWhenTheMintNeverAnswers(t *testing.T) {
 			relay := newFakeRelay()
 			relay.tokenFails = tc.mode
 
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+			if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("actionsIDToken = %q, %v; want no token and a refusal naming %q", token, err, tc.want)
+			}
+
 			out, err := runQueueCmd(t, relay, dir, base,
 				queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
 			if err == nil {
