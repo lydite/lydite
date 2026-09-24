@@ -357,7 +357,7 @@ func actionsIDToken(ctx context.Context, client doer, audience string) (string, 
 	if endpoint == "" || request == "" {
 		return "", fmt.Errorf("no Actions OIDC token can be minted here: the job needs `id-token: write`")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, // #nosec G704 -- endpoint is the platform's own ACTIONS_ID_TOKEN_REQUEST_URL, set by Actions for a job granted `id-token: write`, not pull-request content
 		endpoint+"&audience="+url.QueryEscape(audience), nil)
 	if err != nil {
 		return "", fmt.Errorf("composing the token request: %w", err)

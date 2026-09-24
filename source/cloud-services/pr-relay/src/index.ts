@@ -805,7 +805,9 @@ function queueEntry(ref: string): { pull: number; base: string } | undefined {
     return undefined;
   }
   const number = Number(match[1]);
-  if (!Number.isInteger(number) || number <= 0) {
+  // Pull requests are numbered from 1, so 0 names none — and a ref carrying
+  // more digits than a double holds exactly names none either.
+  if (!Number.isSafeInteger(number) || number === 0) {
     return undefined;
   }
   return { pull: number, base: match[2] };
@@ -935,10 +937,7 @@ async function queueBatching(
   if (!queued || !own) {
     return "this queue entry could not be compared against the pull request's own change, so nothing rules out a batch";
   }
-  if (
-    queued.length !== own.length ||
-    queued.some((file, at) => file.filename !== own[at]?.filename || file.sha !== own[at]?.sha)
-  ) {
+  if (queued.length !== own.length || queued.some((file, at) => file !== own[at])) {
     return "this queue entry batches more than one change, so one pull request's clearance does not speak for it";
   }
   return undefined;
@@ -954,15 +953,15 @@ interface Comparison {
   files?: { filename?: string; sha?: string }[];
 }
 
-/** One file a comparison reports: its path, and the blob that path holds at the head. */
-interface ComparedFile {
-  filename: string;
-  sha: string;
-}
-
 /**
- * The files one revision changes against another — each path and the blob it
- * holds — sorted by path, or nothing when the platform answered no usable list.
+ * The files one revision changes against another — each path with the blob that
+ * path holds, one string per file, sorted — or nothing when the platform answered
+ * no usable list.
+ *
+ * One string per file rather than a pair, because the two lists are compared and
+ * never read apart: a single string is sorted into a canonical order by
+ * `Array.prototype.sort`'s own code-unit ordering, with no comparator to get
+ * wrong and no locale to make two distinct paths compare equal.
  *
  * Nothing rather than an empty list in the cases that matter: a revision this
  * repository does not have, a change too wide for the platform to list files for,
@@ -978,7 +977,7 @@ async function comparedFiles(
   base: string,
   head: string,
   fetcher: typeof fetch,
-): Promise<ComparedFile[] | undefined> {
+): Promise<string[] | undefined> {
   const response = await fetcher(
     `${GITHUB_API}/repos/${repository}/compare/${encodeURIComponent(base)}...${encodeURIComponent(
       head,
@@ -995,18 +994,16 @@ async function comparedFiles(
   if (!comparison.files || comparison.files.length >= COMPARE_FILE_LIMIT) {
     return undefined;
   }
-  const files: ComparedFile[] = [];
+  const files: string[] = [];
   for (const file of comparison.files) {
     if (!file.filename || !file.sha) {
       return undefined;
     }
-    files.push({ filename: file.filename, sha: file.sha });
+    // NUL separates the two halves because it is the one byte a git path cannot
+    // hold, so no path-and-blob pair encodes to the string another one does.
+    files.push(`${file.filename}\0${file.sha}`);
   }
-  // Code-unit order, not a collation: two paths a locale reads as equal would
-  // sort unstably, and the comparison is by index.
-  return files.sort((one, other) =>
-    one.filename < other.filename ? -1 : one.filename > other.filename ? 1 : 0,
-  );
+  return files.sort();
 }
 
 /**

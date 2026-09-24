@@ -1086,10 +1086,12 @@ const MERGE_GROUP_REF =
 // The revision in a queue ref's own name is the base tip the entry was replayed
 // onto, so it is deliberately neither the queue revision nor the pull request's
 // head: a path reading a head out of the ref would read this.
+// biome-ignore lint/security/noSecrets: a synthetic abbreviated commit sha, not a credential
 const QUEUE_BASE = "1a2b3c4d5e6f";
 const QUEUE_REF = `refs/heads/gh-readonly-queue/main/pr-7-${QUEUE_BASE}`;
 const QUEUE_SHA = "queuerevisionsha";
 const PR_HEAD = "prheadsha0000";
+// biome-ignore lint/security/noSecrets: a synthetic decision fingerprint, the hex referral.Fingerprint produces
 const FINGERPRINT = "0123456789abcdef";
 
 // The login an App's own write carries, and the only creator a clearance is read
@@ -1144,6 +1146,9 @@ interface QueueTree {
 
 // The platform's own cap on the files one comparison reports.
 const COMPARE_FILE_LIMIT = 300;
+
+// The platform's own cap on a status description, in characters.
+const DESCRIPTION_LIMIT = 140;
 
 // Every call the queue route makes, answered locally: the originating pull
 // request, the two comparisons that establish the entry is one change, the
@@ -1224,6 +1229,7 @@ describe("carrying a clearance onto a merge-queue entry", () => {
     queue_ref: QUEUE_REF,
     pull_request: 7,
     sha: QUEUE_SHA,
+    // biome-ignore lint/security/noSecrets: a synthetic abbreviated commit sha, not a credential
     base_sha: "0f1e2d3c4b5a",
     fingerprint: FINGERPRINT,
   };
@@ -1454,6 +1460,7 @@ describe("carrying a clearance onto a merge-queue entry", () => {
   it("publishes pending when the clearance records no fingerprint", async () => {
     for (const description of [
       "cleared by @octocat at 1a2b3c4d5e6f",
+      // biome-ignore lint/security/noSecrets: a synthetic clearance description whose fingerprint field the platform cut short
       "cleared by @octocat at 1a2b3c4d5e6f [fp:0123456789abc",
       "cleared by @octocat [at] 1a2b3c4d5e6f",
       `cleared by @octocat [fp:]`,
@@ -1541,6 +1548,45 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       expect(response.status).toBe(400);
       expect(written).toHaveLength(0);
     }
+  });
+
+  // Pull requests are numbered from 1, so zero is a malformed payload rather
+  // than a number to resolve: refused as the payload it is, before the claim's
+  // own ref is consulted at all.
+  it("refuses pull request zero as a malformed payload", async () => {
+    const { response, written } = await compare(cleared, { ...entry, pull_request: 0 });
+    expect(response.status).toBe(400);
+    expect(written).toHaveLength(0);
+  });
+
+  // A fingerprint long enough to spend the whole description budget leaves no
+  // human half, so `WithFingerprint` composes a description whose opening marker
+  // sits at index 0. An index of 0 is a position and not an absence, and reading
+  // it as one would refuse a clearance lydite itself wrote.
+  it("reads a clearance whose fingerprint is the whole description", async () => {
+    const { response, written } = await compare({ description: ` [fp:${FINGERPRINT}]` });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "success" });
+    expect(posted(written).description).toContain("carried forward");
+  });
+
+  // What a clipped description loses is its tail, so the clip is composed here
+  // and spends a character only when one would otherwise be lost: a description
+  // exactly filling the platform's cap is published whole.
+  it("keeps a carried-forward description that exactly fills the platform's cap", async () => {
+    const carried = ", carried forward onto this queue entry";
+    const exact = "c".repeat(DESCRIPTION_LIMIT - carried.length);
+
+    const fits = await compare({ description: `${exact} [fp:${FINGERPRINT}]` });
+    expect(posted(fits.written)).toMatchObject({ state: "success" });
+    expect(posted(fits.written).description).toBe(exact + carried);
+
+    // One character more is clipped, and to the cap exactly — which is what
+    // makes this the boundary rather than a cap nothing reaches.
+    const over = await compare({ description: `${exact}c [fp:${FINGERPRINT}]` });
+    expect(posted(over.written).description).toHaveLength(DESCRIPTION_LIMIT);
+    expect(posted(over.written).description.endsWith("…")).toBe(true);
   });
 
   it("refuses a workflow the merge-group allowlist does not name", async () => {

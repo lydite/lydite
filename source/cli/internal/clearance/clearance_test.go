@@ -344,11 +344,14 @@ const fingerprint = "0f1e2d3c4b5a6978"
 // The description is the whole of where a clearance's fingerprint is stored,
 // so what goes in comes back out — including when the human half carries
 // brackets of its own, which the closing marker's position must not be read
-// from.
+// from, and when there is no human half at all, where the opening marker sits
+// at index 0 and a reader must take that position for a position rather than
+// for an absence.
 func TestAClearancesFingerprintComesBackOutOfItsDescription(t *testing.T) {
 	for _, description := range []string{
 		"cleared by @pedromvgomes at 4c2eaea",
 		"cleared by @pedromvgomes at 4c2eaea [see the thread]",
+		"",
 	} {
 		composed := WithFingerprint(description, fingerprint)
 		got, ok := FingerprintIn(composed)
@@ -377,6 +380,48 @@ func TestALongClearerHandleIsCutAndTheFingerprintIsNot(t *testing.T) {
 	}
 	if !strings.HasPrefix(composed, "cleared by @handle") {
 		t.Errorf("the attribution was not kept: %q", composed)
+	}
+}
+
+// A description that exactly fills what the fingerprint leaves is kept whole.
+// The ellipsis is spent only when something would otherwise be lost, and a
+// description clipped at the last character that fits loses a character of
+// attribution for nothing.
+func TestADescriptionThatExactlyFillsTheBudgetIsNotClipped(t *testing.T) {
+	suffix := fingerprintOpen + fingerprint + fingerprintClose
+	room := DescriptionLimit - len([]rune(suffix))
+	exact := strings.Repeat("a", room)
+
+	if got := WithFingerprint(exact, fingerprint); got != exact+suffix {
+		t.Errorf("WithFingerprint clipped a description that fits: %q", got)
+	}
+	// One character more is clipped, which is what makes this the boundary
+	// rather than a cap nothing reaches.
+	over := WithFingerprint(exact+"a", fingerprint)
+	if !strings.Contains(over, "…") {
+		t.Errorf("a description one character past the budget was not clipped: %q", over)
+	}
+	if n := len([]rune(over)); n != DescriptionLimit {
+		t.Errorf("the clipped description is %d characters, want the whole budget %d", n, DescriptionLimit)
+	}
+}
+
+// A fingerprint spending the entire budget leaves the human half no room at
+// all, and the description is then the field alone. Room for nothing is not
+// room for an ellipsis: treating it as room cuts the attribution to a negative
+// width.
+func TestAFingerprintFillingTheWholeBudgetIsTheWholeDescription(t *testing.T) {
+	whole := strings.Repeat("f", DescriptionLimit-len(fingerprintOpen)-len(fingerprintClose))
+	composed := WithFingerprint("cleared by @pedromvgomes at 4c2eaea", whole)
+
+	if want := fingerprintOpen + whole + fingerprintClose; composed != want {
+		t.Errorf("WithFingerprint = %q, want the fingerprint field alone", composed)
+	}
+	if n := len([]rune(composed)); n != DescriptionLimit {
+		t.Errorf("the description is %d characters, want the whole budget %d", n, DescriptionLimit)
+	}
+	if got, ok := FingerprintIn(composed); !ok || got != whole {
+		t.Errorf("FingerprintIn(%q) = %q, %v; want the fingerprint whole", composed, got, ok)
 	}
 }
 

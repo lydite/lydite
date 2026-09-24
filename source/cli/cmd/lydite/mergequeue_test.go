@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/ui"
 )
 
 // fakeRelay answers both endpoints the queue path talks to and keeps every
@@ -25,8 +28,9 @@ type fakeRelay struct {
 	// status and answer are what the relay's own endpoint replies.
 	status int
 	answer string
-	// tokenStatus is what the Actions token endpoint replies.
+	// tokenStatus and tokenAnswer are what the Actions token endpoint replies.
 	tokenStatus int
+	tokenAnswer string
 }
 
 func (f *fakeRelay) Do(req *http.Request) (*http.Response, error) {
@@ -41,7 +45,7 @@ func (f *fakeRelay) Do(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, req)
 	f.bodies = append(f.bodies, body)
 
-	code, reply := f.tokenStatus, `{"value":"an-oidc-token"}`
+	code, reply := f.tokenStatus, f.tokenAnswer
 	if strings.HasSuffix(req.URL.Path, queueRoute) {
 		code, reply = f.status, f.answer
 	}
@@ -57,6 +61,7 @@ func newFakeRelay() *fakeRelay {
 		status:      http.StatusOK,
 		answer:      `{"state":"success","description":"cleared by @octocat at 1a2b3c4d5e6f"}`,
 		tokenStatus: http.StatusOK,
+		tokenAnswer: `{"value":"an-oidc-token"}`,
 	}
 }
 
@@ -421,6 +426,133 @@ func TestQueueFailsWithoutAMintEndpoint(t *testing.T) {
 	}
 	if len(relay.requests) != 0 {
 		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
+	}
+	// No token comes back either. A caller reading the value alongside the
+	// error would present an unminted string as a bearer token, which the
+	// relay would answer 401 to rather than naming the missing permission.
+	if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil {
+		t.Errorf("actionsIDToken = %q, %v; want no token and a refusal", token, err)
+	}
+}
+
+// A mint that answers anything but a token is a run with nothing to present,
+// and nothing is submitted with it: the relay would answer 401 to an empty
+// bearer, which says the request was refused rather than that the token this
+// job holds was never minted.
+func TestQueueFailsWhenTheMintAnswersNoToken(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	for _, tc := range []struct {
+		name   string
+		status int
+		answer string
+	}{
+		{"a refusal", http.StatusForbidden, `{"error":"no"}`},
+		{"a 200 naming no token", http.StatusOK, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relay := newFakeRelay()
+			relay.tokenStatus, relay.tokenAnswer = tc.status, tc.answer
+
+			out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+			if err == nil {
+				t.Fatalf("a mint answering no token must fail the run:\n%s", out)
+			}
+			for _, req := range relay.requests {
+				if strings.HasSuffix(req.URL.Path, queueRoute) {
+					t.Error("the comparison was submitted without a token to authorise it")
+				}
+			}
+		})
+	}
+}
+
+// The state the relay published decides the row, because the two answers mean
+// different things to whoever reads the log: success is the clearance carried
+// forward, and anything else is an entry going back to a person.
+func TestTheQueueRowFollowsTheStateTheRelayPublished(t *testing.T) {
+	cleared := queueRow(queueAnswer{State: string(clearance.StateSuccess), Description: "cleared by @octocat"})
+	if cleared.Status != ui.StatusPass {
+		t.Errorf("status = %v for a published success, want %v", cleared.Status, ui.StatusPass)
+	}
+	for _, state := range []clearance.State{clearance.StatePending, clearance.StateFailure, clearance.StateError} {
+		row := queueRow(queueAnswer{State: string(state), Description: "the decision is not the one that was cleared"})
+		if row.Status != ui.StatusRefer {
+			t.Errorf("status = %v for a %s answer, want %v", row.Status, state, ui.StatusRefer)
+		}
+	}
+}
+
+// Every flag the workflow passes is the command's own, reached through the
+// clearance command that holds it: a registration that went missing leaves the
+// invocation refused as an unknown flag, and a subcommand that was never added
+// leaves it refused as an unknown command. Driving the whole command is what
+// says so — runQueue taking the same values as parameters cannot.
+func TestTheQueueCommandReadsEveryFlagTheWorkflowPasses(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	const headSHA = "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567"
+
+	submitted := make(chan string, 1)
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		submitted <- string(raw)
+		_, _ = w.Write([]byte(`{"state":"success","description":"cleared by @octocat"}`))
+	}))
+	defer relay.Close()
+	mint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"value":"an-oidc-token"}`))
+	}))
+	defer mint.Close()
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", mint.URL+"/idtoken?api-version=2.0")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+
+	var out bytes.Buffer
+	cmd := newClearanceCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"queue",
+		"--dir", dir,
+		"--base", base,
+		"--event", queueEvent(t, 21, headSHA, "main"),
+		"--relay", relay.URL,
+		"--no-color",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\n%s", err, out.String())
+	}
+
+	var body queueRequest
+	select {
+	case raw := <-submitted:
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatalf("the submitted body does not parse: %v\n%s", err, raw)
+		}
+	default:
+		t.Fatal("nothing was submitted, so the flags reached no submission")
+	}
+	if body.PullRequest != 21 || body.SHA != headSHA {
+		t.Errorf("the submission names #%d at %s, want the entry --event named", body.PullRequest, body.SHA)
+	}
+	if body.BaseSHA != base {
+		t.Errorf("BaseSHA = %q, want the revision --base named", body.BaseSHA)
+	}
+	if !strings.Contains(out.String(), "cleared by @octocat") {
+		t.Errorf("the report does not say what the relay answered:\n%s", out.String())
+	}
+	// --no-color was honoured rather than merely accepted: an escape in the
+	// report is colour a flag asked for the absence of.
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Errorf("the report carries colour --no-color asked to drop:\n%q", out.String())
 	}
 }
 
