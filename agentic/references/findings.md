@@ -42,7 +42,11 @@ recording's own findings against `ledger.OpenFindings` and appends a `FindingApp
 `v1:<16 hex>`, never `lydite:finding:v1:<hash>`, which is a different string for a different
 purpose (`internal/threads`'s thread-marker prefix). See
 [ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md) and
-`internal/ledger`'s `FindingEvent`/`OpenFindings`.
+`internal/ledger`'s `FindingEvent`/`OpenFindings`. `finding.Crash` travels beside `Finding` in the
+same document for exactly this diff: it names a `(gate, component)` the scan could not finish, so
+the diff can leave that bucket's open set untouched instead of reading a crashed run's empty
+claims as every one of them resolved. See [scanning.md](scanning.md) for how a wrapper decides
+`Crashed` and [quality-history.md](quality-history.md) for `findingScope`, the reader.
 
 **The channel is a document key and deliberately not a sibling file.** `measurements.json` is
 the obvious precedent and it does not carry over: it has one writer, `lydite test`, while

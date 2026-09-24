@@ -212,6 +212,16 @@ back-walk by, rather than a single record read — `OpenFindings` is the one imp
 that replay. See
 [ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md).
 
+**A bucket the scan crashed on is excluded from the diff, not diffed as empty.**
+`cmd/lydite/record.go`'s `findingScope` reads the buckets a recording measured off the same
+counts `Component.Findings`/`RootFindings` already hold, then drops every `(gate, component)`
+`scan.json`'s `Crashed` names — see [findings.md](findings.md) for `finding.Crash` and
+[scanning.md](scanning.md) for how each wrapper decides `executil.Result.Crashed`. Without the
+exclusion a crashed scanner reports zero claims exactly like a clean one, `findingEvents` would
+read every fingerprint the branch held open there as resolved, and the next clean run would
+reopen every one of them as newly appeared — permanent, self-inflicted churn a scan that never
+ran should not be able to cause.
+
 A record's size is therefore no longer a single fixed number the way the paragraph above this
 one might suggest for the scalar fields alone: a quiet commit — nothing appeared or resolved —
 costs exactly what it always did, since `finding_events` is empty and omitted, while a commit
