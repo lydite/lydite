@@ -55,6 +55,26 @@ deliberately not the treatment a **disabled** language gets: `rust.enabled: fals
 at all, because that is an opt-out the repository stated rather than a check that could not run,
 and a row per opted-out component trains readers to ignore the tag that exists to be noticed.
 
+**Shell is scanned, and is the one language off by default rather than on.** A `lang: shell`
+component runs `internal/shell`'s ShellCheck over the scripts git tracks under it, failing on
+every diagnostic it reports — style included — so `shell.enabled` (see
+[Configuration](configuration.md)) defaults to `false` rather than joining Go, Rust and
+TypeScript's default-on: a repository is entitled to declare `lang: shell` purely so the orphan
+gate stops treating its scripts as unclaimed, without that declaration alone failing its build.
+`offByDefaultRows` (`cmd/lydite/scan.go`) is what tells the two apart from an ordinary opt-out: a
+disabled Go/Rust/TypeScript component produces no rows at all, but an unopted-in `lang: shell`
+component still renders `scan`, `licence` and `findings` as `unmeasured`, each naming
+`shell.enabled` as the key that would run it — silence there would read exactly like a script
+that was checked and found clean, the same failure a per-language disable is built not to produce
+for a *declared* language.
+
+`shell.go`'s `argv` passes `--norc`: ShellCheck otherwise reads a `.shellcheckrc` from each
+script's own directory, every directory above it, and the user's own config, and a
+`disable=all` in any of them empties the report on the machine carrying it while the committed
+tree shows nothing — a developer's run and CI's would disagree with no diff to explain why. A
+directive inside a script itself still applies, and vetoing it is `internal/referral`'s job, not
+this one — see [Referral and clearance](referral-and-clearance.md).
+
 **Source no component's checks reach is named on stderr**, by `internal/orphan`'s `Unscanned`.
 The orphan gate is what normally makes a declared list safe to rely on and it cannot answer this:
 it asks whether any component *contains* a file, because a component tests what is under it

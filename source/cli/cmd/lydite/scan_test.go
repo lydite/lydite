@@ -27,6 +27,7 @@ import (
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/shell"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
@@ -398,12 +399,12 @@ func TestTheReasonNothingScansAComponentNamesWhichCaseItIs(t *testing.T) {
 // branch: langEnabled answers false for every language it has no key for, which
 // would skip it as silently as a switch the repository never touched.
 func TestALanguageWithNoScannerIsNotReadAsAnOptOut(t *testing.T) {
-	for _, l := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript} {
+	for _, l := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript, runner.Shell} {
 		if !scannedLang(l) {
 			t.Errorf("scannedLang(%s) = false, want the languages scan has checks for", l)
 		}
 	}
-	for _, l := range []runner.Lang{"", runner.Python, runner.Shell, runner.Lang("cobol")} {
+	for _, l := range []runner.Lang{"", runner.Python, runner.Lang("cobol")} {
 		if scannedLang(l) {
 			t.Errorf("scannedLang(%q) = true, want a language with no scanner to render its rows", l)
 		}
@@ -433,8 +434,9 @@ func TestDisabledLanguageProducesNoUnitsAndNoRows(t *testing.T) {
 // A declared lang: is the language a component is scanned as, and never the
 // one its suite runs in. A command component stating `lang: go` is provisioned
 // Go for its checks and nothing for its suite, which a runner never derived; a
-// `lang: shell` component names a language no toolchain exists for, so neither
-// side provisions anything.
+// `lang: shell` component is a scan unit only where shell is switched on, and
+// names a language no toolchain exists for, so neither side provisions
+// anything.
 func TestADeclaredLangReachesTheScanUnitsAndNotTheTestUnits(t *testing.T) {
 	file := component.File{Components: []component.Component{
 		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
@@ -443,7 +445,13 @@ func TestADeclaredLangReachesTheScanUnitsAndNotTheTestUnits(t *testing.T) {
 
 	units := scanUnits(file, config.Default())
 	if len(units) != 1 || units[0].Name != "tool" || units[0].Lang != runner.Go {
-		t.Fatalf("scan units = %+v, want just tool, as Go", units)
+		t.Fatalf("scan units = %+v, want just tool, as Go, with shell off by default", units)
+	}
+	enabled := config.Default()
+	enabled.Shell.Enabled = true
+	units = scanUnits(file, enabled)
+	if len(units) != 2 || units[1].Name != "scripts" || units[1].Lang != runner.Shell {
+		t.Fatalf("scan units = %+v, want tool and scripts, as shell, with shell switched on", units)
 	}
 	if got := componentUnits(file.Components); len(got) != 0 {
 		t.Fatalf("test units = %+v, want none: neither component has a runner to imply a suite's language", got)
@@ -470,7 +478,7 @@ func TestScanReportsADeclaredLanguageWithNoScannerAsUnmeasured(t *testing.T) {
 	dir := t.TempDir()
 	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
 	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: scripts\n    dir: .\n    lang: shell\n")
+		"components:\n  - name: tools\n    dir: .\n    lang: python\n")
 
 	var out bytes.Buffer
 	cmd := newScanCmd()
@@ -491,15 +499,130 @@ func TestScanReportsADeclaredLanguageWithNoScannerAsUnmeasured(t *testing.T) {
 	for _, r := range doc.Rows {
 		rows[r.Label] = struct{ status, value string }{r.Status, r.Value}
 	}
-	for _, label := range []string{"scan(scripts)", "licence(scripts)", "findings(scripts)"} {
+	for _, label := range []string{"scan(tools)", "licence(tools)", "findings(tools)"} {
 		r, ok := rows[label]
 		if !ok || r.status != string(ui.StatusUnmeasured) {
 			t.Fatalf("rows = %+v, want an unmeasured %s", doc.Rows, label)
 		}
-		if !strings.Contains(r.value, string(runner.Shell)) || strings.Contains(r.value, "raw command") {
+		if !strings.Contains(r.value, string(runner.Python)) || strings.Contains(r.value, "raw command") {
 			t.Errorf("%s = %q, want the declared language named, not a raw command", label, r.value)
 		}
 	}
+}
+
+// Shell is off until a repository switches it on, so a `lang: shell` component
+// in a repository that has not is no opt-out: each gate it would have had says
+// it did not run and names the key that would run it, rather than the
+// component vanishing from a report that then reads as a clean scan.
+func TestAShellComponentWithShellOffIsUnmeasuredNamingTheKey(t *testing.T) {
+	for name, cfgYAML := range map[string]string{
+		"unset": "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n",
+		"false": "shell:\n  enabled: false\nsemgrep:\n  enabled: false\nsecrets:\n  enabled: false\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeLydite(t, dir, config.FileName, cfgYAML)
+			writeLydite(t, dir, component.FileName,
+				"components:\n  - name: scripts\n    dir: .\n    lang: shell\n")
+			writeLydite(t, dir, "install.sh", "#!/bin/sh\necho $1\n")
+
+			rows := scanRows(t, dir)
+			for _, label := range []string{"scan(scripts)", "licence(scripts)", "findings(scripts)"} {
+				r, ok := rows[label]
+				if !ok || r.status != string(ui.StatusUnmeasured) {
+					t.Fatalf("rows = %+v, want an unmeasured %s", rows, label)
+				}
+				if !strings.Contains(r.value, "shell.enabled") {
+					t.Errorf("%s = %q, want the key that would turn shell on named", label, r.value)
+				}
+			}
+			if _, ok := rows["shellcheck(scripts)"]; ok {
+				t.Errorf("rows = %+v, want no ShellCheck row with shell switched off", rows)
+			}
+		})
+	}
+}
+
+// Switched on, a `lang: shell` component is scanned by ShellCheck: a script
+// carrying a diagnostic fails the row and reaches the document as a located
+// claim naming the component, and the licence gate says it has nothing to read
+// rather than going missing.
+func TestAShellComponentWithShellOnIsScannedByShellCheck(t *testing.T) {
+	if !executil.Available("shellcheck") && !executil.Available("pipx") {
+		t.Skip("neither shellcheck nor pipx is on PATH to provide the pinned ShellCheck")
+	}
+	dir := t.TempDir()
+	writeLydite(t, dir, config.FileName, "shell:\n  enabled: true\nsemgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: scripts\n    dir: scripts\n    lang: shell\n")
+	writeLydite(t, dir, "scripts/install.sh", "#!/bin/sh\necho $1\n")
+	gitInit(t, dir)
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	var doc struct {
+		Rows     []struct{ Status, Label, Value string } `json:"rows"`
+		Findings []finding.Finding                       `json:"findings"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v\n%s", err, out.String())
+	}
+	rows := map[string]string{}
+	for _, r := range doc.Rows {
+		rows[r.Label] = r.Status
+	}
+	if got := rows["shellcheck(scripts)"]; got != string(ui.StatusFail) {
+		t.Fatalf("rows = %+v, want a failing shellcheck(scripts) over an unquoted expansion", doc.Rows)
+	}
+	if got := rows["licence(scripts)"]; got != string(ui.StatusUnmeasured) {
+		t.Errorf("rows = %+v, want an unmeasured licence(scripts)", doc.Rows)
+	}
+	for _, label := range []string{"scan(scripts)", "findings(scripts)"} {
+		if _, ok := rows[label]; ok {
+			t.Errorf("rows = %+v, want no %s beside the checks that ran", doc.Rows, label)
+		}
+	}
+	var claim *finding.Finding
+	for i, f := range doc.Findings {
+		if f.Gate == shell.Gate && f.Rule == "SC2086" {
+			claim = &doc.Findings[i]
+		}
+	}
+	if claim == nil {
+		t.Fatalf("findings = %+v, want SC2086 as a located claim", doc.Findings)
+	}
+	if claim.Component != "scripts" || claim.Path != "scripts/install.sh" || claim.Line != 2 || claim.Row != "shellcheck(scripts)" {
+		t.Errorf("claim = %+v, want scripts/install.sh:2 under shellcheck(scripts)", *claim)
+	}
+}
+
+// scanRows runs a scan over dir and answers its rows by label.
+func scanRows(t *testing.T, dir string) map[string]struct{ status, value string } {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	var doc struct {
+		Rows []struct{ Status, Label, Value string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	rows := map[string]struct{ status, value string }{}
+	for _, r := range doc.Rows {
+		rows[r.Label] = struct{ status, value string }{r.Status, r.Value}
+	}
+	return rows
 }
 
 // The name and never the directory: unique names are enforced and unique
@@ -1194,6 +1317,7 @@ func TestEachLanguageNamesTheGatesThatReportItsFindings(t *testing.T) {
 		{runner.Go, []string{golang.GateGosec, golang.GateGovulncheck}},
 		{runner.Rust, []string{rust.GateClippy, rust.GateAudit, rust.GateDeny}},
 		{runner.TypeScript, []string{typescript.GateBiome, typescript.GateLicence}},
+		{runner.Shell, []string{shell.Gate}},
 	} {
 		got := scannerGates(tc.lang)
 		for _, gate := range tc.want {
@@ -1333,9 +1457,9 @@ func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) 
 }
 
 // A component scanned as a declared lang: records its language's gate
-// noughts like a runner component does, and one declaring a language with no
-// scanner records none — a nought there would read as a clean scan of source
-// nothing checked.
+// noughts like a runner component does, and one whose language is switched off
+// or states none records none — a nought there would read as a clean scan of
+// source nothing checked.
 func TestFindingCountsReadTheLanguageAComponentIsScannedAs(t *testing.T) {
 	decl := component.File{Components: []component.Component{
 		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
@@ -1357,6 +1481,16 @@ func TestFindingCountsReadTheLanguageAComponentIsScannedAs(t *testing.T) {
 		if got, ok := perComponent[name]; ok {
 			t.Errorf("perComponent[%s] = %v, want no entry: no gate scans it", name, got)
 		}
+	}
+
+	// Switched on, shell records ShellCheck's nought and nothing else: it has
+	// no dependency set, so no licence key.
+	enabled := config.Default()
+	enabled.Shell.Enabled = true
+	enabled.Licence.Policy.Allow = []string{"MIT"}
+	perComponent, _ = findingCounts(t.TempDir(), decl, enabled, nil, true)
+	if got := perComponent["scripts"]; len(got) != 1 || got[shell.Gate] != 0 {
+		t.Errorf("perComponent[scripts] = %v, want only a %s nought", got, shell.Gate)
 	}
 }
 

@@ -1,0 +1,11 @@
+# Version pin for the ShellCheck release lydite installs via pipx. Nothing here
+# is ever pip-installed by lydite: this file exists so Dependabot's `pip`
+# ecosystem can see the version and open bump PRs, and it is parsed at runtime
+# by internal/shell/pins.go so the version has exactly one home.
+#
+# shellcheck-py is the PyPI distribution of the upstream static ShellCheck
+# binary: its first three version components are ShellCheck's own release, the
+# fourth is the packaging revision. Every platform lydite ships for installs the
+# upstream binary, checksum-verified — linux/arm64 from the sdist, which fetches
+# it by sha256, the rest from a wheel carrying it.
+shellcheck-py==0.11.0.1

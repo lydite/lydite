@@ -16,6 +16,12 @@ every declared component), and carries the numeric gate knobs
 the one **opt-in**: absent or empty, the licence gate reports "not configured" and gates nothing,
 because inventing a default here has already failed this repository once — see
 [ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-introduces.md).
+`shell.enabled` is the other opt-in, and for a different reason: ShellCheck fails a row on every
+diagnostic it reports, style included, so on by default would fail a repository's build over
+scripts it never asked lydite to lint the moment it named one `lang: shell` for the orphan gate
+alone. A `lang: shell` component with `shell.enabled` unset or `false` renders its scan rows
+`unmeasured`, naming the key that would turn it on, rather than a silent pass. See
+[Scanning](scanning.md).
 
 Keys that described a pipeline lydite no longer has are **rejected by name** rather than ignored:
 `coverage.source` and the `coverage.{go,rust}` report paths, which located a report some other job
@@ -41,6 +47,10 @@ typescript:
                           # "corepack enable && yarn install --immutable"
 go:
   enabled: true
+shell:
+  enabled: false         # off unless a repository opts in: ShellCheck fails on every
+                          # diagnostic it reports, style included, so a `lang: shell`
+                          # component renders unmeasured (not a pass) until this is true
 semgrep:
   enabled: true
   config: auto           # override to a custom registry ref/path if needed

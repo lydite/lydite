@@ -112,6 +112,21 @@ var substringSuppressionTokens = []string{
 	"gitleaks:allow",
 }
 
+// shellcheckDirectiveName is how Disqualifications' evidence names a
+// ShellCheck directive, which has no one fixed spelling to quote.
+//
+// ShellCheck reads a directive as `#`, any run of spaces and tabs,
+// `shellcheck`, then at least one more — so `# shellcheck disable=SC2086`,
+// `#shellcheck disable=all` and `#  shellcheck  source=/dev/null` are all
+// directives, and no single literal token matches every one of them. Every
+// directive is vetoed, not only `disable=`: `source=/dev/null` is ShellCheck's
+// own documented way to silence a missing-source warning, `shell=` changes the
+// dialect and with it which checks apply, and `extended-analysis=false` turns
+// the dataflow checks off. A list of the narrowing keys would go stale the
+// first time ShellCheck added one, and the cost of vetoing the rest is a
+// referral for a change a person then reads.
+const shellcheckDirectiveName = "a shellcheck directive"
+
 // skipTokens stop a test from running or from being counted.
 //
 // The `.only` forms belong here even though they read as a focusing tool
@@ -206,6 +221,8 @@ func Disqualifications(ch Change, extra Disqualifiers) []Disqualification {
 			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
 		} else if tok, ok := containsSubstring(line.Text, substringSuppressionTokens); ok {
 			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
+		} else if containsShellcheckDirective(line.Text) {
+			add("suppression added", line.Path, fmt.Sprintf("%s introduces %s", line.Path, shellcheckDirectiveName))
 		}
 		if tok, ok := containsAny(line.Text, skipTokens); ok {
 			add("test disabled", line.Path, fmt.Sprintf("%s introduces %s", line.Path, tok))
@@ -295,6 +312,30 @@ func containsSubstring(text string, tokens []string) (string, bool) {
 	// second value is read by nobody: every caller checks the bool and never
 	// looks at the string when it is false, so no caller can be shown a
 	// different one]
+}
+
+// containsShellcheckDirective reports whether text carries a ShellCheck
+// directive anywhere in it: a `#`, any spaces or tabs, `shellcheck`, and at
+// least one space or tab after it, which is the prefix ShellCheck's own
+// directive reader requires before it reads any key.
+//
+// The `#` is not required to start a word. A `#` inside a shell word is not a
+// comment, so ShellCheck would not read one there, but a veto that fires on a
+// spelling nothing honours costs a referral, and one that misses a spelling
+// something does honour merges a suppression unread.
+func containsShellcheckDirective(text string) bool {
+	const name = "shellcheck"
+	for from := 0; ; {
+		i := strings.IndexByte(text[from:], '#')
+		if i < 0 {
+			return false
+		}
+		rest := strings.TrimLeft(text[from+i+1:], " \t")
+		if after, ok := strings.CutPrefix(rest, name); ok && after != "" && (after[0] == ' ' || after[0] == '\t') {
+			return true
+		}
+		from += i + 1
+	}
 }
 
 // atWordStart reports whether the match at i begins a token rather than

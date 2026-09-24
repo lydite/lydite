@@ -536,3 +536,38 @@ func TestCoverageFloorRejectsImpossibleValues(t *testing.T) {
 		}
 	}
 }
+
+// Shell is the one language a repository switches on rather than off: absent
+// the key, its checks do not run.
+func TestShellDefaultsToOff(t *testing.T) {
+	got, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Shell.Enabled {
+		t.Error("shell.enabled defaulted on, want a repository to switch it on")
+	}
+	dir := t.TempDir()
+	write(t, dir, "go:\n  enabled: false\n")
+	if got, err = Load(dir); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Shell.Enabled {
+		t.Error("a file naming no shell section switched shell on")
+	}
+}
+
+func TestLoadEnablesShell(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "shell:\n  enabled: true\n")
+
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := Default()
+	want.Shell.Enabled = true
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Load = %+v, want %+v", got, want)
+	}
+}

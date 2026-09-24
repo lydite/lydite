@@ -27,6 +27,7 @@ import (
 	"lydite/lydite/internal/scanlang"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
+	"lydite/lydite/internal/shell"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
@@ -145,8 +146,13 @@ func newScanCmd() *cobra.Command {
 				// A language turned off in .lydite/config.yml is one whose
 				// checks never run, so its components produce no rows at all
 				// — a row per opted-out component trains readers to skip the
-				// tag that exists to be noticed.
+				// tag that exists to be noticed. A language that is off until
+				// a repository switches it on is the exception: nobody opted
+				// out, so its components say which key would run them.
 				if !langEnabled(lang, cfg) {
+					for _, row := range offByDefaultRows(c.Name, lang) {
+						rep.Add(row)
+					}
 					continue
 				}
 				cdir := filepath.Join(dir, filepath.FromSlash(c.Dir))
@@ -196,6 +202,8 @@ func newScanCmd() *cobra.Command {
 					results = typescript.Check(ctx, cdir, env)
 				case runner.Go:
 					results = golang.Check(ctx, cdir, env, tc.Key())
+				case runner.Shell:
+					results = shell.Check(ctx, cdir, env)
 				}
 				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
 				switch lang {
@@ -205,6 +213,12 @@ func newScanCmd() *cobra.Command {
 					recordRustLicence(ctx, rep, licenceTree, c, cdir, env, cfg, changed)
 				case runner.TypeScript:
 					recordTypeScriptLicence(ctx, rep, licenceTree, c, cdir, cfg, changed)
+				case runner.Shell:
+					// A row rather than nothing: a licence row absent from a
+					// scanned component reads as a gate that ran and found
+					// nothing.
+					rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: licence.Gate + "(" + c.Name + ")",
+						Value: "not measured — shell declares no dependency set to read licences from"})
 				}
 			}
 
@@ -450,6 +464,34 @@ func unscannedReason(lang runner.Lang) string {
 	return "the component's language, " + string(lang) + ", has no scanner in lydite"
 }
 
+// offByDefaultRows is what a component contributes when its language is one
+// lydite leaves switched off until a repository switches it on: one row per
+// gate a scanned component gets, each naming the key that would run it.
+//
+// Nothing for any other language. Go, Rust and TypeScript are on unless a
+// repository says otherwise, so one of them being off is an opt-out the
+// repository stated, and its components produce no rows. Shell is off unless a
+// repository says otherwise, so a `lang: shell` component in a repository that
+// never mentioned shell is not an opt-out at all — and silence about it reads
+// exactly like a script that was checked and found clean.
+//
+// Every row is `unmeasured`, so the verdict stays `pass`: the component is a
+// declaration the repository is entitled to carry for the orphan gate alone.
+func offByDefaultRows(name string, lang runner.Lang) []ui.Row {
+	if lang != runner.Shell {
+		return nil
+	}
+	why := "shell's checks are off unless shell.enabled: true is set in " + config.FileName
+	return []ui.Row{
+		{Status: ui.StatusUnmeasured, Label: "scan(" + name + ")",
+			Value: "not scanned — " + why + ", so ShellCheck does not run over it"},
+		{Status: ui.StatusUnmeasured, Label: licence.Gate + "(" + name + ")",
+			Value: "not measured — " + why + ", and shell declares no dependency set to read licences from either way"},
+		{Status: ui.StatusUnmeasured, Label: "findings(" + name + ")",
+			Value: "not counted — " + why + ", so no gate reports a finding count for it"},
+	}
+}
+
 // langEnabled reports whether .lydite/config.yml leaves one language's checks
 // switched on.
 func langEnabled(l runner.Lang, cfg config.Config) bool {
@@ -460,6 +502,8 @@ func langEnabled(l runner.Lang, cfg config.Config) bool {
 		return cfg.TypeScript.Enabled
 	case runner.Go:
 		return cfg.Go.Enabled
+	case runner.Shell:
+		return cfg.Shell.Enabled
 	}
 	return false
 }
@@ -481,6 +525,8 @@ func scannerGates(lang runner.Lang) []string {
 		return typescript.FindingGates()
 	case runner.Go:
 		return golang.FindingGates()
+	case runner.Shell:
+		return shell.FindingGates()
 	}
 	return nil
 }

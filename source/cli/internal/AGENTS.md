@@ -17,7 +17,7 @@ says why it is that way and what breaks if it changes.
 | `ledger`, `junit` | [`quality-history.md`](../../../agentic/references/quality-history.md) |
 | `typescript` | [`linters.md`](../../../agentic/references/linters.md) |
 | `semgrep` | [`semgrep.md`](../../../agentic/references/semgrep.md) |
-| `rust`, `golang`, `executil` | [`scanning.md`](../../../agentic/references/scanning.md) |
+| `rust`, `golang`, `shell`, `executil` | [`scanning.md`](../../../agentic/references/scanning.md) |
 | `licence` | [`scanning.md`](../../../agentic/references/scanning.md) for the merge-base delta, and [`findings.md`](../../../agentic/references/findings.md) for how a pair is identified |
 | `toolchain`, `download` | [`toolchains.md`](../../../agentic/references/toolchains.md) |
 | `pins` | [`tool-pins.md`](../../../agentic/references/tool-pins.md) |
