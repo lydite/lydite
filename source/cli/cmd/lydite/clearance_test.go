@@ -27,7 +27,12 @@ import (
 // so a test can assert on the decision's effect rather than on its wording.
 type fakeForge struct {
 	permission string
-	statuses   []map[string]any
+	// headSHA is the head the platform resolves for the pull request,
+	// defaulting to the head constant. A test whose run recomputes the cleared
+	// decision sets it to its own checkout's revision, which is the agreement
+	// the recomputation refuses to proceed without.
+	headSHA  string
+	statuses []map[string]any
 	// changed is the platform's own list-files answer, which is the only
 	// thing the comment surface asks about the pull request itself.
 	changed []map[string]any
@@ -50,6 +55,9 @@ type fakeForge struct {
 
 func (f *fakeForge) start(t *testing.T) {
 	t.Helper()
+	if f.headSHA == "" {
+		f.headSHA = head
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/files"):
@@ -60,7 +68,7 @@ func (f *fakeForge) start(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(f.changed)
 		case strings.Contains(r.URL.Path, "/pulls/"):
-			_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"}}`))
+			_, _ = w.Write([]byte(`{"head":{"sha":"` + f.headSHA + `"}}`))
 		case strings.Contains(r.URL.Path, "/permission"):
 			_, _ = w.Write([]byte(`{"permission":"` + f.permission + `"}`))
 		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodGet:
@@ -138,22 +146,69 @@ func runClearanceCmd(t *testing.T, eventPath string) string {
 // where the declarations in force are read from.
 func runClearanceCmdIn(t *testing.T, dir, eventPath string) string {
 	t.Helper()
-	cmd := &cobra.Command{}
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	if err := runClearance(context.Background(), cmd, dir, eventPath, "", true); err != nil {
+	out, err := runClearanceWith(t, clearanceOptions{dir: dir, eventPath: eventPath, base: "auto", noColor: true})
+	if err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
-	return out.String()
+	return out
 }
 
 // runClearanceRendering answers the comment with the status rendered at
 // statusOut instead of posted, and returns what the run answered with.
 func runClearanceRendering(t *testing.T, eventPath, statusOut string) error {
 	t.Helper()
+	_, err := runClearanceWith(t, clearanceOptions{
+		dir: ".", eventPath: eventPath, statusOut: statusOut, base: "auto", noColor: true,
+	})
+	return err
+}
+
+// runClearanceWith answers the comment exactly as asked, and returns what the
+// run wrote to both streams: the fingerprint a clearance could not take is
+// reported on stderr, and a test asserting that reads it there.
+func runClearanceWith(t *testing.T, opt clearanceOptions) (string, error) {
+	t.Helper()
 	cmd := &cobra.Command{}
-	cmd.SetOut(&bytes.Buffer{})
-	return runClearance(context.Background(), cmd, ".", eventPath, statusOut, true)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := runClearance(context.Background(), cmd, opt)
+	return out.String(), err
+}
+
+// clearedCheckout is the checkout a run that recomputes the cleared decision
+// holds: the pull request's own head, one commit on top of the base the
+// decision is measured against, with one path no exemption covers.
+func clearedCheckout(t *testing.T) (dir, base, head string) {
+	t.Helper()
+	dir, base = reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	r := executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD")
+	if !r.Ok() {
+		t.Fatalf("git rev-parse HEAD: %v\n%s", r.Err, r.Output)
+	}
+	return dir, base, strings.TrimSpace(r.Output)
+}
+
+// clearedDescription is the description a clearance of that checkout records:
+// who cleared what, carrying the fingerprint `clearance queue` recomputes over
+// the same tree.
+//
+// Composed from a recomputation rather than from a literal, because the whole
+// property is that the two paths agree — a literal on each side agrees with
+// nothing and drifts silently. TestAClearanceRecordsTheFingerprintTheQueueRecomputes
+// asserts the agreement itself, end to end.
+func clearedDescription(t *testing.T, login, dir, base, head string) string {
+	t.Helper()
+	decision, err := queueDecision(context.Background(), dir, base)
+	if err != nil {
+		t.Fatalf("recomputing the decision: %v", err)
+	}
+	return clearance.WithFingerprint(
+		"cleared by @"+login+" at "+shortSHA(head),
+		referral.Fingerprint(decision.Uncovered, decision.Disqualifications))
 }
 
 var (
@@ -168,15 +223,25 @@ var (
 // second `/lydite clear` reads it as passing. The clearance is posted first so
 // a partial failure never leaves a green referral with no clearance record.
 func TestClearPostsTheClearanceThenResolvesTheReferralOnTheHead(t *testing.T) {
-	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	dir, base, head := clearedCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: head,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
 	forge.start(t)
 	t.Setenv("GITHUB_SERVER_URL", "https://example.invalid")
 	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
 	t.Setenv("GITHUB_RUN_ID", "12")
 
-	out := runClearanceCmd(t, eventFile(t, "/lydite clear", "pedromvgomes", commented))
+	out, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	})
+	if err != nil {
+		t.Fatalf("runClearance: %v\n%s", err, out)
+	}
 
-	description := "cleared by @pedromvgomes at " + shortSHA(head)
+	description := clearedDescription(t, "pedromvgomes", dir, base, head)
 	want := []map[string]string{
 		{"state": "success", "context": "lydite/clearance", "description": description,
 			"target_url": "https://example.invalid/lydite/lydite/actions/runs/12"},
@@ -202,6 +267,84 @@ func TestClearPostsTheClearanceThenResolvesTheReferralOnTheHead(t *testing.T) {
 	}
 	if !strings.Contains(out, "clearance") {
 		t.Errorf("report did not mention the clearance:\n%s", out)
+	}
+}
+
+// The point of the whole mechanism, asserted as the equality it is: what a real
+// `/lydite clear` records on the head is what a real `clearance queue` submits
+// for the same tree. Each path asserted against its own literal instead would
+// keep agreeing with that literal long after the two stopped agreeing with each
+// other, which is precisely how a queue entry starts answering pending for a
+// decision that never changed.
+func TestAClearanceRecordsTheFingerprintTheQueueRecomputes(t *testing.T) {
+	dir, base, head := clearedCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: head,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
+	forge.start(t)
+
+	out, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	})
+	if err != nil {
+		t.Fatalf("runClearance: %v\n%s", err, out)
+	}
+	if len(forge.published) == 0 {
+		t.Fatalf("nothing was published:\n%s", out)
+	}
+	recorded, ok := clearance.FingerprintIn(forge.published[0]["description"])
+	if !ok || recorded == "" {
+		t.Fatalf("the clearance carries no fingerprint: %q", forge.published[0]["description"])
+	}
+
+	relay := newFakeRelay()
+	queueOut, err := runQueueCmd(t, relay, dir, base,
+		queueEvent(t, 40, "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567", "main"))
+	if err != nil {
+		t.Fatalf("runQueue: %v\n%s", err, queueOut)
+	}
+	submitted := submittedRequest(t, relay).Fingerprint
+
+	if recorded != submitted {
+		t.Errorf("the clearance recorded %q and the queue recomputed %q over the same tree, "+
+			"so no cleared entry leaves the queue", recorded, submitted)
+	}
+}
+
+// A run that cannot recompute the decision still clears the referral, and says
+// what it could not do. The checkout not being the revision being cleared is
+// the ordinary way that happens — a job answering the comment from the default
+// branch has the change nowhere in its tree — and a fingerprint taken there
+// would attach a person's judgement to reasons nobody was shown.
+func TestAClearanceRecordsNoFingerprintOffTheRevisionItClears(t *testing.T) {
+	// The platform answers with the default head, which is not the revision
+	// this checkout is at.
+	dir, base, _ := clearedCheckout(t)
+	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	out, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	})
+	if err != nil {
+		t.Fatalf("runClearance: %v\n%s", err, out)
+	}
+
+	if len(forge.published) != 2 {
+		t.Fatalf("published %+v, want the clearance and the resolved referral", forge.published)
+	}
+	description := forge.published[0]["description"]
+	if description != "cleared by @pedromvgomes at "+shortSHA(head) {
+		t.Errorf("description = %q, want the attribution with no fingerprint beside it", description)
+	}
+	if _, ok := clearance.FingerprintIn(description); ok {
+		t.Errorf("a decision computed off another revision was recorded as this one's: %q", description)
+	}
+	if !strings.Contains(out, "records no fingerprint") {
+		t.Errorf("the run did not say the clearance will not carry onto a queue entry:\n%s", out)
 	}
 }
 
@@ -242,14 +385,21 @@ func TestAFailedClearancePostPostsNothingElse(t *testing.T) {
 // run cannot derive from its own claims at all: an issue_comment run's ref is
 // a branch, not a pull ref.
 func TestClearRendersTheStatusDocumentInsteadOfPostingIt(t *testing.T) {
-	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	dir, base, head := clearedCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: head,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
 	forge.start(t)
 	t.Setenv("GITHUB_SERVER_URL", "https://example.invalid")
 	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
 	t.Setenv("GITHUB_RUN_ID", "12")
 
 	out := filepath.Join(t.TempDir(), "clearance", "status.json")
-	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), out); err != nil {
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: out, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
 
@@ -260,7 +410,7 @@ func TestClearRendersTheStatusDocumentInsteadOfPostingIt(t *testing.T) {
 	want := map[string]any{
 		"state":        "success",
 		"context":      "lydite/clearance",
-		"description":  "cleared by @pedromvgomes at " + shortSHA(head),
+		"description":  clearedDescription(t, "pedromvgomes", dir, base, head),
 		"target_url":   "https://example.invalid/lydite/lydite/actions/runs/12",
 		"sha":          head,
 		"pull_request": float64(40),
@@ -360,20 +510,60 @@ func TestTheStatusOutFlagIsWiredIntoTheCommand(t *testing.T) {
 	}
 }
 
+// --base and --base-branch are flags on the command a workflow actually runs:
+// the revision the cleared decision is recomputed against reaches the
+// computation only through them, and a fingerprint is taken over that decision.
+func TestTheBaseFlagsAreWiredIntoTheCommand(t *testing.T) {
+	dir, base, head := clearedCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: head,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
+	forge.start(t)
+
+	out := filepath.Join(t.TempDir(), "status.json")
+	cmd := newClearanceCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"--dir", dir,
+		"--base", base,
+		"--base-branch", "main",
+		"--event", eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		"--status-out", out,
+		"--no-color",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	got := readRenderedStatus(t, out)["description"]
+	if got != clearedDescription(t, "pedromvgomes", dir, base, head) {
+		t.Errorf("description = %#v, want the attribution carrying the recomputed fingerprint", got)
+	}
+}
+
 // A rendered clearance resolves the referral it cleared, exactly as the direct
 // route does: the second document names lydite/referral on the same head, with
 // the same description and the same revision, at the sibling path derived from
 // --status-out. Without it a consumer's pull request holds a clearance record
 // beside a referral still pending, and nothing merges.
 func TestARenderedClearanceAlsoRendersTheResolvedReferral(t *testing.T) {
-	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	dir, base, head := clearedCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: head,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
 	forge.start(t)
 	t.Setenv("GITHUB_SERVER_URL", "https://example.invalid")
 	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
 	t.Setenv("GITHUB_RUN_ID", "12")
 
 	out := filepath.Join(t.TempDir(), "rendered", "lydite-status.json")
-	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), out); err != nil {
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: out, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
 
@@ -382,7 +572,7 @@ func TestARenderedClearanceAlsoRendersTheResolvedReferral(t *testing.T) {
 	want := map[string]any{
 		"state":        "success",
 		"context":      "lydite/referral",
-		"description":  "cleared by @pedromvgomes at " + shortSHA(head),
+		"description":  clearedDescription(t, "pedromvgomes", dir, base, head),
 		"target_url":   "https://example.invalid/lydite/lydite/actions/runs/12",
 		"sha":          head,
 		"pull_request": float64(40),
@@ -1088,7 +1278,7 @@ func TestClearanceNeedsAnEventPayload(t *testing.T) {
 	t.Setenv("GITHUB_EVENT_PATH", "")
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
-	err := runClearance(context.Background(), cmd, ".", "", "", true)
+	err := runClearance(context.Background(), cmd, clearanceOptions{dir: ".", base: "auto", noColor: true})
 	if err == nil || !strings.Contains(err.Error(), "event payload") {
 		t.Fatalf("err = %v, want a message naming the missing payload", err)
 	}
