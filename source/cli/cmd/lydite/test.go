@@ -417,10 +417,12 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	}
 
 	rows := make([]ui.Row, len(plans))
-	// notes[i] is the row about the component's install, present only when
-	// there was nothing for the install to run. Resolved here, before anything
-	// runs, because it is a question about the tree: which lockfile declares
-	// this component's dependencies, which no install of it changes.
+	// notes[i] is the row about the component's install, present when there
+	// is something to say about it: an override and where it runs, or no
+	// lockfile to install from at all. Resolved here, before anything runs,
+	// because it is a question about the tree: which lockfile — or which
+	// override — declares this component's dependencies, and where, which
+	// no install of it changes.
 	notes := make([]ui.Row, len(plans))
 	measured := make([]measurement, len(plans))
 	for i, p := range plans {
@@ -1271,26 +1273,52 @@ const installHint = "Set typescript.install in " + config.FileName + " if this c
 // label would silently lose one of the two.
 func installLabel(name string) string { return "install(" + name + ")" }
 
-// installNote is the row a component whose install has no workspace root to
-// run in takes, and false for one whose dependencies lydite installs.
+// installNote is the row a component's install takes when there is
+// something to say about where or whether it runs, and false for one whose
+// dependencies lydite installs the ordinary way, with nothing to add.
 //
-// Resolving no root is not an install that succeeded. No package manager ran,
-// so whatever node_modules the tree already held is what the suite imports
-// from — and a run saying nothing about it reads exactly like one that
-// installed the workspace it was pointed at.
+// A typescript.install override is one of those things: it may resolve a
+// workspace root the same way detection does and run there, coalesced with
+// every sibling that resolves the same root, or it may find no such root and
+// run alone in the component's own directory. Either is a fact about the
+// tree a reader of the report cannot get from the command itself, so this
+// names where the override is going to run — not whether it succeeds. This
+// runs before the install does; a separate failure row covers the install
+// actually failing.
 //
-// Unmeasured and not a failure, and the suite still runs: a component whose
-// dependencies are in place by some other means passes, and this row claims
-// only that lydite did not put them there.
+// Resolving no root, with no override configured, is not an install that
+// succeeded either. No package manager ran, so whatever node_modules the
+// tree already held is what the suite imports from — and a run saying
+// nothing about it reads exactly like one that installed the workspace it
+// was pointed at.
+//
+// Neither row is a failure: a component whose dependencies are in place by
+// some other means passes, and these rows claim only what lydite did or did
+// not do about them.
 func installNote(root string, c component.Component, cfg config.Config) (ui.Row, bool) {
 	dir := filepath.Join(root, filepath.FromSlash(c.Dir))
 	if !installsNodeDeps(dir, c) {
 		return ui.Row{}, false
 	}
-	// typescript.install replaces detection entirely and runs in the
-	// component's own directory, so it needs no root resolved for it.
 	if cfg.TypeScript.Install != "" {
-		return ui.Row{}, false
+		if wsRoot, ok := nodedeps.WorkspaceRoot(dir, root); ok {
+			return ui.Row{
+				Status: ui.StatusContext,
+				Label:  installLabel(c.Name),
+				Value:  "override at workspace root",
+				Detail: []string{
+					"typescript.install (" + cfg.TypeScript.Install + ") runs at " + wsRoot + ", coalesced with every sibling resolving the same root",
+				},
+			}, true
+		}
+		return ui.Row{
+			Status: ui.StatusContext,
+			Label:  installLabel(c.Name),
+			Value:  "override in " + c.Dir,
+			Detail: []string{
+				"typescript.install (" + cfg.TypeScript.Install + ") runs in " + dir + ", shared with no other component",
+			},
+		}, true
 	}
 	if _, ok := nodedeps.WorkspaceRoot(dir, root); ok {
 		return ui.Row{}, false
