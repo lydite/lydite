@@ -28,11 +28,18 @@ export interface Env {
    * workflow at any revision, including a branch anyone with write access can
    * move. A SHA-pinned entry therefore admits that SHA and nothing else.
    *
-   * Both default to empty, which admits no job at all — the state in which the
+   * Each defaults to empty, which admits no job at all — the state in which the
    * gated contexts are refused to every caller.
+   *
+   * `MERGE_GROUP_WORKFLOW_REFS` is named for the run shape rather than for a
+   * context, because the job it admits posts `lydite/referral` without being
+   * allowed to say what that status reads: `/merge-group` composes the verdict
+   * itself from a comparison. A ref in more than one of these lists holds no
+   * authority at all.
    */
   REFERRAL_WORKFLOW_REFS?: string;
   CLEARANCE_WORKFLOW_REFS?: string;
+  MERGE_GROUP_WORKFLOW_REFS?: string;
 }
 
 /** What a client sends. Deliberately small, and none of it is trusted. */
@@ -62,9 +69,32 @@ interface StatusRequest {
   sha?: string;
 }
 
+/**
+ * What a merge-queue entry submits for comparison.
+ *
+ * None of it is authority. The repository is the claim's, the pull request is
+ * derived from the claim's own ref and resolved live before it is read from,
+ * and the fingerprint is evidence the relay compares rather than a verdict it
+ * is told — a job that could name the state would need no comparison at all.
+ */
+interface QueueRequest {
+  /** The queue ref this entry builds on, which has to agree with the claim's. */
+  queue_ref?: string;
+  /** The originating pull request, which has to agree with the ref's own. */
+  pull_request?: number;
+  /** The queue revision the verdict is published against. */
+  sha?: string;
+  /** The revision the decision was recomputed against, for a person to read. */
+  base_sha?: string;
+  /** The fingerprint of the reasons the recomputed decision refers on. */
+  fingerprint?: string;
+}
+
 const JWKS = "https://token.actions.githubusercontent.com/.well-known/jwks";
 
-const ROUTES = ["/comment", "/review", "/status"];
+const QUEUE_ROUTE = "/merge-group";
+
+const ROUTES = ["/comment", "/review", "/status", QUEUE_ROUTE];
 
 // The two contexts a job may only post from an allowlisted workflow: the
 // referral verdict a merge is gated on, and the status a human Clearance acts
@@ -79,6 +109,19 @@ const CLEARANCE_CONTEXT = "lydite/clearance";
 // verdict this route never authors and never moves.
 const REFERRAL_PENDING = "pending";
 const REFERRAL_RESOLVED = "success";
+
+// The platform's cap on a status description, which is also what
+// `internal/clearance`'s own `DescriptionLimit` composes against: text past it
+// is clipped by the platform, and a clipped description loses its tail.
+const DESCRIPTION_LIMIT = 140;
+
+// The delimiters `internal/clearance`'s `WithFingerprint` writes a decision's
+// fingerprint under, and `FingerprintIn` reads it back from. Two
+// implementations of one encoding, so they are spelled the same way in both:
+// see `fingerprintOpen`/`fingerprintClose` in
+// `source/cli/internal/clearance/decide.go`.
+const FINGERPRINT_OPEN = " [fp:";
+const FINGERPRINT_CLOSE = "]";
 
 /**
  * What the relay talks to.
@@ -110,9 +153,11 @@ const production: Deps = {
  * The repository is always the claim's. The pull request is too, except for the
  * clearance runs `resolveTarget` describes, which have no pull-request ref and
  * whose submitted number is resolved through that token before it is written to.
+ * A merge-queue run has no pull-request ref either, and `queueTarget` reads the
+ * number out of the one ref shape that carries it instead.
  *
- * Three endpoints, and each writes to one pull request and nothing else.
- * `POST /comment` upserts the standing comment; `POST /review` applies the
+ * Four endpoints, and each writes to one pull request's own record and nothing
+ * else. `POST /comment` upserts the standing comment; `POST /review` applies the
  * operations document `lydite threads` computed — the threads to open on the
  * change's own lines, the ones to answer, and the ones to take down; `POST
  * /status` records a verdict on a revision of that pull request, so the check a
@@ -123,7 +168,18 @@ const production: Deps = {
  * keeps lydite's vocabulary in one place rather than in a Worker one release
  * behind it.
  *
- * That covers those three writes and nothing else. The coverage gate runs the
+ * `POST /merge-group` is the one route that composes a verdict rather than
+ * relaying one. A merge queue replays the change onto a fresh base, so the
+ * revision it builds carries no clearance and can be given none — its ref
+ * belongs to no pull request, so there is no surface a clearing comment could be
+ * typed at. The entry submits the fingerprint of the decision recomputed on the
+ * queue's own tree; the relay resolves the originating pull request live, reads
+ * the fingerprint the clearance recorded on that pull request's real head,
+ * compares, and publishes the referral at the queue revision. The job that
+ * submits therefore still holds no writing token, which is the reason the relay
+ * exists at all.
+ *
+ * That covers those four writes and nothing else. The coverage gate runs the
  * repository's own tests and its `setup`/`teardown` shell, and on a pull
  * request that code is the pull request's; with no writable token in the job,
  * the worst that code can do through the relay is provoke a wrong comment on
@@ -146,7 +202,9 @@ export default createRelay();
 async function handle(request: Request, env: Env, deps: Deps): Promise<Response> {
   const route = new URL(request.url).pathname;
   if (request.method !== "POST" || !ROUTES.includes(route)) {
-    return json(404, { error: "POST /comment, POST /review or POST /status" });
+    return json(404, {
+      error: `POST /comment, POST /review, POST /status or POST ${QUEUE_ROUTE}`,
+    });
   }
 
   const presented = bearer(request);
@@ -163,9 +221,22 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
     return json(401, { error: "the Actions OIDC token did not verify" });
   }
 
-  const payload = (await request.json().catch(() => ({}))) as CommentRequest & ReviewOps & StatusRequest;
+  const payload = (await request.json().catch(() => ({}))) as CommentRequest &
+    ReviewOps &
+    StatusRequest &
+    QueueRequest;
 
-  const target = resolveTarget(route, claims, payload, env);
+  if (route === QUEUE_ROUTE) {
+    const error = queuePayloadError(payload);
+    if (error) {
+      return json(400, { error });
+    }
+  }
+
+  const target =
+    route === QUEUE_ROUTE
+      ? queueTarget(claims, payload, env)
+      : resolveTarget(route, claims, payload, env);
   if ("error" in target) {
     return json(403, { error: target.error });
   }
@@ -209,6 +280,34 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
       });
     }
     const token = await installationToken(jwt, installation, claims.repository, deps.fetcher);
+
+    if (route === QUEUE_ROUTE) {
+      // The pull request's own head, live: the queue ref's trailing revision is
+      // the base tip the entry was replayed onto, not a head, and nothing in
+      // the body is a revision the clearance may be read off. A pull request
+      // this repository does not have is a pull request `GET /pulls/:n` answers
+      // nothing for.
+      const pr = await pullRequest(token, claims.repository, pull, deps.fetcher);
+      const head = pr?.head?.sha;
+      if (!head) {
+        return json(403, { error: NO_SUCH_PULL });
+      }
+      const cleared = await standingStatus(
+        token,
+        claims.repository,
+        head,
+        CLEARANCE_CONTEXT,
+        deps.fetcher,
+      );
+      const verdict = queueVerdict(cleared, payload.fingerprint as string, pull);
+      await postStatus(
+        token,
+        claims.repository,
+        { ...verdict, context: REFERRAL_CONTEXT, sha: payload.sha },
+        deps.fetcher,
+      );
+      return json(200, verdict);
+    }
 
     if (route === "/comment") {
       if (target.submitted) {
@@ -268,17 +367,17 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
         // `lydite/referral` to `success` after a clearance with no live read
         // at all, so this is a tighter check on the same exposure rather
         // than a new one.
-        const standing = await currentStatus(
+        const standing = await standingStatus(
           token,
           claims.repository,
           head,
           REFERRAL_CONTEXT,
           deps.fetcher,
         );
-        if (standing !== REFERRAL_PENDING) {
+        if (standing?.state !== REFERRAL_PENDING) {
           return json(403, {
             error: `a clearance resolves a ${REFERRAL_PENDING} ${REFERRAL_CONTEXT}, and this revision carries ${
-              standing ?? "none"
+              standing?.state ?? "none"
             }`,
           });
         }
@@ -322,6 +421,7 @@ const UNWRITTEN: Record<string, string> = {
   "/comment": "the comment could not be posted",
   "/review": "the review could not be applied",
   "/status": "the status could not be posted",
+  [QUEUE_ROUTE]: "the queue entry's verdict could not be published",
 };
 
 /**
@@ -548,6 +648,246 @@ function referralResolution(payload: StatusRequest, claims: ActionsClaims, env: 
   );
 }
 
+// What a merge-queue run presents: the `merge_group` event, on the queue ref
+// the platform builds the entry under. `forge.QueueRefPrefix` is the same
+// prefix on the CLI side.
+const MERGE_GROUP_EVENT = "merge_group";
+const QUEUE_REF_PREFIX = `${BRANCH_REF}gh-readonly-queue/`;
+
+// The segment of a queue ref that names one entry. The trailing revision is
+// the base branch's tip the entry was replayed onto — never the pull request's
+// head — so it is matched to be discarded, and the head is resolved live.
+// Mirrors `queueEntryPattern` in `source/cli/internal/forge/event.go`.
+const QUEUE_ENTRY = /^pr-(\d+)-[0-9a-fA-F]{7,40}$/;
+
+/**
+ * What is wrong with a `/merge-group` payload, or nothing.
+ *
+ * Every field is required because every one of them is compared: a submission
+ * missing one is a comparison that cannot be made, and a comparison that cannot
+ * be made must be refused rather than resolved either way.
+ */
+function queuePayloadError(payload: QueueRequest): string | undefined {
+  if (!payload.queue_ref || !payload.sha || !payload.fingerprint) {
+    return "a queue_ref, a sha and a fingerprint are required";
+  }
+  const named = payload.pull_request;
+  if (typeof named !== "number" || !Number.isInteger(named) || named <= 0) {
+    return "a pull request number is required";
+  }
+  return undefined;
+}
+
+/**
+ * The pull request a merge-queue entry is for, or why there is none.
+ *
+ * The number comes from the claim's own ref, which is the one thing a run cannot
+ * choose, and the body's has only to agree with it — so `submitted` is false:
+ * there is no assertion left to resolve past this, and the head the clearance is
+ * read off is resolved live regardless.
+ *
+ * `sha` is the queue revision the verdict lands on, so it names what gets
+ * written to and is checked against `claims.sha` rather than trusted. On a
+ * `merge_group` run that claim is the revision the queue built, which is exactly
+ * the revision a verdict about this entry belongs on — unlike a `pull_request`
+ * run, whose `claims.sha` is a synthetic merge commit no verdict is published
+ * against.
+ */
+function queueTarget(claims: ActionsClaims, payload: QueueRequest, env: Env): Target {
+  const authority = queueRun(claims, env);
+  if (authority.error) {
+    return { error: authority.error };
+  }
+  if (payload.queue_ref !== claims.ref) {
+    return { error: "the queue ref submitted is not the one this run is for" };
+  }
+  const fromRef = queuePullRequest(claims.ref);
+  if (!fromRef) {
+    return { error: `${claims.ref} names no pull request, so there is no clearance to read` };
+  }
+  if (payload.pull_request !== fromRef) {
+    return { error: "the pull request submitted is not the one this queue ref names" };
+  }
+  if (!claims.sha || payload.sha !== claims.sha) {
+    return { error: "the sha submitted is not the revision this run is for" };
+  }
+  return { pull: fromRef, submitted: false };
+}
+
+/**
+ * Whether this run is a merge-queue run: one whose `job_workflow_ref` the
+ * merge-group allowlist names and no other allowlist does, running as
+ * `merge_group` on a queue ref.
+ *
+ * Conditioned on the same three claims a clearance run is, and for the same
+ * reason: the allowlist names a workflow file, and a file says nothing about
+ * what started it. The authority this route carries is narrower than a
+ * clearance's — the state is the relay's own to compose, never the caller's —
+ * but the same allowlisted callee reached from a `push` or a same-repository
+ * `pull_request` caller is a run whoever can open a pull request controls, and
+ * a verdict published under lydite's identity is not theirs to provoke.
+ *
+ * A ref in more than one allowlist holds no authority at all. Reading it as a
+ * queue run would hand a referral or clearance workflow this route's own
+ * resolution of a pull request from a ref shape it does not present.
+ */
+function queueRun(claims: ActionsClaims, env: Env): ClearanceAuthority {
+  const named = claims.job_workflow_ref ?? "";
+  if (!allowlisted(env.MERGE_GROUP_WORKFLOW_REFS, named)) {
+    return {
+      run: false,
+      error: `${QUEUE_ROUTE} is answered only for an allowlisted workflow, and ${
+        named || "this run names no job_workflow_ref"
+      } is not one`,
+    };
+  }
+  if (
+    allowlisted(env.REFERRAL_WORKFLOW_REFS, named) ||
+    allowlisted(env.CLEARANCE_WORKFLOW_REFS, named)
+  ) {
+    return { run: false, error: `${named} is allowlisted for more than one authority` };
+  }
+  if (claims.event_name !== MERGE_GROUP_EVENT || !claims.ref.startsWith(QUEUE_REF_PREFIX)) {
+    return {
+      run: false,
+      error: `a queue run is a ${MERGE_GROUP_EVENT} run on a ${QUEUE_REF_PREFIX} ref, and this run is ${
+        claims.event_name || "an unnamed event"
+      } on ${claims.ref || "no ref"}`,
+    };
+  }
+  return { run: true };
+}
+
+/**
+ * The pull request a queue ref names, or nothing.
+ *
+ * The last segment is the one read: a base branch may hold slashes, and a group
+ * carrying several pull requests names the one the platform put last. A group of
+ * more than one refers rather than misreads — the decision recomputed over it
+ * covers every change in the group, so its fingerprint matches no single pull
+ * request's clearance.
+ */
+function queuePullRequest(ref: string): number | undefined {
+  if (!ref.startsWith(QUEUE_REF_PREFIX)) {
+    return undefined;
+  }
+  const segments = ref.slice(QUEUE_REF_PREFIX.length).split("/");
+  const match = QUEUE_ENTRY.exec(segments[segments.length - 1] ?? "");
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const number = Number(match[1]);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+/**
+ * The verdict a queue entry's submitted fingerprint earns against the clearance
+ * standing on the originating pull request's head.
+ *
+ * `success` carries the clearer's own attribution forward rather than composing
+ * one of lydite's: the decision the person judged is unchanged, so the judgement
+ * is still theirs. Every other answer is `pending` and never `failure` — the
+ * standing-referral state, and the one state `clearance.Decide` accepts a
+ * clearing comment against. A `failure` here would make a mismatched entry
+ * permanently unclearable, which is the deadlock ADR 0053 removes.
+ */
+function queueVerdict(
+  cleared: StatusEntry | undefined,
+  fingerprint: string,
+  pull: number,
+): { state: string; description: string } {
+  if (cleared?.state !== REFERRAL_RESOLVED) {
+    return {
+      state: REFERRAL_PENDING,
+      description: clip(`no clearance stands on #${pull}'s head, so this entry stays referred`),
+    };
+  }
+  const description = cleared.description ?? "";
+  const recorded = fingerprintIn(description);
+  if (!recorded) {
+    return {
+      state: REFERRAL_PENDING,
+      description: clip(
+        `#${pull}'s clearance records no decision fingerprint, so it cannot carry forward — clear #${pull} again`,
+      ),
+    };
+  }
+  if (recorded !== fingerprint) {
+    return {
+      state: REFERRAL_PENDING,
+      description: clip(
+        `the decision changed since #${pull} was cleared, so the clearance does not carry forward — clear #${pull} again`,
+      ),
+    };
+  }
+  return {
+    state: REFERRAL_RESOLVED,
+    description: clip(`${attributionIn(description)}, carried forward onto this queue entry`),
+  };
+}
+
+/**
+ * The fingerprint a status description carries, or nothing when it carries none
+ * usable for a comparison.
+ *
+ * The reader of `internal/clearance`'s `WithFingerprint`, and it has to agree
+ * with `FingerprintIn` in `source/cli/internal/clearance/decide.go` exactly:
+ * nothing follows the fingerprint, so the last opening marker in a description
+ * ending in the closing one is the field, and a value holding a bracket or a
+ * space names nothing — which is what keeps brackets in the human half from
+ * reading as a field.
+ *
+ * A description whose field is empty and one that has no field at all collapse
+ * to the same answer here, unlike in Go where the second return distinguishes
+ * them: both are unusable for a comparison, and this route's one use of either
+ * is the same `pending`.
+ */
+function fingerprintIn(description: string): string | undefined {
+  if (!description.endsWith(FINGERPRINT_CLOSE)) {
+    return undefined;
+  }
+  const open = description.lastIndexOf(FINGERPRINT_OPEN);
+  if (open < 0) {
+    return undefined;
+  }
+  const value = description.slice(
+    open + FINGERPRINT_OPEN.length,
+    description.length - FINGERPRINT_CLOSE.length,
+  );
+  if (!value || /[ [\]]/.test(value)) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * The human half of a clearance's description: who cleared what, without the
+ * fingerprint field.
+ *
+ * A description carrying no field is all human half, so nothing is cut from it.
+ */
+function attributionIn(description: string): string {
+  if (!fingerprintIn(description)) {
+    return description;
+  }
+  return description.slice(0, description.lastIndexOf(FINGERPRINT_OPEN));
+}
+
+/**
+ * A description inside the platform's own cap.
+ *
+ * Composed here rather than left to the platform's clip, because what a clipped
+ * description loses is its tail — which is where the reason a person has to act
+ * on sits.
+ */
+function clip(description: string): string {
+  const runes = [...description];
+  if (runes.length <= DESCRIPTION_LIMIT) {
+    return description;
+  }
+  return `${runes.slice(0, DESCRIPTION_LIMIT - 1).join("")}…`;
+}
+
 /**
  * Whether a `job_workflow_ref` is one of the exact strings a var lists.
  *
@@ -629,13 +969,20 @@ async function pullRequest(
   return (await response.json()) as PullRequest;
 }
 
-/** As much of `GET /commits/:sha/status` as the standing referral is read from. */
+/** One entry of `GET /commits/:sha/status`: what a context says on a revision. */
+interface StatusEntry {
+  context?: string;
+  state?: string;
+  description?: string;
+}
+
+/** As much of `GET /commits/:sha/status` as a standing status is read from. */
 interface CombinedStatus {
-  statuses?: { context?: string; state?: string }[];
+  statuses?: StatusEntry[];
 }
 
 /**
- * The state a context is currently standing at on a revision, or nothing when
+ * The status a context is currently standing at on a revision, or nothing when
  * that revision carries no such status.
  *
  * The combined status answers one entry per context, each the most recent
@@ -643,17 +990,17 @@ interface CombinedStatus {
  * now". Read with the installation token and on the revision `handle` resolved,
  * because the point of the read is that it is the platform's answer rather than
  * the caller's: a request cannot assert the state it is about to be allowed to
- * move. Any failure other than a missing revision throws and reaches the caller
- * as the route's `502`, so a transient outage stays retryable rather than
- * reading as a refusal.
+ * move, nor the description a decision is compared against. Any failure other
+ * than a missing revision throws and reaches the caller as the route's `502`, so
+ * a transient outage stays retryable rather than reading as a refusal.
  */
-async function currentStatus(
+async function standingStatus(
   token: string,
   repository: string,
   sha: string,
   context: string,
   fetcher: typeof fetch,
-): Promise<string | undefined> {
+): Promise<StatusEntry | undefined> {
   const response = await fetcher(
     `${GITHUB_API}/repos/${repository}/commits/${encodeURIComponent(sha)}/status`,
     { headers: apiHeaders(`Bearer ${token}`) },
@@ -665,15 +1012,17 @@ async function currentStatus(
     throw new Error(`reading the standing status answered ${response.status}`);
   }
   const combined = (await response.json()) as CombinedStatus;
-  return (combined.statuses ?? []).find((status) => status.context === context)?.state;
+  return (combined.statuses ?? []).find((status) => status.context === context);
 }
 
 /**
- * Records the verdict on the revision `handle` has already resolved and
- * checked the caller's `sha` against, and under the `lydite/`-namespaced
- * `context` it has already checked too — so by the time this runs, both the
- * revision and the repository are ones the run is already for, and the check
- * is one only lydite's own tooling could have named.
+ * Records the verdict on the revision `handle` has already checked the caller's
+ * `sha` against — the pull request's own head on `/status`, the queue revision
+ * this run is for on `/merge-group` — and under a context it has already checked
+ * too: the `lydite/`-namespaced one a caller named, or the referral context the
+ * queue route composes its own verdict under. So by the time this runs, both the
+ * revision and the repository are ones the run is already for, and the check is
+ * one only lydite's own tooling could have named.
  */
 async function postStatus(
   token: string,

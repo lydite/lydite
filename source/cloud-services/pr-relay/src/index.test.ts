@@ -1081,3 +1081,316 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
     });
   });
 });
+
+const MERGE_GROUP_REF =
+  "lydite/actions/.github/workflows/merge-group.yml@refs/tags/v1";
+// The revision in a queue ref's own name is the base tip the entry was replayed
+// onto, so it is deliberately neither the queue revision nor the pull request's
+// head: a path reading a head out of the ref would read this.
+const QUEUE_BASE = "1a2b3c4d5e6f";
+const QUEUE_REF = `refs/heads/gh-readonly-queue/main/pr-7-${QUEUE_BASE}`;
+const QUEUE_SHA = "queuerevisionsha";
+const PR_HEAD = "prheadsha0000";
+const FINGERPRINT = "0123456789abcdef";
+
+// Every call the queue route makes, answered locally: the originating pull
+// request, the clearance standing on its head, and the one status write. A
+// `clearance` of undefined is a head carrying no clearance at all.
+function queueStub(
+  clearance: { state?: string; description?: string } | undefined,
+  written: { url: string; init?: RequestInit }[] = [],
+  read: string[] = [],
+  head = PR_HEAD,
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    const target = String(url);
+    if (target.endsWith("/installation")) {
+      return Response.json({ id: 42 });
+    }
+    if (target.includes("/access_tokens")) {
+      return Response.json({ token: "ghs_test" });
+    }
+    if (/\/commits\/[^/]+\/status$/.test(target)) {
+      read.push(target);
+      return Response.json({
+        statuses: clearance
+          ? [{ context: "lydite/clearance", state: "success", ...clearance }]
+          : [],
+      });
+    }
+    if (target.endsWith("/pulls/7")) {
+      return Response.json({ state: "open", head: { sha: head } });
+    }
+    if (/\/pulls\/\d+$/.test(target)) {
+      return new Response("", { status: 404 });
+    }
+    if (target.includes("/statuses/")) {
+      written.push({ url: target, init });
+      return Response.json({ id: 1 });
+    }
+    throw new Error(`the relay called something unexpected: ${target}`);
+  }) as typeof fetch;
+}
+
+describe("carrying a clearance onto a merge-queue entry", () => {
+  const entry = {
+    queue_ref: QUEUE_REF,
+    pull_request: 7,
+    sha: QUEUE_SHA,
+    base_sha: "0f1e2d3c4b5a",
+    fingerprint: FINGERPRINT,
+  };
+  // What a merge-queue run presents: the `merge_group` event, on the queue ref,
+  // with `claims.sha` the revision the queue built.
+  const queueClaims = {
+    ref: QUEUE_REF,
+    event_name: "merge_group",
+    sha: QUEUE_SHA,
+  };
+  // Built per call rather than once: `env` is only populated in `beforeAll`,
+  // and a relay env captured at collection time carries no audience or key.
+  const queueEnv = (overrides: Partial<Env> = {}) =>
+    gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: MERGE_GROUP_REF, ...overrides });
+  const cleared = {
+    description: `cleared by @octocat at ${QUEUE_BASE} [fp:${FINGERPRINT}]`,
+  };
+
+  async function compare(
+    clearance: { state?: string; description?: string } | undefined,
+    body: unknown = entry,
+    relayEnv: Env = queueEnv(),
+    claim: object = {},
+    // `null` is a run naming no job_workflow_ref at all, which `undefined`
+    // cannot say: it takes the default.
+    ref: string | null = MERGE_GROUP_REF,
+  ) {
+    const written: { url: string; init?: RequestInit }[] = [];
+    const read: string[] = [];
+    const token = await keys.sign(
+      claims({ job_workflow_ref: ref ?? undefined, ...queueClaims, ...claim }),
+    );
+    const response = await send(
+      "/merge-group",
+      token,
+      body,
+      relayEnv,
+      queueStub(clearance, written, read),
+    );
+    return { response, written, read };
+  }
+
+  function posted(written: { url: string; init?: RequestInit }[]) {
+    return JSON.parse(String(written[0]?.init?.body)) as {
+      state: string;
+      context: string;
+      description: string;
+    };
+  }
+
+  // The whole point: the decision the person judged is unchanged, so their
+  // judgement still applies and the attribution is theirs rather than lydite's.
+  it("publishes success carrying the clearer's attribution forward", async () => {
+    const { response, written, read } = await compare(cleared);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ state: "success" });
+    expect(written).toHaveLength(1);
+    // The verdict lands on the queue revision, and the clearance is read off
+    // the pull request's own live head — never the revision the ref's name
+    // carries, which is the base tip the entry was replayed onto.
+    expect(written[0]?.url).toBe(
+      `https://api.github.com/repos/lydite/proving-ground/statuses/${QUEUE_SHA}`,
+    );
+    expect(read).toEqual([
+      `https://api.github.com/repos/lydite/proving-ground/commits/${PR_HEAD}/status`,
+    ]);
+    expect(posted(written)).toMatchObject({
+      state: "success",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("@octocat");
+    expect(posted(written).description).not.toContain("[fp:");
+  });
+
+  // Not equal is not silence, and it is never the isolation gate: `pending` is
+  // the one state a clearing comment is accepted against, so the author clears
+  // the pull request again and the entry re-enters the queue.
+  it("publishes pending naming what changed when the fingerprints differ", async () => {
+    const { response, written } = await compare({
+      description: "cleared by @octocat at 1a2b3c4d5e6f [fp:ffffffffffffffff]",
+    });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("the decision changed");
+    expect(posted(written).description).toContain("#7");
+  });
+
+  // A clearance recorded by a lydite that wrote no fingerprint, or one the
+  // platform truncated past its closing marker, is unusable for a comparison —
+  // and absence is not agreement.
+  it("publishes pending when the clearance records no fingerprint", async () => {
+    for (const description of [
+      "cleared by @octocat at 1a2b3c4d5e6f",
+      "cleared by @octocat at 1a2b3c4d5e6f [fp:0123456789abc",
+      "cleared by @octocat [at] 1a2b3c4d5e6f",
+      `cleared by @octocat [fp:]`,
+      `cleared by @octocat [fp:has a space]`,
+    ]) {
+      const { response, written } = await compare({ description });
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("no decision fingerprint");
+    }
+  });
+
+  it("publishes pending when the head carries no clearance", async () => {
+    for (const clearance of [undefined, { state: "pending", description: cleared.description }]) {
+      const { response, written } = await compare(clearance);
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("no clearance stands");
+    }
+  });
+
+  // The sha names what gets written to, so it is checked against the claim
+  // rather than trusted: on a `merge_group` run the claim is the revision the
+  // queue built, which is the revision this verdict belongs on.
+  it("refuses a sha that is not the revision this run is for", async () => {
+    const { response, written } = await compare(cleared, {
+      ...entry,
+      sha: "someone-elses-sha",
+    });
+    expect(response.status).toBe(403);
+    expect(written).toHaveLength(0);
+  });
+
+  // The ref is the only claim a run cannot choose, and it is the only place a
+  // merge_group payload names a pull request at all.
+  it("refuses a queue ref or a pull request that disagrees with the claim's ref", async () => {
+    for (const body of [
+      { ...entry, queue_ref: "refs/heads/gh-readonly-queue/main/pr-9-1a2b3c4d5e6f" },
+      { ...entry, pull_request: 9 },
+    ]) {
+      const { response, written } = await compare(cleared, body);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses a pull request this repository does not have", async () => {
+    const ref = "refs/heads/gh-readonly-queue/main/pr-8-1a2b3c4d5e6f";
+    const { response, written } = await compare(
+      cleared,
+      { ...entry, queue_ref: ref, pull_request: 8 },
+      queueEnv(),
+      { ref },
+    );
+    expect(response.status).toBe(403);
+    expect(written).toHaveLength(0);
+  });
+
+  it("requires a queue ref, a pull request, a sha and a fingerprint", async () => {
+    for (const field of ["queue_ref", "pull_request", "sha", "fingerprint"]) {
+      const partial: Record<string, unknown> = { ...entry };
+      delete partial[field];
+      const { response, written } = await compare(cleared, partial);
+      expect(response.status).toBe(400);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses a workflow the merge-group allowlist does not name", async () => {
+    for (const ref of [
+      null,
+      "",
+      "someone/else/.github/workflows/x.yml@refs/heads/main",
+      REFERRAL_REF,
+      CLEARANCE_REF,
+      `${MERGE_GROUP_REF}x`,
+      MERGE_GROUP_REF.replace("@refs/tags/v1", "@refs/heads/main"),
+    ]) {
+      const { response, written } = await compare(cleared, entry, queueEnv(), {}, ref);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses every caller when the merge-group allowlist is empty", async () => {
+    for (const relayEnv of [gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: "" }), gatedEnv(), env]) {
+      const { response, written } = await compare(cleared, entry, relayEnv);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("names a missing job_workflow_ref as such", async () => {
+    const { response } = await compare(cleared, entry, queueEnv(), {}, null);
+    expect(JSON.stringify(await response.json())).toContain(
+      "names no job_workflow_ref",
+    );
+  });
+
+  // A ref carrying more than one authority is a deployment mistake, refused
+  // rather than resolved toward whichever list is read first.
+  it("refuses a ref allowlisted for more than one authority", async () => {
+    for (const relayEnv of [
+      gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: REFERRAL_REF }),
+      gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: CLEARANCE_REF }),
+    ]) {
+      const ref = relayEnv.MERGE_GROUP_WORKFLOW_REFS as string;
+      const { response, written } = await compare(cleared, entry, relayEnv, {}, ref);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  // The allowlist names a workflow file, and a file says nothing about what
+  // started it: the same callee reached from another event is a run whoever can
+  // open a pull request controls.
+  it("refuses an allowlisted run presenting another event or ref shape", async () => {
+    for (const claim of [
+      { event_name: "push" },
+      { event_name: "pull_request", ref: "refs/pull/7/merge" },
+      { event_name: undefined },
+      { ref: "refs/heads/main" },
+    ]) {
+      const { response, written } = await compare(cleared, entry, queueEnv(), claim);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses a request presenting no token", async () => {
+    const relay = createRelay({ fetchJwks: keys.jwks, fetcher: queueStub(cleared) });
+    const response = await relay.fetch(
+      new Request("https://pr.lydite.org/merge-group", {
+        method: "POST",
+        body: JSON.stringify(entry),
+      }),
+      queueEnv(),
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("says nothing about lydite's own credentials when the write fails", async () => {
+    const broken = (async (url: unknown) => {
+      const target = String(url);
+      if (target.endsWith("/installation")) return Response.json({ id: 42 });
+      if (target.includes("/access_tokens")) return Response.json({ token: "ghs_test" });
+      return new Response("upstream detail", { status: 500 });
+    }) as typeof fetch;
+
+    const token = await keys.sign(
+      claims({ job_workflow_ref: MERGE_GROUP_REF, ...queueClaims }),
+    );
+    const response = await send("/merge-group", token, entry, queueEnv(), broken);
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(body).toContain("queue entry");
+  });
+});
