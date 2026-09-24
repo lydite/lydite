@@ -1,11 +1,12 @@
 // Package config loads .lydite/config.yml, an optional config file: lydite's
 // default (no file present) is to scan everything it detects with every
-// check enabled and to produce coverage itself. The file cannot tune
+// check but shell's enabled and to produce coverage itself. The file cannot tune
 // severity or suppress individual findings (that's what a fix-up pass +
 // #nosec/nosemgrep annotations in the scanned repo itself are for). What it
 // can do falls in two groups:
 //
-//   - Opt out: disable a language's checks entirely, exclude specific paths
+//   - Opt in to shell's checks, or opt out: disable a language's checks
+//     entirely, exclude specific paths
 //     from ecosystem/package detection, override Semgrep's ruleset, adjust
 //     the coverage gates' noise tolerance.
 //   - Describe the repo's pipeline: coverage.source says whether lydite or
@@ -42,9 +43,9 @@ const Dir = ".lydite"
 // FileName is the config file lydite looks for, relative to the scan root.
 const FileName = Dir + "/config.yml"
 
-// Language is the opt-out surface for one of the three languages lydite
-// checks. `enabled: false` says lydite runs no check over that language's
-// code; it does not say that no component tests it, which is the component
+// Language is the on/off surface for one of the languages lydite checks.
+// `enabled: false` says lydite runs no check over that language's code; it
+// does not say that no component tests it, which is the component
 // declaration's to state.
 type Language struct {
 	Enabled bool `yaml:"enabled"`
@@ -223,15 +224,24 @@ type Config struct {
 	Rust       Language           `yaml:"rust"`
 	TypeScript TypeScriptLanguage `yaml:"typescript"`
 	Go         Language           `yaml:"go"`
-	Semgrep    Semgrep            `yaml:"semgrep"`
-	Secrets    Secrets            `yaml:"secrets"`
-	Licence    Licence            `yaml:"licence"`
-	Coverage   Coverage           `yaml:"coverage"`
-	Toolchain  Toolchain          `yaml:"toolchain"`
+	// Shell is the one language lydite checks that is off unless a
+	// repository switches it on. A `lang: shell` component is a declaration a
+	// repository carries for the orphan gate alone — it claims the scripts
+	// under it — and ShellCheck fails on every diagnostic it reports, style
+	// included, so on by default would fail that repository's build over
+	// scripts it never asked lydite to lint. Off is not silence: a `lang:
+	// shell` component in a repository that has not switched it on renders
+	// its scan rows unmeasured, naming the key that would turn it on.
+	Shell     Language  `yaml:"shell"`
+	Semgrep   Semgrep   `yaml:"semgrep"`
+	Secrets   Secrets   `yaml:"secrets"`
+	Licence   Licence   `yaml:"licence"`
+	Coverage  Coverage  `yaml:"coverage"`
+	Toolchain Toolchain `yaml:"toolchain"`
 }
 
-// Default returns lydite's zero-config behavior: every language, Semgrep and
-// secret scanning enabled, no excludes, Semgrep's ruleset set to "auto", lydite producing
+// Default returns lydite's zero-config behavior: Rust, TypeScript, Go, Semgrep
+// and secret scanning enabled and shell disabled, no excludes, Semgrep's ruleset set to "auto", lydite producing
 // coverage itself, every language's patch-coverage gate enabled, and
 // toolchain provisioning on with every version taken from the repo's own
 // manifests.
@@ -240,6 +250,7 @@ func Default() Config {
 		Rust:       Language{Enabled: true},
 		TypeScript: TypeScriptLanguage{Language: Language{Enabled: true}, Linter: LinterBiome},
 		Go:         Language{Enabled: true},
+		Shell:      Language{Enabled: false},
 		Semgrep:    Semgrep{Enabled: true, Config: "auto"},
 		Secrets:    Secrets{Enabled: true},
 		Toolchain:  Toolchain{Enabled: true},

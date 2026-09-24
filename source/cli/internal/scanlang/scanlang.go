@@ -18,12 +18,12 @@ import "lydite/lydite/internal/runner"
 //
 // Enumerated rather than derived from runner.Runs. Having a runner and having a
 // scanner are independent: a language gains one without the other — Python has
-// a runner and no scanner, and a component may state lang: shell with neither
-// — so reading either off the other would scan a language nothing checks, or
-// skip one something does.
+// a runner and no scanner, and shell has a scanner and no runner — so reading
+// either off the other would scan a language nothing checks, or skip one
+// something does.
 func Scanned(l runner.Lang) bool {
 	switch l {
-	case runner.Go, runner.Rust, runner.TypeScript:
+	case runner.Go, runner.Rust, runner.TypeScript, runner.Shell:
 		return true
 	default:
 		return false

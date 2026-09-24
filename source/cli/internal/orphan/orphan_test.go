@@ -405,7 +405,7 @@ func TestACommandComponentWithALanguageClaimsByContainment(t *testing.T) {
 // Unscanned matches a component on the language it is scanned as. A `lang:
 // shell` component rooted beside Go source is not a Go component, so the Go
 // is still reported as scanned by nothing — while the shell it does cover is
-// no gap either way, since lydite has no shell scanner to point at it.
+// no gap, since the component's own declared language claims it.
 func TestAShellComponentDoesNotCoverGoForTheScan(t *testing.T) {
 	root := repo(t, map[string]string{
 		"go.mod":     "module x\n",
@@ -448,18 +448,17 @@ func TestACommandComponentIsScannedAsItsDeclaredLanguage(t *testing.T) {
 
 // Unscanned skips a language lydite has no scanner for, whether or not it has
 // a runner: no declaration could close that gap. Python has a runner and no
-// scanner; shell has neither.
+// scanner.
 func TestALanguageWithNoScannerIsNeverUnscanned(t *testing.T) {
 	root := repo(t, map[string]string{
-		"tools/seed.py":      "print('x')\n",
-		"scripts/install.sh": "#!/bin/sh\n",
-		"cli/main.go":        "package main\n",
+		"tools/seed.py": "print('x')\n",
+		"cli/main.go":   "package main\n",
 	})
 	f := component.File{Components: []component.Component{
 		{Name: "cli", Dir: "cli", Runner: runner.GoTest},
 	}}
 	if gaps := unscanned(t, root, f); len(gaps) != 0 {
-		t.Errorf("gaps = %+v, want none — neither python nor shell has a scanner to point", gaps)
+		t.Errorf("gaps = %+v, want none — python has no scanner to point", gaps)
 	}
 }
 
