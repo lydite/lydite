@@ -39,6 +39,8 @@ source/cli/internal/rust/         # clippy, cargo-audit, cargo-deny
 source/cli/internal/typescript/   # pinned Biome, the only TS linter (see linters.md)
 source/cli/internal/golang/       # gosec, govulncheck (installed into a version-keyed GOBIN dir)
 source/cli/internal/semgrep/      # pinned Semgrep, installed via pipx
+source/cli/internal/shell/        # pinned ShellCheck (via shellcheck-py), installed via pipx —
+                                  #   off by default, see configuration.md and scanning.md
 source/cli/internal/coverage/     # reads a component's coverage report (see coverage.md)
 source/cli/internal/crap/         # the CRAP index per function, Go, Rust and TypeScript alike (see crap.md)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each

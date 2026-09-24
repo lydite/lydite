@@ -18,6 +18,7 @@ Dependabot watches, colocated with the package that uses it:
 | cargo-deny | `internal/rust/cargo-deny-pin/Cargo.toml` | parsed by `internal/rust/pins.go` |
 | cargo-semver-checks | `internal/rust/cargo-semver-checks-pin/Cargo.toml` | parsed by `internal/rust/pins.go`, exported as `rust.CargoSemverChecksVersion` |
 | semgrep | `internal/semgrep/requirements.txt` | parsed by `internal/semgrep/pins.go` |
+| shellcheck (via shellcheck-py) | `internal/shell/shellcheck-pin/requirements.txt` | parsed by `internal/shell/pins.go`, installed via pipx the way semgrep is |
 | gosec, govulncheck | `internal/golang/go-pin/go.mod` | **still Go constants** — see below |
 | gitleaks | `internal/secrets/gitleaks-pin/go.mod` | **still a Go constant** — see below |
 

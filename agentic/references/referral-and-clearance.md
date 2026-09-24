@@ -60,7 +60,12 @@ Five properties are load-bearing and easy to weaken by accident:
   (`#![allow(`, `#[expect(`, `@ts-nocheck`, `//nolint`, `//go:build ignore`) alongside the
   per-line ones — `gitleaks:allow` among them, clearing a secret finding outright — because the
   broad form is strictly more powerful than the narrow one it would
-  otherwise be the only one caught. `.gitattributes` is there because a `-diff` attribute
+  otherwise be the only one caught. A ShellCheck directive (`# shellcheck disable=...`,
+  `source=`, `shell=`, `extended-analysis=`) is vetoed as a class rather than by any one
+  spelling, matched by `containsShellcheckDirective` on ShellCheck's own directive-reader
+  prefix — `#`, optional spaces or tabs, `shellcheck`, then a space or tab — because the key
+  after it is one ShellCheck could add to at any time, and every one of them narrows what gets
+  checked the same way `disable=` does. `.gitattributes` is there because a `-diff` attribute
   replaces a hunk body with `Binary files ... differ`, and git reads that attribute from the
   branch — the diff is passed `--text` so the trick does not work, and the edit is referred
   anyway.
