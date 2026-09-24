@@ -146,7 +146,13 @@ type Component struct {
 	// Compose declares the services the suite needs.
 	Compose Compose `yaml:"compose,omitempty"`
 	// Setup runs before the suite — migrations, fixtures, whatever is not a
-	// container.
+	// container. It also carries an extra install step beyond an otherwise
+	// normal install, such as `npx playwright install --with-deps chromium`:
+	// it runs after the coalesced node install, not instead of it. Two
+	// components sharing such a step point its cache at a directory under
+	// the scan root through their own env: (PLAYWRIGHT_BROWSERS_PATH, say)
+	// and declare that directory in Occupies, so the two writes collide the
+	// way Occupies already handles.
 	Setup []string `yaml:"setup,omitempty"`
 	// Teardown runs after the suite, including after a failure: leaked
 	// containers and leftover data poison the next local run.

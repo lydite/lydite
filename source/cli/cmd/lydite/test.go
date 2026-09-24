@@ -1264,7 +1264,7 @@ func installsNodeDeps(dir string, c component.Component) bool {
 
 // installHint is the way out of a failed install: the repository says how its
 // dependencies go in when detection does not match.
-const installHint = "Set typescript.install in " + config.FileName + " if this component installs differently."
+const installHint = "Set typescript.install in " + config.FileName + " if this component's install replaces detection entirely, or add a setup: line if it just needs one more step."
 
 // installLabel is how every row about one component's install is named.
 //
