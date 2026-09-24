@@ -197,8 +197,16 @@ the component's to declare.`,
 				//
 				// Scoped to the responsibility set, so `test(a): not
 				// affected` is emitted by the one shard that owns a.
+				//
+				// A component declaring no suite takes the row its declaration
+				// gives it whether or not selection reached it, so the row
+				// reads the same here as in a fold, where no shard ran it.
 				skipped = make(map[string]ui.Row, len(res.Skipped))
 				for _, c := range intersect(res.Skipped, own) {
+					if declaresNoSuite(c) {
+						skipped[c.Name] = noSuiteTestRow("test", c.Name)
+						continue
+					}
 					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: testLabel(c.Name), Value: "not affected"}
 				}
 				ordered = own
@@ -236,7 +244,7 @@ the component's to declare.`,
 				// still the tree whose coverage the next change gates
 				// against.
 				if len(file.Components) > 0 {
-					addCoverageRows(ctx, cmd, rep, dir, file, own, nil, cfg, cov)
+					addTestCoverageRows(ctx, cmd, rep, dir, file, own, nil, cfg, cov)
 				}
 				// Only when the declaration is genuinely empty. A run that
 				// selected nothing has components declared and has already
@@ -258,7 +266,7 @@ the component's to declare.`,
 
 			ms := runComponentsGated(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep, gate)
 			gate.report(rep, own)
-			addCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
+			addTestCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -325,6 +333,86 @@ the component's to declare.`,
 // forbids those names, and a consumer keying rows by label would silently lose
 // the gate.
 func testLabel(name string) string { return "test(" + name + ")" }
+
+// declaresNoSuite reports whether a component names neither a runner nor a
+// command — the shape that states only the language it is scanned as.
+//
+// Such a component is not a work item. It runs nothing, so it takes no
+// toolchain, no services and no scheduler lock — a lock on its directory would
+// serialise the components rooted beside it for nothing — and `test plan`
+// places it in no shard. Every row it takes on the test side is produced from
+// the declaration rather than from a run: by `lydite test` when unsharded, and
+// by `test merge` when folding shards, none of which ran it.
+func declaresNoSuite(c component.Component) bool { return c.Runner == "" && len(c.Command) == 0 }
+
+// noSuiteReason is why every test-side gate is unmeasured for a component that
+// declares no suite. It names the declaration an author would change — adding a
+// runner or a command — which is what sets it apart from a raw command's
+// reason, whose author would change the command to a runner.
+const noSuiteReason = "the component declares no suite — neither a runner nor a command, only the lang: it is scanned as"
+
+// noSuiteTestRow is the test row of a component that declares no suite, under
+// whichever command's label kind names.
+func noSuiteTestRow(kind, name string) ui.Row {
+	return ui.Row{Status: ui.StatusUnmeasured, Label: kind + "(" + name + ")", Value: "not run — " + noSuiteReason}
+}
+
+// noSuiteFlakyRow is the flaky row of a component that declares no suite: there
+// is no first run for a second one to disagree with.
+func noSuiteFlakyRow(name string) ui.Row {
+	return unexaminedRow(flakyLabel(name), noSuiteReason)
+}
+
+// noSuiteCoverageRows adds the coverage, complexity and — when a floor is
+// configured — floor rows of a component that declares no suite.
+//
+// Unmeasured, and never the context a raw command's complexity row takes: a
+// raw command runs a suite over source whose language lydite cannot name,
+// while this component states its language and runs nothing, so adding a suite
+// is exactly what would make every one of these rows measurable.
+func noSuiteCoverageRows(rep *ui.Report, name string, floor float64) {
+	rep.Add(unmeasuredRow("coverage("+name+")", noSuiteReason))
+	rep.Add(unmeasuredRow("crap("+name+")", noSuiteReason))
+	if floor > 0 {
+		rep.Add(unmeasuredRow("floor("+name+")", fmt.Sprintf("the %.1f%% floor cannot apply: %s", floor, noSuiteReason)))
+	}
+}
+
+// withSuites is the components that declare a suite, in the order given.
+func withSuites(cs []component.Component) []component.Component {
+	out := make([]component.Component, 0, len(cs))
+	for _, c := range cs {
+		if !declaresNoSuite(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// addTestCoverageRows is addCoverageRows over the components that declare a
+// suite, followed by the declaration's rows for each that declares none.
+//
+// A component declaring no suite is kept out of the measured set rather than
+// handed to it as unmeasurable: a measurement with no language renders its
+// complexity row as a raw command's, naming a command this component does not
+// declare. It contributes to no composed figure either way — nothing could
+// ever measure it, so it sits on neither side of any comparison.
+//
+// Its rows follow only a run that instruments, for the reason a suite's do: a
+// run under --no-coverage emits no coverage row for any component.
+func addTestCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, file component.File, own []component.Component, ms []measurement, cfg config.Config, cov coverageOptions) {
+	if suites := withSuites(own); len(suites) > 0 {
+		addCoverageRows(ctx, cmd, rep, dir, file, suites, ms, cfg, cov)
+	}
+	if !cov.Instrument {
+		return
+	}
+	for _, c := range own {
+		if declaresNoSuite(c) {
+			noSuiteCoverageRows(rep, c.Name, cfg.Coverage.Floor)
+		}
+	}
+}
 
 // defaultConcurrency is how many components run at once when nothing says
 // otherwise.
@@ -430,7 +518,17 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	}
 	var items []scheduler.Item
 	var index []int
+	suites := 0
 	for i, p := range plans {
+		if declaresNoSuite(p.c) {
+			// Unmeasurable rather than unmeasured: nothing could ever measure
+			// it, so its absence from a baseline is permanent and expected
+			// rather than a gap this run left — the way a raw command's is.
+			rows[i] = p.row
+			measured[i] = unmeasurableComponent(p.c, noSuiteReason)
+			continue
+		}
+		suites++
 		if !p.ready {
 			rows[i] = p.row
 			continue
@@ -495,9 +593,11 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 	// written by a suite that failed, was killed, or never started describes
 	// an unfinished run, and recording it would put a number in the baseline
 	// that nothing can be compared against honestly. Enforced here, over the
-	// final rows, so no path out of runComponent can forget it.
+	// final rows, so no path out of runComponent can forget it. A component
+	// declaring no suite never reached runComponent, and keeps the
+	// unmeasurable measurement its declaration gave it.
 	for i := range plans {
-		if rows[i].Status != ui.StatusPass {
+		if rows[i].Status != ui.StatusPass && !declaresNoSuite(plans[i].c) {
 			// The row's own words, so the coverage row and the suite row give
 			// a reader the same account of one event rather than two.
 			replaced := unmeasuredComponent(plans[i].c, rows[i].Label+" did not pass: "+rows[i].Value)
@@ -513,7 +613,10 @@ func runComponentsGated(ctx context.Context, root string, selected, ordered []co
 		}
 	}
 
-	rep.Add(scheduleRow(ctx, outcome, len(plans), limit))
+	// Counted over the components that declare a suite: one that declares none
+	// was never the scheduler's to start, so it is neither a component the
+	// run started nor one it failed to.
+	rep.Add(scheduleRow(ctx, outcome, suites, limit))
 	// A component's install row sits immediately above the component it is
 	// about, so the two are read together rather than as two reports of
 	// different things.
@@ -564,7 +667,8 @@ func itemFor(p componentPlan) scheduler.Item {
 }
 
 // planComponents opens each component's log and loads the stack of any that
-// declares services.
+// declares services. A component declaring no suite is planned unrunnable, its
+// row already final, under every command that plans through here.
 //
 // The container runtime is probed at most once for the whole run, and only
 // when something actually declares services: a component that declares none
@@ -600,6 +704,15 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 
 	plans := make([]componentPlan, len(selected))
 	for i, c := range selected {
+		// Final before anything runs, and never runnable: the scheduler is
+		// never given it, so it takes no lock on its directory. No log is
+		// opened either — an empty file under its name would read as the
+		// output of a run that never happened.
+		if declaresNoSuite(c) {
+			plans[i] = componentPlan{c: c, log: &componentLog{out: io.Discard, name: c.Name, width: width},
+				row: noSuiteTestRow(kind, c.Name)}
+			continue
+		}
 		p := componentPlan{c: c, log: openLog(root, c.Name, kind+".log", stream, width), ready: true}
 		if !c.Compose.Declared() {
 			plans[i] = p
@@ -1659,6 +1772,10 @@ func (g *flakyGate) report(rep *ui.Report, own []component.Component) {
 	defer g.mu.Unlock()
 	for _, c := range own {
 		switch row, ok := g.rows[c.Name]; {
+		case declaresNoSuite(c):
+			// Whether or not the gate was asked for: the row names the
+			// declaration, which no flag changes.
+			rep.Add(noSuiteFlakyRow(c.Name))
 		case ok:
 			rep.Add(row)
 		case !g.requested:
@@ -1920,7 +2037,9 @@ func env(c component.Component) []string {
 // A shard's set is its own, since it can never execute a component outside it
 // and materialising a rustup channel for one is a download nothing uses.
 //
-// A component declaring its own command implies no language and needs nothing.
+// A component declaring its own command implies no language and needs nothing,
+// and neither does one declaring no suite: its lang: names what it is scanned
+// as, and Lang — the language a suite runs in — stays empty without a runner.
 func componentUnits(components []component.Component) []toolchain.Unit {
 	var out []toolchain.Unit
 	for _, c := range components {

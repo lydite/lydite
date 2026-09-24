@@ -40,14 +40,18 @@ manifest; it is stated in the package doc because it is the rule most likely to 
 Eleven crates behind one `cargo --workspace` invocation are one component: declared as three, the
 workspace compiles three times and provisions three copies of everything the suite needs.
 
-**`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
-second statement of the language could only disagree with the first.
+**`lang` is derived from `runner` and stated at most once.** `cargo-nextest` can only be Rust, and
+a second statement of the language could only disagree with the first, so `lang:` beside `runner:`
+is refused.
 
 [ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
-decides to relax this: a component may declare `lang:` directly where no runner already implies
-one — refused beside `runner:` for the reason above, optional beside `command:`, and required
-alone to form a "scanned but not tested" component. That decision is design only; the field does
-not exist yet, and this section still describes the codebase as it is.
+lets a component declare `lang:` directly where no runner already implies one — optional beside
+`command:`, and required alone to form a "scanned but not tested" component that declares no
+invocation at all. `Component.Lang()` stays the runner-implied language, empty without a runner;
+`Component.ScanLang()` is the runner's language when there is one and the declared `lang:`
+otherwise, and is the one accessor the scan path (`lydite scan`, `internal/orphan`) reads — every
+test-side reader keeps reading `Lang()`. See
+[What a raw command component gets](#what-a-raw-command-component-gets) below.
 
 **A component's name may hold only letters, digits, `.`, `_` and `-`.** It is not merely a label: it
 is a `--component` value inside a comma-separated list, the name of a CI matrix job, and the suffix of
@@ -452,10 +456,29 @@ language with a runner but no scanner gets the same three scan rows with a reaso
 language.
 
 [ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
-decides that a raw `command:` component may additionally declare `lang:`, opting its `scan`,
-`licence` and `findings` rows into that language's checks while the test-side table above stays
-unchanged. That decision is design only and not yet built; this table still describes what a raw
-`command:` component gets today.
+lets a raw `command:` component additionally declare `lang:`, opting its `scan`, `licence` and
+`findings` rows into that language's checks while the test-side table above stays unchanged — the
+row still comes from the command, not the language.
+
+### What a `lang:`-only component gets
+
+A component declaring `lang:` and neither `runner:` nor `command:` declares no invocation at all —
+`component.declaresNoSuite` — and is scanned, not tested. `validateSuiteKeys` refuses every key that
+configures a suite on it (`args`, `watch`, `occupies`, `depends_on`, `compose`, `setup`, `teardown`,
+`mutation`, `api_surface`): each is a declaration nothing would read. `env` stays allowed, because it
+reaches the scan's checks.
+
+| Gate | For a `lang:`-only component |
+|---|---|
+| orphan | measured, but only for its declared language: it claims the files of that language under its directory, not every file there — a `lang: shell` component at `dir: .` would otherwise clear the gate for the whole repository |
+| `scan(<name>)`, `licence(<name>)`, `findings(<name>)` | as any scanned language: measured once lydite has a scanner for it, `unmeasured` with a reason naming the language until then (shell today) |
+| `lydite test`, coverage, complexity (CRAP), mutation, flaky | `unmeasured`, each with the reason that the component declares no suite — a different sentence from a raw command's, because the declaration an author would change differs |
+
+It is not scheduled, sharded or locked: `test plan`'s `planItems` skips it, so it takes no
+scheduler item and serialises nothing beside it. Its test-side rows are produced from the
+declaration rather than a run — by `lydite test` directly when unsharded, and by `test merge`
+(`suiteRows`, `mutationRows`) when folding shards, where its absence from every shard's report is
+the plan working as declared rather than a shard that died.
 
 ## Output: captured, not streamed
 

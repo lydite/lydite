@@ -59,14 +59,15 @@ components:
 // A key lydite silently drops is a component configured differently from
 // what its author wrote, with every run still reporting a result.
 func TestParseRejectsUnknownKeys(t *testing.T) {
-	_, err := Parse([]byte("components:\n  - name: a\n    dir: .\n    runner: go-test\n    lang: go\n"), "components.yml")
-	if err == nil || !strings.Contains(err.Error(), "lang") {
+	_, err := Parse([]byte("components:\n  - name: a\n    dir: .\n    runner: go-test\n    language: go\n"), "components.yml")
+	if err == nil || !strings.Contains(err.Error(), "language") {
 		t.Fatalf("want an error naming the unknown key, got %v", err)
 	}
 }
 
-// lang is derived from the runner, never declared, so there is nothing for a
-// second statement of it to disagree with.
+// Lang is the runner's language, and a runner is its only source: a component
+// with a runner cannot also declare one, so there is nothing for a second
+// statement of it to disagree with.
 func TestLangIsDerivedFromRunner(t *testing.T) {
 	for name, want := range map[runner.Name]runner.Lang{
 		runner.GoTest:              runner.Go,
@@ -78,6 +79,146 @@ func TestLangIsDerivedFromRunner(t *testing.T) {
 		if got := (Component{Runner: name}).Lang(); got != want {
 			t.Errorf("%s: lang = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// A component states its language at most once: the runner states it where
+// one exists, and lang states it beside a command or alone. Lang answers the
+// suite's language and never reads a declared lang; ScanLang answers the
+// scanned language and reads whichever statement there is.
+func TestLangAndScanLangAcrossTheThreeShapes(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - {name: tested, dir: cli, runner: go-test}
+  - {name: made, dir: tool, command: [make, test], lang: go}
+  - {name: bare-command, dir: tool, command: [make, test]}
+  - {name: scripts, dir: scripts, lang: shell}
+`), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for i, want := range []struct{ lang, scan runner.Lang }{
+		{runner.Go, runner.Go},
+		{"", runner.Go},
+		{"", ""},
+		{"", runner.Shell},
+	} {
+		c := f.Components[i]
+		if got := c.Lang(); got != want.lang {
+			t.Errorf("%s: Lang() = %q, want %q — a declared lang must not reach the suite's language", c.Name, got, want.lang)
+		}
+		if got := c.ScanLang(); got != want.scan {
+			t.Errorf("%s: ScanLang() = %q, want %q", c.Name, got, want.scan)
+		}
+	}
+}
+
+// A lang lydite recognises as source but has no scanner or runner for is still
+// declarable: the scan reports what it could not do, rather than the
+// declaration being refused.
+func TestLangNeedNotHaveARunner(t *testing.T) {
+	for _, l := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript, runner.Python, runner.Shell} {
+		doc := "components:\n  - {name: a, dir: cli, lang: " + string(l) + "}\n"
+		f, err := Parse([]byte(doc), FileName)
+		if err != nil {
+			t.Errorf("lang %q alone was refused: %v", l, err)
+			continue
+		}
+		if got := f.Components[0].DeclaredLang; got != l {
+			t.Errorf("lang %q parsed as %q", l, got)
+		}
+	}
+}
+
+// A component with no suite refuses every key that configures one: each is a
+// declaration nothing reads, which is the ground an unknown key is refused on.
+func TestNoSuiteComponentRefusesSuiteKeys(t *testing.T) {
+	for _, tc := range []struct{ key, yaml string }{
+		{"args", "args: [-race]"},
+		{"watch", "watch: [Makefile]"},
+		{"occupies", "occupies: [gen]"},
+		{"depends_on", "depends_on: [other]"},
+		{"compose", "compose: {up: [db]}"},
+		{"setup", "setup: [make fixtures]"},
+		{"teardown", "teardown: [make clean]"},
+		{"mutation", "mutation: false"},
+		{"api_surface", "api_surface: {}"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			doc := "components:\n  - {name: other, dir: cli, runner: go-test}\n  - {name: a, dir: scripts, lang: shell, " + tc.yaml + "}\n"
+			_, err := Parse([]byte(doc), FileName)
+			if err == nil {
+				t.Fatalf("%s on a component with no suite was accepted", tc.key)
+			}
+			if want := tc.key + " configures a suite"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		})
+	}
+}
+
+// A tree lydite is measuring reads a suite key on a no-suite component the way
+// it reads an unknown key: the declaration can still be measured, and its
+// author is not being addressed.
+func TestLoadHistoricalToleratesSuiteKeysOnANoSuiteComponent(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, FileName, "components:\n  - {name: a, dir: scripts, lang: shell, setup: [make fixtures]}\n")
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(root); err == nil {
+		t.Error("Load accepted setup on a component with no suite")
+	}
+	if _, err := LoadHistorical(root); err != nil {
+		t.Errorf("LoadHistorical refused a measurable tree over a key nothing reads: %v", err)
+	}
+}
+
+// A no-suite component may still declare env, because a declared environment
+// reaches the scan's checks as well as a suite. And another component may name
+// it in depends_on: a change to what a suite invokes is an invalidation edge
+// whether or not the target has a suite of its own.
+func TestNoSuiteComponentKeepsEnvAndCanBeDependedOn(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: scripts
+    dir: scripts
+    lang: shell
+    env:
+      SHELLCHECK_OPTS: -x
+  - name: cli
+    dir: cli
+    runner: go-test
+    depends_on: [scripts]
+`), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := f.Components[0].Env["SHELLCHECK_OPTS"]; got != "-x" {
+		t.Errorf("env = %v", f.Components[0].Env)
+	}
+	if got := f.Components[1].DependsOn; len(got) != 1 || got[0] != "scripts" {
+		t.Errorf("depends_on = %v", got)
+	}
+}
+
+// A command component keeps every suite key it could declare before stating
+// its language: lang adds scanning and takes nothing from the test side.
+func TestCommandComponentWithLangKeepsItsSuiteKeys(t *testing.T) {
+	f, err := Parse([]byte(`
+components:
+  - name: made
+    dir: tool
+    command: [make, test]
+    lang: go
+    setup: [make fixtures]
+    watch: [Makefile]
+`), FileName)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c := f.Components[0]; len(c.Setup) != 1 || len(c.Watch) != 1 || c.DeclaredLang != runner.Go {
+		t.Errorf("component = %+v", c)
 	}
 }
 
@@ -132,9 +273,24 @@ func TestParseRejects(t *testing.T) {
 			want: "escapes the scan root",
 		},
 		{
-			name: "no runner and no command",
+			name: "no runner, no command and no lang",
 			yaml: "components:\n  - {name: a, dir: cli}\n",
-			want: "one of runner or command is required",
+			want: "one of runner, command or lang is required",
+		},
+		{
+			name: "lang beside a runner",
+			yaml: "components:\n  - {name: a, dir: cli, runner: go-test, lang: go}\n",
+			want: "lang and runner are mutually exclusive",
+		},
+		{
+			name: "unknown lang",
+			yaml: "components:\n  - {name: a, dir: cli, lang: cobol}\n",
+			want: `unknown lang "cobol" (languages: go, python, rust, shell, typescript)`,
+		},
+		{
+			name: "unknown lang beside a command",
+			yaml: "components:\n  - {name: a, dir: cli, command: [make, test], lang: cobol}\n",
+			want: `unknown lang "cobol"`,
 		},
 		{
 			name: "both runner and command",

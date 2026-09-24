@@ -20,6 +20,12 @@
 // produces no such artefact, and cannot tell a buildable unit from a
 // manifest that exists for another purpose — lydite's own
 // internal/golang/go-pin/go.mod is a real module and is not a component.
+//
+// A component's language is stated at most once. A runner states it — a
+// component naming cargo-nextest can only be Rust — and `lang:` states it
+// everywhere a runner does not: beside a raw `command:`, or alone, where the
+// component declares no suite and is scanned but not tested. See
+// docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md.
 package component
 
 import (
@@ -30,6 +36,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -91,10 +98,16 @@ type Component struct {
 	// component declares is relative to this, and the runner is invoked
 	// here.
 	Dir string `yaml:"dir"`
-	// Runner names how the suite is invoked, and thereby the language. The
-	// language is never declared: cargo-nextest can only be Rust, and a
-	// second statement of it could only disagree.
+	// Runner names how the suite is invoked, and thereby the language. A
+	// component with a runner never also declares lang: cargo-nextest can only
+	// be Rust, and a second statement of it could only disagree.
 	Runner runner.Name `yaml:"runner"`
+	// DeclaredLang is the language a component without a runner is scanned
+	// as: beside a command, or alone, where the component declares no suite.
+	// It names a language only; a command component stating it gains the
+	// language's scanners and nothing on the test side — no toolchain, no
+	// derived variant — which is why Lang does not read it and ScanLang does.
+	DeclaredLang runner.Lang `yaml:"lang,omitempty"`
 	// Args are passed through to the runner. Every repository's test
 	// invocation is bespoke at the edges — tagged builds, workspace filters,
 	// custom profiles — and this is where that belongs. lydite decides
@@ -141,7 +154,8 @@ type Component struct {
 	// derivable at all: a Go client generated from an OpenAPI document has
 	// no edge any tool reads.
 	DependsOn []string `yaml:"depends_on,omitempty"`
-	// Env is added to the runner's environment.
+	// Env is added to the runner's environment and to the scan's checks, so a
+	// component declaring no suite may still declare it.
 	Env map[string]string `yaml:"env,omitempty"`
 	// Compose declares the services the suite needs.
 	Compose Compose `yaml:"compose,omitempty"`
@@ -182,13 +196,30 @@ type APISurfaceConfig struct{}
 // MutationEnabled reports whether mutation testing runs for this component.
 func (c Component) MutationEnabled() bool { return c.Mutation == nil || *c.Mutation }
 
-// Lang is the language the component's runner implies.
+// Lang is the language the component's runner implies, and empty without a
+// runner. It is the language the suite runs in — the toolchain provisioned,
+// the coverage report read, whether CRAP and mutation can walk the source —
+// so a declared lang never reaches it: a command component stating `lang: go`
+// has no Go suite for any of those to act on.
 func (c Component) Lang() runner.Lang {
 	if r, ok := runner.Lookup(c.Runner); ok {
 		return r.Lang
 	}
 	return ""
 }
+
+// ScanLang is the language the component's source is scanned as: the runner's
+// when it has one, and the declared lang otherwise. Empty means the component
+// states no language and its source is not scanned.
+func (c Component) ScanLang() runner.Lang {
+	if c.Runner != "" {
+		return c.Lang()
+	}
+	return c.DeclaredLang
+}
+
+// hasInvocation reports whether the component declares a suite at all.
+func (c Component) hasInvocation() bool { return c.Runner != "" || len(c.Command) > 0 }
 
 // File is the parsed component declaration.
 type File struct {
@@ -322,6 +353,9 @@ func (f File) validate(source string, strict bool) error {
 			return fmt.Errorf("%s: %w", where, err)
 		}
 		if err := validateInvocation(where, c); err != nil {
+			return err
+		}
+		if err := validateSuiteKeys(where, c, strict); err != nil {
 			return err
 		}
 		if err := validateCompose(where, c.Compose); err != nil {
@@ -481,23 +515,106 @@ func validateOccupies(where string, occupies []string) error {
 	return nil
 }
 
-// validateInvocation requires exactly one of runner and command.
+// validateInvocation requires at most one of runner and command, and at least
+// one of runner, command and lang.
 //
-// Neither leaves lydite with nothing to invoke. Both is worse: one of the two
-// would silently win, and which one is a coin-flip a reader cannot resolve
-// from the file — while the component still reports a result either way.
+// None of the three names nothing to run and nothing to scan. Runner and
+// command together is worse: one of the two would silently win, and which one
+// is a coin-flip a reader cannot resolve from the file — while the component
+// still reports a result either way. Lang beside a runner is refused for the
+// same reason: the runner already states the language, and a second statement
+// could only disagree with it.
 func validateInvocation(where string, c Component) error {
+	if c.DeclaredLang != "" {
+		if err := validateLang(where, c.DeclaredLang); err != nil {
+			return err
+		}
+	}
 	switch {
-	case c.Runner == "" && len(c.Command) == 0:
-		return fmt.Errorf("%s: one of runner or command is required (runners: %s)", where, strings.Join(runner.Names(), ", "))
+	case c.Runner == "" && len(c.Command) == 0 && c.DeclaredLang == "":
+		return fmt.Errorf("%s: one of runner, command or lang is required (runners: %s; languages: %s)",
+			where, strings.Join(runner.Names(), ", "), strings.Join(langNames(), ", "))
 	case c.Runner != "" && len(c.Command) > 0:
 		return fmt.Errorf("%s: runner and command are mutually exclusive — command opts out of the derived variants a runner supplies", where)
+	case c.Runner != "" && c.DeclaredLang != "":
+		return fmt.Errorf("%s: lang and runner are mutually exclusive — runner %q already implies the language, and a second statement could only disagree with it", where, c.Runner)
 	case c.Runner != "":
 		if _, ok := runner.Lookup(c.Runner); !ok {
 			return fmt.Errorf("%s: unknown runner %q (runners: %s)", where, c.Runner, strings.Join(runner.Names(), ", "))
 		}
-	case len(c.Args) > 0:
+	case len(c.Command) > 0 && len(c.Args) > 0:
 		return fmt.Errorf("%s: args applies to a runner; a command carries its own arguments", where)
+	}
+	return nil
+}
+
+// validateLang refuses a lang that names no language lydite recognises as
+// source. A language lydite recognises and has no scanner for is not refused
+// here: the component is still declared, and the scan says what it could not
+// do.
+func validateLang(where string, l runner.Lang) error {
+	if len(runner.SourceExtsFor(l)) == 0 {
+		return fmt.Errorf("%s: unknown lang %q (languages: %s)", where, l, strings.Join(langNames(), ", "))
+	}
+	return nil
+}
+
+// langNames returns every language lang may name, sorted: the languages
+// runner's source-extension table recognises, read off that table rather than
+// restated, so a language gaining extensions there is declarable here at once.
+func langNames() []string {
+	seen := map[runner.Lang]bool{}
+	var out []string
+	for _, ext := range runner.SourceExts() {
+		if l, ok := runner.LangForExt(ext); ok && !seen[l] {
+			seen[l] = true
+			out = append(out, string(l))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// validateSuiteKeys refuses, on a component declaring no suite, every key that
+// configures one. Each is a declaration nothing reads — args with nothing to
+// pass them to, services with no suite to start them for, and watch and
+// depends_on, which exist to decide when a suite reruns — so it is refused on
+// the same grounds as an unknown key: a component configured differently from
+// what its author wrote, with every run still reporting a result. Env is not
+// among them, because a component's declared environment reaches its scan's
+// checks too. Another component naming this one in its own depends_on is
+// unaffected: a change to what a suite invokes is an invalidation edge whether
+// or not the target has a suite of its own.
+//
+// Only when this tree is the one being configured, the same leniency unknown
+// keys receive: a historical tree carrying one of these still describes a
+// declaration that can be measured, and its author cannot act on the refusal.
+func validateSuiteKeys(where string, c Component, strict bool) error {
+	if !strict || c.hasInvocation() {
+		return nil
+	}
+	var keys []string
+	for _, k := range []struct {
+		name     string
+		declared bool
+	}{
+		{"args", len(c.Args) > 0},
+		{"watch", len(c.Watch) > 0},
+		{"occupies", len(c.Occupies) > 0},
+		{"depends_on", len(c.DependsOn) > 0},
+		{"compose", c.Compose.Declared()},
+		{"setup", len(c.Setup) > 0},
+		{"teardown", len(c.Teardown) > 0},
+		{"mutation", c.Mutation != nil},
+		{"api_surface", c.APISurface != nil},
+	} {
+		if k.declared {
+			keys = append(keys, k.name)
+		}
+	}
+	if len(keys) > 0 {
+		return fmt.Errorf("%s: %s configures a suite, and this component declares none — declare a runner or command, or remove it",
+			where, strings.Join(keys, ", "))
 	}
 	return nil
 }

@@ -311,3 +311,57 @@ func TestPlanAndRunSeeTheSameConflicts(t *testing.T) {
 		t.Fatalf("the planner and the run disagree:\nplan %v\nrun  %v", a, b)
 	}
 }
+
+// A component declaring no suite runs nothing, so it contends with nothing and
+// no shard runs it. Declared at the root, it would otherwise overlap both of
+// its siblings' trees and pull them into one job — serialising two suites that
+// share nothing, for a component with nothing to run.
+func TestAComponentDeclaringNoSuiteIsInNoShard(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: api\n    dir: api\n    runner: go-test\n"+
+			"  - name: scripts\n    dir: .\n    lang: shell\n"+
+			"  - name: web\n    dir: web\n    runner: go-test\n")
+	for _, dir := range []string{"api", "web"} {
+		write(t, root, dir+"/.keep", "")
+	}
+	file, err := component.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := planItems(root, file)
+	if err != nil {
+		t.Fatalf("planItems: %v", err)
+	}
+	for _, it := range items {
+		if it.Name == "scripts" {
+			t.Errorf("items = %+v, want no item for a component declaring no suite", items)
+		}
+	}
+
+	matrix := filepath.Join(t.TempDir(), "matrix.json")
+	out, err := runPlanCmd(t, root, "--out", matrix, "--json")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(matrix) // #nosec G304 -- a path this test just wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []matrixEntry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("matrix is not JSON: %v\n%s", err, data)
+	}
+	want := []matrixEntry{{Name: "api", Components: "api"}, {Name: "web", Components: "web"}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("matrix = %+v, want %+v", got, want)
+	}
+	row := jsonRowByLabel(t, out, "plan")
+	if row.Value != "2 shard(s) over 2 component(s)" {
+		t.Errorf("plan value = %q, want the count of the components a shard runs", row.Value)
+	}
+	if !strings.Contains(strings.Join(row.Detail, "\n"), "scripts declares no suite") {
+		t.Errorf("plan detail = %q, want the unsharded component named", row.Detail)
+	}
+}

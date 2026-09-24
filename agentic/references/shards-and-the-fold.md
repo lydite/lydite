@@ -92,7 +92,14 @@ way `plan` and `scan` do rather than reporting that nought of nought components 
 **A declared component with no row from any shard is a failure, and so is one with two.** Not
 `unmeasured`: that status does not vote, so a run whose runner died would publish `"verdict": "pass"`
 over a repository it half tested. It is the same reason the `schedule` row fails an interrupted run
-instead of leaving it amber. The `orphans`, `watch` and `select` rows ask about the declaration and
+instead of leaving it amber.
+
+**A component declaring no suite** ([Components](components.md#what-a-lang-only-component-gets))
+is the one exception: `planItems` places it in no shard on purpose, so its absence from every
+shard's report is the plan working as declared, not a dead shard. `suiteRows`/`mutationRows` give
+it the row its declaration implies directly, rather than looking for one in the fold.
+
+The `orphans`, `watch` and `select` rows ask about the declaration and
 the tree, so every shard computes the same answer; they collapse to one, and a disagreement fails —
 the shards did not see the same tree. The per-shard `schedule` rows fold into one
 (`N shard(s), max K concurrent`) carrying each shard's serialised pairs beneath.

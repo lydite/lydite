@@ -396,7 +396,11 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 	results := make([]componentMutation, len(plans))
 	var items []scheduler.Item
 	var index []int
+	suites := 0
 	for i, p := range plans {
+		if !declaresNoSuite(p.c) {
+			suites++
+		}
 		if !p.ready {
 			rows[i] = p.row
 			continue
@@ -421,7 +425,10 @@ func runMutation(ctx context.Context, rep *ui.Report, selected, ordered []compon
 		withdrawInterrupted(rows, results, index)
 	}
 
-	rep.Add(scheduleRow(ctx, outcome, len(plans), opts.limit))
+	// Counted over the components that declare a suite: one that declares none
+	// was never the scheduler's to start, so it is neither a component the
+	// run started nor one it failed to.
+	rep.Add(scheduleRow(ctx, outcome, suites, opts.limit))
 	addRows(rep, rows, ordered, skipped, mutationLabel)
 	// In plan order, so two runs of one declaration hand the same document to
 	// whatever anchors these. A component the interrupt above reset carries

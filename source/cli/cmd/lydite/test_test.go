@@ -806,7 +806,7 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 	// would find one and the assertion below would hold either way.
 	t.Setenv("PATH", t.TempDir())
 	root := fixtureRepo(t, "components: []\n")
-	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod"}}, "test", false)
+	plans := planComponents(context.Background(), root, []component.Component{{Name: "fixture", Dir: "mod", Runner: runner.GoTest}}, "test", false)
 	if len(plans) != 1 || !plans[0].ready {
 		t.Fatalf("a component with no compose block must not be probed for a runtime: %+v", plans)
 	}
@@ -1690,7 +1690,7 @@ func TestExamineNamesATestFileThatDoesNotParse(t *testing.T) {
 func TestReportNamesAComponentWhoseSuiteNeverRan(t *testing.T) {
 	g := newFlakyGate(t.Context(), t.TempDir(), "", true)
 	rep := ui.NewReport("test")
-	g.report(rep, []component.Component{{Name: "never-ran"}})
+	g.report(rep, []component.Component{{Name: "never-ran", Runner: runner.GoTest}})
 	row := reportRowByLabel(t, rep, flakyLabel("never-ran"))
 	if row.Status != ui.StatusUnmeasured {
 		t.Fatalf("row = %+v, want unmeasured: the gate never examined this component", row)
@@ -2168,5 +2168,160 @@ func TestTheFlakyRowNamesATestTheWayItsReportDoes(t *testing.T) {
 	}
 	if found[0].Site != ". nextestprobe::a shared_name" {
 		t.Errorf("site = %q, want the scope, the binary and the name", found[0].Site)
+	}
+}
+
+// A component declaring no suite takes no toolchain on the test side, whatever
+// language it declares: lang: names what it is scanned as, and a suite that
+// does not exist has nothing to run under a Go it asked nobody for.
+func TestAComponentDeclaringNoSuiteProvisionsNoToolchain(t *testing.T) {
+	got := componentUnits([]component.Component{
+		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
+		{Name: "gen", Dir: "gen", DeclaredLang: runner.Go},
+		{Name: "mod", Dir: "mod", Runner: runner.GoTest},
+	})
+	want := []toolchain.Unit{{Name: "mod", Lang: runner.Go, Dir: "mod"}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("componentUnits = %+v, want %+v", got, want)
+	}
+}
+
+// A component declaring no suite is never given to the scheduler, so it takes
+// no lock on its directory. Rooted beside a component that runs, a lock would
+// serialise that component against nothing — and the schedule row would name
+// a pair nobody declared.
+func TestAComponentDeclaringNoSuiteTakesNoLock(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	declared := []component.Component{
+		{Name: "scripts", Dir: "mod", DeclaredLang: runner.Shell},
+		{Name: "fixture", Dir: "mod", Runner: runner.GoTest},
+	}
+	plans := planComponents(context.Background(), root, declared, "test", false)
+	for _, p := range plans {
+		defer p.log.Close()
+	}
+	if plans[0].ready {
+		t.Errorf("plan = %+v, want a component declaring no suite planned unrunnable", plans[0])
+	}
+
+	rep := ui.NewReport("test")
+	ms := runComponents(context.Background(), root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
+
+	schedule := rowByLabel(t, rep, "schedule")
+	if !strings.HasPrefix(schedule.Value, "1 component(s)") || strings.Contains(schedule.Value, "serialised") {
+		t.Errorf("schedule = %+v, want one component scheduled and no pair serialised", schedule)
+	}
+	row := rowByLabel(t, rep, testLabel("scripts"))
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, noSuiteReason) {
+		t.Errorf("test(scripts) = %+v, want unmeasured, naming that it declares no suite", row)
+	}
+	if got := rowByLabel(t, rep, testLabel("fixture")); got.Status != ui.StatusPass {
+		t.Errorf("test(fixture) = %+v, want the suite beside it to pass unaffected", got)
+	}
+	if !ms[0].Unmeasurable || ms[0].Why != noSuiteReason {
+		t.Errorf("measurement = %+v, want unmeasurable for the declaration's reason", ms[0])
+	}
+	if _, err := os.Stat(filepath.Join(root, runner.ReportDir, "scripts")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a log directory exists for a component that ran nothing: %v", err)
+	}
+}
+
+// Unsharded, a component declaring no suite takes every test-side row from its
+// declaration: the suite, its flaky rerun, its coverage and its complexity are
+// each unmeasured, for a reason distinct from a raw command's — the author
+// adds a suite here, where there they swap a command for a runner. The
+// component that runs beside it is unaffected.
+func TestAnUnshardedRunReportsANoSuiteComponentFromItsDeclaration(t *testing.T) {
+	root := fixtureRepo(t, `components:
+  - name: fixture
+    dir: mod
+    runner: go-test
+  - name: scripts
+    dir: scripts
+    lang: shell
+`)
+	write(t, root, "scripts/install.sh", "#!/bin/sh\necho hi\n")
+	write(t, root, config.FileName, "coverage:\n  floor: 10\n")
+	out, err := runTestCmd(t, root, "--json")
+	if err != nil {
+		t.Fatalf("test failed: %v\n%s", err, out)
+	}
+	for _, label := range []string{testLabel("scripts"), flakyLabel("scripts"), "coverage(scripts)", "crap(scripts)", "floor(scripts)"} {
+		row := jsonRowByLabel(t, out, label)
+		if row.Status != string(ui.StatusUnmeasured) {
+			t.Errorf("%s = %+v, want unmeasured", label, row)
+		}
+		if !strings.Contains(row.Value, noSuiteReason) || strings.Contains(row.Value, "raw command") {
+			t.Errorf("%s value = %q, want the no-suite reason and not a raw command's", label, row.Value)
+		}
+	}
+	if row := jsonRowByLabel(t, out, testLabel("fixture")); row.Status != string(ui.StatusPass) {
+		t.Errorf("test(fixture) = %+v, want a pass", row)
+	}
+	if row := jsonRowByLabel(t, out, "coverage(fixture)"); row.Status != string(ui.StatusContext) {
+		t.Errorf("coverage(fixture) = %+v, want its measured figure", row)
+	}
+	if row := jsonRowByLabel(t, out, "crap(fixture)"); strings.Contains(row.Value, noSuiteReason) {
+		t.Errorf("crap(fixture) = %+v, want its own score", row)
+	}
+}
+
+// A floor row names a floor that is configured. With none configured there is
+// no floor to say cannot apply, so a component declaring no suite takes only
+// its coverage and complexity rows.
+func TestANoSuiteComponentTakesAFloorRowOnlyWhenAFloorIsConfigured(t *testing.T) {
+	unset := ui.NewReport("test")
+	noSuiteCoverageRows(unset, "scripts", 0)
+	var labels []string
+	for _, r := range unset.Rows() {
+		labels = append(labels, r.Label)
+	}
+	if want := []string{"coverage(scripts)", "crap(scripts)"}; fmt.Sprint(labels) != fmt.Sprint(want) {
+		t.Errorf("rows with no floor = %v, want %v", labels, want)
+	}
+
+	set := ui.NewReport("test")
+	noSuiteCoverageRows(set, "scripts", 10)
+	row := rowByLabel(t, set, "floor(scripts)")
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, "10.0%") || !strings.Contains(row.Value, noSuiteReason) {
+		t.Errorf("floor(scripts) = %+v, want unmeasured, naming the floor and the no-suite reason", row)
+	}
+}
+
+// A selection holding only components that declare no suite measures nothing,
+// so it answers nothing about the repository: a composed coverage row or a
+// baseline row there would describe a measurement no component took part in.
+func TestASelectionOfOnlyNoSuiteComponentsTakesNoComposedRows(t *testing.T) {
+	own := []component.Component{{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell}}
+	file := component.File{Components: own}
+	rep := ui.NewReport("test")
+	addTestCoverageRows(context.Background(), newRootCmd(), rep, t.TempDir(), file, own, nil, config.Default(),
+		coverageOptions{Instrument: true})
+	var labels []string
+	for _, r := range rep.Rows() {
+		labels = append(labels, r.Label)
+	}
+	if want := []string{"coverage(scripts)", "crap(scripts)"}; fmt.Sprint(labels) != fmt.Sprint(want) {
+		t.Errorf("rows = %v, want only the declaration's own %v", labels, want)
+	}
+}
+
+// A run that selected nothing still takes a coverage and complexity row per
+// component it is responsible for: a coverage section that disappeared when
+// nothing was affected would read as one that measured everything and passed.
+func TestCoverageRowsReportEvenWhenNothingWasSelected(t *testing.T) {
+	root := affectedRepo(t)
+	commitChange(t, root, "", "")
+
+	out, err := runTestCmd(t, root, "--affected", "--json")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	for _, name := range []string{"a", "b"} {
+		for _, label := range []string{"coverage(" + name + ")", "crap(" + name + ")"} {
+			if row := jsonRowByLabel(t, out, label); row.Status != string(ui.StatusUnmeasured) {
+				t.Errorf("%s = %+v, want unmeasured: the component's suite never ran", label, row)
+			}
+		}
 	}
 }

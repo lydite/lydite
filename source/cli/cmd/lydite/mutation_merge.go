@@ -95,8 +95,7 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, componentRowsNoting(rep, decl, inputs, mutationLabel,
-		func(name string) string { return projectionNote(inputs, name) })...)
+	problems = append(problems, mutationRows(rep, decl, inputs)...)
 	// A tree the shards disagree about is reported under `shards`, which is the
 	// row that says these documents are not one run. The counts still fold from
 	// the rows, because a fold that dropped them would answer a narrower
@@ -113,6 +112,29 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 	rep.Add(foldedMutationRow(inputs, counts, decl))
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedMutationLabel(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
+}
+
+// mutationRows is componentRowsNoting over the declaration, with every
+// component that declares no suite taking the row its declaration gives it
+// instead — the rule suiteRows applies to the test fold, for the same reason.
+//
+// No shard mutates such a component — `test plan` places it in no shard — so
+// its absence from every shard's report is the plan working, not a job that
+// died. Its row is the one an unsharded run gives it, and a shard that reported
+// it anyway is not read: foldedMutationLabel claims its label, so its copy is
+// neither carried nor counted twice.
+func mutationRows(rep *ui.Report, decl component.File, inputs []shardInput) []string {
+	var problems []string
+	for _, c := range decl.Components {
+		if declaresNoSuite(c) {
+			rep.Add(noSuiteTestRow("mutation", c.Name))
+			continue
+		}
+		one := component.File{Components: []component.Component{c}}
+		problems = append(problems, componentRowsNoting(rep, one, inputs, mutationLabel,
+			func(name string) string { return projectionNote(inputs, name) })...)
+	}
+	return problems
 }
 
 // projectionNote is what a shard's uploaded directory still says about a

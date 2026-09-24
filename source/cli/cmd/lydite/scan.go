@@ -24,6 +24,7 @@ import (
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/scanlang"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
@@ -124,7 +125,7 @@ func newScanCmd() *cobra.Command {
 			// spent to make a report harder to read.
 			scanned := map[string]string{}
 			for _, c := range file.Components {
-				lang := langOf(c)
+				lang := c.ScanLang()
 				if !scannedLang(lang) {
 					// Said out loud rather than skipped. A component lydite
 					// has no scanner for is one nothing scans, and dropping it
@@ -132,10 +133,10 @@ func newScanCmd() *cobra.Command {
 					// scanned and found clean.
 					//
 					// Asked before langEnabled, which answers false for every
-					// language it has no key for: a language with a runner and
-					// no scanner would otherwise leave through the opt-out
-					// branch and be skipped as though the repository had
-					// switched it off.
+					// language it has no key for: a language a component states,
+					// by its runner or its own lang:, that has no scanner would
+					// otherwise leave through the opt-out branch and be skipped
+					// as though the repository had switched it off.
 					for _, row := range unscannedRows(c.Name, lang) {
 						rep.Add(row)
 					}
@@ -376,12 +377,14 @@ func declaredEnvNames(c component.Component, composed []string) []string {
 //
 // Only components whose language is enabled: `enabled: false` says lydite
 // runs no check over that language's code, so provisioning its toolchain
-// would download a compiler nothing is going to invoke. A component that
-// declares its own command implies no language and needs nothing.
+// would download a compiler nothing is going to invoke. The language is the
+// one the component is scanned as, so a command component stating `lang: go`
+// is provisioned the Go toolchain its checks run under, and one stating no
+// language needs nothing.
 func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
 	var out []toolchain.Unit
 	for _, c := range file.Components {
-		lang := langOf(c)
+		lang := c.ScanLang()
 		if lang == "" || !langEnabled(lang, cfg) {
 			continue
 		}
@@ -390,33 +393,25 @@ func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
 	return out
 }
 
-// anyLanguageDeclared reports whether some component names a runner, and so
-// implies source in a language lydite knows.
+// anyLanguageDeclared reports whether some component states a language its
+// source is scanned as, by its runner or its own lang:.
 func anyLanguageDeclared(file component.File) bool {
 	for _, c := range file.Components {
-		if langOf(c) != "" {
+		if c.ScanLang() != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// scannedLang reports whether lydite has checks for a language at all, which is
-// a property of lydite rather than of the repository — a language switched off
-// in .lydite/config.yml has scanners and is not being asked to run them.
+// scannedLang reports whether lydite has checks for a language at all. It reads
+// scanlang's list, the one internal/orphan also reads, so the scan and the
+// unscanned warning cannot disagree about which languages a scanner exists for.
 //
-// The three are enumerated rather than derived from runner.Runs, so a language
-// that gains a runner before it gains a scanner is not scanned by default: it
+// Not derived from runner.Runs: a language that has a runner and no scanner
 // would reach langEnabled, which answers false for every language it has no key
 // for, and be skipped as silently as an opt-out the repository never stated.
-func scannedLang(l runner.Lang) bool {
-	switch l {
-	case runner.Go, runner.Rust, runner.TypeScript:
-		return true
-	default:
-		return false
-	}
-}
+func scannedLang(l runner.Lang) bool { return scanlang.Scanned(l) }
 
 // unscannedRows is what a component lydite has no scanner for contributes to the
 // report: one row per gate a scanned component gets, each saying why that gate

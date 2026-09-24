@@ -430,6 +430,78 @@ func TestDisabledLanguageProducesNoUnitsAndNoRows(t *testing.T) {
 	}
 }
 
+// A declared lang: is the language a component is scanned as, and never the
+// one its suite runs in. A command component stating `lang: go` is provisioned
+// Go for its checks and nothing for its suite, which a runner never derived; a
+// `lang: shell` component names a language no toolchain exists for, so neither
+// side provisions anything.
+func TestADeclaredLangReachesTheScanUnitsAndNotTheTestUnits(t *testing.T) {
+	file := component.File{Components: []component.Component{
+		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
+		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
+	}}
+
+	units := scanUnits(file, config.Default())
+	if len(units) != 1 || units[0].Name != "tool" || units[0].Lang != runner.Go {
+		t.Fatalf("scan units = %+v, want just tool, as Go", units)
+	}
+	if got := componentUnits(file.Components); len(got) != 0 {
+		t.Fatalf("test units = %+v, want none: neither component has a runner to imply a suite's language", got)
+	}
+	if !anyLanguageDeclared(file) {
+		t.Error("anyLanguageDeclared = false, want a declared lang: to count")
+	}
+
+	reqs, err := toolchain.Requirements(t.TempDir(),
+		[]toolchain.Unit{{Name: "scripts", Lang: runner.Shell, Dir: "scripts"}}, toolchain.Overrides{})
+	if err != nil {
+		t.Fatalf("requirements: %v", err)
+	}
+	if len(reqs) != 0 {
+		t.Errorf("requirements = %+v, want none for a language with no toolchain", reqs)
+	}
+}
+
+// A component stating only a language lydite has no scanner for is scanned as
+// that language: its three rows are unmeasured and say which language, rather
+// than blaming a raw command it never declared or leaving through the opt-out
+// branch langEnabled would take for a language with no config key.
+func TestScanReportsADeclaredLanguageWithNoScannerAsUnmeasured(t *testing.T) {
+	dir := t.TempDir()
+	writeLydite(t, dir, config.FileName, "semgrep:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: scripts\n    dir: .\n    lang: shell\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	var doc struct {
+		Rows []struct{ Status, Label, Value string } `json:"rows"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatalf("parsing the report: %v", err)
+	}
+	rows := map[string]struct{ status, value string }{}
+	for _, r := range doc.Rows {
+		rows[r.Label] = struct{ status, value string }{r.Status, r.Value}
+	}
+	for _, label := range []string{"scan(scripts)", "licence(scripts)", "findings(scripts)"} {
+		r, ok := rows[label]
+		if !ok || r.status != string(ui.StatusUnmeasured) {
+			t.Fatalf("rows = %+v, want an unmeasured %s", doc.Rows, label)
+		}
+		if !strings.Contains(r.value, string(runner.Shell)) || strings.Contains(r.value, "raw command") {
+			t.Errorf("%s = %q, want the declared language named, not a raw command", label, r.value)
+		}
+	}
+}
+
 // The name and never the directory: unique names are enforced and unique
 // directories are not, and a scan row and a test row about one component have
 // to carry the same token.
@@ -1257,6 +1329,34 @@ func TestASecretClaimIsCountedOverTheRepositoryAndNotInAComponent(t *testing.T) 
 	}
 	if got, ok := perComponent["cli"][secrets.Gate]; ok {
 		t.Errorf("perComponent[cli][%s] = %d, want no key: the claim names no component", secrets.Gate, got)
+	}
+}
+
+// A component scanned as a declared lang: records its language's gate
+// noughts like a runner component does, and one declaring a language with no
+// scanner records none — a nought there would read as a clean scan of source
+// nothing checked.
+func TestFindingCountsReadTheLanguageAComponentIsScannedAs(t *testing.T) {
+	decl := component.File{Components: []component.Component{
+		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
+		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
+		{Name: "legacy", Dir: "legacy", Command: []string{"make", "check"}},
+	}}
+
+	perComponent, _ := findingCounts(t.TempDir(), decl, config.Default(), nil, true)
+
+	for _, gate := range golang.FindingGates() {
+		if gate == licence.Gate {
+			continue
+		}
+		if got, ok := perComponent["tool"][gate]; !ok || got != 0 {
+			t.Errorf("tool[%s] = %d (present %v), want a nought for the Go gate it is scanned by", gate, got, ok)
+		}
+	}
+	for _, name := range []string{"scripts", "legacy"} {
+		if got, ok := perComponent[name]; ok {
+			t.Errorf("perComponent[%s] = %v, want no entry: no gate scans it", name, got)
+		}
 	}
 }
 

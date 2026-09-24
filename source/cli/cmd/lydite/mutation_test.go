@@ -2104,3 +2104,31 @@ func TestATeardownFailureTakesOverAMeasurementAndNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// A component declaring no suite is never the scheduler's to start, so the
+// schedule row does not count it: a run beside one component that runs is a
+// run over one component. Its own row is the one its declaration gives it.
+func TestAComponentDeclaringNoSuiteIsNotScheduledForMutation(t *testing.T) {
+	root := mutationRepo(t,
+		"components:\n"+
+			"  - name: app\n    dir: app\n    runner: go-test\n    mutation: false\n"+
+			"  - name: scripts\n    dir: web\n    lang: shell\n")
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main")
+	if err != nil {
+		t.Fatalf("a component declaring no suite failed the run: %v", err)
+	}
+	schedule, ok := rowNamed(doc, "schedule")
+	if !ok {
+		t.Fatal("the run emitted no schedule row")
+	}
+	if !strings.HasPrefix(schedule.Value, "1 component(s)") {
+		t.Errorf("schedule = %q, want only the component with a suite counted", schedule.Value)
+	}
+	row, ok := rowNamed(doc, mutationLabel("scripts"))
+	if !ok {
+		t.Fatal("the component declaring no suite took no row")
+	}
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, noSuiteReason) {
+		t.Errorf("mutation(scripts) = %+v, want unmeasured, naming that it declares no suite", row)
+	}
+}

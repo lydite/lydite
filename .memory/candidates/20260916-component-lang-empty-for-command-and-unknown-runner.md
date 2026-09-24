@@ -19,8 +19,9 @@ having already run first in the same validation loop: a `command:`-invoked compo
 component would be, because both report `Lang() == ""` or a language the switch does not name.
 
 ADR 0056 (`docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md`,
-design only, not yet built) decides the opposite of what this note originally recommended for a
-declared-language field: a declared `lang:` must NOT reach `Lang()` or its readers, because they
-assume a non-empty answer came from a runner. The ADR adds a separate `ScanLang()` instead, read
-only by the scan path. `Lang()` itself is unchanged by that decision and this note's description
-of its current behaviour still holds.
+built in lydite/lydite#252) decided the opposite of what this note originally recommended for a
+declared-language field: a declared `lang:` (`Component.DeclaredLang`) does NOT reach `Lang()` or
+its readers, because they assume a non-empty answer came from a runner. The shipped
+`Component.ScanLang()` is the separate accessor, read only by the scan path
+(`cmd/lydite/scan.go`, `record.go`, `internal/orphan`). `Lang()` itself is unchanged and this
+note's description of its current behaviour still holds.
