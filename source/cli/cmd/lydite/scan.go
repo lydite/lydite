@@ -24,6 +24,7 @@ import (
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
+	"lydite/lydite/internal/scanlang"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/toolchain"
@@ -403,22 +404,14 @@ func anyLanguageDeclared(file component.File) bool {
 	return false
 }
 
-// scannedLang reports whether lydite has checks for a language at all, which is
-// a property of lydite rather than of the repository — a language switched off
-// in .lydite/config.yml has scanners and is not being asked to run them.
+// scannedLang reports whether lydite has checks for a language at all. It reads
+// scanlang's list, the one internal/orphan also reads, so the scan and the
+// unscanned warning cannot disagree about which languages a scanner exists for.
 //
-// The three are enumerated rather than derived from runner.Runs, so a language
-// that gains a runner before it gains a scanner is not scanned by default: it
+// Not derived from runner.Runs: a language that has a runner and no scanner
 // would reach langEnabled, which answers false for every language it has no key
 // for, and be skipped as silently as an opt-out the repository never stated.
-func scannedLang(l runner.Lang) bool {
-	switch l {
-	case runner.Go, runner.Rust, runner.TypeScript:
-		return true
-	default:
-		return false
-	}
-}
+func scannedLang(l runner.Lang) bool { return scanlang.Scanned(l) }
 
 // unscannedRows is what a component lydite has no scanner for contributes to the
 // report: one row per gate a scanned component gets, each saying why that gate

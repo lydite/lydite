@@ -6,7 +6,7 @@
 // fails open: nothing breaks when it goes stale, so a directory nobody
 // declared is tested by nobody while every run still reports green.
 //
-// So every source file must fall under some component's directory or an
+// So every source file must be claimed by some component or covered by an
 // explicit exclude. A file under neither is an orphan, and the author clears
 // it by declaring a component or writing the exclude — a gate, in the sense
 // CONTEXT.md gives the word, not a referral: there is always work that
@@ -41,6 +41,7 @@ import (
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/scanlang"
 )
 
 // ErrNoRepository reports that root is not inside a git repository, so the
@@ -76,8 +77,9 @@ type Result struct {
 	UnusedExcludes []string
 }
 
-// Find lists the source files under root that no component's dir covers and
-// no exclude matches.
+// Find lists the source files under root that no component claims and no
+// exclude matches. A component claims what is under its dir; one declaring no
+// suite, only a lang:, claims only that language's files there.
 //
 // The tree comes from git: tracked files, plus untracked ones git is not
 // ignoring. Both halves matter. Tracked alone would miss the newly written
@@ -123,19 +125,45 @@ func Find(ctx context.Context, root string, f component.File) (Result, error) {
 	return res, nil
 }
 
-// coveredByComponent reports whether a component's dir contains the file.
-//
-// A dir of "." is the whole scan root, which is the shape a single-component
-// repository declares and would otherwise match nothing: "./x" is not a
-// prefix any cleaned path carries.
+// coveredByComponent reports whether some component claims the file.
 func coveredByComponent(file string, components []component.Component) bool {
 	for _, c := range components {
-		dir := path.Clean(filepath(c.Dir))
-		if dir == "." || strings.HasPrefix(file, dir+"/") {
+		if claims(file, c) {
 			return true
 		}
 	}
 	return false
+}
+
+// claims reports whether one component claims the file for the orphan gate.
+//
+// A component that runs a suite — a runner or a raw command — claims every file
+// under its directory, whatever it is written in: the suite runs over that
+// directory and reaches whatever it reaches. A component declaring only lang:
+// runs no suite, and claims only the files of that language under its
+// directory. By containment, `lang: shell` at `dir: .` would clear the gate for
+// every file in the repository while testing none of them. A component
+// declaring none of the three is refused by component.Parse; one built without
+// it keeps claiming by containment.
+func claims(file string, c component.Component) bool {
+	if !contains(c.Dir, file) {
+		return false
+	}
+	if c.Runner != "" || len(c.Command) > 0 || c.DeclaredLang == "" {
+		return true
+	}
+	lang, ok := runner.LangForExt(strings.ToLower(path.Ext(file)))
+	return ok && lang == c.DeclaredLang
+}
+
+// contains reports whether a component's dir contains the file.
+//
+// A dir of "." is the whole scan root, which is the shape a single-component
+// repository declares and would otherwise match nothing: "./x" is not a
+// prefix any cleaned path carries.
+func contains(dir, file string) bool {
+	dir = path.Clean(filepath(dir))
+	return dir == "." || strings.HasPrefix(file, dir+"/")
 }
 
 // filepath normalises a declared dir to the forward-slash form every path
@@ -161,7 +189,7 @@ func sourceFiles(ctx context.Context, root string) ([]string, error) {
 // component tests what is under it whatever the file is written in. A scanner
 // is per language: a Go component covering `web/app.ts` by containment runs
 // gosec, which will never look at it. So a file is unscanned when no component
-// both contains it *and* implies its language.
+// both contains it *and* is scanned as its language.
 //
 // This is the half of the guard `Find` cannot give `lydite scan`. A component
 // rooted at `.` contains every path in the repository, so a Go component at
@@ -198,13 +226,15 @@ func Unscanned(ctx context.Context, root string, f component.File, enabled func(
 	for _, p := range files {
 		ext := strings.ToLower(path.Ext(p))
 		lang, ok := runner.LangForExt(ext)
-		// A language lydite has no runner for is skipped rather than
+		// A language lydite has no scanner for is skipped rather than
 		// reported. "Unscanned" names a file some scanner could have read and
 		// no component pointed one at; there is no scanner to point, so every
-		// such file would be a gap no declaration could ever close. Find still
-		// asks about them, because whether a component claims a path needs no
-		// scanner to answer.
-		if !ok || !runner.Runs(lang) || ambiguousExt[ext] || (enabled != nil && !enabled(lang)) {
+		// such file would be a gap no declaration could ever close. Whether
+		// the language has a runner is a different question and not this
+		// one: a runner without a scanner leaves the gap unclosable all the
+		// same. Find still asks about these files, because whether a component
+		// claims a path needs no scanner to answer.
+		if !ok || !scanlang.Scanned(lang) || ambiguousExt[ext] || (enabled != nil && !enabled(lang)) {
 			continue
 		}
 		if excluded(p, f.Excludes) || coveredByLanguage(p, lang, f.Components, modules) {
@@ -247,8 +277,12 @@ type Gap struct {
 	Files []string
 }
 
-// coveredByLanguage reports whether a component contains the file, runs checks
-// for the language it is written in, and — for Go — actually reaches it.
+// coveredByLanguage reports whether a component contains the file, is scanned
+// as the language it is written in, and — for Go — actually reaches it.
+//
+// The language is the component's scan language: its runner's, or its own
+// lang: where it has no runner. A `lang: shell` component therefore covers the
+// shell beside it and not the Go.
 //
 // Containment is not enough for Go, and the exception is exact rather than a
 // heuristic: a nested go.mod starts a separate module that the enclosing
@@ -266,25 +300,25 @@ type Gap struct {
 // needs none: Biome walks the tree from where it is pointed.
 func coveredByLanguage(file string, lang runner.Lang, components []component.Component, modules map[string]bool) bool {
 	for _, c := range components {
-		r, ok := runner.Lookup(c.Runner)
-		if !ok {
-			// A component declaring a raw command implies no language, so
-			// nothing here can say whether its checks reach this file. It is
-			// not a gap: a component *is* declared for it, and `lydite scan`
-			// already reports that component unmeasured with the reason. A
-			// warning too would say the same thing twice, once wrongly —
-			// telling an author to declare a component they have declared,
-			// with an exclude as the only way to silence it, which would take
-			// those files out of the orphan gate as well.
-			if coveredByComponent(file, []component.Component{c}) {
+		scanned := c.ScanLang()
+		if scanned == "" {
+			// A component declaring a raw command and no lang: states no
+			// language, so nothing here can say whether its checks reach this
+			// file. It is not a gap: a component *is* declared for it, and
+			// `lydite scan` already reports that component unmeasured with the
+			// reason. A warning too would say the same thing twice, once
+			// wrongly — telling an author to declare a component they have
+			// declared, with an exclude as the only way to silence it, which
+			// would take those files out of the orphan gate as well.
+			if contains(c.Dir, file) {
 				return true
 			}
 			continue
 		}
-		if r.Lang != lang {
+		if scanned != lang {
 			continue
 		}
-		if !coveredByComponent(file, []component.Component{c}) {
+		if !contains(c.Dir, file) {
 			continue
 		}
 		if lang == runner.Go && !sameGoModule(file, filepath(c.Dir), modules) {

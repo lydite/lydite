@@ -11,6 +11,7 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/orphan"
+	"lydite/lydite/internal/runner"
 )
 
 // The gate is the guard on a declared list, so the case it exists for is a
@@ -344,4 +345,129 @@ func TestScanningOptOutsDoNotNarrowTheGate(t *testing.T) {
 	if want := []string{"web/app.ts"}; !equal(res.Orphans, want) {
 		t.Errorf("orphans = %v, want %v", res.Orphans, want)
 	}
+}
+
+// A component declaring only lang: runs no suite, so it claims its language's
+// files under its directory and nothing else. By containment, a `lang: shell`
+// component would clear the gate for every file beside the scripts while
+// testing none of them.
+func TestANoSuiteComponentClaimsOnlyItsDeclaredLanguage(t *testing.T) {
+	root := repo(t, map[string]string{
+		"scripts/install.sh":   "#!/bin/sh\n",
+		"scripts/helpers.bash": "true\n",
+		"scripts/gen.go":       "package scripts\n",
+		"scripts/seed.py":      "print('x')\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
+	}}
+	res := find(t, root, f)
+	if want := []string{"scripts/gen.go", "scripts/seed.py"}; !equal(res.Orphans, want) {
+		t.Errorf("orphans = %v, want %v — a lang: shell component claims the shell and only the shell", res.Orphans, want)
+	}
+}
+
+// At the scan root the no-suite rule is what keeps the gate standing at all:
+// the component claims every shell file in the repository and leaves the rest
+// exactly as orphaned as it was without it.
+func TestANoSuiteComponentAtTheRootDoesNotClaimTheRepository(t *testing.T) {
+	root := repo(t, map[string]string{
+		"install.sh":  "#!/bin/sh\n",
+		"cli/main.go": "package main\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "shell", Dir: ".", DeclaredLang: runner.Shell},
+	}}
+	res := find(t, root, f)
+	if want := []string{"cli/main.go"}; !equal(res.Orphans, want) {
+		t.Errorf("orphans = %v, want %v", res.Orphans, want)
+	}
+}
+
+// A command component that states its language still runs a suite over its
+// directory, so it keeps claiming by containment: the lang: it states narrows
+// what is scanned, not what the suite it runs is answerable for.
+func TestACommandComponentWithALanguageClaimsByContainment(t *testing.T) {
+	root := repo(t, map[string]string{
+		"svc/main.go":    "package main\n",
+		"svc/deploy.sh":  "#!/bin/sh\n",
+		"svc/web/app.ts": "export const a = 1\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "svc", Dir: "svc", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
+	}}
+	res := find(t, root, f)
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans = %v, want none — a command component claims everything under its dir", res.Orphans)
+	}
+}
+
+// Unscanned matches a component on the language it is scanned as. A `lang:
+// shell` component rooted beside Go source is not a Go component, so the Go
+// is still reported as scanned by nothing — while the shell it does cover is
+// no gap either way, since lydite has no shell scanner to point at it.
+func TestAShellComponentDoesNotCoverGoForTheScan(t *testing.T) {
+	root := repo(t, map[string]string{
+		"go.mod":     "module x\n",
+		"main.go":    "package main\n",
+		"install.sh": "#!/bin/sh\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "shell", Dir: ".", DeclaredLang: runner.Shell},
+	}}
+	gaps := unscanned(t, root, f)
+	if len(gaps) != 1 || gaps[0].Lang != runner.Go || !equal(gaps[0].Files, []string{"main.go"}) {
+		t.Errorf("gaps = %+v, want only main.go under go", gaps)
+	}
+}
+
+// A command component that states lang: is scanned as that language, so it
+// covers that language's files beside it for the scan — and not another
+// scanned language's, which a raw command with no lang: would.
+func TestACommandComponentIsScannedAsItsDeclaredLanguage(t *testing.T) {
+	root := repo(t, map[string]string{
+		"go.mod":     "module x\n",
+		"main.go":    "package main\n",
+		"web/app.ts": "export const a = 1\n",
+	})
+	stated := component.File{Components: []component.Component{
+		{Name: "all", Dir: ".", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
+	}}
+	gaps := unscanned(t, root, stated)
+	if len(gaps) != 1 || gaps[0].Lang != runner.TypeScript || !equal(gaps[0].Files, []string{"web/app.ts"}) {
+		t.Errorf("gaps = %+v, want only web/app.ts under typescript", gaps)
+	}
+
+	raw := component.File{Components: []component.Component{
+		{Name: "all", Dir: ".", Command: []string{"make", "test"}},
+	}}
+	if gaps := unscanned(t, root, raw); len(gaps) != 0 {
+		t.Errorf("gaps = %+v, want none — a raw command states no language to hold its files against", gaps)
+	}
+}
+
+// Unscanned skips a language lydite has no scanner for, whether or not it has
+// a runner: no declaration could close that gap. Python has a runner and no
+// scanner; shell has neither.
+func TestALanguageWithNoScannerIsNeverUnscanned(t *testing.T) {
+	root := repo(t, map[string]string{
+		"tools/seed.py":      "print('x')\n",
+		"scripts/install.sh": "#!/bin/sh\n",
+		"cli/main.go":        "package main\n",
+	})
+	f := component.File{Components: []component.Component{
+		{Name: "cli", Dir: "cli", Runner: runner.GoTest},
+	}}
+	if gaps := unscanned(t, root, f); len(gaps) != 0 {
+		t.Errorf("gaps = %+v, want none — neither python nor shell has a scanner to point", gaps)
+	}
+}
+
+func unscanned(t *testing.T, root string, f component.File) []orphan.Gap {
+	t.Helper()
+	gaps, err := orphan.Unscanned(context.Background(), root, f, nil)
+	if err != nil {
+		t.Fatalf("Unscanned: %v", err)
+	}
+	return gaps
 }
