@@ -348,6 +348,146 @@ func TestAClearanceRecordsNoFingerprintOffTheRevisionItClears(t *testing.T) {
 	}
 }
 
+// optedInCheckout is clearedCheckout for a repository whose component opted
+// into api_surface: the decision being cleared is reached over a comparison as
+// well as over the change's own paths, and one path here is covered by no
+// exemption, so the fingerprint carries both.
+func optedInCheckout(t *testing.T) (dir, base, head string) {
+	t.Helper()
+	dir, base = reviewRepo(t, crateBase(crateOptIn), map[string]string{
+		"probe/src/lib.rs": crateAPI + "pub fn also() {}\n",
+		"src/auth.go":      "package src",
+	})
+	r := executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD")
+	if !r.Ok() {
+		t.Fatalf("git rev-parse HEAD: %v\n%s", r.Err, r.Output)
+	}
+	return dir, base, strings.TrimSpace(r.Output)
+}
+
+// comparedSurfaces is the document `review compare` writes for that checkout,
+// which is what a clearance reads instead of making the comparison itself.
+func comparedSurfaces(t *testing.T, dir, base string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "surfaces.json")
+	compare := newReviewCompareCmd()
+	var out bytes.Buffer
+	compare.SetOut(&out)
+	compare.SetErr(&out)
+	compare.SetArgs([]string{"--dir", dir, "--base", base, "--write-surfaces", path})
+	if err := compare.Execute(); err != nil {
+		t.Fatalf("review compare: %v\n%s", err, out.String())
+	}
+	return path
+}
+
+// recordedFingerprint is the fingerprint the clearance rendered at statusOut
+// carries, and fails the test when it carries none: a comparison of two
+// clearances that both recorded nothing would agree for the wrong reason.
+func recordedFingerprint(t *testing.T, statusOut string) string {
+	t.Helper()
+	description, _ := readRenderedStatus(t, statusOut)["description"].(string)
+	fingerprint, ok := clearance.FingerprintIn(description)
+	if !ok || fingerprint == "" {
+		t.Fatalf("the clearance carries no fingerprint: %q", description)
+	}
+	return fingerprint
+}
+
+// A clearance given a comparison document records the fingerprint the same
+// clearance records when it makes the comparison itself — which is what lets a
+// component whose comparison runs the change's own code be compared in a job
+// holding no credential and cleared in one that does. The stub the comparison
+// needs is removed before the --surfaces run, so a run that recomputed instead
+// would reach a component it could not compare and fingerprint that.
+//
+// Both sides are real computations for the same reason
+// TestAClearanceRecordsTheFingerprintTheQueueRecomputes is: a literal on each
+// side keeps agreeing with itself long after the two paths stop agreeing with
+// each other.
+func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base, headSHA := optedInCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: headSHA,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
+	forge.start(t)
+
+	document := comparedSurfaces(t, dir, base)
+
+	inProcess := filepath.Join(t.TempDir(), "in-process.json")
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: inProcess, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	removeSemverChecksStub(t)
+
+	// Through the command, because --surfaces is a flag a workflow runs and
+	// not only a field runClearance happens to take.
+	fromDocument := filepath.Join(t.TempDir(), "from-document.json")
+	cmd := newClearanceCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"--dir", dir,
+		"--base", base,
+		"--surfaces", document,
+		"--status-out", fromDocument,
+		"--event", eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		"--no-color",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	want, got := recordedFingerprint(t, inProcess), recordedFingerprint(t, fromDocument)
+	if got != want {
+		t.Errorf("a clearance given the comparison recorded %q and one that made it recorded %q, "+
+			"so no entry cleared through the document leaves the queue", got, want)
+	}
+}
+
+// A comparison document that cannot be read at all — the computing job never
+// ran, or its artifact never arrived — is no evidence any surface is clean. The
+// clearance is still recorded, since answering the comment is this command's
+// job, and it fingerprints a decision referring for a comparison nobody made
+// rather than the one a real comparison reached.
+func TestAClearanceFromAnUnreadableSurfacesDocumentFingerprintsTheUncomparedSurface(t *testing.T) {
+	semverChecksStub(t, semverChecksUnbroken)
+	dir, base, headSHA := optedInCheckout(t)
+	forge := &fakeForge{
+		permission: "admin", headSHA: headSHA,
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
+	forge.start(t)
+
+	document := comparedSurfaces(t, dir, base)
+	removeSemverChecksStub(t)
+
+	clear := func(surfaces, statusOut string) {
+		t.Helper()
+		if _, err := runClearanceWith(t, clearanceOptions{
+			dir: dir, base: base, surfaces: surfaces, statusOut: statusOut, noColor: true,
+			eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		}); err != nil {
+			t.Fatalf("runClearance: %v", err)
+		}
+	}
+	compared := filepath.Join(t.TempDir(), "compared.json")
+	clear(document, compared)
+	unreadable := filepath.Join(t.TempDir(), "unreadable.json")
+	clear(filepath.Join(t.TempDir(), "never-written.json"), unreadable)
+
+	if recordedFingerprint(t, unreadable) == recordedFingerprint(t, compared) {
+		t.Error("a document nothing wrote fingerprinted the decision a real comparison reached, " +
+			"so an artifact that never arrived carries a clearance onto a queue entry")
+	}
+}
+
 // A failure resolving the referral fails the run: the clearance is recorded
 // but the referral still blocks, and a job reporting success would hide that.
 func TestAFailedReferralPostAfterTheClearanceFailsTheRun(t *testing.T) {

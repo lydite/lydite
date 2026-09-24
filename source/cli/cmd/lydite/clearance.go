@@ -27,6 +27,7 @@ func newClearanceCmd() *cobra.Command {
 	var statusOut string
 	var base string
 	var baseBranch string
+	var surfacesPath string
 	var noColor bool
 	cmd := &cobra.Command{
 		Use:           "clearance",
@@ -58,6 +59,12 @@ checkout this runs against, which has to be the revision being cleared; a
 clearance given anywhere else records no fingerprint and says so, and the
 queue entry goes back to a person.
 
+--surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
+here. A component's own comparison executes its own code — a Rust crate's
+build.rs, a proc-macro — so the job that records the clearance with a
+credential should not also be the job that ran it: compute in one job with
+none, clear and record in another that never runs the change's own code.
+
 --status-out <file> renders them as documents instead of posting them, for a
 step that posts them: the ` + clearance.ClearanceContext + ` status at <file>, and the
 ` + clearance.Context + ` status at the sibling <file> with .referral before its
@@ -71,6 +78,7 @@ that clears nothing writes no document.`,
 				statusOut:  statusOut,
 				base:       base,
 				baseBranch: baseBranch,
+				surfaces:   surfacesPath,
 				noColor:    noColor,
 			})
 		},
@@ -84,6 +92,8 @@ that clears nothing writes no document.`,
 	cmd.Flags().StringVar(&base, "base", "auto",
 		`commit the cleared decision is recomputed against ("auto" resolves the merge-base with the base branch)`)
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	cmd.Flags().StringVar(&surfacesPath, "surfaces", "",
+		"read a comparison 'review compare' already made instead of running it here, and fingerprint the decision it feeds")
 	cmd.Flags().StringVar(&statusOut, "status-out", "",
 		"render the "+clearance.ClearanceContext+" status as a JSON document at this path, and the "+clearance.Context+
 			" status it resolves at the .referral sibling, for another step to post instead of posting them here")
@@ -103,7 +113,10 @@ type clearanceOptions struct {
 	statusOut  string
 	base       string
 	baseBranch string
-	noColor    bool
+	// surfaces names the comparison document a computing job already wrote,
+	// and is empty for a run that makes the comparison itself.
+	surfaces string
+	noColor  bool
 }
 
 func runClearance(ctx context.Context, cmd *cobra.Command, opt clearanceOptions) error {
@@ -273,6 +286,13 @@ func clearedFingerprint(ctx context.Context, cmd *cobra.Command, opt clearanceOp
 // decision that was cleared. A narrower one would record a person's judgement
 // against reasons that were never the whole of what referred the change.
 //
+// opt.surfaces names a comparison `review compare` already made, and is the
+// route for a component whose comparison runs the change's own code: read here,
+// it is reconciled against what this run resolves for itself and never re-run,
+// so the job holding the credential this clearance is recorded with executes
+// none of it. A run given no document makes the comparison itself, under the
+// same guard `review` computes under.
+//
 // The rows both comparisons render go to a report of their own rather than to
 // the one this command writes. What this run reports is the clearance; the
 // verdict those rows describe belongs to the `review` that published the
@@ -295,16 +315,39 @@ func clearedDecision(ctx context.Context, cmd *cobra.Command, opt clearanceOptio
 	if err != nil {
 		return referral.Decision{}, err
 	}
-	// Guarded exactly when this invocation will also publish with its own
-	// token: that is the one combination where a component's own build code —
-	// a Rust crate's build.rs, a TypeScript package's lifecycle scripts — would
-	// run inside the process that holds a writing credential. A run rendering
-	// documents for another step to post holds none, which is what lets it
-	// compute the comparison at all; see
-	// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
-	surfaces, err := computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, opt.statusOut == "")
-	if err != nil {
-		return referral.Decision{}, err
+	var surfaces []surfaceComparison
+	if opt.surfaces != "" {
+		doc, readErr := readSurfaces(opt.surfaces)
+		switch readErr {
+		case nil:
+			// reconcileSurfaces checks the document's base against the
+			// baseSHA resolved here and requires a result for every
+			// component this tree says opted in — neither is taken on the
+			// document's own word.
+			surfaces, err = reconcileSurfaces(opt.dir, baseSHA, doc)
+		default:
+			// Unreadable, not absent: a document the computing job never
+			// wrote is no evidence any surface is clean, so every opted-in
+			// component is uncomputable. That is the decision `review`
+			// reaches from the same document, and the fingerprint has to
+			// describe the decision rather than a cleaner reading of it.
+			surfaces, err = uncomputableSurfaces(opt.dir, "the comparison document could not be read: "+readErr.Error())
+		}
+		if err != nil {
+			return referral.Decision{}, err
+		}
+	} else {
+		// Guarded exactly when this invocation will also publish with its own
+		// token: that is the one combination where a component's own build code
+		// — a Rust crate's build.rs, a TypeScript package's lifecycle scripts —
+		// would run inside the process that holds a writing credential. A run
+		// rendering documents for another step to post holds none, which is what
+		// lets it compute the comparison at all; see
+		// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
+		surfaces, err = computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, opt.statusOut == "")
+		if err != nil {
+			return referral.Decision{}, err
+		}
 	}
 	file, err := loadExemptionsAt(ctx, opt.dir, baseSHA)
 	if err != nil {
