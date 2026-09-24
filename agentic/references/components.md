@@ -81,6 +81,14 @@ here invalidates me" and is read only by `internal/affected`. See
 [ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md) and
 [Services and the scheduler](services-and-scheduling.md).
 
+An extra install step beyond an otherwise-normal install — a browser download, a codegen
+step — is a `setup:` line rather than a change to `typescript.install`: it runs after the
+coalesced install, for the one component that needs it. Two components sharing such a step
+point its cache at a directory under the scan root (a `PLAYWRIGHT_BROWSERS_PATH` set via the
+component's own `env:`) and declare that directory in `occupies:`, so two writers into it are
+the collision `occupies:` already serialises rather than a lock the step invents for itself.
+See [ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
+
 Entries are **relative to the scan root**, like `watch:` and unlike `compose.file:`, which is
 relative to the component root: the scheduler compares one component's declaration against
 another's, and two component-relative paths are not comparable without resolving both first.
@@ -305,14 +313,14 @@ ancestor holding a recognised lockfile, bounded by the scan root, and installs
 there — a package of a workspace declares its dependencies nowhere; the lockfile
 that resolves them sits at the root above it, and a component at `packages/ui`
 in a repository whose only `pnpm-lock.yaml` is at the root installs from that
-root rather than installing nothing. `typescript.install` is unaffected by this
-walk: the override still replaces detection entirely and still runs in the
-component's own directory, since a repository that authored one said where it
-meant it to run by declaring the component there. [ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md)
-decides this changes in a later slice — the override will attempt `WorkspaceRoot`
-first and run there, coalesced, falling back to the component's own directory
-only where no root resolves — but that fix has not landed, and the override
-still runs uncoalesced in the component's own directory whenever it is set.
+root rather than installing nothing. `typescript.install` replaces *what* runs, never
+*where*: `Install` still attempts `WorkspaceRoot` first, and when a root resolves the
+override runs there, coalesced with every sibling that resolves the same root and
+sharing the same `lockRoot` and `installedUnder` guard a detected install shares. Only
+when no root resolves — an ambiguous multi-lockfile root, or no lockfile at all — does
+the override fall back to running in the component's own directory, sharing nothing
+with any other component. See
+[ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
 Several components resolving
 the same root share one install: the first to reach it runs the frozen install,
 and every other one waits and then finds it already done, rather than each
@@ -356,6 +364,12 @@ installed the workspace it was pointed at. That row keys off the same join
 criterion above, not off whether a runner matched, so a `command:` component
 that meets it is exactly as visible when its install has no root to resolve
 as a `vitest` or `jest` component is.
+
+A `typescript.install` override also takes its own `install(<name>)` row, naming where
+it is going to run: at a resolved workspace root, coalesced with every sibling
+resolving that root, or in the component's own directory when no root resolves. The
+override is the least standard install a report can name, and a row that is silently
+absent for it would read the same as one lydite never bothered to say anything about.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
