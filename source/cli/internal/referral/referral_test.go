@@ -150,6 +150,11 @@ exemptions:
 			Change{Paths: []string{"source/.gitleaksignore"}},
 			"secret-scan config edited",
 		},
+		{
+			"a net-new shellcheck directive",
+			Change{Paths: []string{"scripts/install.sh"}, Added: []DiffLine{{Path: "scripts/install.sh", Text: "# shellcheck disable=all"}}},
+			"suppression added",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -795,6 +800,56 @@ func TestGitleaksAllowIsASuppression(t *testing.T) {
 	}
 	if !strings.Contains(d[0].Evidence, "gitleaks:allow") {
 		t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
+	}
+}
+
+// ShellCheck reads a directive as `#`, any spaces or tabs, `shellcheck`, then
+// at least one more, so every spelling it honours is a suppression — and
+// every key, not only disable=: source=/dev/null is ShellCheck's own way of
+// silencing a missing-source warning.
+func TestAShellcheckDirectiveIsASuppression(t *testing.T) {
+	for _, text := range []string{
+		"# shellcheck disable=SC2086",
+		"#shellcheck disable=all",
+		"#  shellcheck\tdisable=SC2086",
+		"echo \"$x\" # shellcheck disable=SC2154",
+		"# shellcheck source=/dev/null",
+		"# shellcheck shell=sh disable=SC2039",
+	} {
+		t.Run(text, func(t *testing.T) {
+			d := Disqualifications(Change{
+				Paths: []string{"scripts/install.sh"},
+				Added: []DiffLine{{Path: "scripts/install.sh", Text: text}},
+			}, Disqualifiers{})
+			if len(d) != 1 || d[0].Kind != "suppression added" {
+				t.Fatalf("got %+v, want one suppression added", d)
+			}
+			if !strings.Contains(d[0].Evidence, "shellcheck directive") {
+				t.Errorf("evidence = %q, want it to name what was found", d[0].Evidence)
+			}
+		})
+	}
+}
+
+// ShellCheck requires whitespace after `shellcheck` before it reads any key,
+// so a comment that merely mentions the tool is not a directive, and a veto
+// that fired on one would teach readers to ignore it.
+func TestAShellcheckMentionIsNotADirective(t *testing.T) {
+	for _, text := range []string{
+		"# shellcheck",
+		"# shellcheck-py pins the binary",
+		"# run shellcheck disable=all to see nothing",
+		"shellcheck --norc ./a.sh",
+	} {
+		t.Run(text, func(t *testing.T) {
+			d := Disqualifications(Change{
+				Paths: []string{"scripts/install.sh"},
+				Added: []DiffLine{{Path: "scripts/install.sh", Text: text}},
+			}, Disqualifiers{})
+			if len(d) != 0 {
+				t.Errorf("got %+v, want nothing", d)
+			}
+		})
 	}
 }
 

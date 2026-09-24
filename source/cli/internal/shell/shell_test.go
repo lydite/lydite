@@ -13,10 +13,11 @@ import (
 	"lydite/lydite/internal/gitdiff"
 )
 
-// One run, in json1, over each script as a path that cannot read as an option.
+// One run, in json1, reading no .shellcheckrc, over each script as a path that
+// cannot read as an option.
 func TestArgvIsOneJSON1RunOverEachScript(t *testing.T) {
 	got := argv([]string{"a.sh", "-rf.sh", "sub/b.bash"})
-	want := []string{"--format=json1", "./a.sh", "./-rf.sh", "./sub/b.bash"}
+	want := []string{"--format=json1", "--norc", "./a.sh", "./-rf.sh", "./sub/b.bash"}
 	if !slices.Equal(got, want) {
 		t.Errorf("argv = %q, want %q", got, want)
 	}

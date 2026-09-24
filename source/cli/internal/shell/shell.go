@@ -39,8 +39,8 @@ func FindingGates() []string { return []string{Gate} }
 //
 // env.Install is what pipx is invoked with and env.Check what ShellCheck is.
 // ShellCheck reads the scripts and never executes them, so the component's
-// declared environment reaching it steers nothing but ShellCheck's own
-// configuration lookup.
+// declared environment reaching it steers nothing but the options ShellCheck
+// reads from SHELLCHECK_OPTS.
 func Check(ctx context.Context, dir string, env executil.Env) []executil.Result {
 	if r := ensure(ctx, env.Install); !r.Ok() {
 		return []executil.Result{r}
@@ -69,10 +69,17 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 // and the cut a site is made at would land in the wrong place on any indented
 // script. json1 counts every character as one column.
 //
+// --norc, because ShellCheck otherwise reads a `.shellcheckrc` from each
+// script's directory and every directory above it, then from the user's own
+// config: a `disable=all` in any of them empties the report and passes the
+// row, the one committed where no line of any script shows it, the other on
+// the machine running the check, so a developer's run and CI's would disagree.
+// A directive inside a script still applies, and is referral's to veto.
+//
 // Each script is passed as `./<path>`, so a file whose name begins with `-` is
 // read as a file rather than as an option.
 func argv(scripts []string) []string {
-	args := []string{"--format=json1"}
+	args := []string{"--format=json1", "--norc"}
 	for _, s := range scripts {
 		args = append(args, "./"+s)
 	}
