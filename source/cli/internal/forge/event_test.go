@@ -52,3 +52,90 @@ func TestLoadPullRequestEventWithoutATitle(t *testing.T) {
 		t.Errorf("event = %+v, want number 9 taken from the pull request and no title", event)
 	}
 }
+
+// The realistic payload, abbreviated to the fields read: the platform names the
+// originating pull request nowhere but the queue ref, so a payload parsed
+// without reading that ref names nothing to compare a clearance against.
+const mergeGroupPayload = `{
+  "action": "checks_requested",
+  "merge_group": {
+    "head_sha": "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567",
+    "head_ref": "refs/heads/gh-readonly-queue/main/pr-69-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "head_commit": {"id": "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567", "message": "feat: a change"},
+    "base_sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "base_ref": "refs/heads/main"
+  },
+  "repository": {"full_name": "vipengele/typescript"},
+  "sender": {"login": "octocat"}
+}`
+
+func TestLoadMergeGroupEventReadsTheQueueRevisionAndItsEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(mergeGroupPayload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	event, err := LoadMergeGroupEvent(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.MergeGroup.HeadSHA != "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567" {
+		t.Errorf("HeadSHA = %q, want the revision the queue built", event.MergeGroup.HeadSHA)
+	}
+	if event.MergeGroup.BaseSHA != "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d" {
+		t.Errorf("BaseSHA = %q, want the tip the entry was replayed onto", event.MergeGroup.BaseSHA)
+	}
+	if event.Repository.FullName != "vipengele/typescript" {
+		t.Errorf("FullName = %q, want the repository the payload names", event.Repository.FullName)
+	}
+	if got := event.BaseBranch(); got != "main" {
+		t.Errorf("BaseBranch() = %q, want the branch without its ref prefix", got)
+	}
+	entry, err := event.QueueEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Number != 69 {
+		t.Errorf("Number = %d, want the pull request the queue ref names", entry.Number)
+	}
+	// The revision the name carries is the base the entry was replayed onto,
+	// not the pull request's head: a caller reading it as a head would compare
+	// a clearance against a revision no clearance was given for.
+	if entry.BaseSHA != "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d" {
+		t.Errorf("BaseSHA = %q, want the revision the ref's own name carries", entry.BaseSHA)
+	}
+}
+
+// A base branch may hold slashes, and the segments between the prefix and the
+// entry are the branch's rather than something to parse.
+func TestQueueEntryReadsTheLastSegmentOfANestedBaseBranch(t *testing.T) {
+	var event MergeGroupEvent
+	event.MergeGroup.HeadRef = "refs/heads/gh-readonly-queue/release/1.x/pr-412-deadbeefdeadbeef"
+
+	entry, err := event.QueueEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Number != 412 {
+		t.Errorf("Number = %d, want 412", entry.Number)
+	}
+}
+
+// A ref this command cannot read names no pull request, and nothing about a
+// clearance can be decided from a guess at which one it was.
+func TestQueueEntryRefusesARefThatNamesNoEntry(t *testing.T) {
+	for _, ref := range []string{
+		"refs/heads/main",
+		"refs/heads/gh-readonly-queue/main",
+		"refs/heads/gh-readonly-queue/main/pr-69",
+		"refs/heads/gh-readonly-queue/main/pr-0-deadbeefdead",
+		"refs/heads/gh-readonly-queue/main/pr-69-zz",
+		"",
+	} {
+		var event MergeGroupEvent
+		event.MergeGroup.HeadRef = ref
+		if entry, err := event.QueueEntry(); err == nil {
+			t.Errorf("QueueEntry() on %q = %+v, want a refusal", ref, entry)
+		}
+	}
+}

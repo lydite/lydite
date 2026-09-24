@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -76,6 +79,111 @@ type PullRequestEvent struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	} `json:"pull_request"`
+}
+
+// MergeGroupEvent is the part of a merge_group payload the queue-time path
+// needs: the revision the queue built, the ref it built it on, and the base it
+// replayed onto.
+//
+// A merge queue entry is the change replayed on the base branch's current tip,
+// so the revision here exists on the queue's own ref and on no pull request.
+// Nothing can have cleared it — a gh-readonly-queue ref carries no comment
+// surface — which is why the decision the entry renders is recomputed and
+// compared against the clearance the originating pull request holds. See
+// docs/adr/0053-a-clearance-carries-forward-when-the-decision-it-was-given-for-is-unchanged.md.
+//
+// The originating pull request is named nowhere else in the payload: the
+// platform encodes it in the queue ref, which QueueEntry reads.
+type MergeGroupEvent struct {
+	Action     string `json:"action"`
+	MergeGroup struct {
+		// HeadSHA is the commit the queue built, and the revision a verdict
+		// about this entry is published against.
+		HeadSHA string `json:"head_sha"`
+		// HeadRef is the queue ref, `refs/heads/gh-readonly-queue/<base
+		// branch>/pr-<number>-<sha>`.
+		HeadRef string `json:"head_ref"`
+		// BaseSHA is the base branch's tip the entry was replayed onto, and
+		// BaseRef names that branch.
+		BaseSHA string `json:"base_sha"`
+		BaseRef string `json:"base_ref"`
+	} `json:"merge_group"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// LoadMergeGroupEvent reads a merge_group webhook payload from disk.
+func LoadMergeGroupEvent(path string) (MergeGroupEvent, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- path is the platform's own GITHUB_EVENT_PATH or the --event flag, supplied by whoever runs lydite, not untrusted remote input
+	if err != nil {
+		return MergeGroupEvent{}, fmt.Errorf("reading the event payload: %w", err)
+	}
+	var event MergeGroupEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return MergeGroupEvent{}, fmt.Errorf("parsing the event payload: %w", err)
+	}
+	return event, nil
+}
+
+// QueueRefPrefix is what the platform names every merge-queue ref under, after
+// the `refs/heads/` every branch ref carries.
+const QueueRefPrefix = "gh-readonly-queue/"
+
+const branchRefPrefix = "refs/heads/"
+
+// queueEntryPattern matches the segment of a queue ref that names one entry.
+// The trailing revision is the base branch's own tip when the group was
+// formed, not the pull request's head — the platform builds the name out of
+// what the entry was replayed onto.
+var queueEntryPattern = regexp.MustCompile(`^pr-([0-9]+)-([0-9a-fA-F]{7,40})$`)
+
+// QueueEntry is the pull request a queue ref names.
+type QueueEntry struct {
+	// Number is the originating pull request.
+	Number int
+	// BaseSHA is the revision the ref's own name carries: the base branch's
+	// tip the entry was replayed onto. It is the platform's spelling of the
+	// name and not a base anything is measured against — the payload's own
+	// base_sha, and a locally resolved merge-base, are the revisions for that.
+	BaseSHA string
+}
+
+// BaseBranch is the branch the entry is queued for, as a name rather than a
+// ref.
+func (e MergeGroupEvent) BaseBranch() string {
+	return strings.TrimPrefix(e.MergeGroup.BaseRef, branchRefPrefix)
+}
+
+// QueueEntry reads the originating pull request out of the queue ref.
+//
+// The last segment is the one read. A base branch may hold slashes
+// (`release/1.x`), so the segments between the prefix and the entry are the
+// branch's and are not parsed; and when the queue groups several pull requests
+// into one ref, the entry named is the one the platform put last. A group
+// carrying more than the one change refers rather than misreads: the decision
+// recomputed over it covers every change in the group, so its fingerprint
+// differs from any single pull request's and the comparison does not match.
+//
+// A ref that is not a queue ref, or whose last segment names no entry, is an
+// error. This path exists for one event and the ref is the only place that
+// event names a pull request, so a ref it cannot read leaves nothing to
+// compare against rather than something to guess at.
+func (e MergeGroupEvent) QueueEntry() (QueueEntry, error) {
+	ref := strings.TrimPrefix(e.MergeGroup.HeadRef, branchRefPrefix)
+	if !strings.HasPrefix(ref, QueueRefPrefix) {
+		return QueueEntry{}, fmt.Errorf("%q is not a merge-queue ref, so it names no pull request", e.MergeGroup.HeadRef)
+	}
+	segments := strings.Split(strings.TrimPrefix(ref, QueueRefPrefix), "/")
+	match := queueEntryPattern.FindStringSubmatch(segments[len(segments)-1])
+	if match == nil {
+		return QueueEntry{}, fmt.Errorf("the merge-queue ref %q does not end in a pr-<number>-<sha> segment, so it names no pull request", e.MergeGroup.HeadRef)
+	}
+	number, err := strconv.Atoi(match[1])
+	if err != nil || number <= 0 {
+		return QueueEntry{}, fmt.Errorf("the merge-queue ref %q names no pull request number", e.MergeGroup.HeadRef)
+	}
+	return QueueEntry{Number: number, BaseSHA: match[2]}, nil
 }
 
 // LoadPullRequestEvent reads a pull_request webhook payload from disk.

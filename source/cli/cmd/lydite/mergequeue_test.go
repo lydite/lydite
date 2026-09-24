@@ -1,0 +1,430 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"lydite/lydite/internal/referral"
+)
+
+// fakeRelay answers both endpoints the queue path talks to and keeps every
+// request, so what is submitted is asserted rather than inferred from an exit
+// code.
+type fakeRelay struct {
+	requests []*http.Request
+	bodies   []string
+	// status and answer are what the relay's own endpoint replies.
+	status int
+	answer string
+	// tokenStatus is what the Actions token endpoint replies.
+	tokenStatus int
+}
+
+func (f *fakeRelay) Do(req *http.Request) (*http.Response, error) {
+	body := ""
+	if req.Body != nil {
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = string(raw)
+	}
+	f.requests = append(f.requests, req)
+	f.bodies = append(f.bodies, body)
+
+	code, reply := f.tokenStatus, `{"value":"an-oidc-token"}`
+	if strings.HasSuffix(req.URL.Path, queueRoute) {
+		code, reply = f.status, f.answer
+	}
+	return &http.Response{
+		StatusCode: code,
+		Body:       io.NopCloser(strings.NewReader(reply)),
+		Header:     http.Header{},
+	}, nil
+}
+
+func newFakeRelay() *fakeRelay {
+	return &fakeRelay{
+		status:      http.StatusOK,
+		answer:      `{"state":"success","description":"cleared by @octocat at 1a2b3c4d5e6f"}`,
+		tokenStatus: http.StatusOK,
+	}
+}
+
+// queueEvent writes a merge_group payload naming one entry on the given
+// revision.
+func queueEvent(t *testing.T, number int, headSHA, baseBranch string) string {
+	t.Helper()
+	payload := fmt.Sprintf(`{
+	  "action": "checks_requested",
+	  "merge_group": {
+	    "head_sha": %q,
+	    "head_ref": "refs/heads/gh-readonly-queue/%s/pr-%d-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+	    "base_sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+	    "base_ref": "refs/heads/%s"
+	  },
+	  "repository": {"full_name": "vipengele/typescript"}
+	}`, headSHA, baseBranch, number, baseBranch)
+	path := filepath.Join(t.TempDir(), "merge-group.json")
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// runQueueCmd drives the command against a fake transport, with the mint
+// endpoint the platform sets for a job granted id-token: write.
+func runQueueCmd(t *testing.T, relay *fakeRelay, dir, base, eventPath string) (string, error) {
+	t.Helper()
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+	var out bytes.Buffer
+	cmd := newQueueCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := runQueue(context.Background(), cmd, relay, queueOptions{
+		dir:       dir,
+		eventPath: eventPath,
+		relay:     "https://relay.example",
+		base:      base,
+		noColor:   true,
+	})
+	return out.String(), err
+}
+
+// submittedRequest is the queue submission's decoded body.
+func submittedRequest(t *testing.T, relay *fakeRelay) queueRequest {
+	t.Helper()
+	for i, req := range relay.requests {
+		if !strings.HasSuffix(req.URL.Path, queueRoute) {
+			continue
+		}
+		var body queueRequest
+		if err := json.Unmarshal([]byte(relay.bodies[i]), &body); err != nil {
+			t.Fatalf("the submitted body does not parse: %v\n%s", err, relay.bodies[i])
+		}
+		return body
+	}
+	t.Fatalf("nothing was submitted to %s", queueRoute)
+	return queueRequest{}
+}
+
+// The submission names the entry, the revision a verdict is published against
+// and the fingerprint of the reasons the recomputed decision refers on. None of
+// it is authority — the relay resolves each against the claim it verified — so
+// what this pins is that the comparison the relay is asked to make is the one
+// the ADR describes.
+func TestQueueSubmitsTheRecomputedFingerprint(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	relay := newFakeRelay()
+	event := queueEvent(t, 69, "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567", "main")
+
+	out, err := runQueueCmd(t, relay, dir, base, event)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+
+	body := submittedRequest(t, relay)
+	decision, err := queueDecision(context.Background(), dir, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := referral.Fingerprint(decision.Uncovered, decision.Disqualifications)
+	if body.Fingerprint != want {
+		t.Errorf("Fingerprint = %q, want %q — the reasons this entry refers on", body.Fingerprint, want)
+	}
+	if body.PullRequest != 69 {
+		t.Errorf("PullRequest = %d, want the pull request the queue ref names", body.PullRequest)
+	}
+	if body.SHA != "9f3b1c2d4e5f60718293a4b5c6d7e8f901234567" {
+		t.Errorf("SHA = %q, want the revision the queue built", body.SHA)
+	}
+	if !strings.Contains(body.QueueRef, "gh-readonly-queue/main/pr-69-") {
+		t.Errorf("QueueRef = %q, want the ref the payload carries", body.QueueRef)
+	}
+	if body.BaseSHA != base {
+		t.Errorf("BaseSHA = %q, want the revision the decision was recomputed against", body.BaseSHA)
+	}
+	// The repository is nowhere in the body: the relay takes it from the
+	// verified claim, so nothing here could name another one.
+	if strings.Contains(relay.bodies[len(relay.bodies)-1], "vipengele") {
+		t.Errorf("the submission names a repository:\n%s", relay.bodies[len(relay.bodies)-1])
+	}
+}
+
+// The request is composed as the relay's own contract: a POST to the route,
+// carrying the OIDC token minted for the relay's origin as its audience, so a
+// token this run presents cannot be replayed against another service.
+func TestQueueSubmissionIsAuthorisedWithATokenMintedForTheRelay(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	relay := newFakeRelay()
+
+	if out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 4, "cafe1234cafe1234cafe1234cafe1234cafe1234", "main")); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+
+	if len(relay.requests) != 2 {
+		t.Fatalf("requests = %d, want the mint and the submission", len(relay.requests))
+	}
+	mint := relay.requests[0]
+	if mint.Method != http.MethodGet || mint.Header.Get("authorization") != "Bearer the-mint-token" {
+		t.Errorf("the mint request is %s with %q", mint.Method, mint.Header.Get("authorization"))
+	}
+	if got := mint.URL.Query().Get("audience"); got != "https://relay.example" {
+		t.Errorf("audience = %q, want the relay's own origin", got)
+	}
+	if got := mint.URL.Query().Get("api-version"); got != "2.0" {
+		t.Errorf("api-version = %q, want the query the platform's endpoint already carries", got)
+	}
+	submission := relay.requests[1]
+	if submission.Method != http.MethodPost {
+		t.Errorf("method = %s, want POST", submission.Method)
+	}
+	if got := submission.URL.String(); got != "https://relay.example"+queueRoute {
+		t.Errorf("url = %q, want the relay's queue route", got)
+	}
+	if got := submission.Header.Get("authorization"); got != "Bearer an-oidc-token" {
+		t.Errorf("authorization = %q, want the minted token", got)
+	}
+	if got := submission.Header.Get("content-type"); got != "application/json" {
+		t.Errorf("content-type = %q", got)
+	}
+}
+
+// The whole of the ADR's equivalence: the same change replayed onto a moved base
+// refers for the same reasons, so it fingerprints the same and the clearance
+// carries forward. A fingerprint over the tree, or over the revision, would
+// differ here and the entry would be stuck.
+func TestTheSameChangeOnAMovedBaseFingerprintsTheSame(t *testing.T) {
+	first, firstBase := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	moved, movedBase := reviewRepo(t,
+		map[string]string{"README.md": "hello", "docs/other.md": "somebody else's merge"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	ctx := context.Background()
+	before, err := queueDecision(ctx, first, firstBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := queueDecision(ctx, moved, movedBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := referral.Fingerprint(before.Uncovered, before.Disqualifications)
+	if got := referral.Fingerprint(after.Uncovered, after.Disqualifications); got != want {
+		t.Errorf("fingerprint = %q, want %q — the reasons are unchanged, so the clearance carries", got, want)
+	}
+}
+
+// A change referring for different reasons fingerprints differently, which is
+// the half that makes the comparison worth making.
+func TestADifferentReasonFingerprintsDifferently(t *testing.T) {
+	ctx := context.Background()
+	one, oneBase := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	two, twoBase := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/billing.go": "package src"},
+	)
+
+	first, err := queueDecision(ctx, one, oneBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := queueDecision(ctx, two, twoBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if referral.Fingerprint(first.Uncovered, first.Disqualifications) ==
+		referral.Fingerprint(second.Uncovered, second.Disqualifications) {
+		t.Error("two changes uncovering different paths fingerprint alike, so no comparison could tell them apart")
+	}
+}
+
+// The exemptions come from the base commit, never from the queue's own tree: an
+// entry carrying a widening of the allowlist must get no benefit from it, the
+// property Decide already always reads the file from the merge-base for.
+func TestQueueReadsExemptionsFromTheBaseNotTheQueuedTree(t *testing.T) {
+	selfServing := "exemptions:\n  - name: anything\n    reason: it is fine, trust me\n    paths: [\"**\"]\n"
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{referral.FileName: selfServing, "src/auth.go": "package src"},
+	)
+
+	decision, err := queueDecision(context.Background(), dir, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Referred {
+		t.Error("a queued change that exempts itself is not exempt")
+	}
+	if len(decision.Uncovered) == 0 {
+		t.Error("the recomputed decision names no uncovered path, so its fingerprint would read as fully exempt")
+	}
+}
+
+// A pending answer is the mechanism working: the reasons moved, so the entry
+// drops out of the queue and the author clears the pull request again. Failing
+// the run would report that as a broken pipeline.
+func TestQueuePendingIsNotAFailingRun(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	relay := newFakeRelay()
+	relay.answer = `{"state":"pending","description":"the decision is not the one that was cleared"}`
+
+	out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "not the one that was cleared") {
+		t.Errorf("the report does not say what the relay answered:\n%s", out)
+	}
+}
+
+// Nothing falls back, because there is nothing to fall back to: this job holds
+// no token that could publish a status. A refused submission is "no verdict was
+// published", which has to be said out loud.
+func TestQueueFailsWhenTheRelayPublishesNothing(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	for _, code := range []int{http.StatusForbidden, http.StatusConflict, http.StatusBadGateway} {
+		relay := newFakeRelay()
+		relay.status = code
+		relay.answer = `{"error":"refused"}`
+
+		out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+		if err == nil {
+			t.Fatalf("a %d answer must fail the run:\n%s", code, out)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprint(code)) {
+			t.Errorf("error = %v, want the answer's own status code", err)
+		}
+	}
+}
+
+// A 200 naming no state says nothing about what was published, and a run that
+// reported it as a verdict would be a green step nobody wrote.
+func TestQueueFailsOnAnAnswerNamingNoState(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	relay := newFakeRelay()
+	relay.answer = `{"description":"something"}`
+
+	if out, err := runQueueCmd(t, relay, dir, base, queueEvent(t, 7, "beef1234beef1234beef1234beef1234beef1234", "main")); err == nil {
+		t.Fatalf("an answer naming no state must fail the run:\n%s", out)
+	}
+}
+
+// A job without id-token: write has nothing to present, and is told so here
+// rather than by a 401 from the relay.
+func TestQueueFailsWithoutAMintEndpoint(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	relay := newFakeRelay()
+
+	err := runQueue(context.Background(), newQueueCmd(), relay, queueOptions{
+		dir:       dir,
+		base:      base,
+		eventPath: queueEvent(t, 7, "beef1234beef1234beef1234beef1234beef1234", "main"),
+		relay:     "https://relay.example",
+		noColor:   true,
+	})
+	if err == nil {
+		t.Fatal("a job that cannot mint an OIDC token must say so")
+	}
+	if len(relay.requests) != 0 {
+		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
+	}
+}
+
+// The relay is the only route, so a run given none is refused before anything
+// is measured rather than recomputing a decision it has nowhere to submit.
+func TestQueueNeedsARelay(t *testing.T) {
+	relay := newFakeRelay()
+	err := runQueue(context.Background(), newQueueCmd(), relay, queueOptions{dir: t.TempDir(), base: "auto", noColor: true})
+	if err == nil || !strings.Contains(err.Error(), "--relay") {
+		t.Fatalf("err = %v, want a refusal naming --relay", err)
+	}
+}
+
+// A payload that is not a merge_group's names no queue revision, and there is
+// nothing to publish a verdict against.
+func TestQueueRefusesAPayloadThatIsNotAMergeGroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(`{"pull_request":{"number":9,"head":{"sha":"abc"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runQueue(context.Background(), newQueueCmd(), newFakeRelay(), queueOptions{
+		dir:       t.TempDir(),
+		base:      "auto",
+		eventPath: path,
+		relay:     "https://relay.example",
+		noColor:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "merge_group") {
+		t.Fatalf("err = %v, want a refusal naming the event this command answers", err)
+	}
+}
+
+// The route and the origin are composed rather than assembled by hand at the
+// call site, so a trailing slash on the configured origin does not become a
+// path the relay has no route for.
+func TestTheSubmissionURLToleratesATrailingSlash(t *testing.T) {
+	req, err := newQueueRequest(context.Background(), "https://relay.example/", "token", queueRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := req.URL.String(); got != "https://relay.example"+queueRoute {
+		t.Errorf("url = %q", got)
+	}
+}
+
+// The audience is escaped into the mint query rather than concatenated, so an
+// origin carrying anything a query reserves names one audience and not two.
+func TestTheMintQueryEscapesTheAudience(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+	relay := newFakeRelay()
+
+	if _, err := actionsIDToken(context.Background(), relay, "https://relay.example/a&b=c"); err != nil {
+		t.Fatal(err)
+	}
+	if got := relay.requests[0].URL.Query().Get("audience"); got != "https://relay.example/a&b=c" {
+		t.Errorf("audience = %q, want the origin whole", got)
+	}
+	if !strings.Contains(relay.requests[0].URL.RawQuery, url.QueryEscape("https://relay.example/a&b=c")) {
+		t.Errorf("raw query = %q, want the audience escaped", relay.requests[0].URL.RawQuery)
+	}
+}
