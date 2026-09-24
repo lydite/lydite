@@ -746,10 +746,10 @@ func findingCounts(dir string, decl component.File, cfg config.Config, found []f
 	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
 	perComponent := map[string]map[string]int{}
 	for _, c := range decl.Components {
-		lang := langOf(c)
-		// A component declaring its own command implies no language, and a
-		// language switched off in .lydite/config.yml is one whose checks
-		// never run. Neither has a gate that applies, so neither records a
+		lang := c.ScanLang()
+		// A component stating no language it is scanned as, and a language
+		// switched off in .lydite/config.yml, are ones whose checks never
+		// run. Neither has a gate that applies, so neither records a
 		// zero that would read as a clean scan.
 		if lang == "" || !langEnabled(lang, cfg) {
 			continue

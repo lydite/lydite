@@ -124,7 +124,7 @@ func newScanCmd() *cobra.Command {
 			// spent to make a report harder to read.
 			scanned := map[string]string{}
 			for _, c := range file.Components {
-				lang := langOf(c)
+				lang := c.ScanLang()
 				if !scannedLang(lang) {
 					// Said out loud rather than skipped. A component lydite
 					// has no scanner for is one nothing scans, and dropping it
@@ -132,10 +132,10 @@ func newScanCmd() *cobra.Command {
 					// scanned and found clean.
 					//
 					// Asked before langEnabled, which answers false for every
-					// language it has no key for: a language with a runner and
-					// no scanner would otherwise leave through the opt-out
-					// branch and be skipped as though the repository had
-					// switched it off.
+					// language it has no key for: a language a component states,
+					// by its runner or its own lang:, that has no scanner would
+					// otherwise leave through the opt-out branch and be skipped
+					// as though the repository had switched it off.
 					for _, row := range unscannedRows(c.Name, lang) {
 						rep.Add(row)
 					}
@@ -376,12 +376,14 @@ func declaredEnvNames(c component.Component, composed []string) []string {
 //
 // Only components whose language is enabled: `enabled: false` says lydite
 // runs no check over that language's code, so provisioning its toolchain
-// would download a compiler nothing is going to invoke. A component that
-// declares its own command implies no language and needs nothing.
+// would download a compiler nothing is going to invoke. The language is the
+// one the component is scanned as, so a command component stating `lang: go`
+// is provisioned the Go toolchain its checks run under, and one stating no
+// language needs nothing.
 func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
 	var out []toolchain.Unit
 	for _, c := range file.Components {
-		lang := langOf(c)
+		lang := c.ScanLang()
 		if lang == "" || !langEnabled(lang, cfg) {
 			continue
 		}
@@ -390,11 +392,11 @@ func scanUnits(file component.File, cfg config.Config) []toolchain.Unit {
 	return out
 }
 
-// anyLanguageDeclared reports whether some component names a runner, and so
-// implies source in a language lydite knows.
+// anyLanguageDeclared reports whether some component states a language its
+// source is scanned as, by its runner or its own lang:.
 func anyLanguageDeclared(file component.File) bool {
 	for _, c := range file.Components {
-		if langOf(c) != "" {
+		if c.ScanLang() != "" {
 			return true
 		}
 	}
