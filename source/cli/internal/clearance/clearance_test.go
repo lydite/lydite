@@ -440,6 +440,13 @@ func TestADescriptionCarryingNoFingerprintIsNotAnEmptyOne(t *testing.T) {
 		{"an empty field", "cleared by @pedromvgomes at 4c2eaea [fp:]", "", true},
 		{"a field the platform truncated", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e2d3c…", "", false},
 		{"bracketed text that is not a field", "cleared by @pedromvgomes at 4c2eaea [see the thread]", "", false},
+		// A fingerprint holds neither a space nor a bracket, so a value
+		// carrying either is a marker that fell where the human half happens to
+		// read like one. Reading it as a field would compare a decision against
+		// prose.
+		{"a marker followed by prose", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e2d3c] [see the thread]", "", false},
+		{"a value holding a space", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e 2d3c]", "", false},
+		{"a value holding an opening bracket", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e[2d3c]", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := FingerprintIn(tc.description)

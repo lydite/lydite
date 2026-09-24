@@ -3,6 +3,7 @@ package forge
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,27 @@ func TestQueueEntryReadsTheLastSegmentOfANestedBaseBranch(t *testing.T) {
 
 // A ref this command cannot read names no pull request, and nothing about a
 // clearance can be decided from a guess at which one it was.
+// A payload that could not be read at all and one that is not JSON are both
+// "there is no merge group here", and each names which of the two it was: a
+// workflow that wrote the event to another path and one that wrote something
+// other than the platform's own document are different things to go and fix.
+func TestLoadMergeGroupEventRefusesAPayloadItCannotRead(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	if _, err := LoadMergeGroupEvent(missing); err == nil ||
+		!strings.Contains(err.Error(), "reading the event payload") {
+		t.Errorf("err = %v, want a refusal naming the read", err)
+	}
+
+	malformed := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(malformed, []byte(`{"merge_group":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadMergeGroupEvent(malformed); err == nil ||
+		!strings.Contains(err.Error(), "parsing the event payload") {
+		t.Errorf("err = %v, want a refusal naming the parse", err)
+	}
+}
+
 func TestQueueEntryRefusesARefThatNamesNoEntry(t *testing.T) {
 	for _, ref := range []string{
 		"refs/heads/main",

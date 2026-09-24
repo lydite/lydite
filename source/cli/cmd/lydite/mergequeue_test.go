@@ -31,6 +31,33 @@ type fakeRelay struct {
 	// tokenStatus and tokenAnswer are what the Actions token endpoint replies.
 	tokenStatus int
 	tokenAnswer string
+	// fails and tokenFails are how each endpoint fails short of answering.
+	fails      failMode
+	tokenFails failMode
+}
+
+// failMode is how the fake fails rather than what it answers.
+//
+// A transport that never completed and a body that stops part way through are
+// neither of them a status code, so neither is something an answer document can
+// say — and both leave the run with no verdict, which is the whole of what this
+// path has to report.
+type failMode int
+
+const (
+	// answers is the endpoint replying, whatever it replies.
+	answers failMode = iota
+	// transportFails is a request that never completed.
+	transportFails
+	// bodyFails is a response whose body errors part way through the read.
+	bodyFails
+)
+
+// brokenBody is a response body that errors rather than ending.
+type brokenBody struct{}
+
+func (brokenBody) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("the connection dropped before the answer ended")
 }
 
 func (f *fakeRelay) Do(req *http.Request) (*http.Response, error) {
@@ -45,13 +72,20 @@ func (f *fakeRelay) Do(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, req)
 	f.bodies = append(f.bodies, body)
 
-	code, reply := f.tokenStatus, f.tokenAnswer
+	code, reply, mode := f.tokenStatus, f.tokenAnswer, f.tokenFails
 	if strings.HasSuffix(req.URL.Path, queueRoute) {
-		code, reply = f.status, f.answer
+		code, reply, mode = f.status, f.answer, f.fails
+	}
+	if mode == transportFails {
+		return nil, fmt.Errorf("dial tcp: connection refused")
+	}
+	var content io.Reader = strings.NewReader(reply)
+	if mode == bodyFails {
+		content = brokenBody{}
 	}
 	return &http.Response{
 		StatusCode: code,
-		Body:       io.NopCloser(strings.NewReader(reply)),
+		Body:       io.NopCloser(content),
 		Header:     http.Header{},
 	}, nil
 }
@@ -62,6 +96,8 @@ func newFakeRelay() *fakeRelay {
 		answer:      `{"state":"success","description":"cleared by @octocat at 1a2b3c4d5e6f"}`,
 		tokenStatus: http.StatusOK,
 		tokenAnswer: `{"value":"an-oidc-token"}`,
+		fails:       answers,
+		tokenFails:  answers,
 	}
 }
 
@@ -465,6 +501,13 @@ func TestQueueFailsWhenTheMintAnswersNoToken(t *testing.T) {
 					t.Error("the comparison was submitted without a token to authorise it")
 				}
 			}
+			// No token comes back either: a caller reading the value alongside
+			// the error would present an unminted string as a bearer token,
+			// which the relay would answer 401 to rather than naming the
+			// missing permission.
+			if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil {
+				t.Errorf("actionsIDToken = %q, %v; want no token and a refusal", token, err)
+			}
 		})
 	}
 }
@@ -596,6 +639,228 @@ func TestTheSubmissionURLToleratesATrailingSlash(t *testing.T) {
 	}
 	if got := req.URL.String(); got != "https://relay.example"+queueRoute {
 		t.Errorf("url = %q", got)
+	}
+}
+
+// The payload is the whole of what says which entry this run is for, so a run
+// pointed at no payload and one pointed at a payload that is not there are both
+// refused before anything is measured — and each says which it was, because a
+// workflow that never wrote the event and one that wrote it elsewhere are
+// different things to go and fix.
+func TestQueueRefusesAnEventItCannotRead(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	t.Setenv("GITHUB_EVENT_PATH", "")
+
+	err := runQueue(context.Background(), newQueueCmd(), newFakeRelay(), queueOptions{
+		dir:     dir,
+		base:    base,
+		relay:   "https://relay.example",
+		noColor: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_EVENT_PATH") {
+		t.Fatalf("err = %v, want a refusal naming where the payload is looked for", err)
+	}
+
+	out, err := runQueueCmd(t, newFakeRelay(), dir, base, filepath.Join(t.TempDir(), "absent.json"))
+	if err == nil || !strings.Contains(err.Error(), "reading the event payload") {
+		t.Fatalf("err = %v, want a refusal naming the read\n%s", err, out)
+	}
+}
+
+// A merge group naming a revision but no entry has no pull request to read a
+// clearance off, and the revision alone is not something a comparison can be
+// made against.
+func TestQueueRefusesARefThatNamesNoEntry(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	path := filepath.Join(t.TempDir(), "merge-group.json")
+	payload := `{
+	  "merge_group": {
+	    "head_sha": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+	    "head_ref": "refs/heads/gh-readonly-queue/main",
+	    "base_ref": "refs/heads/main"
+	  }
+	}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runQueueCmd(t, newFakeRelay(), dir, base, path)
+	if err == nil {
+		t.Fatalf("a ref naming no entry must fail the run:\n%s", out)
+	}
+}
+
+// The base decides what the decision is recomputed over, so a base this
+// checkout cannot resolve leaves nothing to fingerprint — and a run that
+// submitted a fingerprint taken over the wrong diff would compare a decision
+// nobody made.
+func TestQueueRefusesABaseItCannotResolve(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	out, err := runQueueCmd(t, newFakeRelay(), dir,
+		"1111111111111111111111111111111111111111",
+		queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+	if err == nil || !strings.Contains(err.Error(), "does not name a commit") {
+		t.Fatalf("err = %v, want a refusal naming the base\n%s", err, out)
+	}
+}
+
+// An exemptions file the base commit carries and that does not parse states no
+// exemptions and does not state that either: every condition would silently
+// fail closed, fingerprinting a decision that refers for reasons the file may
+// well have covered. The run is refused instead.
+func TestQueueRefusesExemptionsTheBaseCannotParse(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello", ".lydite/exemptions.yml": "exemptions: ["},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	relay := newFakeRelay()
+	out, err := runQueueCmd(t, relay, dir, base,
+		queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+	if err == nil {
+		t.Fatalf("an exemptions file that does not parse must fail the run:\n%s", out)
+	}
+	if len(relay.requests) != 0 {
+		t.Errorf("requests = %d, want nothing submitted for a decision that was never recomputed", len(relay.requests))
+	}
+}
+
+// A revision the repository does not have leaves no diff to read, and a
+// decision recomputed over no diff refers for nothing — which is the answer
+// that merges unattended. It is refused rather than reported.
+func TestQueueDecisionRefusesADiffItCannotRead(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+
+	if _, err := queueDecision(context.Background(), dir, "1111111111111111111111111111111111111111"); err == nil {
+		t.Fatal("a base the repository does not have must refuse rather than recompute an empty decision")
+	}
+}
+
+// --relay is a string a workflow passes, so a value that composes no URL is
+// caller-reachable input and not a shape only a test can make. It is refused
+// where it is composed, with the origin named, rather than reaching the
+// transport as a request nothing could send.
+func TestQueueRefusesAnOriginThatComposesNoURL(t *testing.T) {
+	if _, err := newQueueRequest(context.Background(), "https://relay.example\n", "token", queueRequest{}); err == nil {
+		t.Fatal("an origin carrying a control character composes no request, and must say so")
+	}
+
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+	relay := newFakeRelay()
+	answer, err := submitQueueComparison(context.Background(), relay, "https://relay.example\n", queueRequest{})
+	if err == nil {
+		t.Fatalf("answer = %+v, want the refusal newQueueRequest composed", answer)
+	}
+	// The mint still ran — the audience is escaped, so the origin only fails
+	// where it becomes a path — and nothing was submitted with the token it
+	// answered.
+	if len(relay.requests) != 1 {
+		t.Fatalf("requests = %d, want the mint alone", len(relay.requests))
+	}
+	if strings.HasSuffix(relay.requests[0].URL.Path, queueRoute) {
+		t.Error("a request that could not be composed reached the relay anyway")
+	}
+}
+
+// An unreachable relay and an answer that stops mid-read are both "no verdict
+// was published", and neither is a status code. A run that exited 0 over either
+// would report an entry as carried forward on the strength of nothing.
+func TestQueueFailsWhenTheSubmissionNeverCompletes(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	for _, tc := range []struct {
+		name string
+		mode failMode
+		want string
+	}{
+		{"an unreachable relay", transportFails, "submitting the comparison"},
+		{"an answer that stops part way", bodyFails, "reading the relay's answer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relay := newFakeRelay()
+			relay.fails = tc.mode
+
+			out, err := runQueueCmd(t, relay, dir, base,
+				queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+			if err == nil {
+				t.Fatalf("%s must fail the run:\n%s", tc.name, out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The mint fails the same three ways, and a job that presented an unminted
+// token would be told 401 by the relay — which says the request was refused
+// rather than that this job never held a token to send.
+func TestQueueFailsWhenTheMintNeverAnswers(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	for _, tc := range []struct {
+		name string
+		mode failMode
+		want string
+	}{
+		{"an unreachable endpoint", transportFails, "requesting an Actions OIDC token"},
+		{"an answer that stops part way", bodyFails, "reading the Actions OIDC token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relay := newFakeRelay()
+			relay.tokenFails = tc.mode
+
+			out, err := runQueueCmd(t, relay, dir, base,
+				queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
+			if err == nil {
+				t.Fatalf("%s must fail the run:\n%s", tc.name, out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+			for _, req := range relay.requests {
+				if strings.HasSuffix(req.URL.Path, queueRoute) {
+					t.Error("the comparison was submitted without a token to authorise it")
+				}
+			}
+		})
+	}
+}
+
+// The mint endpoint is the platform's own, read from the environment, and an
+// environment naming one that composes no URL is refused where it is composed:
+// the audience would otherwise be appended to a string nothing can send, and
+// the run would report the mint as having answered nothing rather than as
+// never having been asked.
+func TestTheMintRefusesAnEndpointThatComposesNoURL(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0\n")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+	relay := newFakeRelay()
+
+	token, err := actionsIDToken(context.Background(), relay, "https://relay.example")
+	if token != "" || err == nil || !strings.Contains(err.Error(), "composing the token request") {
+		t.Fatalf("actionsIDToken = %q, %v; want a refusal naming the composition", token, err)
+	}
+	if len(relay.requests) != 0 {
+		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
 	}
 }
 

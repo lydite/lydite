@@ -1141,7 +1141,15 @@ interface QueueCalls {
 interface QueueTree {
   queued?: ComparedFile[];
   own?: ComparedFile[];
-  comparison?: "missing" | "unlisted" | "wide" | "blobless";
+  comparison?: "missing" | "unlisted" | "wide" | "blobless" | "refused";
+  // How the statuses list answers short of a usable list: a revision the
+  // platform does not have, a read it refused, and a body that is not a list at
+  // all. A missing revision carries no clearance; the other two are outages
+  // rather than answers, and reach the caller as the route's own 502.
+  standing?: "missing" | "refused" | "unshaped";
+  // A status write the platform refused, which is a verdict that was not
+  // recorded however well the comparison went.
+  write?: "refused";
 }
 
 // The platform's own cap on the files one comparison reports.
@@ -1170,6 +1178,15 @@ function queueStub(
     }
     if (/\/commits\/[^/]+\/statuses(\?|$)/.test(target)) {
       calls.read?.push(target);
+      if (tree.standing === "missing") {
+        return new Response("", { status: 404 });
+      }
+      if (tree.standing === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
+      if (tree.standing === "unshaped") {
+        return Response.json({ context: "lydite/clearance" });
+      }
       return Response.json(
         clearance
           ? [
@@ -1192,6 +1209,9 @@ function queueStub(
       if (tree.comparison === "unlisted") {
         return Response.json({ status: "ahead" });
       }
+      if (tree.comparison === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
       const changed =
         comparison[2] === PR_HEAD ? (tree.own ?? ENTRY_PATHS) : (tree.queued ?? ENTRY_PATHS);
       if (tree.comparison === "blobless") {
@@ -1211,6 +1231,9 @@ function queueStub(
     }
     if (target.includes("/statuses/")) {
       calls.written?.push({ url: target, init });
+      if (tree.write === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
       return Response.json({ id: 1 });
     }
     throw new Error(`the relay called something unexpected: ${target}`);
@@ -1463,8 +1486,12 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       // biome-ignore lint/security/noSecrets: a synthetic clearance description whose fingerprint field the platform cut short
       "cleared by @octocat at 1a2b3c4d5e6f [fp:0123456789abc",
       "cleared by @octocat [at] 1a2b3c4d5e6f",
+      // Bracketed text that is not a field: it closes the way a field does, so
+      // the opening marker is the whole of what tells the two apart.
+      "cleared by @octocat at 1a2b3c4d5e6f [by hand]",
       `cleared by @octocat [fp:]`,
       `cleared by @octocat [fp:has a space]`,
+      `cleared by @octocat [fp:0123456789abcdef] [see the thread]`,
     ]) {
       const { response, written } = await compare({ description });
       expect(response.status).toBe(200);
@@ -1660,6 +1687,97 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       queueEnv(),
     );
     expect(response.status).toBe(401);
+  });
+
+  // The ref shape `queueRun` checks is the prefix alone, which says nothing
+  // about the entry the last segment names. A ref that clears the prefix and
+  // names no entry has no pull request to read a clearance off, and a verdict
+  // published without one would be a clearance carried forward from nowhere.
+  it("refuses a queue ref that clears the prefix and names no entry", async () => {
+    for (const ref of [
+      "refs/heads/gh-readonly-queue/main",
+      "refs/heads/gh-readonly-queue/main/pr-7",
+      "refs/heads/gh-readonly-queue/main/pr-7-zz",
+      // Pull requests are numbered from 1, so zero names none — and a number
+      // wider than a double holds exactly names none either.
+      "refs/heads/gh-readonly-queue/main/pr-0-1a2b3c4d5e6f",
+      "refs/heads/gh-readonly-queue/main/pr-111111111111111111111-1a2b3c4d5e6f",
+    ]) {
+      const { response, written, read, compared } = await compare(
+        cleared,
+        { ...entry, queue_ref: ref },
+        queueEnv(),
+        { ref },
+      );
+      expect(response.status).toBe(403);
+      expect(JSON.stringify(await response.json())).toContain("names no pull request");
+      expect(written).toHaveLength(0);
+      expect(read).toHaveLength(0);
+      expect(compared).toHaveLength(0);
+    }
+  });
+
+  // A comparison the platform refused is not a comparison, and a batch that
+  // could not be checked is not a batch that was ruled out. It is an outage
+  // rather than a refusal, so it reaches the caller as the route's own 502 and
+  // stays retryable.
+  it("fails the request when a comparison is refused rather than answered", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      comparison: "refused",
+    });
+
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(written).toHaveLength(0);
+  });
+
+  // A revision the platform does not have carries no clearance, which is the
+  // same answer as a revision carrying none: the entry stays referred.
+  it("publishes pending when the revision the clearance would be on is missing", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "missing",
+    });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "pending" });
+    expect(posted(written).description).toContain("no clearance stands");
+  });
+
+  // A read that failed states nothing at all, so it fails the request rather
+  // than reading as "no clearance" — a clearance that may well stand would
+  // otherwise be published pending over an outage. A body that parses and is
+  // not a list carries no entry under any context, which is a head with no
+  // clearance on it.
+  it("tells a refused standing read apart from one that is no list", async () => {
+    const refused = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "refused",
+    });
+    expect(refused.response.status).toBe(502);
+    expect(JSON.stringify(await refused.response.json())).not.toContain("upstream detail");
+    expect(refused.written).toHaveLength(0);
+
+    const unshaped = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "unshaped",
+    });
+    expect(unshaped.response.status).toBe(200);
+    expect(posted(unshaped.written)).toMatchObject({ state: "pending" });
+    expect(posted(unshaped.written).description).toContain("no clearance stands");
+  });
+
+  // A write the platform refused is a verdict that was not recorded, however
+  // well the comparison went. Answering 200 over it would report an entry as
+  // published against a revision carrying nothing.
+  it("fails the request when the verdict is composed but not recorded", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      write: "refused",
+    });
+
+    expect(response.status).toBe(502);
+    expect(written).toHaveLength(1);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(body).toContain("queue entry");
   });
 
   it("says nothing about lydite's own credentials when the write fails", async () => {
