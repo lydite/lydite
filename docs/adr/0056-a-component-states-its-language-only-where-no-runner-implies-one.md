@@ -183,7 +183,7 @@ slice adds an explicit case for each scanned language without a dependency set, 
 `licence(<name>)` `unmeasured` with the reason that the language declares no dependency set, and
 makes the switch's `default` a panic: a language reaching it has passed `scannedLang`, so an
 unhandled one is a lydite defect rather than an input a repository can supply — the stance
-[the per-language switch rule](../../agentic/rules/a-per-language-counting-switch-panics-on-an-unhandled-grammar.md)
+[the per-language switch rule](../../agentic/rules/refuse-an-unhandled-grammar-rather-than-fall-through.md)
 takes.
 
 **The orphan gate.** A no-suite component claims only the files of its declared language under its
