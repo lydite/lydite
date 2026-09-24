@@ -517,10 +517,10 @@ function gatedEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-// What `GET /commits/:sha/status` answers: the state each context is standing
-// at on that revision, and what reached the endpoint. A stub given no
-// `Standing` throws when the read is attempted, which is how a path that must
-// never read the platform is held to it.
+// What `GET /commits/:sha/statuses` answers: one entry per status ever posted,
+// newest first, and what reached the endpoint. A stub given no `Standing` throws
+// when the read is attempted, which is how a path that must never read the
+// platform is held to it.
 interface Standing {
   states?: Record<string, string>;
   read?: { url: string; init?: RequestInit }[];
@@ -541,17 +541,14 @@ function pullStub(
     if (target.includes("/access_tokens")) {
       return Response.json({ token: "ghs_test" });
     }
-    if (/\/commits\/[^/]+\/status$/.test(target)) {
+    if (/\/commits\/[^/]+\/statuses(\?|$)/.test(target)) {
       if (!standing) {
         throw new Error(`the relay read a standing status it should not have: ${target}`);
       }
       standing.read?.push({ url: target, init });
-      return Response.json({
-        statuses: Object.entries(standing.states ?? {}).map(([context, state]) => ({
-          context,
-          state,
-        })),
-      });
+      return Response.json(
+        Object.entries(standing.states ?? {}).map(([context, state]) => ({ context, state })),
+      );
     }
     const pull = /\/pulls\/(\d+)$/.exec(target);
     if (pull) {
@@ -993,7 +990,9 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
 
     // The state admitted is the platform's answer for the revision the relay
     // resolved, read with the installation token: a request cannot assert the
-    // state it is about to be allowed to move.
+    // state it is about to be allowed to move. The list endpoint and not the
+    // combined one, because that is the only one that answers who posted each
+    // status.
     it("reads the standing state from the platform with the app's token", async () => {
       const read: { url: string; init?: RequestInit }[] = [];
       const { response } = await resolveReferral({
@@ -1003,7 +1002,7 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
       expect(response.status).toBe(200);
       expect(read).toHaveLength(1);
       expect(read[0]?.url).toBe(
-        "https://api.github.com/repos/lydite/proving-ground/commits/abc123/status",
+        "https://api.github.com/repos/lydite/proving-ground/commits/abc123/statuses?per_page=100",
       );
       expect(
         (read[0]?.init?.headers as Record<string, string> | undefined)?.authorization,
@@ -1079,5 +1078,723 @@ describe("gating the referral and clearance contexts on job_workflow_ref", () =>
         expect(written).toHaveLength(0);
       }
     });
+  });
+});
+
+const MERGE_GROUP_REF =
+  "lydite/actions/.github/workflows/merge-group.yml@refs/tags/v1";
+// The revision in a queue ref's own name is the base tip the entry was replayed
+// onto, so it is deliberately neither the queue revision nor the pull request's
+// head: a path reading a head out of the ref would read this.
+// biome-ignore lint/security/noSecrets: a synthetic abbreviated commit sha, not a credential
+const QUEUE_BASE = "1a2b3c4d5e6f";
+const QUEUE_REF = `refs/heads/gh-readonly-queue/main/pr-7-${QUEUE_BASE}`;
+const QUEUE_SHA = "queuerevisionsha";
+const PR_HEAD = "prheadsha0000";
+// biome-ignore lint/security/noSecrets: a synthetic decision fingerprint, the hex referral.Fingerprint produces
+const FINGERPRINT = "0123456789abcdef";
+
+// The login an App's own write carries, and the only creator a clearance is read
+// from: `<app-slug>[bot]` for the App this relay authenticates as.
+const APP_CREATOR = { login: "lydite[bot]" };
+
+// What a `lydite/clearance` entry says on a head, as much of it as the queue
+// route reads.
+type Clearance = {
+  state?: string;
+  description?: string;
+  creator?: { login?: string };
+};
+
+// What the pull request's own change touches, which for an unbatched entry is
+// also what the queue commit touches: the queue replays one change onto the base
+// tip, so the two comparisons name the same paths at the same blobs whichever
+// merge method built the entry.
+const ENTRY_PATHS = ["src/auth.go", "README.md"];
+
+// A file a comparison reports, as a test writes it: a bare path takes the blob
+// the same path holds in every other comparison, and the object form is how a
+// test says two comparisons name one path at different content.
+type ComparedFile = string | { filename: string; sha: string };
+
+// The blob a path holds unless a test names another, so the two comparisons of an
+// unbatched entry agree on content as well as on paths.
+function comparedFiles(entries: ComparedFile[]): { filename: string; sha: string }[] {
+  return entries.map((entry) =>
+    typeof entry === "string" ? { filename: entry, sha: `blob-of-${entry}` } : entry,
+  );
+}
+
+// What each call the route makes is recorded in, so a test can assert that a
+// read never happened as well as that it did.
+interface QueueCalls {
+  written?: { url: string; init?: RequestInit }[];
+  read?: string[];
+  compared?: string[];
+}
+
+// What the platform answers about the revisions: the files each comparison
+// reports — the queue commit's own change and the pull request's — and the
+// answers that are no comparison at all: a revision GitHub does not have, a
+// comparison carrying no file list, a change too wide for it to list files for,
+// and a file list naming no blob for a path.
+interface QueueTree {
+  queued?: ComparedFile[];
+  own?: ComparedFile[];
+  comparison?: "missing" | "unlisted" | "wide" | "blobless" | "refused";
+  // How the statuses list answers short of a usable list: a revision the
+  // platform does not have, a read it refused, and a body that is not a list at
+  // all. A missing revision carries no clearance; the other two are outages
+  // rather than answers, and reach the caller as the route's own 502.
+  standing?: "missing" | "refused" | "unshaped";
+  // A status write the platform refused, which is a verdict that was not
+  // recorded however well the comparison went.
+  write?: "refused";
+}
+
+// The platform's own cap on the files one comparison reports.
+const COMPARE_FILE_LIMIT = 300;
+
+// The platform's own cap on a status description, in characters.
+const DESCRIPTION_LIMIT = 140;
+
+// Every call the queue route makes, answered locally: the originating pull
+// request, the two comparisons that establish the entry is one change, the
+// clearance standing on the pull request's head, and the one status write. A
+// `clearance` of undefined is a head carrying no clearance at all, and a
+// `clearance` naming no creator is one the App itself posted.
+function queueStub(
+  clearance: Clearance | undefined,
+  calls: QueueCalls = {},
+  tree: QueueTree = {},
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    const target = String(url);
+    if (target.endsWith("/installation")) {
+      return Response.json({ id: 42 });
+    }
+    if (target.includes("/access_tokens")) {
+      return Response.json({ token: "ghs_test" });
+    }
+    if (/\/commits\/[^/]+\/statuses(\?|$)/.test(target)) {
+      calls.read?.push(target);
+      if (tree.standing === "missing") {
+        return new Response("", { status: 404 });
+      }
+      if (tree.standing === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
+      if (tree.standing === "unshaped") {
+        return Response.json({ context: "lydite/clearance" });
+      }
+      return Response.json(
+        clearance
+          ? [
+              {
+                context: "lydite/clearance",
+                state: "success",
+                creator: APP_CREATOR,
+                ...clearance,
+              },
+            ]
+          : [],
+      );
+    }
+    const comparison = /\/compare\/([^.]+)\.\.\.([^?]+)/.exec(target);
+    if (comparison) {
+      calls.compared?.push(target);
+      if (tree.comparison === "missing") {
+        return new Response("", { status: 404 });
+      }
+      if (tree.comparison === "unlisted") {
+        return Response.json({ status: "ahead" });
+      }
+      if (tree.comparison === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
+      const changed =
+        comparison[2] === PR_HEAD ? (tree.own ?? ENTRY_PATHS) : (tree.queued ?? ENTRY_PATHS);
+      if (tree.comparison === "blobless") {
+        const nameOnly = comparedFiles(changed).map(({ filename }) => ({ filename }));
+        return Response.json({ files: nameOnly });
+      }
+      const files = comparedFiles(
+        tree.comparison === "wide" ? filler(COMPARE_FILE_LIMIT) : changed,
+      );
+      return Response.json({ files });
+    }
+    if (target.endsWith("/pulls/7")) {
+      return Response.json({ state: "open", head: { sha: PR_HEAD } });
+    }
+    if (/\/pulls\/\d+$/.test(target)) {
+      return new Response("", { status: 404 });
+    }
+    if (target.includes("/statuses/")) {
+      calls.written?.push({ url: target, init });
+      if (tree.write === "refused") {
+        return new Response("upstream detail", { status: 500 });
+      }
+      return Response.json({ id: 1 });
+    }
+    throw new Error(`the relay called something unexpected: ${target}`);
+  }) as typeof fetch;
+}
+
+// A file list at the platform's cap, which is a list that may have been cut
+// short — the same answer for both comparisons, so what fails the check is the
+// truncation and not a difference between them.
+function filler(count: number): string[] {
+  return Array.from({ length: count }, (_, at) => `src/file-${at}.go`);
+}
+
+describe("carrying a clearance onto a merge-queue entry", () => {
+  const entry = {
+    queue_ref: QUEUE_REF,
+    pull_request: 7,
+    sha: QUEUE_SHA,
+    // biome-ignore lint/security/noSecrets: a synthetic abbreviated commit sha, not a credential
+    base_sha: "0f1e2d3c4b5a",
+    fingerprint: FINGERPRINT,
+  };
+  // What a merge-queue run presents: the `merge_group` event, on the queue ref,
+  // with `claims.sha` the revision the queue built.
+  const queueClaims = {
+    ref: QUEUE_REF,
+    event_name: "merge_group",
+    sha: QUEUE_SHA,
+  };
+  // Built per call rather than once: `env` is only populated in `beforeAll`,
+  // and a relay env captured at collection time carries no audience or key.
+  const queueEnv = (overrides: Partial<Env> = {}) =>
+    gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: MERGE_GROUP_REF, ...overrides });
+  const cleared = {
+    description: `cleared by @octocat at ${QUEUE_BASE} [fp:${FINGERPRINT}]`,
+  };
+
+  async function compare(
+    clearance: Clearance | undefined,
+    body: unknown = entry,
+    relayEnv: Env = queueEnv(),
+    claim: object = {},
+    // `null` is a run naming no job_workflow_ref at all, which `undefined`
+    // cannot say: it takes the default.
+    ref: string | null = MERGE_GROUP_REF,
+    tree: QueueTree = {},
+  ) {
+    const calls: Required<QueueCalls> = { written: [], read: [], compared: [] };
+    const token = await keys.sign(
+      claims({ job_workflow_ref: ref ?? undefined, ...queueClaims, ...claim }),
+    );
+    const response = await send(
+      "/merge-group",
+      token,
+      body,
+      relayEnv,
+      queueStub(clearance, calls, tree),
+    );
+    return { response, ...calls };
+  }
+
+  function posted(written: { url: string; init?: RequestInit }[]) {
+    return JSON.parse(String(written[0]?.init?.body)) as {
+      state: string;
+      context: string;
+      description: string;
+    };
+  }
+
+  // The whole point: the decision the person judged is unchanged, so their
+  // judgement still applies and the attribution is theirs rather than lydite's.
+  it("publishes success carrying the clearer's attribution forward", async () => {
+    const { response, written, read, compared } = await compare(cleared);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ state: "success" });
+    expect(written).toHaveLength(1);
+    // The verdict lands on the queue revision, and the clearance is read off
+    // the pull request's own live head — never the revision the ref's name
+    // carries, which is the base tip the entry was replayed onto.
+    expect(written[0]?.url).toBe(
+      `https://api.github.com/repos/lydite/proving-ground/statuses/${QUEUE_SHA}`,
+    );
+    expect(read).toEqual([
+      `https://api.github.com/repos/lydite/proving-ground/commits/${PR_HEAD}/statuses?per_page=100`,
+    ]);
+    // Both comparisons run from the base tip the ref's own name carries, which
+    // is the one revision in this exchange the caller did not choose.
+    expect(compared).toEqual([
+      `https://api.github.com/repos/lydite/proving-ground/compare/${QUEUE_BASE}...${QUEUE_SHA}?per_page=300`,
+      `https://api.github.com/repos/lydite/proving-ground/compare/${QUEUE_BASE}...${PR_HEAD}?per_page=300`,
+    ]);
+    expect(posted(written)).toMatchObject({
+      state: "success",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("@octocat");
+    expect(posted(written).description).not.toContain("[fp:");
+  });
+
+  // The commonest change there is: one every exemption covers, referring for
+  // nothing. No clearance was ever given for it and none can be, so waiting on
+  // one is the deadlock the whole mechanism exists to remove — and nothing about
+  // a clearance is read, because there is nothing a clearance would decide.
+  it("publishes success for an entry that is not referred, reading no clearance", async () => {
+    const { response, written, read, compared } = await compare(undefined, {
+      ...entry,
+      referred: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.url).toBe(
+      `https://api.github.com/repos/lydite/proving-ground/statuses/${QUEUE_SHA}`,
+    );
+    expect(posted(written)).toMatchObject({
+      state: "success",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("not referred");
+    expect(read).toHaveLength(0);
+    expect(compared).toHaveLength(0);
+  });
+
+  // Absence is not a claim. A submission that says nothing about whether the
+  // decision refers is compared, which is the answer that needs a clearance —
+  // and a value that is not a boolean is refused rather than read as either.
+  it("compares an entry that does not say whether it refers, and refuses a non-boolean", async () => {
+    const said = await compare(cleared, { ...entry, referred: true });
+    expect(posted(said.written)).toMatchObject({ state: "success" });
+    expect(said.read).toHaveLength(1);
+
+    const silent = await compare(cleared, entry);
+    expect(posted(silent.written)).toMatchObject({ state: "success" });
+    expect(silent.read).toHaveLength(1);
+
+    for (const referred of ["false", 0, null]) {
+      const { response, written } = await compare(cleared, { ...entry, referred });
+      expect(response.status).toBe(400);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  // The ref names only the last entry of a group, so a clearance read off that
+  // pull request's head would stand in for every change the platform batched
+  // beside it — and it agrees whenever the earlier entries' reasons are a subset
+  // of the last's, which is exactly when the fingerprints coincide.
+  it("publishes pending for a queue commit holding more than this change", async () => {
+    const { response, written, read } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [...ENTRY_PATHS, "src/somebody-elses-entry.go"] },
+    );
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("batches more than one change");
+    // Refused before the clearance is read: the fingerprint would have matched,
+    // so a comparison made here answers `success` on content nobody cleared.
+    expect(read).toHaveLength(0);
+  });
+
+  // The batch a path-only comparison cannot see: an earlier entry touching only
+  // files this pull request also touches names the same paths at other content,
+  // and the fingerprint agrees there too, so the blob shas are the only thing
+  // that tells the two trees apart.
+  it("publishes pending for a queue commit naming this change's paths at other content", async () => {
+    const { response, written, read } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [{ filename: "src/auth.go", sha: "blob-of-somebody-elses-edit" }, "README.md"] },
+    );
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("batches more than one change");
+    expect(read).toHaveLength(0);
+  });
+
+  // A batch that could not be checked is not a batch that was ruled out.
+  it("publishes pending when the comparison answers nothing usable", async () => {
+    for (const comparison of ["missing", "unlisted", "wide", "blobless"] as const) {
+      const { response, written, read } = await compare(
+        cleared,
+        entry,
+        queueEnv(),
+        {},
+        MERGE_GROUP_REF,
+        { comparison },
+      );
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("nothing rules out a batch");
+      expect(read).toHaveLength(0);
+    }
+  });
+
+  // The files and not the commits: a squash or a rebase gives the replayed
+  // change new commit shas, and an entry whose tree is the pull request's own
+  // change is the entry one clearance speaks for however the platform built it,
+  // in whatever order the file list arrives.
+  it("compares the change a queue commit makes, whatever order the platform lists it in", async () => {
+    const { response, written } = await compare(
+      cleared,
+      entry,
+      queueEnv(),
+      {},
+      MERGE_GROUP_REF,
+      { queued: [...ENTRY_PATHS].reverse() },
+    );
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "success" });
+  });
+
+  // Not equal is not silence, and it is never the isolation gate: `pending` is
+  // the one state a clearing comment is accepted against, so the author clears
+  // the pull request again and the entry re-enters the queue.
+  it("publishes pending naming what changed when the fingerprints differ", async () => {
+    const { response, written } = await compare({
+      description: "cleared by @octocat at 1a2b3c4d5e6f [fp:ffffffffffffffff]",
+    });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({
+      state: "pending",
+      context: "lydite/referral",
+    });
+    expect(posted(written).description).toContain("the decision changed");
+    expect(posted(written).description).toContain("#7");
+  });
+
+  // A clearance recorded by a lydite that wrote no fingerprint, or one the
+  // platform truncated past its closing marker, is unusable for a comparison —
+  // and absence is not agreement.
+  it("publishes pending when the clearance records no fingerprint", async () => {
+    for (const description of [
+      "cleared by @octocat at 1a2b3c4d5e6f",
+      // biome-ignore lint/security/noSecrets: a synthetic clearance description whose fingerprint field the platform cut short
+      "cleared by @octocat at 1a2b3c4d5e6f [fp:0123456789abc",
+      "cleared by @octocat [at] 1a2b3c4d5e6f",
+      // Bracketed text that is not a field: it closes the way a field does, so
+      // the opening marker is the whole of what tells the two apart.
+      "cleared by @octocat at 1a2b3c4d5e6f [by hand]",
+      `cleared by @octocat [fp:]`,
+      `cleared by @octocat [fp:has a space]`,
+      `cleared by @octocat [fp:0123456789abcdef] [see the thread]`,
+    ]) {
+      const { response, written } = await compare({ description });
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("no decision fingerprint");
+    }
+  });
+
+  // A context name is not evidence of who wrote it, and the fingerprint inside
+  // the description is a hash of public diff content anyone can recompute: a
+  // status posted by any identity but lydite's own App is the token holder's
+  // assertion, and carries no clearance forward however well it matches.
+  it("publishes pending when the clearance was posted by another identity", async () => {
+    for (const creator of [
+      { login: "github-actions[bot]" },
+      { login: "octocat" },
+      { login: "" },
+      undefined,
+    ]) {
+      const { response, written } = await compare({ ...cleared, creator });
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({
+        state: "pending",
+        context: "lydite/referral",
+      });
+      expect(posted(written).description).toContain("not posted by lydite[bot]");
+    }
+  });
+
+  it("publishes pending when the head carries no clearance", async () => {
+    for (const clearance of [undefined, { state: "pending", description: cleared.description }]) {
+      const { response, written } = await compare(clearance);
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({ state: "pending" });
+      expect(posted(written).description).toContain("no clearance stands");
+    }
+  });
+
+  // The sha names what gets written to, so it is checked against the claim
+  // rather than trusted: on a `merge_group` run the claim is the revision the
+  // queue built, which is the revision this verdict belongs on.
+  it("refuses a sha that is not the revision this run is for", async () => {
+    const { response, written } = await compare(cleared, {
+      ...entry,
+      sha: "someone-elses-sha",
+    });
+    expect(response.status).toBe(403);
+    expect(written).toHaveLength(0);
+  });
+
+  // The ref is the only claim a run cannot choose, and it is the only place a
+  // merge_group payload names a pull request at all.
+  it("refuses a queue ref or a pull request that disagrees with the claim's ref", async () => {
+    for (const body of [
+      { ...entry, queue_ref: "refs/heads/gh-readonly-queue/main/pr-9-1a2b3c4d5e6f" },
+      { ...entry, pull_request: 9 },
+    ]) {
+      const { response, written } = await compare(cleared, body);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses a pull request this repository does not have", async () => {
+    const ref = "refs/heads/gh-readonly-queue/main/pr-8-1a2b3c4d5e6f";
+    const { response, written } = await compare(
+      cleared,
+      { ...entry, queue_ref: ref, pull_request: 8 },
+      queueEnv(),
+      { ref },
+    );
+    expect(response.status).toBe(403);
+    expect(written).toHaveLength(0);
+  });
+
+  it("requires a queue ref, a pull request, a sha and a fingerprint", async () => {
+    for (const field of ["queue_ref", "pull_request", "sha", "fingerprint"]) {
+      const partial: Record<string, unknown> = { ...entry };
+      delete partial[field];
+      const { response, written } = await compare(cleared, partial);
+      expect(response.status).toBe(400);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  // Pull requests are numbered from 1, so zero is a malformed payload rather
+  // than a number to resolve: refused as the payload it is, before the claim's
+  // own ref is consulted at all.
+  it("refuses pull request zero as a malformed payload", async () => {
+    const { response, written } = await compare(cleared, { ...entry, pull_request: 0 });
+    expect(response.status).toBe(400);
+    expect(written).toHaveLength(0);
+  });
+
+  // A fingerprint long enough to spend the whole description budget leaves no
+  // human half, so `WithFingerprint` composes a description whose opening marker
+  // sits at index 0. An index of 0 is a position and not an absence, and reading
+  // it as one would refuse a clearance lydite itself wrote.
+  it("reads a clearance whose fingerprint is the whole description", async () => {
+    const { response, written } = await compare({ description: ` [fp:${FINGERPRINT}]` });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "success" });
+    expect(posted(written).description).toContain("carried forward");
+  });
+
+  // What a clipped description loses is its tail, so the clip is composed here
+  // and spends a character only when one would otherwise be lost: a description
+  // exactly filling the platform's cap is published whole.
+  it("keeps a carried-forward description that exactly fills the platform's cap", async () => {
+    const carried = ", carried forward onto this queue entry";
+    const exact = "c".repeat(DESCRIPTION_LIMIT - carried.length);
+
+    const fits = await compare({ description: `${exact} [fp:${FINGERPRINT}]` });
+    expect(posted(fits.written)).toMatchObject({ state: "success" });
+    expect(posted(fits.written).description).toBe(exact + carried);
+
+    // One character more is clipped, and to the cap exactly — which is what
+    // makes this the boundary rather than a cap nothing reaches.
+    const over = await compare({ description: `${exact}c [fp:${FINGERPRINT}]` });
+    expect(posted(over.written).description).toHaveLength(DESCRIPTION_LIMIT);
+    expect(posted(over.written).description.endsWith("…")).toBe(true);
+  });
+
+  it("refuses a workflow the merge-group allowlist does not name", async () => {
+    for (const ref of [
+      null,
+      "",
+      "someone/else/.github/workflows/x.yml@refs/heads/main",
+      REFERRAL_REF,
+      CLEARANCE_REF,
+      `${MERGE_GROUP_REF}x`,
+      MERGE_GROUP_REF.replace("@refs/tags/v1", "@refs/heads/main"),
+    ]) {
+      const { response, written } = await compare(cleared, entry, queueEnv(), {}, ref);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses every caller when the merge-group allowlist is empty", async () => {
+    for (const relayEnv of [gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: "" }), gatedEnv(), env]) {
+      const { response, written } = await compare(cleared, entry, relayEnv);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("names a missing job_workflow_ref as such", async () => {
+    const { response } = await compare(cleared, entry, queueEnv(), {}, null);
+    expect(JSON.stringify(await response.json())).toContain(
+      "names no job_workflow_ref",
+    );
+  });
+
+  // A ref carrying more than one authority is a deployment mistake, refused
+  // rather than resolved toward whichever list is read first.
+  it("refuses a ref allowlisted for more than one authority", async () => {
+    for (const relayEnv of [
+      gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: REFERRAL_REF }),
+      gatedEnv({ MERGE_GROUP_WORKFLOW_REFS: CLEARANCE_REF }),
+    ]) {
+      const ref = relayEnv.MERGE_GROUP_WORKFLOW_REFS as string;
+      const { response, written } = await compare(cleared, entry, relayEnv, {}, ref);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  // The allowlist names a workflow file, and a file says nothing about what
+  // started it: the same callee reached from another event is a run whoever can
+  // open a pull request controls.
+  it("refuses an allowlisted run presenting another event or ref shape", async () => {
+    for (const claim of [
+      { event_name: "push" },
+      { event_name: "pull_request", ref: "refs/pull/7/merge" },
+      { event_name: undefined },
+      { ref: "refs/heads/main" },
+    ]) {
+      const { response, written } = await compare(cleared, entry, queueEnv(), claim);
+      expect(response.status).toBe(403);
+      expect(written).toHaveLength(0);
+    }
+  });
+
+  it("refuses a request presenting no token", async () => {
+    const relay = createRelay({ fetchJwks: keys.jwks, fetcher: queueStub(cleared) });
+    const response = await relay.fetch(
+      new Request("https://pr.lydite.org/merge-group", {
+        method: "POST",
+        body: JSON.stringify(entry),
+      }),
+      queueEnv(),
+    );
+    expect(response.status).toBe(401);
+  });
+
+  // The ref shape `queueRun` checks is the prefix alone, which says nothing
+  // about the entry the last segment names. A ref that clears the prefix and
+  // names no entry has no pull request to read a clearance off, and a verdict
+  // published without one would be a clearance carried forward from nowhere.
+  it("refuses a queue ref that clears the prefix and names no entry", async () => {
+    for (const ref of [
+      "refs/heads/gh-readonly-queue/main",
+      "refs/heads/gh-readonly-queue/main/pr-7",
+      "refs/heads/gh-readonly-queue/main/pr-7-zz",
+      // Pull requests are numbered from 1, so zero names none — and a number
+      // wider than a double holds exactly names none either.
+      "refs/heads/gh-readonly-queue/main/pr-0-1a2b3c4d5e6f",
+      "refs/heads/gh-readonly-queue/main/pr-111111111111111111111-1a2b3c4d5e6f",
+    ]) {
+      const { response, written, read, compared } = await compare(
+        cleared,
+        { ...entry, queue_ref: ref },
+        queueEnv(),
+        { ref },
+      );
+      expect(response.status).toBe(403);
+      expect(JSON.stringify(await response.json())).toContain("names no pull request");
+      expect(written).toHaveLength(0);
+      expect(read).toHaveLength(0);
+      expect(compared).toHaveLength(0);
+    }
+  });
+
+  // A comparison the platform refused is not a comparison, and a batch that
+  // could not be checked is not a batch that was ruled out. It is an outage
+  // rather than a refusal, so it reaches the caller as the route's own 502 and
+  // stays retryable.
+  it("fails the request when a comparison is refused rather than answered", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      comparison: "refused",
+    });
+
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(written).toHaveLength(0);
+  });
+
+  // A revision the platform does not have carries no clearance, which is the
+  // same answer as a revision carrying none: the entry stays referred.
+  it("publishes pending when the revision the clearance would be on is missing", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "missing",
+    });
+
+    expect(response.status).toBe(200);
+    expect(posted(written)).toMatchObject({ state: "pending" });
+    expect(posted(written).description).toContain("no clearance stands");
+  });
+
+  // A read that failed states nothing at all, so it fails the request rather
+  // than reading as "no clearance" — a clearance that may well stand would
+  // otherwise be published pending over an outage. A body that parses and is
+  // not a list carries no entry under any context, which is a head with no
+  // clearance on it.
+  it("tells a refused standing read apart from one that is no list", async () => {
+    const refused = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "refused",
+    });
+    expect(refused.response.status).toBe(502);
+    expect(JSON.stringify(await refused.response.json())).not.toContain("upstream detail");
+    expect(refused.written).toHaveLength(0);
+
+    const unshaped = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      standing: "unshaped",
+    });
+    expect(unshaped.response.status).toBe(200);
+    expect(posted(unshaped.written)).toMatchObject({ state: "pending" });
+    expect(posted(unshaped.written).description).toContain("no clearance stands");
+  });
+
+  // A write the platform refused is a verdict that was not recorded, however
+  // well the comparison went. Answering 200 over it would report an entry as
+  // published against a revision carrying nothing.
+  it("fails the request when the verdict is composed but not recorded", async () => {
+    const { response, written } = await compare(cleared, entry, queueEnv(), {}, MERGE_GROUP_REF, {
+      write: "refused",
+    });
+
+    expect(response.status).toBe(502);
+    expect(written).toHaveLength(1);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(body).toContain("queue entry");
+  });
+
+  it("says nothing about lydite's own credentials when the write fails", async () => {
+    const broken = (async (url: unknown) => {
+      const target = String(url);
+      if (target.endsWith("/installation")) return Response.json({ id: 42 });
+      if (target.includes("/access_tokens")) return Response.json({ token: "ghs_test" });
+      return new Response("upstream detail", { status: 500 });
+    }) as typeof fetch;
+
+    const token = await keys.sign(
+      claims({ job_workflow_ref: MERGE_GROUP_REF, ...queueClaims }),
+    );
+    const response = await send("/merge-group", token, entry, queueEnv(), broken);
+    expect(response.status).toBe(502);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain("upstream detail");
+    expect(body).toContain("queue entry");
   });
 });

@@ -64,6 +64,11 @@ that clears nothing writes no document.`,
 		"render the "+clearance.ClearanceContext+" status as a JSON document at this path, and the "+clearance.Context+
 			" status it resolves at the .referral sibling, for another step to post instead of posting them here")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "drop colour; glyphs are kept")
+	// The queue path answers a merge_group event rather than a comment, and it
+	// belongs here because what it decides is a clearance's reach: a merge
+	// queue's own revision is one nobody can be asked to clear, so the question
+	// is whether the clearance the pull request already holds still applies.
+	cmd.AddCommand(newQueueCmd())
 	return cmd
 }
 

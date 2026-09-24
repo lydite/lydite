@@ -423,3 +423,152 @@ reader's local run; **nothing can establish that yet** (see #27), so it is absen
 than asserted. `ui.Marker` identifies the standing comment for editing, by a marker in the
 body rather than by author, because the author is whoever's token posted it.
 
+## A clearance carries forward across a merge queue
+
+A repository with a merge queue and a required `lydite/referral` deadlocks on every referred
+change: a queue entry replays the change onto a fresh `main`, so its commit is by construction a
+revision nobody cleared and nobody can — a `gh-readonly-queue/` ref belongs to no pull request,
+so there is no comment surface `/lydite clear` could even be typed at. See
+[ADR 0053](../../docs/adr/0053-a-clearance-carries-forward-when-the-decision-it-was-given-for-is-unchanged.md)
+for the reasoning; this section is the mechanism it lands.
+
+The move is to stop treating a clearance as a statement about a tree and start treating it as a
+statement about a decision, one that carries forward exactly when the decision is unchanged.
+`internal/referral.Decide` refers for one of two reasons — an uncovered path (`Uncovered`) or a
+disqualifier vetoing an otherwise-matching exemption (`Disqualifications`) — and both are pure
+functions of the diff and the exemptions file, with no tree identity in either. So the queue-time
+question is never "is this the same tree"; it is "does `Decide`, recomputed on the queue's own
+tree, refer for the same reasons it referred for when a person cleared it."
+
+**`referral.Fingerprint(uncovered []string, disqualifications []Disqualification) string`**
+(`source/cli/internal/referral/decide.go`) answers that question with a short, deterministic hash
+over both arguments together — never `Uncovered` alone. `Uncovered` is only populated on the
+branch where no single exemption covers every path; a referral caused purely by a disqualifier —
+a net-new suppression, a disabled test, an edit to `.lydite/exemptions.yml` itself — leaves
+`Uncovered` empty, indistinguishable by that value alone from "fully exempt." Hashing both closes
+that: a disqualifier-only referral fingerprints differently from a fully-exempt change, even
+though both leave `Uncovered` empty. Neither slice arrives sorted from `Decide` — `Uncovered`
+walks `ch.Paths` and `Disqualifications` walks the diff's own order — so `Fingerprint` sorts a
+copy of each before hashing, making the result independent of the order either arrived in. A
+disqualification's identity for this purpose is `Kind` and `Path` alone, matching
+`disqualify.go`'s own doc comment; `Evidence` is the text of what was found, not part of what a
+disqualification *is*, and is not hashed. The hash is short and not cryptographically sensitive —
+it exists to detect the same reasons recomputed on a different tree, not to resist a deliberate
+collision.
+
+**`clearance.WithFingerprint`/`clearance.FingerprintIn`** (`source/cli/internal/clearance/decide.go`)
+carry the fingerprint on the one thing that already outlives the commit it was computed for: the
+`lydite/clearance` status description, keyed by SHA forever regardless of which branch still
+points at that commit, so no new durable store is needed. `WithFingerprint` composes the
+description a clearance is recorded under — who cleared what, then the fingerprint of the
+decision they cleared — as an `" [fp:<value>]"` suffix, budget-checked against
+`clearance.DescriptionLimit`, the platform's 140-character cap on a status description. The human
+half gives way when the two do not fit: a cut fingerprint is a value that compares unequal to the
+decision it was taken over, so the description's leading text is truncated with an ellipsis
+before the fingerprint is appended, never the other way round. An empty fingerprint appends
+nothing, which reads back as absent. `FingerprintIn` is the reverse read, and its second return
+value is the reason it exists as a pair rather than returning a bare string: it distinguishes a
+description that carries no fingerprint field at all — every clearance recorded by a lydite that
+wrote none, and any description the platform truncated past its closing marker — from one whose
+field is present but empty. Both are unusable for a comparison, and both have to be refusable as
+such rather than silently read as a match.
+
+**`lydite clearance queue`** (`source/cli/cmd/lydite/mergequeue.go`, `newQueueCmd`/`runQueue`) is
+the merge_group-aware CLI path. It answers a `merge_group` event payload rather than a pull
+request: it reads the queue ref's own `QueueEntry` (`internal/forge.MergeGroupEvent.QueueEntry`)
+for the originating pull-request number, resolves the base commit the same way `review` does,
+recomputes `referral.Decide` against the queue's own tree and — deliberately — the base branch's
+*current* exemptions rather than any pinned revision, and derives the fingerprint from the
+result. `queueDecision` calls `referral.Decide` alone — never `measureDependencies` and never
+`computeAPISurfaces` — and hands it the zero `referral.Evidence{}`, under which every `versions:`
+condition fails: no dependency-delta comparison and no API-surface comparison runs here at all.
+That is deliberate scope, in the same spirit as why `review`'s own `computeAPISurfaces` gates a
+component's comparison behind `guardCredential` at all — that guard exists to keep a component's
+untrusted build code (a Rust crate's `build.rs`, a TypeScript package's lifecycle scripts) out of
+a process about to publish with a writing credential. This job holds no writing credential to
+protect in the first place, but it also has none of the toolchain provisioning or worktree
+machinery `review` sets up to run that comparison safely, so rather than reimplement any of it
+here, it runs none of it and lets `Evidence{}`'s zero value say so. Passing nothing is the
+direction that refers: an entry whose clearance was given against a `versions: patch-and-minor`
+condition, or against a declared API break, that held at pull-request time therefore fingerprints
+differently at queue time and goes back to a person rather than being silently trusted forward.
+Measuring either at queue time is worth doing and is not this path's to do — see the referral
+job's own `--reports`, in `queueDecision`'s own doc comment. The command then submits a
+`queueRequest` (`QueueRef`, `PullRequest`, `SHA`, `BaseSHA`, `Fingerprint`, `Referred`) to the
+relay, minting its own Actions OIDC token for the relay's origin — it holds no writing token by
+design, since it is the job that parses diff evidence and the relay is what writes, the same split
+every other relay-fronted job keeps. `Referred` is `decision.Referred`: whether the recomputed
+decision refers at all, which is what lets the relay answer an unreferred entry without reading
+any clearance.
+
+**`pr-relay`'s `POST /merge-group`** (`source/cloud-services/pr-relay/src/index.ts`) is the one
+relay route that composes a verdict rather than relaying a caller's own. `queueOutcome` gives
+three answers, ordered by what each has to establish first. An entry whose submitted `referred` is
+`false` is published `success` immediately and reads no clearance at all: a clearance is only ever
+given against a referral, so for a change every exemption covers there is none to compare against
+and nothing to wait for, which is the commonest change there is and the deadlock ADR 0053 exists
+to remove. That answer speaks for the whole queue commit even when the platform batched it, since
+the decision behind it was recomputed over the queue's own tree against the base tip and every
+batched change is inside that diff. Absence is not that claim — a payload saying nothing about
+`referred` is compared, and a `referred` that is not a boolean is refused outright.
+
+A referred entry is the path that needs a clearance, and the route resolves the *pull request's own
+head*, live, through `GET /pulls/:n` with the installation token — never the queue ref's own
+embedded SHA. That SHA (`base_sha` in the `merge_group` payload, and the trailing revision in the
+ref's `pr-<n>-<sha>` segment) is the base branch's tip the entry was replayed onto, not the pull
+request's head; reading it as a head is a common misreading the route is written to avoid entirely
+by never touching it for that purpose. With the real head in hand, `queueBatching` establishes
+that the queue commit carries this pull request's change and nothing else — a clearance speaks for
+one pull request, so a batched entry answers `pending` before any clearance is read, as described
+below. Only then does the route read the `lydite/clearance` status standing on that head
+(`standingStatus`) and — before trusting it as evidence at all — check that status's own
+`creator.login` equals the lydite App's bot identity, `lydite[bot]`
+(`APP_STATUS_CREATOR`). This is not the same check as matching the `lydite/clearance` context
+name: a context name is not evidence of who wrote it, and a fingerprint embedded in a description
+is a hash of the change's own diff that anybody holding `statuses: write` could recompute and
+paste into a forged status, clearing their own entry. The creator check is now its own rule, not
+just this paragraph's reasoning — see
+[`agentic/rules/a-status-read-back-as-authority-must-be-checked-against-its-own-creator.md`](../rules/a-status-read-back-as-authority-must-be-checked-against-its-own-creator.md).
+Only once the status is both `success` and App-authored does the route compare the recorded
+fingerprint against the submitted one (`queueVerdict`) and publish `lydite/referral` at the queue
+revision: a match publishes `success`, carrying the original clearer's own attribution forward
+rather than composing lydite's own, because the decision they judged is unchanged and the
+judgement is still theirs; a mismatch, an unusable fingerprint, an unauthored clearance, or no
+clearance at all publishes `pending` naming why — **never `failure`**, because `clearance.Decide`
+refuses to accept a clearing comment against a `failure` status, and publishing `failure` here
+would make a mismatched queue entry permanently unclearable and reopen the exact deadlock this
+mechanism removes. The entry then drops out of the queue exactly as any required check still
+pending would, and the author clears the pull request again to re-enter it.
+
+**The known limitation.** `/lydite clear` (`cmd/lydite/clearance.go`'s `applyAction`,
+`KindClear` branch) does not yet compute or embed a fingerprint at clear time, so no real
+clearance recorded today carries one, and every *referred* entry's merge-queue comparison
+currently answers `pending` regardless of whether the decision actually held. This does not
+affect an *unreferred* entry (a fully exempt change) — `queueOutcome` in the relay publishes
+`success` for those directly, since a clearance is only ever given against a referral and there
+is none to carry forward or wait on. Tracked in
+[lydite/lydite#254](https://github.com/lydite/lydite/issues/254).
+
+**The merge-queue batching caveat — closed.** A queue ref that groups more than one pull request
+into one entry only names the *last* `pr-N-sha` segment (`QueueEntry` in
+`internal/forge/event.go`), so the clearance compared against would be the last pull request's
+own while the tree the decision is recomputed over holds every earlier entry's change too —
+`referral.Fingerprint` hashes only the sets of uncovered paths and `(Kind, Path)`
+disqualifications, so an earlier entry whose referral reasons happen to be a subset of the last
+entry's own could leave the group's fingerprint equal to the last entry's clearance. The relay's
+`queueBatching` rules this out before the clearance is even read: it compares the queue commit's
+changed files, from the ref's own embedded base (never the request body's `base_sha`, which the
+caller could choose to defeat the check), against the pull request's own changed files from that
+same base — the two comparisons run concurrently, neither depending on the other's answer — and
+answers `pending` naming the batch on any difference or on an unusable comparison. Changed files
+rather than commits, because a squash or rebase merge method changes which commits survive the
+replay but not the tree the entry has to hold. And each file's *blob sha* alongside its path, from
+the same `files` array `comparedFiles` reads the names out of: a path list alone does not identify
+a change, so an earlier entry editing only files the last pull request also edits produces an
+identical path list at different content — and since `Fingerprint` hashes paths and
+disqualification kinds rather than what any line says, it agrees there too. A path-only comparison
+would therefore carry the clearance forward on content its clearer never saw for precisely the
+batch this check exists to catch. Two comparisons agree only when they name the same files at the
+same blobs; a file the platform reported with no blob sha makes the comparison unusable, which is
+the same `pending` as no comparison at all.
+

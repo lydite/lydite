@@ -102,7 +102,7 @@ from the body, reads the pull-request number out of `ref` (`refs/pull/<n>/merge`
 `refs/pull/<n>/head` both; a clearance run is the one exception, below), mints an installation token narrowed to that one repository and to
 `pull_requests: write` and `statuses: write`, writes, and discards it. It stores nothing.
 
-Three endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
+Four endpoints. `POST /comment` upserts the standing comment by its marker; `POST /status`
 records a verdict on a revision of that pull request — `{state, context, description, sha}`, with
 nothing defaulted — so the check is authored by the App rather than by whichever token the job
 held; the repository is the claim's, the revision has to equal the pull request's current head as
@@ -110,7 +110,35 @@ held; the repository is the claim's, the revision has to equal the pull request'
 synthetic merge commit, the same revision `forge.PullRequestEvent` reads a head from the event
 payload rather than `GITHUB_SHA` to avoid — and `context` is refused unless it starts `lydite/`,
 so a caller can no more author a status on another commit or under another tool's check name than
-it can name another repository. The two gated
+it can name another repository. `POST /merge-group` is the fourth, and the odd one out: it
+composes `lydite/referral` itself from a fingerprint comparison rather than relaying a caller's
+own verdict, because a merge-queue entry's ref belongs to no pull request and carries no
+`lydite/clearance` of its own to relay. The CLI submits whether the recomputed decision refers at
+all; an unreferred entry (a fully exempt change) is published `success` directly, since a
+clearance is only ever given against a referral and there is none to wait on. For a referred
+entry, given a verified `merge_group` claim, the route resolves the originating pull request's
+real head live (never the queue ref's own embedded SHA, which is the base tip the entry was
+replayed onto), rules out a batched queue commit by comparing the queue commit's changed paths
+against the pull request's own changed paths, both from that same base, and only then reads the
+`lydite/clearance` status standing there and trusts it as evidence when that status's own
+`creator` login is the lydite App's bot user, `lydite[bot]` — a context name and a state are not
+enough, since anybody holding `statuses: write` can post under `lydite/clearance` and paste in a
+fingerprint they recomputed themselves; see
+[the rule on checking a status's creator before trusting it as authority](../rules/a-status-read-back-as-authority-must-be-checked-against-its-own-creator.md).
+It then compares the recorded fingerprint against the one the CI job submitted and publishes
+`lydite/referral` at the queue revision: `success`, carrying the original clearer's own
+attribution forward, on a match; `pending`, naming why, on a mismatch, an unusable fingerprint,
+a batched entry, or no usable clearance at all — never `failure`, since `clearance.Decide`
+refuses to accept a clearing comment against a `failure` status and publishing one here would
+make a mismatched entry permanently unclearable. `source/cli/cmd/lydite/mergequeue.go` (`lydite
+clearance queue`) is the CLI side that submits to this route; it holds no writing token of its
+own, which is the reason this route composes and writes rather than relaying. See
+[ADR 0053](../../docs/adr/0053-a-clearance-carries-forward-when-the-decision-it-was-given-for-is-unchanged.md)
+and [`referral-and-clearance.md`](referral-and-clearance.md#a-clearance-carries-forward-across-a-merge-queue)
+for the full mechanism, including the known limitation: `/lydite clear` does not yet embed a
+fingerprint at clear time, so a *referred* entry's merge-queue comparison currently answers
+`pending` regardless of whether the decision held — an unreferred entry is unaffected
+([lydite/lydite#254](https://github.com/lydite/lydite/issues/254)). The two gated
 contexts are posted only by an isolated job, which the relay tells apart by the OIDC
 `job_workflow_ref` and by nothing else — OIDC carries no job identity, so `environment`, audience
 and `ref` cannot tell an isolated job from one running the pull request's own code inside the same
@@ -122,14 +150,23 @@ relay can tell a job apart by file"). A local same-repo reusable workflow is nev
 because its ref is controlled by the pull request; an external callee in `lydite/actions` cannot
 be edited by the pull request's author.
 
-The allowlist is two Wrangler vars, `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`, each
-a comma- or newline-separated list of exact
+The allowlist is three Wrangler vars, `REFERRAL_WORKFLOW_REFS`, `CLEARANCE_WORKFLOW_REFS` and
+`MERGE_GROUP_WORKFLOW_REFS`, each a comma- or newline-separated list of exact
 `lydite/actions/.github/workflows/<name>.yml@<ref>` strings, empty by default. An empty list
 admits no job, so `lydite/referral` is refused to every caller until it is set. The match is
 exact, with no patterns: `job_workflow_ref` carries the ref as the caller wrote it, so a SHA pin
 matches only if that exact SHA is allowlisted, and a refusal names the ref it saw so the entry can
 be pasted. Consumers pin the floating major tag and this repository pins an exact SHA; both have to
-be allowlisted. A ref in both lists holds neither authority and is refused.
+be allowlisted. The three lists are disjoint by construction, not merely by convention: a ref
+allowlisted for more than one holds no authority at all, and `/merge-group` refuses outright when
+its own caller's ref also appears in either of the other two. This is not the same failure mode
+as a referral ref and a clearance ref colliding — those two each still name their own state, so a
+ref admitted to both could only ever post one or the other under a name a reviewer can see was
+wrong. `MERGE_GROUP_WORKFLOW_REFS` is different: the job it admits posts `lydite/referral` without
+being allowed to say what that status reads at all — the relay composes the verdict itself from
+the comparison — so a ref that also carried referral or clearance authority would let one workflow
+file compose a verdict under two different sets of rules for the same context, which is not a
+narrower authority than either alone but a different one neither allowlist was written to grant.
 
 Each ref is trusted for one context, with one narrow, one-directional exception. A referral ref
 may post `lydite/referral` only; a clearance ref may post `lydite/clearance` outright, and may
@@ -230,7 +267,8 @@ own verdict.
   not independently verified (see [`ci.md`](ci.md)). A pull request can also swap the pinned ref
   for any other allowlisted ref, so refs of superseded commits and tags must be pruned.
 - **Release checklist: prune the allowlists.** On each release, remove the refs of superseded
-  `lydite/actions` commits and tags from `REFERRAL_WORKFLOW_REFS` and `CLEARANCE_WORKFLOW_REFS`.
+  `lydite/actions` commits and tags from `REFERRAL_WORKFLOW_REFS`, `CLEARANCE_WORKFLOW_REFS` and
+  `MERGE_GROUP_WORKFLOW_REFS`.
 - **The relay is deployed and live.** `pr-relay` runs at `pr.lydite.org`, its secrets are synced,
   `vars.LYDITE_RELAY_URL` is set on `lydite/lydite`, and the lydite App is installed on this
   repository. The `github-token` fallback above stays a supported path, not a temporary one, for

@@ -186,6 +186,11 @@ func publish(ctx context.Context, out, eventPath string, d referral.Decision, ve
 // and for one more: a clearance run is an issue_comment run, whose own claims
 // name a branch rather than a pull ref, so the conversation is in the document
 // or nowhere.
+//
+// description is composed through clearance.WithFingerprint, which is what
+// keeps the fingerprint of the cleared decision inside the platform's cap: the
+// description is the whole of where that fingerprint is stored, and forge clips
+// this document's description on the way out by either route.
 func clearanceStatus(ref pullRequestRef, description string) forge.Status {
 	return forge.Status{
 		State:       clearance.StateSuccess,

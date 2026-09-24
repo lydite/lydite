@@ -336,6 +336,140 @@ func TestProposingIsRefusedByEveryReasonAClearanceIs(t *testing.T) {
 	}
 }
 
+// fingerprint is the shape referral.Fingerprint produces: sixteen hex
+// characters, written as a literal here so this package stays a pure function
+// of a description.
+const fingerprint = "0f1e2d3c4b5a6978"
+
+// The description is the whole of where a clearance's fingerprint is stored,
+// so what goes in comes back out — including when the human half carries
+// brackets of its own, which the closing marker's position must not be read
+// from, and when there is no human half at all, where the opening marker sits
+// at index 0 and a reader must take that position for a position rather than
+// for an absence.
+func TestAClearancesFingerprintComesBackOutOfItsDescription(t *testing.T) {
+	for _, description := range []string{
+		"cleared by @pedromvgomes at 4c2eaea",
+		"cleared by @pedromvgomes at 4c2eaea [see the thread]",
+		"",
+	} {
+		composed := WithFingerprint(description, fingerprint)
+		got, ok := FingerprintIn(composed)
+		if !ok || got != fingerprint {
+			t.Errorf("FingerprintIn(%q) = %q, %v; want %q, true", composed, got, ok, fingerprint)
+		}
+	}
+}
+
+// A clearer handle long enough to spend the whole budget loses its own tail
+// and never the fingerprint: the attribution is legible cut short, while a cut
+// fingerprint compares unequal to the decision it was taken over — silently,
+// since nothing downstream can tell a truncated value from a different one.
+func TestALongClearerHandleIsCutAndTheFingerprintIsNot(t *testing.T) {
+	// Longer than any login the platform issues, so the budget is exercised
+	// rather than assumed from the lengths a login happens to reach.
+	handle := strings.Repeat("handle", 40)
+	composed := WithFingerprint("cleared by @"+handle+" at 4c2eaea", fingerprint)
+
+	if n := len([]rune(composed)); n > DescriptionLimit {
+		t.Errorf("the description is %d characters, past the platform's cap of %d: %q", n, DescriptionLimit, composed)
+	}
+	got, ok := FingerprintIn(composed)
+	if !ok || got != fingerprint {
+		t.Errorf("FingerprintIn(%q) = %q, %v; want %q, true", composed, got, ok, fingerprint)
+	}
+	if !strings.HasPrefix(composed, "cleared by @handle") {
+		t.Errorf("the attribution was not kept: %q", composed)
+	}
+}
+
+// A description that exactly fills what the fingerprint leaves is kept whole.
+// The ellipsis is spent only when something would otherwise be lost, and a
+// description clipped at the last character that fits loses a character of
+// attribution for nothing.
+func TestADescriptionThatExactlyFillsTheBudgetIsNotClipped(t *testing.T) {
+	suffix := fingerprintOpen + fingerprint + fingerprintClose
+	room := DescriptionLimit - len([]rune(suffix))
+	exact := strings.Repeat("a", room)
+
+	if got := WithFingerprint(exact, fingerprint); got != exact+suffix {
+		t.Errorf("WithFingerprint clipped a description that fits: %q", got)
+	}
+	// One character more is clipped, which is what makes this the boundary
+	// rather than a cap nothing reaches.
+	over := WithFingerprint(exact+"a", fingerprint)
+	if !strings.Contains(over, "…") {
+		t.Errorf("a description one character past the budget was not clipped: %q", over)
+	}
+	if n := len([]rune(over)); n != DescriptionLimit {
+		t.Errorf("the clipped description is %d characters, want the whole budget %d", n, DescriptionLimit)
+	}
+}
+
+// A fingerprint spending the entire budget leaves the human half no room at
+// all, and the description is then the field alone. Room for nothing is not
+// room for an ellipsis: treating it as room cuts the attribution to a negative
+// width.
+func TestAFingerprintFillingTheWholeBudgetIsTheWholeDescription(t *testing.T) {
+	whole := strings.Repeat("f", DescriptionLimit-len(fingerprintOpen)-len(fingerprintClose))
+	composed := WithFingerprint("cleared by @pedromvgomes at 4c2eaea", whole)
+
+	if want := fingerprintOpen + whole + fingerprintClose; composed != want {
+		t.Errorf("WithFingerprint = %q, want the fingerprint field alone", composed)
+	}
+	if n := len([]rune(composed)); n != DescriptionLimit {
+		t.Errorf("the description is %d characters, want the whole budget %d", n, DescriptionLimit)
+	}
+	if got, ok := FingerprintIn(composed); !ok || got != whole {
+		t.Errorf("FingerprintIn(%q) = %q, %v; want the fingerprint whole", composed, got, ok)
+	}
+}
+
+// A description with no fingerprint field is its own answer, not an empty
+// fingerprint. A caller comparing against it has nothing to compare, and
+// reading absence as agreement would carry a clearance forward over a decision
+// nobody established was the same one.
+func TestADescriptionCarryingNoFingerprintIsNotAnEmptyOne(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		description string
+		want        string
+		wantOK      bool
+	}{
+		{"no field at all", "cleared by @pedromvgomes at 4c2eaea", "", false},
+		{"an empty field", "cleared by @pedromvgomes at 4c2eaea [fp:]", "", true},
+		{"a field the platform truncated", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e2d3c…", "", false},
+		{"bracketed text that is not a field", "cleared by @pedromvgomes at 4c2eaea [see the thread]", "", false},
+		// A fingerprint holds neither a space nor a bracket, so a value
+		// carrying either is a marker that fell where the human half happens to
+		// read like one. Reading it as a field would compare a decision against
+		// prose.
+		{"a marker followed by prose", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e2d3c] [see the thread]", "", false},
+		{"a value holding a space", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e 2d3c]", "", false},
+		{"a value holding an opening bracket", "cleared by @pedromvgomes at 4c2eaea [fp:0f1e[2d3c]", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := FingerprintIn(tc.description)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("FingerprintIn(%q) = %q, %v; want %q, %v", tc.description, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// Recording no fingerprint writes no field, so a run that has none to record
+// leaves a description a reader refuses rather than one it compares against an
+// empty value.
+func TestAnEmptyFingerprintIsNotRecordedAsAField(t *testing.T) {
+	description := "cleared by @pedromvgomes at 4c2eaea"
+	if got := WithFingerprint(description, ""); got != description {
+		t.Errorf("WithFingerprint(%q, \"\") = %q, want it unchanged", description, got)
+	}
+	if got, ok := FingerprintIn(WithFingerprint(description, "")); ok {
+		t.Errorf("an unrecorded fingerprint reads back as present: %q", got)
+	}
+}
+
 // Only one shape reaches a clearance. This walks the neighbours of the
 // clearing request and asserts that changing any single one of them stops it,
 // so a later refactor cannot widen the path without failing here.
