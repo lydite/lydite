@@ -379,10 +379,9 @@ func TestNoResolvedRootRunsNothing(t *testing.T) {
 	}
 }
 
-// The override replaces detection entirely, including the walk: a repository
-// that authored one said where it meant it to run by declaring the component
-// there.
-func TestTheOverrideRunsInTheComponentDirectory(t *testing.T) {
+// An override replaces what runs, not where: at a root the walk resolves it
+// runs there, exactly as the detected install it replaces would have.
+func TestTheOverrideRunsInTheResolvedRoot(t *testing.T) {
 	root := mkdir(t, t.TempDir(), "repo")
 	dir := mkdir(t, root, "packages", "ui")
 	write(t, root, "pnpm-lock.yaml")
@@ -391,8 +390,85 @@ func TestTheOverrideRunsInTheComponentDirectory(t *testing.T) {
 	if err := Install(context.Background(), dir, root, "pwd > "+cwd, nil, io.Discard); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if got := read(t, cwd); got != dir {
-		t.Errorf("the override ran in %q, want the component directory %q", got, dir)
+	if got := read(t, cwd); got != root {
+		t.Errorf("the override ran in %q, want the workspace root %q", got, root)
+	}
+}
+
+// Where no single root resolves there is nothing to coalesce against, and the
+// ambiguous root is one of the cases the override exists for, so it runs in
+// the component's own directory rather than not at all.
+func TestAnOverrideWithNoResolvedRootRunsInTheComponentDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lockfiles []string
+	}{
+		{"an ambiguous root", []string{"pnpm-lock.yaml", "yarn.lock"}},
+		{"no lockfile", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := mkdir(t, t.TempDir(), "repo")
+			dir := mkdir(t, root, "packages", "ui")
+			for _, lf := range tc.lockfiles {
+				write(t, root, lf)
+			}
+			cwd := filepath.Join(t.TempDir(), "cwd")
+
+			if err := Install(context.Background(), dir, root, "pwd > "+cwd, nil, io.Discard); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if got := read(t, cwd); got != dir {
+				t.Errorf("the override ran in %q, want the component directory %q", got, dir)
+			}
+		})
+	}
+}
+
+// An override at a resolved root is that root's install, so components
+// sharing the root share it too. Run once per component instead, each copy
+// rewrites the node_modules tree, lockfile and store the others are reading.
+func TestAnOverrideAtOneRootIsInstalledOnce(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	runs := mkdir(t, t.TempDir(), "runs")
+	// Sleeps long enough that a concurrent caller arrives while it runs, so the
+	// count below reflects a race that actually happened.
+	override := "mktemp " + filepath.Join(runs, "run.XXXXXX") + " >/dev/null && sleep 0.2"
+
+	var wg sync.WaitGroup
+	for _, pkg := range []string{"ui", "core", "api", "web"} {
+		dir := mkdir(t, root, "packages", pkg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Install(context.Background(), dir, root, override, nil, io.Discard); err != nil {
+				t.Errorf("Install: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := invocations(t, runs); got != 1 {
+		t.Errorf("the override ran %d times, want one install for the shared root", got)
+	}
+}
+
+// The override's single install at a root runs under one environment, so a
+// second component naming a different one is refused exactly as it is for a
+// detected install.
+func TestASecondEnvironmentForOneOverriddenRootIsAnError(t *testing.T) {
+	root := mkdir(t, t.TempDir(), "repo")
+	write(t, root, "pnpm-lock.yaml")
+	override := "true"
+
+	ui := mkdir(t, root, "packages", "ui")
+	if err := Install(context.Background(), ui, root, override, []string{"TOKEN=a"}, io.Discard); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	api := mkdir(t, root, "packages", "api")
+	if err := Install(context.Background(), api, root, override, []string{"TOKEN=b"}, io.Discard); err == nil {
+		t.Error("Install reported success for an overridden root already installed under a different environment")
 	}
 }
 

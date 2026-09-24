@@ -313,9 +313,17 @@ func Commands(root, override string) []Command {
 // It runs in the workspace root WorkspaceRoot resolves for dir, bounded by
 // scanRoot — a frozen install from the root is what installs the package, and
 // running a package manager in a directory holding no lockfile installs
-// nothing. An override is run in dir itself: it replaces detection entirely,
-// and a repository that authored one said where it meant it to run by
-// declaring the component there.
+// nothing.
+//
+// An override replaces what runs, never where: it runs at the root
+// WorkspaceRoot resolves exactly as a detected install would, coalesced with
+// every sibling resolving that root. Keyed on dir instead, every component
+// carrying the override would be its own key and run the same install
+// concurrently over one shared node_modules, lockfile and store. Only when no
+// root resolves — an ambiguous multi-lockfile root, or no lockfile at all —
+// does the override run in dir itself, keyed there and shared with no other
+// component; the ambiguous root is one of the cases the override exists for,
+// and there is no single root there to coalesce against.
 //
 // One root is installed once: every component resolving it shares the single
 // install the first of them runs, and one arriving while that runs waits for
@@ -335,6 +343,8 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 		if root, ok = WorkspaceRoot(dir, scanRoot); !ok {
 			return nil
 		}
+	} else if r, ok := WorkspaceRoot(dir, scanRoot); ok {
+		root = r
 	}
 	if v, done := installed.Load(root); done {
 		return installedUnder(root, v.([]string), env)
