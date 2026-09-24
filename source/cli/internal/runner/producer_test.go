@@ -223,14 +223,28 @@ func TestAProducerFollowsTheWorkspaceRootInstallResolved(t *testing.T) {
 	}
 }
 
-// An override runs in the component's own directory regardless of any
-// lockfile above it, so its producer has to be read from there too — a
-// workspace root above a component with no runner of its own must not be
-// mistaken for where an override installed.
-func TestAnOverrideProducerReadsTheComponentDirectoryNotTheWorkspaceRoot(t *testing.T) {
+// An override coalesces onto the workspace root Install itself resolved, so
+// its producer has to be read from there too — the same lockfile that makes
+// Install run at scanRoot rather than dir must make the lookup follow it.
+func TestAnOverrideProducerFollowsTheWorkspaceRootInstallResolved(t *testing.T) {
 	scanRoot := mkdirAll(t, t.TempDir(), "repo")
 	mkdirAll(t, scanRoot, config.Dir)
 	touch(t, filepath.Join(scanRoot, "pnpm-lock.yaml"))
+	dir := mkdirAll(t, scanRoot, "packages", "ui")
+	writePackage(t, scanRoot, "vitest", "4.1.11")
+	writePackage(t, scanRoot, "@vitest/coverage-v8", "4.1.11")
+
+	got := registry[Vitest].Producer(dir, scanRoot, "npm install", "22.11.0")
+	if !strings.Contains(got, "vitest 4.1.11") || !strings.Contains(got, "@vitest/coverage-v8 4.1.11") {
+		t.Errorf("producer = %q, want the runner and provider named from the resolved workspace root", got)
+	}
+}
+
+// An override with no workspace root to coalesce onto still runs in the
+// component's own directory, and its producer has to be read from there.
+func TestAnOverrideProducerReadsTheComponentDirectoryWhenNoWorkspaceRootResolves(t *testing.T) {
+	scanRoot := mkdirAll(t, t.TempDir(), "repo")
+	mkdirAll(t, scanRoot, config.Dir)
 	dir := mkdirAll(t, scanRoot, "packages", "ui")
 	writePackage(t, dir, "vitest", "4.1.11")
 	writePackage(t, dir, "@vitest/coverage-v8", "4.1.11")

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"lydite/lydite/internal/runner"
 )
 
@@ -60,6 +62,52 @@ var probes = map[runner.Lang]probe{
 		// "v22.21.1"
 		parse: func(out string) string { return nthField(out, 0) },
 	},
+}
+
+// managerProbes identifies an already-installed package manager, keyed by the
+// name `packageManager` gives it. Its keys are also the managers lydite
+// provisions at all.
+//
+// The version is parsed with pinned rather than canonical, because what it is
+// compared against is an exact pin: canonical drops a pre-release, and would
+// read an ambient 9.0.0-rc.1 as the 9.0.0 a repository pinned.
+var managerProbes = map[string]probe{
+	"pnpm": {
+		bin:         "pnpm",
+		versionArgs: []string{"--version"},
+		// "8.15.4"
+		parse: func(out string) string { return pinned(firstField(out)) },
+	},
+	"yarn": {
+		bin:         "yarn",
+		versionArgs: []string{"--version"},
+		// "1.22.19", or "4.1.0" for a Yarn 2+ release
+		parse: func(out string) string { return pinned(firstField(out)) },
+	},
+}
+
+// probeFor is the probe that identifies what a requirement asks for: its
+// package manager's when it names one, and its language's otherwise.
+func probeFor(req Requirement) (probe, bool) {
+	if req.Manager != "" {
+		p, ok := managerProbes[req.Manager]
+		return p, ok
+	}
+	p, ok := probes[req.Lang]
+	return p, ok
+}
+
+// pinned renders a version exactly as stated, pre-release included, in the
+// "v"-prefixed form golang.org/x/mod/semver compares, or "" when it is not a
+// full semantic version.
+func pinned(s string) string {
+	v := "v" + strings.TrimPrefix(strings.TrimSpace(s), "v")
+	// Canonical pads a partial version and drops build metadata, so only a
+	// version it leaves as it was is a full one.
+	if semver.Canonical(v) != v {
+		return ""
+	}
+	return v
 }
 
 // installed reports the canonical version of the ambient toolchain for an

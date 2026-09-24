@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -108,6 +110,79 @@ func WorkspaceRoot(dir, scanRoot string) (string, bool) {
 	}
 }
 
+// Declared is the package manager a workspace's package.json names in its
+// `packageManager` field, and the exact version it pins.
+type Declared struct {
+	// Name is the manager, one of Managers().
+	Name string
+	// Version is the exact version the field pins ("8.15.4"), with any
+	// integrity hash removed.
+	Version string
+	// Hash is the integrity hash the field carries after `+`
+	// ("sha512.<hex>"), verbatim, or "" when it carries none.
+	Hash string
+	// Source is the package.json the field was read from, for messages.
+	Source string
+}
+
+// exactVersion is the only version form `packageManager` admits: Corepack
+// installs exactly what it names, so a range there is not a pin.
+var exactVersion = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+
+// PackageManager reads the `packageManager` field of root's package.json —
+// the field Corepack itself reads — and reports false with no error when the
+// field is absent, which leaves Manager's lockfile detection as the answer.
+//
+// root is a directory WorkspaceRoot resolved: the manifest declaring the
+// manager for a whole workspace sits beside the lockfile it resolves, so this
+// reads that one file and never walks for another.
+//
+// The field only ever adds a version to a manager the lockfile already
+// identified; it never overrides one. A root whose lockfiles are ambiguous
+// stays refused exactly as Manager refuses it, and a field naming a manager
+// other than the one its lockfile identifies is an error rather than a choice
+// between them — a package.json saying yarn beside a pnpm-lock.yaml is a
+// misconfigured repository, and installing with either manager writes a
+// lockfile the other half of it does not use. A field that is present but
+// cannot be read as `<name>@<exact version>[+<hash>]` is an error too: it is
+// a pin the repository meant, and falling back to an unpinned manager would
+// ignore it without saying so.
+func PackageManager(root string) (Declared, bool, error) {
+	source := filepath.Join(root, "package.json")
+	// #nosec G304 -- root is a workspace root resolved from the repository's own component declaration, not a scanned file's contents
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return Declared{}, false, nil
+	}
+	var manifest struct {
+		PackageManager *string `json:"packageManager"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return Declared{}, false, fmt.Errorf("%s: %w", source, err)
+	}
+	if manifest.PackageManager == nil {
+		return Declared{}, false, nil
+	}
+	field := *manifest.PackageManager
+	name, pin, found := strings.Cut(field, "@")
+	version, hash, _ := strings.Cut(pin, "+")
+	if !found || name == "" || !exactVersion.MatchString(version) {
+		return Declared{}, false, fmt.Errorf("%s: packageManager %q is not <name>@<exact version>[+<hash>]", source, field)
+	}
+	if !slices.Contains(Managers(), name) {
+		return Declared{}, false, fmt.Errorf("%s: packageManager names %q, which is not one of %s",
+			source, name, strings.Join(Managers(), ", "))
+	}
+	detected, ok := Manager(root)
+	if !ok {
+		return Declared{}, false, nil
+	}
+	if detected != name {
+		return Declared{}, false, fmt.Errorf("%s: packageManager names %s, but the lockfile beside it is %s's", source, name, detected)
+	}
+	return Declared{Name: name, Version: version, Hash: hash, Source: source}, true, nil
+}
+
 // within reports whether dir is root or lies below it.
 func within(dir, root string) bool {
 	if root == "" {
@@ -164,12 +239,38 @@ type Command struct {
 	// Argv is the program and its arguments, passed as argv with no shell —
 	// except the override, which is a shell invocation by construction.
 	Argv []string
-	// Optional marks a step whose failure is not the install failing.
-	// `corepack enable` is the case: it may already be enabled, or absent on
-	// an older Node, and the install that follows works either way. Treating
-	// it as fatal would turn a working repository into a failing one over a
-	// step that had nothing to do.
-	Optional bool
+}
+
+// managers names the package managers Commands can detect and internal/toolchain
+// provisions — the argv[0]s Install checks for on PATH before running them, so
+// an absent one fails with a name and a reason rather than exec's bare
+// "executable file not found in $PATH".
+var managers = map[string]bool{"npm": true, "yarn": true, "pnpm": true}
+
+// managerOnPath reports an error naming manager when it cannot be found on the
+// PATH env composes — the PATH the child Install is about to run under, which
+// is not necessarily this process's own.
+//
+// npm ships with every Node lydite provisions, so it is always there; yarn
+// and pnpm are what internal/toolchain provisions separately when
+// packageManager pins one. A manager still missing at this point means that
+// provisioning did not happen or did not reach this component's environment,
+// and the reader needs to know which manager and why — not exec's bare
+// "executable file not found in $PATH", which names neither.
+func managerOnPath(manager string, env []string) error {
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			dirs = filepath.SplitList(v)
+		}
+	}
+	for _, d := range dirs {
+		info, err := os.Stat(filepath.Join(d, manager)) // #nosec G703 -- d comes from this process's own PATH or a PATH this package composed from its own provisioning output; manager is one of the fixed names in the managers table, not user input
+		if err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: not on PATH — lydite could not provision it; see the warning above, or install it manually", manager)
 }
 
 // Commands is what installing at root takes, in order, or nothing when no
@@ -197,10 +298,7 @@ func Commands(root, override string) []Command {
 	case "npm":
 		return []Command{{Argv: []string{"npm", "ci"}}}
 	case "yarn":
-		return []Command{
-			{Argv: []string{"corepack", "enable"}, Optional: true},
-			{Argv: []string{"yarn", "install", "--immutable"}},
-		}
+		return []Command{{Argv: []string{"yarn", "install", "--immutable"}}}
 	case "pnpm":
 		return []Command{{Argv: []string{"pnpm", "install", "--frozen-lockfile"}}}
 	default:
@@ -215,9 +313,17 @@ func Commands(root, override string) []Command {
 // It runs in the workspace root WorkspaceRoot resolves for dir, bounded by
 // scanRoot — a frozen install from the root is what installs the package, and
 // running a package manager in a directory holding no lockfile installs
-// nothing. An override is run in dir itself: it replaces detection entirely,
-// and a repository that authored one said where it meant it to run by
-// declaring the component there.
+// nothing.
+//
+// An override replaces what runs, never where: it runs at the root
+// WorkspaceRoot resolves exactly as a detected install would, coalesced with
+// every sibling resolving that root. Keyed on dir instead, every component
+// carrying the override would be its own key and run the same install
+// concurrently over one shared node_modules, lockfile and store. Only when no
+// root resolves — an ambiguous multi-lockfile root, or no lockfile at all —
+// does the override run in dir itself, keyed there and shared with no other
+// component; the ambiguous root is one of the cases the override exists for,
+// and there is no single root there to coalesce against.
 //
 // One root is installed once: every component resolving it shares the single
 // install the first of them runs, and one arriving while that runs waits for
@@ -237,6 +343,8 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 		if root, ok = WorkspaceRoot(dir, scanRoot); !ok {
 			return nil
 		}
+	} else if r, ok := WorkspaceRoot(dir, scanRoot); ok {
+		root = r
 	}
 	if v, done := installed.Load(root); done {
 		return installedUnder(root, v.([]string), env)
@@ -249,9 +357,14 @@ func Install(ctx context.Context, dir, scanRoot, override string, env []string, 
 		return installedUnder(root, v.([]string), env)
 	}
 	for _, cmd := range Commands(root, override) {
+		if managers[cmd.Argv[0]] {
+			if err := managerOnPath(cmd.Argv[0], env); err != nil {
+				return err
+			}
+		}
 		// #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- every argv is built above from a fixed set, except the override, which comes from the target repo's own .lydite/config.yml and is authored by whoever configured lydite for that repo
 		res := executil.RunOutput(ctx, root, env, out, cmd.Argv[0], cmd.Argv[1:]...)
-		if !res.Ok() && !cmd.Optional {
+		if !res.Ok() {
 			// Only success is recorded, so the next component resolving this
 			// root installs again: a root whose install failed has no tree to
 			// share, and skipping would hand it a second failure it cannot

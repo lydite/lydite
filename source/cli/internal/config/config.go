@@ -74,14 +74,16 @@ type TypeScriptLanguage struct {
 	// Linter selects the engine backing the TypeScript check. LinterBiome is
 	// the only accepted value.
 	Linter Linter `yaml:"linter"`
-	// Install overrides coverage's install-command auto-detection (npm ci /
-	// corepack enable && yarn install --immutable / pnpm install
-	// --frozen-lockfile, chosen by the root's lockfile) with an explicit
-	// shell command. Needed for Corepack-pinned or otherwise nonstandard
-	// install flows auto-detection can't infer, or to resolve an ambiguous
-	// multi-lockfile root that auto-detection otherwise skips. Only
-	// consulted by coverage (internal/coverage), never by scan. Unset means:
-	// use auto-detection, falling back to no install step if no single
+	// Install overrides install-command auto-detection (npm ci / corepack
+	// enable && yarn install --immutable / pnpm install --frozen-lockfile,
+	// chosen by the root's lockfile) with an explicit shell command. Needed
+	// for Corepack-pinned or otherwise nonstandard install flows
+	// auto-detection can't infer, or to resolve an ambiguous multi-lockfile
+	// root that auto-detection otherwise skips. Consulted wherever a
+	// TypeScript component's dependencies must be in place before its
+	// checks run — coverage (internal/coverage) and the test path
+	// (cmd/lydite/test.go) alike — never by scan. Unset means: use
+	// auto-detection, falling back to no install step if no single
 	// recognized lockfile is found.
 	Install string `yaml:"install,omitempty"`
 }

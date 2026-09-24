@@ -544,11 +544,10 @@ func stubRuns(t *testing.T, runs string) int {
 	return len(entries)
 }
 
-// An install that had a root to run in is reported by the component's own row
-// and takes none of its own, whether it succeeded or failed — a second row per
-// JavaScript component on every healthy run is how a diagnostic earns a reader
-// who skims past the ones that matter.
-func TestAnInstallThatRanTakesNoRowOfItsOwn(t *testing.T) {
+// An override still takes a context row naming where it runs, whether it
+// goes on to succeed or fail — that fact is not available from the
+// component's own row, which only reports the suite.
+func TestAnOverrideTakesAContextRowNamingWhereItRuns(t *testing.T) {
 	// The install is the typescript.install override, so what each case
 	// exercises is lydite's attribution rather than any package manager's
 	// behaviour — internal/nodedeps covers the detection.
@@ -569,10 +568,9 @@ func TestAnInstallThatRanTakesNoRowOfItsOwn(t *testing.T) {
 			runComponents(context.Background(), root, []component.Component{nodeComponent()}, nil, nil,
 				cfg, nil, 1, false, false, rep)
 
-			for _, r := range rep.Rows() {
-				if strings.HasPrefix(r.Label, "install(") {
-					t.Errorf("row = %+v, want no install row: the install ran", r)
-				}
+			install := rowByLabel(t, rep, "install(web)")
+			if install.Status != ui.StatusContext {
+				t.Errorf("row = %+v, want a context row naming where the override runs", install)
 			}
 			if suite := rowByLabel(t, rep, "test(web)"); suite.Status != tc.status || suite.Value != tc.value {
 				t.Errorf("row = %+v, want %q %q", suite, tc.status, tc.value)
@@ -611,16 +609,56 @@ func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
 	}, config.Default()); ok {
 		t.Error("a command component under a workspace root is installed from it, so there is nothing to report")
 	}
-	// A typescript.install override needs no root resolved for it — it
-	// replaces detection entirely — so a component with no lockfile anywhere
-	// still takes no row when one is configured.
-	cfg := config.Default()
-	cfg.TypeScript.Install = "true"
-	if _, ok := installNote(t.TempDir(), component.Component{
-		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}, cfg); ok {
-		t.Error("typescript.install replaces detection, so a component with no lockfile still needs no row")
-	}
+}
+
+// A typescript.install override still runs somewhere, even with no lockfile
+// to detect a workspace root from — and where it runs is exactly the fact
+// detection would otherwise have reported, so the row stays.
+func TestInstallNoteNamesWhereAnOverrideRuns(t *testing.T) {
+	t.Run("resolves a workspace root", func(t *testing.T) {
+		root := t.TempDir()
+		write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+		write(t, root, "packages/ui/package.json", `{"name":"ui"}`)
+		cfg := config.Default()
+		cfg.TypeScript.Install = "pnpm install"
+		row, ok := installNote(root, component.Component{
+			Name: "ui", Dir: "packages/ui", Runner: runner.Vitest,
+		}, cfg)
+		if !ok {
+			t.Fatal("an override that resolves a shared root is a fact worth reporting, not silence")
+		}
+		if row.Status != ui.StatusContext {
+			t.Errorf("status = %q, want context: this describes where the install runs, not whether it succeeded", row.Status)
+		}
+		if !strings.Contains(row.Value, "workspace root") {
+			t.Errorf("value = %q, want the resolved root named", row.Value)
+		}
+		if detail := strings.Join(row.Detail, " "); !strings.Contains(detail, "pnpm install") || !strings.Contains(detail, root) {
+			t.Errorf("detail = %v, want the override command and the resolved root named", row.Detail)
+		}
+	})
+
+	t.Run("resolves no root", func(t *testing.T) {
+		root := t.TempDir()
+		write(t, root, "web/package.json", `{"name":"web"}`)
+		cfg := config.Default()
+		cfg.TypeScript.Install = "true"
+		row, ok := installNote(root, component.Component{
+			Name: "web", Dir: "web", Runner: runner.Vitest,
+		}, cfg)
+		if !ok {
+			t.Fatal("an override with no lockfile to resolve a root from still runs somewhere, worth naming")
+		}
+		if row.Status != ui.StatusContext {
+			t.Errorf("status = %q, want context: this describes where the install runs, not whether it succeeded", row.Status)
+		}
+		if !strings.Contains(row.Value, "web") {
+			t.Errorf("value = %q, want the component's own directory named", row.Value)
+		}
+		if detail := strings.Join(row.Detail, " "); !strings.Contains(detail, "true") || !strings.Contains(detail, filepath.Join(root, "web")) {
+			t.Errorf("detail = %v, want the override command and its own directory named", row.Detail)
+		}
+	})
 }
 
 // nodeComponent is a JavaScript component whose suite is a command of its own,

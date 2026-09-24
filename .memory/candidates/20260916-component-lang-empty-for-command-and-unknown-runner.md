@@ -18,6 +18,9 @@ having already run first in the same validation loop: a `command:`-invoked compo
 `api_surface` is rejected by the same `default` branch, with the same error, as a `vitest`
 component would be, because both report `Lang() == ""` or a language the switch does not name.
 
-Any future per-language opt-in field on `Component` should check `Lang()` the same way rather
-than checking `Runner != ""` or assuming a language is always derivable — a `command:` component
-is a real, supported shape that carries no language at all.
+ADR 0056 (`docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md`,
+design only, not yet built) decides the opposite of what this note originally recommended for a
+declared-language field: a declared `lang:` must NOT reach `Lang()` or its readers, because they
+assume a non-empty answer came from a runner. The ADR adds a separate `ScanLang()` instead, read
+only by the scan path. `Lang()` itself is unchanged by that decision and this note's description
+of its current behaviour still holds.

@@ -61,6 +61,11 @@ toolchain:
                           # (air-gapped runners, or images that preprovision everything)
   # go/rust/node: deliberately unset. The versions come from the repo's own
   # manifests — see toolchains.md. These keys exist only as a local override.
+  # There is no toolchain.pnpm or toolchain.yarn: a package manager's version
+  # is read exclusively from packageManager in the workspace's own
+  # package.json, with no config override at all — a repo whose pin needs
+  # changing is a repo whose packageManager field needs changing, not
+  # lydite's config (see toolchains.md).
 coverage:
   tolerance: 0.1         # pp a coverage figure may dip below its baseline before the gate fails;
                           # absorbs sub-tenth measurement noise ("86.1% vs baseline 86.1%,
@@ -75,6 +80,12 @@ coverage:
     tolerance: 0.1       # the patch gate's own dip allowance — deliberately independent, so
                           # loosening the aggregate knob never weakens the untested-new-code check
 ```
+
+`typescript.install` replaces the whole install; a component that needs one extra command beyond
+an otherwise-normal install — a browser download, a codegen step — declares it in that
+component's own `setup:` instead (see [components.md](components.md)), which runs after the
+install rather than instead of it. See
+[ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
 
 Omitting the file, or omitting a section/key within it, keeps that value at its default — see
 `internal/config/config_test.go` for the exact merge semantics.

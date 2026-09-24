@@ -6,6 +6,11 @@
 for manifests. A component names a runner, the runner implies a language, and its `dir` is where
 that language's checks run. See [ADR 0020](../../docs/adr/0020-scan-on-components.md).
 
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides to relax "the runner implies a language": a component may declare `lang:` directly where
+no runner already implies one, so the scan path reads a language a runner never derived. That
+decision is design only — the scan path still reads the runner-implied language alone today.
+
 **A repository that declares no components is an error, not a row.** `lydite: no components
 declared in .lydite/components.yml`, exit 1. An `unmeasured` row would leave the job green over an
 entirely unscanned repository — a security scan that silently stopped, which is the wardnet#957
@@ -33,6 +38,11 @@ finding count). A raw `command:` implies no language, so it is the usual case. S
 would read as a component that was scanned and found clean. Semgrep and gitleaks are root-scoped, so
 they still cover the component's source. See
 [Components](components.md#what-a-raw-command-component-gets).
+
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides that a `command:` component may declare `lang:` to opt out of this treatment. That
+decision is design only and not yet built.
+
 This is
 deliberately not the treatment a **disabled** language gets: `rust.enabled: false` produces no rows
 at all, because that is an opt-out the repository stated rather than a check that could not run,

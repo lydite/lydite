@@ -43,6 +43,12 @@ workspace compiles three times and provisions three copies of everything the sui
 **`lang` is derived from `runner`, never declared.** `cargo-nextest` can only be Rust, and a
 second statement of the language could only disagree with the first.
 
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides to relax this: a component may declare `lang:` directly where no runner already implies
+one — refused beside `runner:` for the reason above, optional beside `command:`, and required
+alone to form a "scanned but not tested" component. That decision is design only; the field does
+not exist yet, and this section still describes the codebase as it is.
+
 **A component's name may hold only letters, digits, `.`, `_` and `-`.** It is not merely a label: it
 is a `--component` value inside a comma-separated list, the name of a CI matrix job, and the suffix of
 that job's artifact, so it has to survive all three round trips and the ones it cannot survive fail
@@ -80,6 +86,14 @@ the pair runs in sequence, in no declared order — and it is not `watch:`, whic
 here invalidates me" and is read only by `internal/affected`. See
 [ADR 0050](../../docs/adr/0050-a-component-declares-the-paths-it-occupies.md) and
 [Services and the scheduler](services-and-scheduling.md).
+
+An extra install step beyond an otherwise-normal install — a browser download, a codegen
+step — is a `setup:` line rather than a change to `typescript.install`: it runs after the
+coalesced install, for the one component that needs it. Two components sharing such a step
+point its cache at a directory under the scan root (a `PLAYWRIGHT_BROWSERS_PATH` set via the
+component's own `env:`) and declare that directory in `occupies:`, so two writers into it are
+the collision `occupies:` already serialises rather than a lock the step invents for itself.
+See [ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
 
 Entries are **relative to the scan root**, like `watch:` and unlike `compose.file:`, which is
 relative to the component root: the scheduler compares one component's declaration against
@@ -305,10 +319,15 @@ ancestor holding a recognised lockfile, bounded by the scan root, and installs
 there — a package of a workspace declares its dependencies nowhere; the lockfile
 that resolves them sits at the root above it, and a component at `packages/ui`
 in a repository whose only `pnpm-lock.yaml` is at the root installs from that
-root rather than installing nothing. `typescript.install` is unaffected by this
-walk: the override still replaces detection entirely and still runs in the
-component's own directory, since a repository that authored one said where it
-meant it to run by declaring the component there. Several components resolving
+root rather than installing nothing. `typescript.install` replaces *what* runs, never
+*where*: `Install` still attempts `WorkspaceRoot` first, and when a root resolves the
+override runs there, coalesced with every sibling that resolves the same root and
+sharing the same `lockRoot` and `installedUnder` guard a detected install shares. Only
+when no root resolves — an ambiguous multi-lockfile root, or no lockfile at all — does
+the override fall back to running in the component's own directory, sharing nothing
+with any other component. See
+[ADR 0055](../../docs/adr/0055-an-install-step-is-a-setup-command-and-the-override-still-coalesces.md).
+Several components resolving
 the same root share one install: the first to reach it runs the frozen install,
 and every other one waits and then finds it already done, rather than each
 mutating the same `node_modules` tree on its own schedule. That install runs
@@ -351,6 +370,12 @@ installed the workspace it was pointed at. That row keys off the same join
 criterion above, not off whether a runner matched, so a `command:` component
 that meets it is exactly as visible when its install has no root to resolve
 as a `vitest` or `jest` component is.
+
+A `typescript.install` override also takes its own `install(<name>)` row, naming where
+it is going to run: at a resolved workspace root, coalesced with every sibling
+resolving that root, or in the component's own directory when no root resolves. The
+override is the least standard install a report can name, and a row that is silently
+absent for it would read the same as one lydite never bothered to say anything about.
 
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
@@ -425,6 +450,12 @@ from it. Each gate either measures it, renders it `unmeasured` with a reason, or
 Every `unmeasured` row leaves the verdict `pass` and is never rendered as a gate that passed. A
 language with a runner but no scanner gets the same three scan rows with a reason naming that
 language.
+
+[ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
+decides that a raw `command:` component may additionally declare `lang:`, opting its `scan`,
+`licence` and `findings` rows into that language's checks while the test-side table above stays
+unchanged. That decision is design only and not yet built; this table still describes what a raw
+`command:` component gets today.
 
 ## Output: captured, not streamed
 

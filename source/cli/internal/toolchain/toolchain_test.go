@@ -19,6 +19,7 @@ import (
 func TestSatisfied(t *testing.T) {
 	pinned := Requirement{Lang: runner.Go, Version: "v1.26.4", Raw: "1.26.4"}
 	unpinned := Requirement{Lang: runner.Rust, Raw: "stable"}
+	manager := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v8.15.4", Raw: "8.15.4"}
 
 	for _, tc := range []struct {
 		name    string
@@ -38,6 +39,14 @@ func TestSatisfied(t *testing.T) {
 		// satisfy a pin, so it is treated as too old.
 		{"unidentifiable ambient fails a pin", pinned, "", true, false},
 		{"unidentifiable ambient clears no pin", unpinned, "", true, true},
+		// A package manager's version is a pin, not a floor: Corepack runs that
+		// release and no other, so a newer ambient one is as wrong as an older.
+		{"a manager at its pin is satisfied", manager, "v8.15.4", true, true},
+		{"a newer manager is not", manager, "v8.16.0", true, false},
+		{"an older manager is not", manager, "v8.14.0", true, false},
+		{"a pre-release of the pinned manager is not", manager, "v8.15.4-rc.1", true, false},
+		{"an unidentifiable manager is not", manager, "", true, false},
+		{"an absent manager is not", manager, "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := satisfied(tc.req, tc.ambient, tc.present); got != tc.want {
