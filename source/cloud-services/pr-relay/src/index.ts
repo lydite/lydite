@@ -103,6 +103,25 @@ const ROUTES = ["/comment", "/review", "/status", QUEUE_ROUTE];
 const REFERRAL_CONTEXT = "lydite/referral";
 const CLEARANCE_CONTEXT = "lydite/clearance";
 
+// The login GitHub attributes a write made with this App's installation token
+// to: an App's bot user, `<app-slug>[bot]`, for the App `LYDITE_APP_ID` names.
+//
+// `/merge-group` reads a clearance rather than being told one, and a context name
+// is not evidence of who wrote it: any token holding `statuses: write` can post
+// under `lydite/clearance`, and the fingerprint in the description is a hash of
+// the change's own diff (`internal/referral.Fingerprint`) that anybody can
+// recompute. Without this check an author forges the status their own entry is
+// then cleared by, which is the whole of what CLEARANCE_WORKFLOW_REFS exists to
+// stop. A creator is compared and not a token scope, because the read answers
+// only what stands on the revision.
+//
+// Login alone settles it: GitHub permits no `[` in a user or organisation login,
+// so no account other than this App's bot can carry this one. A clearance posted
+// through the `github-token` fallback rather than through this relay is therefore
+// not one a queue entry can carry forward — it is `github-actions[bot]`'s
+// assertion, not lydite's.
+const APP_STATUS_CREATOR = "lydite[bot]";
+
 // The two referral states this relay reasons about by name, spelled as
 // `internal/clearance`'s own `State` values: a standing referral waiting on a
 // person, and the verdict a clearance resolves it to. Every other state is a
@@ -762,10 +781,18 @@ function queueRun(claims: ActionsClaims, env: Env): ClearanceAuthority {
  * The pull request a queue ref names, or nothing.
  *
  * The last segment is the one read: a base branch may hold slashes, and a group
- * carrying several pull requests names the one the platform put last. A group of
- * more than one refers rather than misreads — the decision recomputed over it
- * covers every change in the group, so its fingerprint matches no single pull
- * request's clearance.
+ * carrying several pull requests names the one the platform put last.
+ *
+ * A group of more than one is only partly covered by this design. The number read
+ * names the last pull request, so the clearance compared against is that one's,
+ * while the queue revision the verdict lands on holds every earlier entry's
+ * change too. `referral.Fingerprint` hashes the set of uncovered paths and the set
+ * of (Kind, Path) disqualifications, so an earlier entry whose referral reasons
+ * are a subset of the last's leaves the group's fingerprint equal to the last's
+ * own clearance — which then carries forward onto a revision holding content the
+ * clearer never saw. Neither side detects a batch, so a repository queueing more
+ * than one entry per queue commit is outside what this comparison speaks for.
+ * `QueueEntry` in `source/cli/internal/forge/event.go` carries the same caveat.
  */
 function queuePullRequest(ref: string): number | undefined {
   if (!ref.startsWith(QUEUE_REF_PREFIX)) {
@@ -784,6 +811,12 @@ function queuePullRequest(ref: string): number | undefined {
  * The verdict a queue entry's submitted fingerprint earns against the clearance
  * standing on the originating pull request's head.
  *
+ * Only a clearance `APP_STATUS_CREATOR` posted is read as one. A status any other
+ * identity wrote under that context is an assertion by whoever held that token,
+ * and it answers the same `pending` as a head carrying no clearance at all rather
+ * than an error: a repository whose clearance was recorded some other way has a
+ * referred entry to clear again, not a broken queue.
+ *
  * `success` carries the clearer's own attribution forward rather than composing
  * one of lydite's: the decision the person judged is unchanged, so the judgement
  * is still theirs. Every other answer is `pending` and never `failure` — the
@@ -800,6 +833,14 @@ function queueVerdict(
     return {
       state: REFERRAL_PENDING,
       description: clip(`no clearance stands on #${pull}'s head, so this entry stays referred`),
+    };
+  }
+  if (cleared.creator?.login !== APP_STATUS_CREATOR) {
+    return {
+      state: REFERRAL_PENDING,
+      description: clip(
+        `#${pull}'s clearance was not posted by ${APP_STATUS_CREATOR}, so it cannot carry forward — clear #${pull} again`,
+      ),
     };
   }
   const description = cleared.description ?? "";
@@ -974,6 +1015,8 @@ interface StatusEntry {
   context?: string;
   state?: string;
   description?: string;
+  /** Who posted it: the App's bot user for anything this relay wrote. */
+  creator?: { login?: string };
 }
 
 /** As much of `GET /commits/:sha/status` as a standing status is read from. */

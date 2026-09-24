@@ -1093,11 +1093,24 @@ const QUEUE_SHA = "queuerevisionsha";
 const PR_HEAD = "prheadsha0000";
 const FINGERPRINT = "0123456789abcdef";
 
+// The login an App's own write carries, and the only creator a clearance is read
+// from: `<app-slug>[bot]` for the App this relay authenticates as.
+const APP_CREATOR = { login: "lydite[bot]" };
+
+// What a `lydite/clearance` entry says on a head, as much of it as the queue
+// route reads.
+type Clearance = {
+  state?: string;
+  description?: string;
+  creator?: { login?: string };
+};
+
 // Every call the queue route makes, answered locally: the originating pull
 // request, the clearance standing on its head, and the one status write. A
-// `clearance` of undefined is a head carrying no clearance at all.
+// `clearance` of undefined is a head carrying no clearance at all, and a
+// `clearance` naming no creator is one the App itself posted.
 function queueStub(
-  clearance: { state?: string; description?: string } | undefined,
+  clearance: Clearance | undefined,
   written: { url: string; init?: RequestInit }[] = [],
   read: string[] = [],
   head = PR_HEAD,
@@ -1114,7 +1127,14 @@ function queueStub(
       read.push(target);
       return Response.json({
         statuses: clearance
-          ? [{ context: "lydite/clearance", state: "success", ...clearance }]
+          ? [
+              {
+                context: "lydite/clearance",
+                state: "success",
+                creator: APP_CREATOR,
+                ...clearance,
+              },
+            ]
           : [],
       });
     }
@@ -1156,7 +1176,7 @@ describe("carrying a clearance onto a merge-queue entry", () => {
   };
 
   async function compare(
-    clearance: { state?: string; description?: string } | undefined,
+    clearance: Clearance | undefined,
     body: unknown = entry,
     relayEnv: Env = queueEnv(),
     claim: object = {},
@@ -1244,6 +1264,27 @@ describe("carrying a clearance onto a merge-queue entry", () => {
       expect(response.status).toBe(200);
       expect(posted(written)).toMatchObject({ state: "pending" });
       expect(posted(written).description).toContain("no decision fingerprint");
+    }
+  });
+
+  // A context name is not evidence of who wrote it, and the fingerprint inside
+  // the description is a hash of public diff content anyone can recompute: a
+  // status posted by any identity but lydite's own App is the token holder's
+  // assertion, and carries no clearance forward however well it matches.
+  it("publishes pending when the clearance was posted by another identity", async () => {
+    for (const creator of [
+      { login: "github-actions[bot]" },
+      { login: "octocat" },
+      { login: "" },
+      undefined,
+    ]) {
+      const { response, written } = await compare({ ...cleared, creator });
+      expect(response.status).toBe(200);
+      expect(posted(written)).toMatchObject({
+        state: "pending",
+        context: "lydite/referral",
+      });
+      expect(posted(written).description).toContain("not posted by lydite[bot]");
     }
   });
 

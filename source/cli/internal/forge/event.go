@@ -160,10 +160,18 @@ func (e MergeGroupEvent) BaseBranch() string {
 // The last segment is the one read. A base branch may hold slashes
 // (`release/1.x`), so the segments between the prefix and the entry are the
 // branch's and are not parsed; and when the queue groups several pull requests
-// into one ref, the entry named is the one the platform put last. A group
-// carrying more than the one change refers rather than misreads: the decision
-// recomputed over it covers every change in the group, so its fingerprint
-// differs from any single pull request's and the comparison does not match.
+// into one ref, the entry named is the one the platform put last.
+//
+// A group carrying more than one change is only partly covered by this design.
+// The number read names the last pull request, so the clearance compared against
+// is that one's, while the tree the decision is recomputed over holds every
+// earlier entry's change too. referral.Fingerprint hashes the set of uncovered
+// paths and the set of (Kind, Path) disqualifications, so an earlier entry whose
+// referral reasons are a subset of the last's leaves the group's fingerprint
+// equal to the last's own clearance — and that clearance then carries forward
+// onto a revision holding content the clearer never saw. Nothing here detects a
+// batch, so a repository queueing more than one entry per queue commit is
+// outside what this comparison speaks for.
 //
 // A ref that is not a queue ref, or whose last segment names no entry, is an
 // error. This path exists for one event and the ref is the only place that
