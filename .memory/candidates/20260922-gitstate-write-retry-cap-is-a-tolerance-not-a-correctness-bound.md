@@ -21,7 +21,15 @@ Past the cap, nothing is silently lost: `Write` returns a wrapped error naming t
 attempt count, `landed` is nil, and no partial state reaches the branch (proven by
 `TestARunThatLosesEveryRaceRecordsNothingAndSaysSo`). The caller (`cmd/lydite/record.go`) turns
 that error into a failing row, and the *next* successful `Write` reads the branch's own newest
-record via `ledger.Latest`, finds it is not the new commit's parent, and appends an explicit
-`ledger.KindGap` record. The retry cap therefore bounds how much overlap one writer survives,
-not whether the ledger's completeness guarantee holds — raising the cap only makes a gap rarer,
-never falser.
+record, finds it is not the new commit's parent, and appends an explicit `ledger.KindGap` record.
+The retry cap therefore bounds how much overlap one writer survives, not whether the ledger's
+completeness guarantee holds — raising the cap only makes a gap rarer, never falser.
+
+As of the finding-transitions slice (ADR 0058), `record.go`'s `gapBefore` no longer calls
+`ledger.Latest` directly for this — it reads `ledger.BranchState`'s `previous`/`hasPrevious`
+return instead, which computes the same "newest previous record" answer as one part of a single
+partition walk shared with the finding-diff replay (`BranchState`'s own doc comment explains
+why: `gapBefore`'s `Latest` lookup and `OpenFindings` were each reading the same
+`lookbackMonths` of partitions independently, once per write attempt). `ledger.Latest` itself
+still exists, unchanged, and is exercised directly by `internal/gitstate/gitstate_test.go` — it
+is not dead code, just no longer this call site's path to the same answer.
