@@ -1,16 +1,11 @@
 # What lydite builds, tests, scans and gates in its own repository.
 #
-# Two tested components, because a component is the unit its build tool treats
-# as a whole: the Go module at source/cli/ is what `go test` treats as one, and
+# Two components, because a component is the unit its build tool treats as a
+# whole: the Go module at source/cli/ is what `go test` treats as one, and
 # source/cloud-services/ is one npm workspace. The Workers and the library they
 # share are three packages in that workspace and deliberately not three
 # components — declared separately, npm would install and build the workspace
 # three times, and each copy would provision everything the suite needs again.
-#
-# scripts/ is a third, declaring only lang: shell: it has no suite, so it is
-# scanned and not tested. Nothing checks shell yet — that scanner is #253 — so
-# its scan rows read unmeasured until it lands, said out loud rather than
-# silenced behind an exclude.
 #
 # The *-pin directories under it hold real manifests — a go.mod, a
 # package.json, a Cargo.toml — and are deliberately not components: they exist
@@ -35,10 +30,6 @@ components:
     # filter, so it would select no test file and the component would fail with
     # "No test files found".
 
-  - name: scripts
-    dir: scripts
-    lang: shell
-
 # The pin manifests' own source. cargo refuses a [package] manifest with no
 # src/lib.rs, so cargo-audit-pin and cargo-deny-pin each carry an empty one —
 # real Rust that no component builds, tests or scans, and this is where a
@@ -53,13 +44,14 @@ components:
 # build a crate that is deliberately not one; leaving them undeclared is what
 # this line says out loud.
 #
-# The last two are scripts no runner runs: the CI helper that asserts on the
-# proving-ground fixture, and the CI helper that guards against an artifact
-# colliding with publish's glob (whose own --selftest exercises it, run as a
-# CI step rather than a suite). Each is exercised by the workflow that invokes
-# it, not by a suite.
+# The last three are scripts no runner runs: the installer that ships with
+# every release, the CI helper that asserts on the proving-ground fixture, and
+# the CI helper that guards against an artifact colliding with publish's
+# glob (whose own --selftest exercises it, run as a CI step rather than a
+# suite). Each is exercised by the workflow that invokes it, not by a suite.
 excludes:
   - "source/cli/internal/**/*-pin/**"
   - "source/cli/internal/mutation/testdata/**"
+  - "scripts/install.sh"
   - ".github/assert-proving-ground.py"
   - ".github/assert-no-lydite-reports-collision.py"
