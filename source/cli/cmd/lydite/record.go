@@ -365,15 +365,19 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 	}
 	scope := findingScope(perComponent, root)
 	return func(worktree string) ([]ledger.Record, error) {
+		// One walk of the branch's own history serves both gap detection and
+		// the finding diff, rather than each reading the same partitions on
+		// its own — see ledger.BranchState.
+		open, previous, hasPrevious := ledger.BranchState(worktree, branch, head.At)
 		// A copy per attempt, so a retry's events are diffed against the
 		// branch it fetched and never carry an earlier attempt's.
 		rec := entry
 		// No scope is no scan, and a recording that measured no bucket has
 		// nothing to diff against what the branch holds open.
 		if len(scope) > 0 {
-			rec.FindingEvents = findingEvents(scope, found, ledger.OpenFindings(worktree, branch, head.At))
+			rec.FindingEvents = findingEvents(scope, found, open)
 		}
-		if gap, ok := gapBefore(ctx, dir, worktree, branch, head); ok {
+		if gap, ok := gapBefore(ctx, dir, branch, head, previous, hasPrevious); ok {
 			return []ledger.Record{gap, rec}, nil
 		}
 		return []ledger.Record{rec}, nil
@@ -477,12 +481,15 @@ func findingEvents(scope map[ledger.FindingBucket]bool, found []finding.Finding,
 // nothing about the failure can be written BY the failing run. It is written
 // by the next successful one, out of git history — the one input a failed
 // write cannot have damaged.
-func gapBefore(ctx context.Context, dir, worktree, branch string, head gitstate.Commit) (ledger.Record, bool) {
-	previous, ok := ledger.Latest(worktree, branch, head.At)
+//
+// previous and hasPrevious are the caller's own ledger.BranchState answer, not
+// a fresh ledger.Latest lookup here: the caller already paid for one walk of
+// the branch's partitions and this does not pay for a second.
+func gapBefore(ctx context.Context, dir, branch string, head gitstate.Commit, previous ledger.Record, hasPrevious bool) (ledger.Record, bool) {
 	// Nothing recorded on this branch yet is not a gap: a repository adopting
 	// the ledger has no history to be missing, and claiming one would put a
 	// break at the start of every line ever drawn.
-	if !ok {
+	if !hasPrevious {
 		return ledger.Record{}, false
 	}
 	if previous.Commit == head.Parent || previous.Commit == head.SHA {

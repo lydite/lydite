@@ -561,6 +561,79 @@ func OpenFindings(root, branch string, before time.Time) map[FindingBucket]map[s
 	return open
 }
 
+// BranchState is what a writer needs from a branch's own history before it
+// appends a new record: the newest entry recorded so far, for gap detection,
+// and the open finding set replayed up to before, for finding transitions.
+// One walk answers both.
+//
+// Latest and OpenFindings each read the same lookbackMonths of partitions
+// independently when a caller needs both, and gitstate.Write retries its
+// closure up to three times on a push race — three attempts at one commit
+// would otherwise parse a year of history as many as six times, on a path
+// that runs on every commit. This walks it once and reduces it two ways.
+//
+// The two reductions keep their own existing rules rather than share one:
+// Latest's "at or before" tie tolerates two commits recorded in the same
+// second, which is why gap detection still finds a previous commit sharing
+// head's own timestamp; OpenFindings' replay excludes a record at exactly
+// before, because before is the commit about to be recorded and its own
+// events, once appended, must never be read back as history for themselves.
+func BranchState(root, branch string, before time.Time) (open map[FindingBucket]map[string]bool, previous Record, hasPrevious bool) {
+	var recs []Record
+	month := time.Date(before.UTC().Year(), before.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	for range lookbackMonths {
+		parts, err := partsFor(root, month)
+		if err != nil {
+			break
+		}
+		for _, p := range parts {
+			_, _ = scan(filepath.Join(root, filepath.FromSlash(p)), func(rec Record) bool {
+				if rec.Kind == KindEntry && rec.Branch == branch {
+					recs = append(recs, rec)
+				}
+				return false
+			})
+		}
+		month = month.AddDate(0, -1, 0)
+	}
+
+	for _, rec := range recs {
+		if rec.At.After(before) {
+			continue
+		}
+		if !hasPrevious || rec.At.After(previous.At) {
+			previous, hasPrevious = rec, true
+		}
+	}
+
+	replay := make([]Record, 0, len(recs))
+	for _, rec := range recs {
+		if rec.At.Before(before) && len(rec.FindingEvents) > 0 {
+			replay = append(replay, rec)
+		}
+	}
+	sort.SliceStable(replay, func(i, j int) bool { return replay[i].At.Before(replay[j].At) })
+	open = map[FindingBucket]map[string]bool{}
+	for _, rec := range replay {
+		for _, ev := range rec.FindingEvents {
+			bucket := FindingBucket{Gate: ev.Gate, Component: ev.Component}
+			switch ev.Transition {
+			case FindingAppeared:
+				if open[bucket] == nil {
+					open[bucket] = map[string]bool{}
+				}
+				open[bucket][ev.Fingerprint] = true
+			case FindingResolved:
+				delete(open[bucket], ev.Fingerprint)
+				if len(open[bucket]) == 0 {
+					delete(open, bucket)
+				}
+			}
+		}
+	}
+	return open, previous, hasPrevious
+}
+
 // appendRecord adds one line to the month's current part, rolling to the next
 // when the line would take that part over the cap.
 func appendRecord(root string, rec Record) (string, error) {
