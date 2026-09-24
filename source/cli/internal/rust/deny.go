@@ -236,9 +236,17 @@ func runDeny(ctx context.Context, dir string, env []string, bin string) executil
 // one. The status is a bitmask of which checks failed — licenses 4, bans 2, 6
 // for both — so what decides the row is Ok, never a comparison against 1, and
 // cargo-deny can set it for reasons no diagnostic in the stream states.
+//
+// Crashed is exactly those reasons: a failure with no error-severity
+// diagnostic to account for it is a run that did not finish checking, since
+// cargo-deny sets its status from its errors alone. The stream is no document
+// that could fail to parse — a malformed line costs only itself — so this
+// pairing is the only signal it gives.
 func denyResult(dir string, r executil.Result) executil.Result {
 	r.Output = r.Stderr
-	r.Findings = denyFindings(dir, decodeDeny(strings.NewReader(r.Stderr)))
+	messages := decodeDeny(strings.NewReader(r.Stderr))
+	r.Findings = denyFindings(dir, messages)
+	r.Crashed = !r.Ok() && !denyStatesAnError(messages)
 	if r.Ok() {
 		return r
 	}
@@ -248,6 +256,17 @@ func denyResult(dir string, r executil.Result) executil.Result {
 	}
 	r.Detail = unreadable(GateDeny, r.Err)
 	return r
+}
+
+// denyStatesAnError reports whether the stream holds a diagnostic of the
+// severity cargo-deny sets its exit status from.
+func denyStatesAnError(messages []denyMessage) bool {
+	for _, m := range messages {
+		if m.Type == "diagnostic" && m.Fields.Severity == denySeverityError {
+			return true
+		}
+	}
+	return false
 }
 
 // PolicySource is the document that decided which licences a component's

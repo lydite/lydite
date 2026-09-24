@@ -3,6 +3,7 @@ package golang
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -192,12 +193,25 @@ func govulncheckTrace(f *govulncheckFinding) []string {
 // writes each message complete, so a truncated stream is a run that was
 // killed, and the advisories it did report are true.
 func decodeGovulncheck(r io.Reader) []govulncheckMessage {
+	out, _ := decodeGovulncheckWhole(r)
+	return out
+}
+
+// decodeGovulncheckWhole is decodeGovulncheck, also saying whether the stream
+// parsed to its end.
+//
+// The stream carries no message marking a finished run — `config`, `SBOM`,
+// `progress`, `osv` and `finding` are all there is — so a stream cut off
+// between two messages is indistinguishable from a whole one. What this can
+// tell apart is a stream cut off inside a message, which is a run killed
+// mid-write and whose advisories are true but not all of them.
+func decodeGovulncheckWhole(r io.Reader) ([]govulncheckMessage, bool) {
 	dec := json.NewDecoder(r)
 	var out []govulncheckMessage
 	for {
 		var m govulncheckMessage
 		if err := dec.Decode(&m); err != nil {
-			return out
+			return out, errors.Is(err, io.EOF)
 		}
 		out = append(out, m)
 	}
@@ -240,8 +254,14 @@ func runGovulncheck(ctx context.Context, dir string, env []string, bin string) e
 	// RunQuiet, because this pass is data: streaming it would print the whole
 	// report a second time under the one the developer just read.
 	data := executil.RunQuietEnv(ctx, dir, env, bin, govulncheckArgv(true)...)
-	return govulncheckResult(r, dir, data.Output)
+	return govulncheckResult(r, dir, data)
 }
+
+// govulncheckFound is the status the text pass exits with when it found a
+// vulnerability. Any other non-zero status is govulncheck failing to be a
+// scanner rather than reporting as one — a module it could not load, a
+// database it could not fetch.
+const govulncheckFound = 3
 
 // govulncheckResult is the text pass's result with the data pass's stream read
 // into it.
@@ -249,12 +269,31 @@ func runGovulncheck(ctx context.Context, dir string, env []string, bin string) e
 // Split from the invocation so it can be tested against a captured stream:
 // which pass decides the row is the decision here, and a test that had to run
 // govulncheck twice to reach it would be testing the machine's govulncheck.
-func govulncheckResult(r executil.Result, dir, stream string) executil.Result {
-	if stream == "" {
+//
+// Crashed is decided from both passes and never from the text pass's failure
+// alone, which is how it reports a vulnerability. The data pass exits 0
+// whether or not it found anything, so any failure there is a run that did not
+// finish; the text pass exiting with anything but 0 or govulncheckFound is the
+// same; and an empty or truncated stream holds claims that are not all of them.
+func govulncheckResult(r executil.Result, dir string, data executil.Result) executil.Result {
+	r.Crashed = govulncheckCrashed(r, data)
+	if data.Output == "" {
 		// Nothing to parse: leave the text pass's verdict and output as-is
 		// rather than inventing one.
 		return r
 	}
-	r.Findings = govulncheckFindings(dir, decodeGovulncheck(strings.NewReader(stream)))
+	messages, whole := decodeGovulncheckWhole(strings.NewReader(data.Output))
+	r.Findings = govulncheckFindings(dir, messages)
+	r.Crashed = r.Crashed || !whole
 	return r
+}
+
+// govulncheckCrashed reports whether the two passes' own statuses say the run
+// did not finish, before the stream is read at all.
+func govulncheckCrashed(text, data executil.Result) bool {
+	if !data.Ok() || data.Output == "" {
+		return true
+	}
+	status, exited := text.ExitStatus()
+	return !exited || (status != 0 && status != govulncheckFound)
 }

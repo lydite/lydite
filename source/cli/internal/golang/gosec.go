@@ -339,7 +339,7 @@ func runGosec(ctx context.Context, dir string, env []string, bin string) executi
 	if err != nil {
 		// Detail as well as Err, for the reason an install failure carries
 		// one: report() prints Detail under a failing row and nothing else.
-		return executil.Result{Name: GateGosec, Err: err, Detail: err.Error()}
+		return executil.Result{Name: GateGosec, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -358,25 +358,37 @@ func runGosec(ctx context.Context, dir string, env []string, bin string) executi
 // Whether a claim is made at all, and whether a package that did not compile
 // reads as a pass, are the decisions worth pinning — and a test that had to
 // run gosec to reach them would be testing the machine's gosec.
+//
+// Crashed is read off the report and never off the exit status, which is
+// non-zero for a run that found something: no report, a report that will not
+// parse, or a report naming a package that did not compile. A parsed report
+// naming no build error is a whole answer however gosec exited.
 func gosecResult(r executil.Result, dir, outPath string) executil.Result {
 	data, readErr := os.ReadFile(outPath) // #nosec G304 -- outPath is our own CreateTemp result, not user input
 	if readErr != nil {
 		// No report to read: leave gosec's own exit status and output as-is
 		// rather than inventing a verdict.
+		r.Crashed = true
 		return r
 	}
 	report, ok := parseGosec(data)
 	if !ok {
+		r.Crashed = true
 		return r
 	}
 	r.Findings = gosecFindings(dir, report)
+	errs := buildErrors(dir, report)
+	// Whatever the exit status says: the claims from the packages that did
+	// compile are true, and the package that did not is one whose claims
+	// are missing rather than cleared.
+	r.Crashed = len(errs) > 0
 	// A package that did not compile is a package gosec scanned nothing in,
 	// and it reports that in the report rather than in its exit status. The
 	// status happens to be non-zero today, so this changes no verdict lydite
 	// currently reaches; it is here because a clean exit beside an empty
 	// scan is the failure this branch exists to refuse, and nothing about
 	// gosec's contract promises the status will keep covering it.
-	if errs := buildErrors(dir, report); len(errs) > 0 && r.Ok() {
+	if len(errs) > 0 && r.Ok() {
 		// Detail because this is lydite's verdict rather than gosec's, and
 		// report() prints Detail under a failing row and nothing else. It is
 		// not findings — those stay out of Detail, which is what keeps a

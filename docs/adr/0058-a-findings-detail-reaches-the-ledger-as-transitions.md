@@ -134,6 +134,39 @@ No dashboard reads this yet — `source/web/` is still empty. This slice's payof
 recorded from the day this lands is complete once the dashboard exists to read it; ADR 0009's own
 reasoning already covers why that is worth having before the reader does.
 
+## A crashed scanner must not read as a clean one, and now it does not
+
+`findingCounts` already accepted, for the scalar count, that a scanner which crashed — a
+component that would not build — records 0 like a clean one: a wrong count for one recording,
+corrected by the next. For transitions the same gap is not a wrong count, it is a permanent
+lie: every finding open in that bucket would be written `FindingResolved`, then `FindingAppeared`
+again once the scanner next runs cleanly, baked into a ledger nothing prunes.
+
+`executil.Result` gained `Crashed bool` — never derived from `Err`/`Ok`, since every scanner here
+exits non-zero when it finds something and Biome's own wrapper reuses `Err` on purpose to say so.
+Each wrapper (gosec, govulncheck, Biome, cargo-audit, cargo-deny, clippy, Semgrep, gitleaks,
+shellcheck, and the licence gate) decides it from its own report: a report that did not parse, a
+tool that would not install, or the tool's own structured statement that it did not finish — never
+from the exit code. The scan document carries the crashed `(gate, component)` pairs as data
+(`finding.Crash`, beside `Findings` the same way), and `findingScope` excludes each one: a crashed
+bucket's open findings carry over untouched rather than being diffed against claims that are not a
+complete answer.
+
+Two narrower gaps remain, deliberately not chased further here:
+
+- **Clippy under `-D warnings`** marks a run crashed only when a failing run's diagnostics are not
+  all lints (parse errors and rustc's own `E<digits>` codes are a crash; a denied lint is not). But
+  a denied lint fails its own compilation unit, and cargo then never checks anything that depends
+  on it — a crate's tests, bins and examples when its lib has one, or a dependent crate in a
+  workspace. Those units' findings are silently absent from a run this fix reports as not crashed.
+  Closing it means deciding clippy's verdict from its finding count rather than its exit status,
+  which is a change to what "clippy failed" means, not to this fix.
+- **Semgrep run with `--diff-base` or in `ci` mode** reports only findings new since a base commit,
+  by design — not a crash, a different question being asked. A recording taken from such a run
+  would read every pre-existing Semgrep finding as resolved. `lydite test record`'s own semgrep
+  invocation does not run this way today; a future one that did would need this handled
+  separately from `Crashed`.
+
 ## Consequences
 
 - A stable repository's ledger grows exactly as it does today. An active one's grows in

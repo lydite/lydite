@@ -133,7 +133,7 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 		// one: report() prints Detail under a failing row and nothing else,
 		// so a bare Err renders as `✗ biome` with the cause in neither the
 		// terminal nor --json.
-		return executil.Result{Name: GateBiome, Err: err, Detail: err.Error()}
+		return executil.Result{Name: GateBiome, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -163,6 +163,7 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 			"Add \"root\": false to it (Biome's own requirement for nested configs), which is also\n" +
 			"how a subdirectory states its own ignores: lydite passes --config-path, which beats a\n" +
 			"root biome.json, and only a nested non-root config is merged into lydite's."
+		r.Crashed = true
 		return r
 	}
 
@@ -170,13 +171,19 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 	if readErr != nil {
 		// No report to read: leave Biome's own exit status and output as-is
 		// rather than inventing a verdict.
+		r.Crashed = true
 		return r
 	}
 	var report biomeReport
 	if jsonErr := json.Unmarshal(data, &report); jsonErr != nil {
+		r.Crashed = true
 		return r
 	}
 
+	// Whatever the error set below says: that error is how this wrapper
+	// reports findings, and a report that parsed is a crash only where Biome
+	// itself says it could not lint something.
+	r.Crashed = biomeIncomplete(report)
 	findings := biomeFindings(dir, report)
 	if len(findings) == 0 {
 		r.Err = nil
@@ -194,6 +201,27 @@ func lintDirBiome(ctx context.Context, dir string, env []string, biomeBin, confi
 	r.Detail = b.String()
 	r.Err = fmt.Errorf("%d finding(s)", len(findings))
 	return r
+}
+
+// biomeIncomplete reports whether a parsed report says Biome did not lint
+// everything it was given.
+//
+// Every reportable diagnostic outside the two lint groups lydite enables is,
+// by reportableBiome's own reasoning, a statement about Biome rather than a
+// rule opinion — `parse` for a file with a syntax error, `internalError/io` for
+// one it could not read, and whatever a future Biome adds. Each is a file whose
+// own claims are missing from the report rather than cleared, whether or not
+// the diagnostic itself carries a location.
+func biomeIncomplete(report biomeReport) bool {
+	for _, d := range report.Diagnostics {
+		if !reportableBiome(d.Category) {
+			continue
+		}
+		if !strings.HasPrefix(d.Category, "lint/") {
+			return true
+		}
+	}
+	return false
 }
 
 // biomeFindings is every reportable diagnostic as a located claim.

@@ -1,11 +1,14 @@
 package semgrep
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/fixture"
 )
 
@@ -215,5 +218,53 @@ func TestSemgrepReportsNoSpanForASingleLineResult(t *testing.T) {
 				t.Errorf("EndLine = %d, want %d", got[0].EndLine, tc.want)
 			}
 		})
+	}
+}
+
+// exited is a result carrying a real exit status, the shape executil hands
+// reportResult. An invented error carries no status, and the status is what
+// separates a findings failure from Semgrep failing to run.
+func exited(t *testing.T, code int) executil.Result {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), "", "sh", "-c", "exit "+strconv.Itoa(code))
+	if status, ok := r.ExitStatus(); !ok || status != code {
+		t.Fatalf("running a command that exits %d answered %d, %v", code, status, ok)
+	}
+	r.Name = Gate
+	return r
+}
+
+// Semgrep exits findingsExit for what it found, so a failing run whose report
+// parsed and names no blocking error is a whole answer. Every other shape
+// leaves claims missing rather than cleared.
+func TestReportResultCrashesOnlyWhereItsClaimsAreIncomplete(t *testing.T) {
+	dir := scannedDir(t)
+	data, err := os.ReadFile("testdata/semgrep.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := reportResult(exited(t, findingsExit), dir, data, nil)
+	if len(found.Findings) == 0 || found.Crashed {
+		t.Errorf("%d claims, crashed %v; want the failing run's claims and no crash", len(found.Findings), found.Crashed)
+	}
+	if clean := reportResult(exited(t, 0), dir, []byte(`{"results":[],"errors":[]}`), nil); clean.Crashed {
+		t.Error("a clean run read as a crash")
+	}
+
+	blocked := []byte(`{"results":[],"errors":[{"level":"error","message":"invalid rule schema"}]}`)
+	cases := map[string]struct {
+		r       executil.Result
+		data    []byte
+		readErr error
+	}{
+		"no report":          {exited(t, findingsExit), nil, os.ErrNotExist},
+		"an unparseable one": {exited(t, 0), []byte("not json"), nil},
+		"a blocking error":   {exited(t, findingsExit), blocked, nil},
+		"a fatal exit":       {exited(t, 2), []byte(`{"results":[],"errors":[]}`), nil},
+	}
+	for name, tc := range cases {
+		if got := reportResult(tc.r, dir, tc.data, tc.readErr); !got.Crashed {
+			t.Errorf("%s: not crashed", name)
+		}
 	}
 }

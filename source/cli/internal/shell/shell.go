@@ -50,14 +50,14 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// Detail as well as Err: report() prints Detail under a failing row and
 		// nothing else, so a bare Err renders as `✗ shellcheck` with the cause
 		// in neither the terminal nor --json.
-		return []executil.Result{{Name: Gate, Err: err, Detail: err.Error()}}
+		return []executil.Result{{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}}
 	}
 	if len(scripts) == 0 {
 		// A failing row rather than a passing one. ShellCheck given no file
 		// checks nothing, and a component that declares a language whose source
 		// it does not hold is a declaration to correct, not a clean scan.
 		err := fmt.Errorf("no shell script (%s) under the component's directory, so ShellCheck had nothing to check", strings.Join(runner.SourceExtsFor(runner.Shell), ", "))
-		return []executil.Result{{Name: Gate, Err: err, Detail: err.Error()}}
+		return []executil.Result{{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}}
 	}
 	return []executil.Result{run(ctx, dir, env.Check, scripts)}
 }
@@ -156,11 +156,12 @@ func ensure(ctx context.Context, env []string) executil.Result {
 	r.Name = Gate
 	if !r.Ok() {
 		r.Detail = fmt.Sprintf("installing %s==%s with pipx failed (%v)", pinnedPackage, version, r.Err)
+		r.Crashed = true
 		return r
 	}
 	if got := installedVersion(ctx); got != want {
 		err := fmt.Errorf("pipx installed %s==%s, but the shellcheck on PATH reports %s rather than %s: another shellcheck ahead of pipx's bin directory is the one lydite would run", pinnedPackage, version, orNone(got), want)
-		return executil.Result{Name: Gate, Err: err, Detail: err.Error()}
+		return executil.Result{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	return executil.Result{Name: Gate}
 }

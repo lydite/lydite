@@ -1025,3 +1025,22 @@ func readFixture(t *testing.T, name string) string {
 	}
 	return string(data)
 }
+
+// cargo-deny sets its status from its errors alone, so a failure the stream
+// accounts for with one is a whole answer, and a failure it does not account
+// for is a run that did not finish checking.
+func TestDenyCrashesOnAFailureNoErrorAccountsFor(t *testing.T) {
+	if found := denyResult(crateDir(t), stderrRun(t, "deny.ndjson")); found.Ok() || found.Crashed {
+		t.Errorf("ok %v, crashed %v; want a failing run whose errors account for it", found.Ok(), found.Crashed)
+	}
+	if clean := denyResult(crateDir(t), stderrRun(t, "deny-clean.ndjson")); clean.Crashed {
+		t.Error("a clean run read as a crash")
+	}
+	unaccounted := denyResult(t.TempDir(), executil.Result{
+		Stderr: `{"type":"diagnostic","fields":{"code":"unlicensed","severity":"warning","message":"a"}}` + "\n",
+		Err:    fmt.Errorf("exit status 4"),
+	})
+	if !unaccounted.Crashed {
+		t.Error("a failure with no error-severity diagnostic read as a whole answer")
+	}
+}

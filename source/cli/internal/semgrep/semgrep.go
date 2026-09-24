@@ -116,6 +116,9 @@ func warnSemgrepignore(w io.Writer, dir string) {
 func Check(ctx context.Context, dir, rulesetConfig, baseSHA string, w io.Writer) executil.Result {
 	warnSemgrepignore(w, dir)
 	if r := ensure(ctx); !r.Ok() {
+		// A Semgrep that would not install scanned nothing, so the absence
+		// of claims here is no answer about the code.
+		r.Crashed = true
 		return r
 	}
 	return withFindings(ctx, dir, buildArgs(rulesetConfig, os.Getenv(AppTokenEnv) != "", baseSHA))

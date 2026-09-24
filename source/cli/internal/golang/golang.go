@@ -66,13 +66,13 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ gosec` with the cause in neither the terminal nor --json.
-		results = append(results, executil.Result{Name: GateGosec, Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateGosec, Err: err, Detail: err.Error(), Crashed: true})
 	} else {
 		results = append(results, runGosec(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, toolchainKey, "govulncheck", govulncheckVersion, govulncheckPkg); err != nil {
-		results = append(results, executil.Result{Name: GateGovulncheck, Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateGovulncheck, Err: err, Detail: err.Error(), Crashed: true})
 	} else {
 		results = append(results, runGovulncheck(ctx, dir, env.Check, bin))
 	}

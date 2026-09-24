@@ -176,7 +176,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	perComponent, root := findingCounts(dir, decl, cfg, read.found, read.scanned)
 	rep.Add(findingsRow(perComponent, root, read.scanned))
 
-	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, read.found, mutants)
+	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, read.found, read.crashed, mutants)
 
 	// What may be recorded as a baseline, and the row that says why when
 	// nothing may. An empty snapshot is a legitimate answer here, and is what
@@ -327,7 +327,7 @@ func baselineToRecord(ctx context.Context, dir string, decl component.File, cfg 
 // same fetched branch for the same reason.
 func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc,
 	perComponent map[string]map[string]int, root map[string]int, found []finding.Finding,
-	mutants map[string]mutantCounts) (gitstate.Records, string) {
+	crashed []finding.Crash, mutants map[string]mutantCounts) (gitstate.Records, string) {
 	// A branch and never a guess. History is per branch, so a record filed
 	// under a branch this checkout is not on puts one line's points on
 	// another line, and nothing downstream can tell. The caller's own
@@ -363,7 +363,7 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 		Components:   components,
 		RootFindings: root,
 	}
-	scope := findingScope(perComponent, root)
+	scope := findingScope(perComponent, root, crashed)
 	return func(worktree string) ([]ledger.Record, error) {
 		// One walk of the branch's own history serves both gap detection and
 		// the finding diff, rather than each reading the same partitions on
@@ -386,13 +386,21 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 
 // findingScope is every bucket this recording measured: each gate
 // findingCounts keyed for a component, and each root-scoped one it keyed for
-// the repository.
+// the repository, less every bucket the scan named as crashed.
 //
 // Read off the counts rather than decided again, because a bucket a finding
-// can resolve in is exactly a gate that ran, and the counts are already the
-// one answer to that. A second notion of what ran would drift from the first,
+// can resolve in is a gate that applied, and the counts are already the one
+// answer to that. A second notion of what applied would drift from the first,
 // and the drift would be a resolution recorded for a bucket nothing measured.
-func findingScope(perComponent map[string]map[string]int, root map[string]int) map[ledger.FindingBucket]bool {
+//
+// The counts cannot say whether an applicable gate finished: a scanner that
+// crashed found no claims and counts 0 like a clean one, which is a limit a
+// scalar tolerates and a transition does not — every finding held open there
+// would be recorded resolved, and appear again on the next clean run, in a
+// ledger nothing is ever removed from. The scan document names each crash as
+// data, and a crashed bucket is left out so the open set it holds carries over
+// untouched.
+func findingScope(perComponent map[string]map[string]int, root map[string]int, crashed []finding.Crash) map[ledger.FindingBucket]bool {
 	scope := map[ledger.FindingBucket]bool{}
 	for name, gates := range perComponent {
 		for gate := range gates {
@@ -401,6 +409,9 @@ func findingScope(perComponent map[string]map[string]int, root map[string]int) m
 	}
 	for gate := range root {
 		scope[ledger.FindingBucket{Gate: gate}] = true
+	}
+	for _, c := range crashed {
+		delete(scope, ledger.FindingBucket{Gate: c.Gate, Component: c.Component})
 	}
 	return scope
 }
@@ -725,6 +736,9 @@ type reportsRead struct {
 	mutants []mutantsDoc
 	// found is every located claim the scan documents made.
 	found []finding.Finding
+	// crashed is every gate the scan documents name as not having finished a
+	// trustworthy scan, whose findings are therefore not a complete answer.
+	crashed []finding.Crash
 	// scanned says that some directory held a readable scan document, which is
 	// what separates a gate that found nothing from a scan that never ran. A
 	// count of nought and no scan at all are the same empty list of findings,
@@ -767,6 +781,7 @@ func readReports(rep *ui.Report, reports []string) reportsRead {
 		switch {
 		case scanErr == nil:
 			out.found = append(out.found, scan.Findings...)
+			out.crashed = append(out.crashed, scan.Crashed...)
 			out.scanned = true
 			held = append(held, fmt.Sprintf("%d finding(s) from scan", len(scan.Findings)))
 		case !errors.Is(scanErr, os.ErrNotExist):

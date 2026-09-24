@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
+	"lydite/lydite/internal/ui"
 )
 
 // recordedFindingEvents is the finding events the record this commit appends
@@ -23,7 +26,7 @@ import (
 // Every prior record is filed an hour before this commit, which is what makes
 // it history rather than this commit's own events read back.
 func recordedFindingEvents(t *testing.T, folded measurementsDoc, perComponent map[string]map[string]int,
-	root map[string]int, found []finding.Finding, prior ...[]ledger.FindingEvent) []ledger.FindingEvent {
+	root map[string]int, found []finding.Finding, crashed []finding.Crash, prior ...[]ledger.FindingEvent) []ledger.FindingEvent {
 	t.Helper()
 	repo := gitRepo(t, map[string]string{"README.md": "a repository\n"})
 	commitAll(t, repo, "the commit being recorded")
@@ -46,7 +49,7 @@ func recordedFindingEvents(t *testing.T, folded measurementsDoc, perComponent ma
 		}
 	}
 
-	records, why := historyRecords(context.Background(), repo, "main", folded, perComponent, root, found, nil)
+	records, why := historyRecords(context.Background(), repo, "main", folded, perComponent, root, found, crashed, nil)
 	if records == nil {
 		t.Fatalf("no record to append: %s", why)
 	}
@@ -76,7 +79,7 @@ func TestEveryFindingOfAFirstRecordingAppears(t *testing.T) {
 
 	got := recordedFindingEvents(t, measurementsDoc{},
 		map[string]map[string]int{"cli": {"gosec": 1}}, map[string]int{"gitleaks": 1},
-		[]finding.Finding{a, leak})
+		[]finding.Finding{a, leak}, nil)
 
 	want := []ledger.FindingEvent{
 		{Transition: ledger.FindingAppeared, Fingerprint: leak.Fingerprint(), Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key"},
@@ -99,7 +102,7 @@ func TestAFindingThatIsGoneResolvesAndOneThatStaysWritesNothing(t *testing.T) {
 
 	got := recordedFindingEvents(t, measurementsDoc{},
 		map[string]map[string]int{"cli": {"gosec": 1}}, nil,
-		[]finding.Finding{stays}, prior)
+		[]finding.Finding{stays}, nil, prior)
 
 	want := []ledger.FindingEvent{
 		{Transition: ledger.FindingResolved, Fingerprint: goes.Fingerprint(), Gate: "gosec", Component: "cli"},
@@ -119,7 +122,7 @@ func TestAnUnchangedScanWritesNoFindingEvents(t *testing.T) {
 
 	got := recordedFindingEvents(t, measurementsDoc{},
 		map[string]map[string]int{"cli": {"gosec": 1}}, nil,
-		[]finding.Finding{a}, prior)
+		[]finding.Finding{a}, nil, prior)
 
 	if len(got) != 0 {
 		t.Errorf("events = %+v, want none: nothing appeared and nothing resolved", got)
@@ -139,7 +142,7 @@ func TestABucketThisRecordingDidNotMeasureResolvesNothing(t *testing.T) {
 
 	got := recordedFindingEvents(t, measurementsDoc{},
 		map[string]map[string]int{"cli": {"gosec": 0}}, map[string]int{"gitleaks": 0},
-		nil, prior)
+		nil, nil, prior)
 
 	if len(got) != 0 {
 		t.Errorf("events = %+v, want none: every open finding sits in a bucket this recording did not measure", got)
@@ -160,9 +163,63 @@ func TestARecordingWithNoScanWritesNoFindingEvents(t *testing.T) {
 
 	got := recordedFindingEvents(t,
 		measurementsDoc{Tests: map[string]junit.Counts{"cli": {Total: 3}}},
-		perComponent, root, nil, prior)
+		perComponent, root, nil, nil, prior)
 
 	if got != nil {
 		t.Errorf("events = %+v, want none: nothing was scanned", got)
+	}
+}
+
+// A bucket the scan names as crashed is not measured, however findingCounts
+// counts it: a scanner that crashed made no claim, so it counts 0 like a clean
+// one, and reading that as measured would record every finding it held open as
+// resolved and then as appeared again on the next clean run. Its open set
+// carries over untouched — nothing resolves there, and a partial claim it did
+// make does not appear — while a bucket beside it that finished is diffed as
+// ever.
+func TestACrashedBucketKeepsWhatItHeldOpen(t *testing.T) {
+	held := gosecClaim("a.go", "held")
+	fixed := finding.Finding{Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1", Site: "GO-1\x1fm"}
+	leak := finding.Finding{Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key", Site: "held"}
+	partial := finding.Finding{Gate: "gitleaks", Path: "c.env", Rule: "generic-api-key", Site: "partial"}
+	prior := []ledger.FindingEvent{
+		{Transition: ledger.FindingAppeared, Fingerprint: held.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
+		{Transition: ledger.FindingAppeared, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1"},
+		{Transition: ledger.FindingAppeared, Fingerprint: leak.Fingerprint(), Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key"},
+	}
+
+	// Through the document, so the crash reaches the recording the way a scan
+	// job's does: written beside the findings, read back by readReports.
+	dir := t.TempDir()
+	scan := ui.NewReport("scan")
+	scan.AddFindings(partial)
+	scan.AddCrashed(finding.Crash{Gate: "gosec", Component: "cli"}, finding.Crash{Gate: "gitleaks"})
+	f, err := os.Create(filepath.Join(dir, documentName("scan"))) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scan.WriteJSON(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	read := readReports(ui.NewReport("record"), []string{dir})
+
+	decl := component.File{Components: []component.Component{
+		{Name: "cli", Dir: "cli", Runner: "go-test"},
+	}}
+	perComponent, root := findingCounts(t.TempDir(), decl, config.Default(), read.found, read.scanned)
+	if n, ok := perComponent["cli"]["gosec"]; !ok || n != 0 {
+		t.Fatalf("gosec(cli) counts %d (keyed %v), want the 0 a crashed scanner still records", n, ok)
+	}
+
+	got := recordedFindingEvents(t, measurementsDoc{}, perComponent, root, read.found, read.crashed, prior)
+
+	want := []ledger.FindingEvent{
+		{Transition: ledger.FindingResolved, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("events = %+v, want only the finished bucket's resolution — nothing from a crashed one", got)
 	}
 }

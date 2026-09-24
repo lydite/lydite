@@ -167,9 +167,17 @@ func findingsDetail(findings []finding.Finding) string {
 // never becomes one. What its status cannot be trusted with is a clean exit
 // beside a report that does not parse: that is a run lydite cannot show checked
 // anything, and it fails rather than passing on the status alone.
+//
+// Crashed is decided by the same status and never by a failure alone, which
+// is how ShellCheck reports a diagnostic: a report that does not parse, or any
+// status but 0 and findingsExit — a file it could not read is one whose
+// diagnostics are missing, and a refused invocation checked nothing.
 func result(dir string, r executil.Result) executil.Result {
+	status, exited := r.ExitStatus()
+	r.Crashed = !exited || (status != 0 && status != findingsExit)
 	var rep report
 	if err := json.Unmarshal([]byte(r.Output), &rep); err != nil {
+		r.Crashed = true
 		if r.Ok() {
 			r.Err = fmt.Errorf("shellcheck exited cleanly and its JSON report did not parse: %w", err)
 		}
@@ -183,6 +191,10 @@ func result(dir string, r executil.Result) executil.Result {
 	r.Detail = detailOf(r, findingsDetail(r.Findings))
 	return r
 }
+
+// findingsExit is the status ShellCheck exits with when it reported a
+// diagnostic and checked every file it was given.
+const findingsExit = 1
 
 // detailOf is what a failing row prints: the claims it located, then whatever
 // ShellCheck said on stderr about what it could not do — a file it could not

@@ -186,9 +186,14 @@ func runClippy(ctx context.Context, dir string, env []string) executil.Result {
 // cargo's exit status stays the verdict and a finding count never becomes one:
 // a build that does not compile fails with diagnostics that locate nothing, and
 // a run whose report lists no claim can still be a failure that has to say why.
+//
+// Crashed is read off the diagnostics, never off the exit status, which is 101
+// for a run that found a lint as much as for one that would not build: a
+// failing run is a whole answer only when every error it states is a lint.
 func clippyResult(dir string, r executil.Result) executil.Result {
 	messages := decodeClippy(strings.NewReader(r.Output))
 	r.Findings = clippyFindings(dir, messages)
+	r.Crashed = !r.Ok() && !clippyOnlyLinted(messages)
 	if r.Ok() {
 		return r
 	}
@@ -202,6 +207,46 @@ func clippyResult(dir string, r executil.Result) executil.Result {
 	}
 	r.Detail = unreadable(GateClippy, r.Err)
 	return r
+}
+
+// clippyOnlyLinted reports whether a failing run failed on lints alone.
+//
+// Under `-D warnings` a lint is an error-level diagnostic whose code names the
+// lint — `clippy::ptr_arg`, `unused_variables`. A diagnostic rustc raises
+// because the code is not valid Rust carries an error code of the form E0277,
+// or none at all for a parse error, and a crate that stops there is a crate
+// clippy linted none of. A failing run stating no error-level diagnostic at
+// all failed before rustc said anything — a manifest cargo could not resolve,
+// a build script that died — and is no answer either.
+func clippyOnlyLinted(messages []clippyMessage) bool {
+	linted := false
+	for i := range messages {
+		m := messages[i]
+		if m.Reason != "compiler-message" || m.Message == nil ||
+			!strings.HasPrefix(m.Message.Level, "error") {
+			continue
+		}
+		if m.Message.Code == nil || m.Message.Code.Code == "" || rustcErrorCode(m.Message.Code.Code) {
+			return false
+		}
+		linted = true
+	}
+	return linted
+}
+
+// rustcErrorCode reports whether code is one of rustc's own error codes — an
+// E followed by digits — rather than a lint's name.
+func rustcErrorCode(code string) bool {
+	digits, ok := strings.CutPrefix(code, "E")
+	if !ok || digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // clippyNotes is the text of the diagnostics that locate nothing.

@@ -607,7 +607,7 @@ func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
 	records, why := historyRecords(context.Background(), t.TempDir(), "main",
 		measurementsDoc{Components: map[string]componentMeasurement{
 			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
-		}}, nil, nil, nil, nil)
+		}}, nil, nil, nil, nil, nil)
 	if records != nil {
 		t.Error("a fold carrying no scalar produced records")
 	}

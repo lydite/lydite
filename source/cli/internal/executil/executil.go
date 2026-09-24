@@ -5,6 +5,7 @@ package executil
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -63,6 +64,25 @@ type Result struct {
 	// the prose a human reads and the data a consumer anchors are one
 	// derivation. Empty for a tool whose output lydite does not parse.
 	Findings []finding.Finding
+	// Crashed reports whether Findings cannot be trusted as a complete answer:
+	// the tool could not start or install, its report could not be read or
+	// parsed, or its own report says it did not finish scanning everything it
+	// was given — a package that would not compile, a file it could not read.
+	// A consumer that diffs one run's claims against another's reads a crashed
+	// run's missing claims as nothing: their absence says nothing about the
+	// code, and treating it as resolution records churn nobody caused.
+	//
+	// It is deliberately not derived from Err or Ok. Every scanner here exits
+	// non-zero when it finds something, and Biome's wrapper sets Err to say it
+	// did, so a failing result means "crashed or found something" and cannot
+	// tell the two apart on its own. Each wrapper decides it from what only
+	// that tool's own report can say.
+	//
+	// False is the zero value, and it is the wrong answer for a result built
+	// by hand on a failure path before any wrapper ran — an install that
+	// failed, a temp file that could not be created. A path that returns a
+	// Result sets this explicitly rather than trusting the zero value.
+	Crashed bool
 	// Stderr is what the command wrote to stderr, kept apart from Output by
 	// RunQuiet only. Run deliberately merges the two, because for a scanner
 	// they are one stream of findings; RunQuiet's callers parse Output as
@@ -90,6 +110,24 @@ type Result struct {
 
 // Ok reports whether the command exited zero.
 func (r Result) Ok() bool { return r.Err == nil }
+
+// ExitStatus is the status the command exited with, and whether it exited
+// with one at all.
+//
+// A command that never started, or was killed by a signal or a cancelled
+// context, has no status, and answers false: a caller comparing the status
+// against a tool's documented "found something" code must not read one of
+// those as a match. A nil Err is status 0.
+func (r Result) ExitStatus() (int, bool) {
+	if r.Err == nil {
+		return 0, true
+	}
+	var exit *exec.ExitError
+	if !errors.As(r.Err, &exit) || exit.ExitCode() < 0 {
+		return 0, false
+	}
+	return exit.ExitCode(), true
+}
 
 // HitMemoryLimit reports whether the command died at its memory bound rather
 // than for some unrelated reason.

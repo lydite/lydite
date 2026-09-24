@@ -138,7 +138,7 @@ func withFindings(ctx context.Context, dir string, args []string) executil.Resul
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a bare Err renders as `✗ semgrep` with the
 		// cause in neither the terminal nor --json.
-		return executil.Result{Name: Gate, Err: err, Detail: err.Error()}
+		return executil.Result{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	outPath := out.Name()
 	_ = out.Close()
@@ -148,17 +148,41 @@ func withFindings(ctx context.Context, dir string, args []string) executil.Resul
 	r.Name = Gate
 
 	data, readErr := os.ReadFile(outPath) // #nosec G304 -- outPath is our own CreateTemp result, not user input
+	return reportResult(r, dir, data, readErr)
+}
+
+// findingsExit is the status Semgrep exits with for a findings failure, under
+// --error in `scan` and for a blocking finding in `ci`. Every other non-zero
+// status is Semgrep failing to be a scanner — a ruleset it could not load, an
+// invocation it refused.
+const findingsExit = 1
+
+// reportResult is everything decided after Semgrep has exited, given its result
+// and the report it was told to write.
+//
+// Crashed is read from the report and from a status Semgrep does not use for
+// findings, never from a failing result alone, which is how Semgrep reports
+// that it found something: no report, a report that will not parse, a report
+// naming an error blocking says makes a clean result untrustworthy, or an exit
+// that is neither 0 nor findingsExit.
+func reportResult(r executil.Result, dir string, data []byte, readErr error) executil.Result {
+	status, exited := r.ExitStatus()
+	r.Crashed = !exited || (status != 0 && status != findingsExit)
 	if readErr != nil {
 		// No report to read: leave Semgrep's own exit status and output as-is
 		// rather than inventing a verdict.
+		r.Crashed = true
 		return r
 	}
 	rep, ok := parseReport(data)
 	if !ok {
+		r.Crashed = true
 		return r
 	}
 	r.Findings = findings(dir, rep)
-	if errs := blocking(rep); len(errs) > 0 && r.Ok() {
+	errs := blocking(rep)
+	r.Crashed = r.Crashed || len(errs) > 0
+	if len(errs) > 0 && r.Ok() {
 		r.Err = errors.New("semgrep could not scan everything it was given")
 		r.Detail = strings.Join(errs, "\n")
 	}

@@ -3,6 +3,7 @@ package executil
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -382,5 +383,23 @@ func TestHitMemoryLimitReadsThePeakAgainstTheLimit(t *testing.T) {
 				t.Errorf("HitMemoryLimit = %v, want %v (peak %d, limit %d)", got, tc.want, tc.r.MaxRSS, tc.r.MemoryLimit)
 			}
 		})
+	}
+}
+
+// A scanner's documented "found something" status is compared against this,
+// so a command that never ran must not answer with a status it did not exit
+// with.
+func TestExitStatusIsTheCommandsOwnOrNone(t *testing.T) {
+	if status, exited := RunQuiet(context.Background(), "", "sh", "-c", "exit 3").ExitStatus(); !exited || status != 3 {
+		t.Errorf("status = %d, exited %v; want 3, true", status, exited)
+	}
+	if status, exited := (Result{}).ExitStatus(); !exited || status != 0 {
+		t.Errorf("a clean run's status = %d, exited %v; want 0, true", status, exited)
+	}
+	if _, exited := RunQuiet(context.Background(), "", "lydite-no-such-binary").ExitStatus(); exited {
+		t.Error("a command that never started answered with a status")
+	}
+	if _, exited := (Result{Err: errors.New("exit status 1")}).ExitStatus(); exited {
+		t.Error("an error carrying no process state answered with a status")
 	}
 }

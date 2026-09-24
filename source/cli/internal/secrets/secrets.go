@@ -74,7 +74,7 @@ func Check(ctx context.Context, dir string) executil.Result {
 		// Detail as well as Err: report() prints Detail under a failing row and
 		// nothing else, so a tool that would not install renders as a bare
 		// `✗ gitleaks` with the cause in neither the terminal nor --json.
-		return executil.Result{Name: Gate, Err: err, Detail: err.Error()}
+		return executil.Result{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	return run(ctx, dir, bin)
 }
@@ -113,7 +113,7 @@ func argv(reportPath string) []string {
 func run(ctx context.Context, dir, bin string) executil.Result {
 	out, err := os.CreateTemp("", "lydite-gitleaks-*.json")
 	if err != nil {
-		return executil.Result{Name: Gate, Err: err, Detail: err.Error()}
+		return executil.Result{Name: Gate, Err: err, Detail: err.Error(), Crashed: true}
 	}
 	reportPath := out.Name()
 	_ = out.Close()
@@ -127,5 +127,28 @@ func run(ctx context.Context, dir, bin string) executil.Result {
 	// row this gate fails with the reason rather than a run it declines to
 	// make.
 	keep, scopeErr := tracked(ctx, dir)
-	return result(r, dir, reportPath, keep, scopeErr)
+	// Decided before result replaces gitleaks' own exit with lydite's verdict,
+	// since the status is half of what says whether the walk finished.
+	incomplete := crashed(r.Err, reportPath, scopeErr)
+	r = result(r, dir, reportPath, keep, scopeErr)
+	r.Crashed = incomplete
+	return r
+}
+
+// crashed reports whether a run's claims cannot be read as the whole of what
+// the tree holds.
+//
+// The three outcomes result names as this gate failing rather than finding —
+// no report lydite could read, a walk gitleaks' own status says it did not
+// finish, and a scope git could not be asked for, whose claims include ignored
+// output a scoped run would drop. Each leaves a set of claims whose difference
+// from the last run's says nothing about the tree. A leak lydite could not
+// place is not one: it fails the row, but the walk was whole, and a leak with
+// no line had no fingerprint to resolve in the first place.
+func crashed(exit error, reportPath string, scopeErr error) bool {
+	rep, readErr := readReport(reportPath)
+	if readErr != nil {
+		return true
+	}
+	return !ranToCompletion(exit, rep) || scopeFailure(scopeErr, rep) != nil
 }

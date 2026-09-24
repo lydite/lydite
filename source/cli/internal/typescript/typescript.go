@@ -63,7 +63,7 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// failing row and nothing else, so a bare Err renders as `✗ biome`
 		// with the cause in neither the terminal nor --json — a toolchain
 		// that would not install, indistinguishable from lint findings.
-		return []executil.Result{{Name: GateBiome, Err: err, Detail: err.Error()}}
+		return []executil.Result{{Name: GateBiome, Err: err, Detail: err.Error(), Crashed: true}}
 	}
 	biomeBin := filepath.Join(toolchainDir, "node_modules", ".bin", "biome")
 	configPath := filepath.Join(toolchainDir, "biome.json")

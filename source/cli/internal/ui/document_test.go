@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -144,5 +145,37 @@ func TestNoFindingsWritesNoKey(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "findings") {
 		t.Errorf("a run with no findings wrote the key anyway: %s", buf.String())
+	}
+}
+
+// A crash is what makes the findings beside it readable — a crashed gate's
+// missing claims are unmeasured, not cleared — so it survives the document
+// exactly as it was added, and a run with none writes no key.
+func TestACrashSurvivesTheDocument(t *testing.T) {
+	rep := NewReport("scan")
+	rep.AddCrashed(finding.Crash{Gate: "gosec", Component: "cli"}, finding.Crash{Gate: "gitleaks"})
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"crashed"`) {
+		t.Errorf("the document carries no crashed key: %s", buf.String())
+	}
+	doc, err := ReadDocument(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []finding.Crash{{Gate: "gosec", Component: "cli"}, {Gate: "gitleaks"}}
+	if !slices.Equal(doc.Crashed, want) {
+		t.Errorf("crashed read back as %+v, want %+v", doc.Crashed, want)
+	}
+
+	var clean bytes.Buffer
+	if err := NewReport("scan").WriteJSON(&clean); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(clean.String(), "crashed") {
+		t.Errorf("a run with no crash wrote the key anyway: %s", clean.String())
 	}
 }
