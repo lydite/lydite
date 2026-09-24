@@ -7,9 +7,12 @@ for manifests. A component names a runner, the runner implies a language, and it
 that language's checks run. See [ADR 0020](../../docs/adr/0020-scan-on-components.md).
 
 [ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
-decides to relax "the runner implies a language": a component may declare `lang:` directly where
-no runner already implies one, so the scan path reads a language a runner never derived. That
-decision is design only — the scan path still reads the runner-implied language alone today.
+relaxes "the runner implies a language": a component may declare `lang:` directly where no runner
+already implies one, and the scan path reads `Component.ScanLang()` — the runner's language when
+there is one, the declared `lang:` otherwise — rather than `Component.Lang()`, which stays the
+runner-implied language alone and unread on the scan path. `scannedLang` (`scan.go`) reads
+`internal/scanlang`'s enumeration, the one list `internal/orphan` also reads, so the two cannot
+disagree about which languages lydite has a scanner for.
 
 **A repository that declares no components is an error, not a row.** `lydite: no components
 declared in .lydite/components.yml`, exit 1. An `unmeasured` row would leave the job green over an
@@ -40,8 +43,12 @@ they still cover the component's source. See
 [Components](components.md#what-a-raw-command-component-gets).
 
 [ADR 0056](../../docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md)
-decides that a `command:` component may declare `lang:` to opt out of this treatment. That
-decision is design only and not yet built.
+lets a `command:` component declare `lang:` to opt out of this treatment, and lets a component
+declare `lang:` alone, naming no invocation at all — scanned and not tested. Its test-side rows
+(`test`, coverage, CRAP, mutation, flaky) are `unmeasured` with a reason naming that the component
+declares no suite, produced from the declaration rather than a run: `lydite test` emits them
+directly when unsharded, `test merge` when folding shards, and neither schedules, shards nor locks
+the component. See [Components](components.md#what-a-raw-command-component-gets).
 
 This is
 deliberately not the treatment a **disabled** language gets: `rust.enabled: false` produces no rows
