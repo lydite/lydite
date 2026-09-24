@@ -176,7 +176,7 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 	perComponent, root := findingCounts(dir, decl, cfg, read.found, read.scanned)
 	rep.Add(findingsRow(perComponent, root, read.scanned))
 
-	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, mutants)
+	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, read.found, mutants)
 
 	// What may be recorded as a baseline, and the row that says why when
 	// nothing may. An empty snapshot is a legitimate answer here, and is what
@@ -322,9 +322,11 @@ func baselineToRecord(ctx context.Context, dir string, decl component.File, cfg 
 // whether this commit follows the last one recorded is a question about the
 // branch as fetched by the attempt that is about to write — a retry fetches a
 // branch a concurrent run may have advanced, and an answer computed once would
-// have that retry declare a gap the intervening run had just filled.
+// have that retry declare a gap the intervening run had just filled. Which
+// findings appeared and resolved is the same kind of question, asked of the
+// same fetched branch for the same reason.
 func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc,
-	perComponent map[string]map[string]int, root map[string]int,
+	perComponent map[string]map[string]int, root map[string]int, found []finding.Finding,
 	mutants map[string]mutantCounts) (gitstate.Records, string) {
 	// A branch and never a guess. History is per branch, so a record filed
 	// under a branch this checkout is not on puts one line's points on
@@ -361,12 +363,106 @@ func historyRecords(ctx context.Context, dir, override string, folded measuremen
 		Components:   components,
 		RootFindings: root,
 	}
+	scope := findingScope(perComponent, root)
 	return func(worktree string) ([]ledger.Record, error) {
-		if gap, ok := gapBefore(ctx, dir, worktree, branch, head); ok {
-			return []ledger.Record{gap, entry}, nil
+		// A copy per attempt, so a retry's events are diffed against the
+		// branch it fetched and never carry an earlier attempt's.
+		rec := entry
+		// No scope is no scan, and a recording that measured no bucket has
+		// nothing to diff against what the branch holds open.
+		if len(scope) > 0 {
+			rec.FindingEvents = findingEvents(scope, found, ledger.OpenFindings(worktree, branch, head.At))
 		}
-		return []ledger.Record{entry}, nil
+		if gap, ok := gapBefore(ctx, dir, worktree, branch, head); ok {
+			return []ledger.Record{gap, rec}, nil
+		}
+		return []ledger.Record{rec}, nil
 	}, ""
+}
+
+// findingScope is every bucket this recording measured: each gate
+// findingCounts keyed for a component, and each root-scoped one it keyed for
+// the repository.
+//
+// Read off the counts rather than decided again, because a bucket a finding
+// can resolve in is exactly a gate that ran, and the counts are already the
+// one answer to that. A second notion of what ran would drift from the first,
+// and the drift would be a resolution recorded for a bucket nothing measured.
+func findingScope(perComponent map[string]map[string]int, root map[string]int) map[ledger.FindingBucket]bool {
+	scope := map[ledger.FindingBucket]bool{}
+	for name, gates := range perComponent {
+		for gate := range gates {
+			scope[ledger.FindingBucket{Gate: gate, Component: name}] = true
+		}
+	}
+	for gate := range root {
+		scope[ledger.FindingBucket{Gate: gate}] = true
+	}
+	return scope
+}
+
+// findingEvents is what became of each fingerprint in scope since the branch's
+// last recording: appeared when this scan holds it and the open set did not,
+// resolved when the open set held it and this scan does not.
+//
+// A bucket outside scope is never diffed. Its gate did not run this time, so
+// the absence of its findings from this scan says nothing about them, and a
+// resolution recorded there would close a finding nothing looked for.
+//
+// A resolution carries no path or rule. The claim it would read them from is
+// the one this scan no longer makes, and the open set records only the
+// fingerprint; the appearance that opened it carries both.
+//
+// Sorted, so the same scan over the same history writes the same line.
+func findingEvents(scope map[ledger.FindingBucket]bool, found []finding.Finding,
+	open map[ledger.FindingBucket]map[string]bool) []ledger.FindingEvent {
+	current := map[ledger.FindingBucket]map[string]finding.Finding{}
+	for _, f := range found {
+		bucket := ledger.FindingBucket{Gate: f.Gate, Component: f.Component}
+		if !scope[bucket] {
+			continue
+		}
+		if current[bucket] == nil {
+			current[bucket] = map[string]finding.Finding{}
+		}
+		fp := f.Fingerprint()
+		if _, seen := current[bucket][fp]; !seen {
+			current[bucket][fp] = f
+		}
+	}
+	var events []ledger.FindingEvent
+	for bucket := range scope {
+		for fp, f := range current[bucket] {
+			if !open[bucket][fp] {
+				events = append(events, ledger.FindingEvent{
+					Transition: ledger.FindingAppeared, Fingerprint: fp,
+					Gate: bucket.Gate, Component: bucket.Component, Path: f.Path, Rule: f.Rule,
+				})
+			}
+		}
+		for fp := range open[bucket] {
+			if _, still := current[bucket][fp]; !still {
+				events = append(events, ledger.FindingEvent{
+					Transition: ledger.FindingResolved, Fingerprint: fp,
+					Gate: bucket.Gate, Component: bucket.Component,
+				})
+			}
+		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		a, b := events[i], events[j]
+		if a.Gate != b.Gate {
+			return a.Gate < b.Gate
+		}
+		if a.Component != b.Component {
+			return a.Component < b.Component
+		}
+		if a.Transition != b.Transition {
+			return a.Transition < b.Transition
+		}
+		return a.Fingerprint < b.Fingerprint
+	})
+	return events
 }
 
 // gapBefore is the explicit break to append ahead of this commit's record,
