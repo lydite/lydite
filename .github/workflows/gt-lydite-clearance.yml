@@ -25,3 +25,5 @@ jobs:
       statuses: write
       pull-requests: write
       id-token: write
+    with:
+      relay: https://pr.lydite.org
