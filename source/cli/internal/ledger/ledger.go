@@ -189,7 +189,7 @@ type Record struct {
 	// Transitions and not the whole open set, because a finding that stays
 	// open would otherwise be written into every recording for as long as it
 	// lives — for pre-existing debt, indefinitely — so a quiet commit carries
-	// none and the field is omitted. OpenFindings is how the set is read back.
+	// none and the field is omitted. BranchState is how the set is read back.
 	//
 	// Not named Findings: Component.Findings is already the per-gate counts
 	// this is additive to, and one word must not answer two different
@@ -502,82 +502,33 @@ func Latest(root, branch string, at time.Time) (Record, bool) {
 	return Record{}, false
 }
 
-// OpenFindings is the fingerprints open on branch immediately before the
-// instant before, per bucket, replayed from the finding events of every entry
-// recorded for it in the last lookbackMonths.
-//
-// It is the one implementation of that replay. Records are applied in the
-// order of their own timestamps and not their positions in the files, because
-// two recordings can land out of order and a resolution applied ahead of the
-// appearance it resolves would leave a finding open forever. A record at
-// before itself is excluded, so a writer asking what was open ahead of the
-// commit it is recording never reads that commit's own events back.
-//
-// Bounded by the same walk Latest makes and for the same reason: a branch
-// with nothing in that window is adopting finding history, not resuming one
-// worth reconstructing further back. A bucket no event ever mentioned, and one
-// whose every fingerprint has resolved, is simply absent.
-func OpenFindings(root, branch string, before time.Time) map[FindingBucket]map[string]bool {
-	var recs []Record
-	// Anchored to the first of the month, for the reason Latest gives.
-	month := time.Date(before.UTC().Year(), before.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
-	for range lookbackMonths {
-		parts, err := partsFor(root, month)
-		if err != nil {
-			break
-		}
-		for _, p := range parts {
-			_, _ = scan(filepath.Join(root, filepath.FromSlash(p)), func(rec Record) bool {
-				if rec.Kind == KindEntry && rec.Branch == branch && rec.At.Before(before) && len(rec.FindingEvents) > 0 {
-					recs = append(recs, rec)
-				}
-				return false
-			})
-		}
-		month = month.AddDate(0, -1, 0)
-	}
-	// Stable, so two records sharing a timestamp keep the order they were
-	// written in rather than whatever the sort happens to leave.
-	sort.SliceStable(recs, func(i, j int) bool { return recs[i].At.Before(recs[j].At) })
-
-	open := map[FindingBucket]map[string]bool{}
-	for _, rec := range recs {
-		for _, ev := range rec.FindingEvents {
-			bucket := FindingBucket{Gate: ev.Gate, Component: ev.Component}
-			switch ev.Transition {
-			case FindingAppeared:
-				if open[bucket] == nil {
-					open[bucket] = map[string]bool{}
-				}
-				open[bucket][ev.Fingerprint] = true
-			case FindingResolved:
-				delete(open[bucket], ev.Fingerprint)
-				if len(open[bucket]) == 0 {
-					delete(open, bucket)
-				}
-			}
-		}
-	}
-	return open
-}
-
 // BranchState is what a writer needs from a branch's own history before it
 // appends a new record: the newest entry recorded so far, for gap detection,
-// and the open finding set replayed up to before, for finding transitions.
-// One walk answers both.
+// and the fingerprints open in each bucket, replayed from the finding events
+// of every entry recorded for it in the last lookbackMonths, for finding
+// transitions. One walk of the branch's own partitions answers both, because
+// gitstate.Write retries its closure up to three times on a push race — three
+// attempts at one commit would otherwise parse a year of history as many as
+// six times, on a path that runs on every commit.
 //
-// Latest and OpenFindings each read the same lookbackMonths of partitions
-// independently when a caller needs both, and gitstate.Write retries its
-// closure up to three times on a push race — three attempts at one commit
-// would otherwise parse a year of history as many as six times, on a path
-// that runs on every commit. This walks it once and reduces it two ways.
+// It is the one implementation of the finding-events replay. Records are
+// applied in the order of their own timestamps and not their positions in the
+// files, because two recordings can land out of order and a resolution
+// applied ahead of the appearance it resolves would leave a finding open
+// forever. A bucket no event ever mentioned, and one whose every fingerprint
+// has resolved, is simply absent from open.
 //
-// The two reductions keep their own existing rules rather than share one:
-// Latest's "at or before" tie tolerates two commits recorded in the same
-// second, which is why gap detection still finds a previous commit sharing
-// head's own timestamp; OpenFindings' replay excludes a record at exactly
-// before, because before is the commit about to be recorded and its own
-// events, once appended, must never be read back as history for themselves.
+// The two answers keep their own rules rather than share one. previous
+// tolerates a record at or before before, so a commit recorded in the same
+// second as an earlier one on this branch is still found as its previous —
+// the same tie Latest tolerates, for the same reason. The finding-events
+// replay excludes a record at exactly before, because before is the commit
+// about to be recorded and its own events, once appended, must never be read
+// back as history for themselves.
+//
+// Bounded by the same lookbackMonths walk Latest makes and for the same
+// reason: a branch with nothing in that window is adopting finding history,
+// not resuming one worth reconstructing further back.
 func BranchState(root, branch string, before time.Time) (open map[FindingBucket]map[string]bool, previous Record, hasPrevious bool) {
 	var recs []Record
 	month := time.Date(before.UTC().Year(), before.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)

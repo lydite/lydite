@@ -201,15 +201,16 @@ today.
 set.** Coverage, tests, CRAP and mutation stay scalars-only — that has not changed, and neither
 has `Component.Findings`/`Record.RootFindings`, still a per-gate count. What is new is
 `Record.FindingEvents`: `lydite test record` diffs the buckets a recording actually measured
-against `ledger.OpenFindings`'s replay of the branch's own history and appends only the
+against `ledger.BranchState`'s replay of the branch's own history and appends only the
 fingerprints that newly appeared or resolved since that branch's last recording, never the
 fingerprints still open and unchanged. A stable repository's ledger grows exactly as before;
 growth is proportional to churn, not to the size of what is currently open, which is the same
 reasoning ADR 0009 used to keep detail out of the ledger in the first place, applied one level
 down instead of reopened. The cost this accepts: answering "is fingerprint X open right now"
 needs a replay bounded by `lookbackMonths`, the same window `Latest` already bounds its own
-back-walk by, rather than a single record read — `OpenFindings` is the one implementation of
-that replay. See
+back-walk by, rather than a single record read — `BranchState` is the one implementation of
+that replay, and it answers `gapBefore`'s "newest previous record" question from the same
+partition walk rather than each reading the branch's history separately. See
 [ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md).
 
 **A bucket the scan crashed on is excluded from the diff, not diffed as empty.**

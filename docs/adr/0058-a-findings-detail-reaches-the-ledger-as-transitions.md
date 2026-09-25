@@ -103,13 +103,15 @@ marked resolved, mirroring `findingCounts`'s own existing rule that an inapplica
 key at all. The candidate buckets are exactly the keys already present in `findingCounts`'s
 `perComponent` and `root` maps — the recorder does not need a second notion of "what ran".
 
-Reconstructing the open set: `ledger.OpenFindings(root, branch string, before time.Time) map[FindingBucket]map[string]bool`
+Reconstructing the open set: `ledger.BranchState(root, branch string, before time.Time) (open map[FindingBucket]map[string]bool, previous Record, hasPrevious bool)`
 (new; `FindingBucket{Gate, Component}` new) replays every `KindEntry` record's `FindingEvents` for
-`branch`, across the same `lookbackMonths` window and partition walk `Latest` already performs,
-sorted ascending by the record's own `At` (not file order — `Latest`'s own doc comment already
-notes recordings can land out of order) and applies `FindingAppeared`/`FindingResolved` in that
-order. Bounded, and no new I/O pattern: it is the same walk `Latest` already pays for, reading the
-same partitions, once per recording.
+`branch`, across the same `lookbackMonths` window `Latest` already bounds its own walk by, sorted
+ascending by the record's own `At` (not file order — recordings can land out of order) and applies
+`FindingAppeared`/`FindingResolved` in that order. It is the one implementation of that replay, and
+also answers `gapBefore`'s own "newest previous record" question from the same partition walk,
+rather than each reading the same partitions independently — `Latest`'s "at or before" tie and the
+finding-events replay's exclusive `before` are kept as two different rules over the one collected
+set, not unified into one.
 
 ## Sizing
 
@@ -172,7 +174,7 @@ Two narrower gaps remain, deliberately not chased further here:
 - A stable repository's ledger grows exactly as it does today. An active one's grows in
   proportion to finding churn, never to the size of what is currently open.
 - Reading "is fingerprint X currently open" needs a replay bounded by `lookbackMonths`, not a
-  single record read. `OpenFindings` is the one implementation of that replay; nothing may
+  single record read. `BranchState` is the one implementation of that replay; nothing may
   reimplement it.
 - A recording that ran a subset of gates or components — partial, or ahead of a scanner landing —
   never manufactures a resolution for a bucket it did not measure.
