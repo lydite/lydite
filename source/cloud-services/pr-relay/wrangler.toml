@@ -26,7 +26,7 @@ AUDIENCE = "https://pr.lydite.org"
 # `lydite/clearance` are refused to every caller.
 REFERRAL_WORKFLOW_REFS = ""
 CLEARANCE_WORKFLOW_REFS = ""
-MERGE_GROUP_WORKFLOW_REFS = ""
+MERGE_GROUP_WORKFLOW_REFS = "lydite/actions/.github/workflows/lydite.yml@refs/tags/v1"
 
 # LYDITE_APP_PRIVATE_KEY is a per-Worker secret, set by workers-secrets-sync.yml
 # and never declared here. Per-Worker and deliberately not an account-level
