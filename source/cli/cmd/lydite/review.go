@@ -151,7 +151,8 @@ and keeps every property of the status; the two are alternatives, not a ladder.`
 			// surface nothing could be compared are both referrals, and they
 			// reach the report through the same disqualification the verdict
 			// line is derived from.
-			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, eventPath, surfaces)
+			title := pullRequestTitle(cmd.ErrOrStderr(), eventPath)
+			renderAPISurfaceRows(ctx, cmd, report, &decision, dir, baseSHA, title, surfaces)
 			addDependencyRows(report, &decision, deltas, baseSHA)
 			addDecisionRows(report, decision, len(file.Exemptions))
 

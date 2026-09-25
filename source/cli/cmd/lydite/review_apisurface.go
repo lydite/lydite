@@ -246,8 +246,8 @@ func reconcileSurfaces(dir, base string, doc surfaceDocument) ([]surfaceComparis
 // was compared. That is the one-way ratchet the marker is only safe under —
 // the claim can add a referral and can never remove one, so spelling `feat!:`
 // rather than `feat:` never makes anything greener.
-func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, eventPath string, results []surfaceComparison) {
-	where := breakDeclaration(ctx, cmd.ErrOrStderr(), dir, base, eventPath)
+func renderAPISurfaceRows(ctx context.Context, cmd *cobra.Command, report *ui.Report, d *referral.Decision, dir, base, title string, results []surfaceComparison) {
+	where := breakDeclaration(ctx, cmd.ErrOrStderr(), dir, base, title)
 	if where != "" {
 		refer(d, referral.Disqualification{
 			Kind:     referral.DisqualificationAPIBreakDeclared,
@@ -459,13 +459,18 @@ func locate(findings []finding.Finding, dir string) []string {
 // breakDeclaration names where this change declares a breaking API change, or
 // returns empty when nothing does.
 //
+// title is resolved by the caller, never read here: `review` reads it from
+// the pull_request payload it was given, and `clearance` resolves it live
+// through the platform, because an issue_comment payload carries no pull
+// request title of its own to read.
+//
 // Both sources are read, because the two answer different questions and
 // neither subsumes the other. Squash merge makes the title the commit that
 // lands, so a break declared only in a commit about to be squashed away
 // leaves no marker in the history; locally there is no pull request and no
 // title, and the commits are all there is.
-func breakDeclaration(ctx context.Context, warn io.Writer, dir, base, eventPath string) string {
-	if title := pullRequestTitle(warn, eventPath); declaration.Declared(title) {
+func breakDeclaration(ctx context.Context, warn io.Writer, dir, base, title string) string {
+	if declaration.Declared(title) {
 		return "the pull request title"
 	}
 	messages, err := gitstate.CommitMessages(ctx, dir, base, "HEAD")

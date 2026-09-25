@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/ui"
@@ -24,6 +25,9 @@ func newClearanceCmd() *cobra.Command {
 	var dir string
 	var eventPath string
 	var statusOut string
+	var base string
+	var baseBranch string
+	var surfacesPath string
 	var noColor bool
 	cmd := &cobra.Command{
 		Use:           "clearance",
@@ -48,6 +52,19 @@ A clearance records two statuses on the head by either route: ` + clearance.Clea
 which says who cleared the revision, and ` + clearance.Context + ` resolved to success,
 which is the gate a merge waits on.
 
+The ` + clearance.ClearanceContext + ` description carries the fingerprint of the decision
+that was cleared, which is what lets ` + "`clearance queue`" + ` carry the clearance onto a
+merge-queue entry the same decision still holds for. Computing it reads the
+checkout this runs against, which has to be the revision being cleared; a
+clearance given anywhere else records no fingerprint and says so, and the
+queue entry goes back to a person.
+
+--surfaces reads a comparison ` + "`review compare`" + ` already made instead of running it
+here. A component's own comparison executes its own code — a Rust crate's
+build.rs, a proc-macro — so the job that records the clearance with a
+credential should not also be the job that ran it: compute in one job with
+none, clear and record in another that never runs the change's own code.
+
 --status-out <file> renders them as documents instead of posting them, for a
 step that posts them: the ` + clearance.ClearanceContext + ` status at <file>, and the
 ` + clearance.Context + ` status at the sibling <file> with .referral before its
@@ -55,11 +72,28 @@ extension. Posting here is the path for a repository that has not adopted the
 reusable workflows. The two routes are alternatives, not a ladder. A comment
 that clears nothing writes no document.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClearance(cmd.Context(), cmd, dir, eventPath, statusOut, noColor)
+			return runClearance(cmd.Context(), cmd, clearanceOptions{
+				dir:        dir,
+				eventPath:  eventPath,
+				statusOut:  statusOut,
+				base:       base,
+				baseBranch: baseBranch,
+				surfaces:   surfacesPath,
+				noColor:    noColor,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
 	cmd.Flags().StringVar(&eventPath, "event", "", "webhook payload to answer (defaults to GITHUB_EVENT_PATH)")
+	// The base the cleared decision is recomputed against, the same two flags
+	// review resolves its own with: a fingerprint is taken over a decision, and
+	// a decision is taken over a diff, which needs the revision that diff is
+	// read against.
+	cmd.Flags().StringVar(&base, "base", "auto",
+		`commit the cleared decision is recomputed against ("auto" resolves the merge-base with the base branch)`)
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
+	cmd.Flags().StringVar(&surfacesPath, "surfaces", "",
+		"read a comparison 'review compare' already made instead of running it here, and fingerprint the decision it feeds")
 	cmd.Flags().StringVar(&statusOut, "status-out", "",
 		"render the "+clearance.ClearanceContext+" status as a JSON document at this path, and the "+clearance.Context+
 			" status it resolves at the .referral sibling, for another step to post instead of posting them here")
@@ -72,15 +106,30 @@ that clears nothing writes no document.`,
 	return cmd
 }
 
-func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath, statusOut string, noColor bool) error {
+// clearanceOptions is what runClearance was asked for.
+type clearanceOptions struct {
+	dir        string
+	eventPath  string
+	statusOut  string
+	base       string
+	baseBranch string
+	// surfaces names the comparison document a computing job already wrote,
+	// and is empty for a run that makes the comparison itself.
+	surfaces string
+	noColor  bool
+}
+
+func runClearance(ctx context.Context, cmd *cobra.Command, opt clearanceOptions) error {
 	report := ui.NewReport("clearance")
 
-	if eventPath == "" {
-		eventPath = os.Getenv("GITHUB_EVENT_PATH")
-	}
+	eventPath := firstNonEmpty(opt.eventPath, os.Getenv("GITHUB_EVENT_PATH"))
 	if eventPath == "" {
 		return fmt.Errorf("clearance needs an event payload: pass --event, or run where GITHUB_EVENT_PATH is set")
 	}
+	// Resolved once, so the payload a break declaration is read out of is the
+	// same one this command answers rather than whatever the environment says
+	// a moment later.
+	opt.eventPath = eventPath
 	event, err := forge.LoadCommentEvent(eventPath)
 	if err != nil {
 		return err
@@ -89,7 +138,7 @@ func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath, statu
 	// A comment on a plain issue names no revision, so there is nothing a
 	// clearance could apply to.
 	if !event.OnPullRequest() {
-		return writeReport(cmd, report, noColor, ui.Row{
+		return writeReport(cmd, report, opt.noColor, ui.Row{
 			Status: ui.StatusContext,
 			Label:  "not a pull request",
 			Value:  "nothing to decide",
@@ -97,7 +146,7 @@ func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath, statu
 	}
 	command := clearance.Parse(event.Comment.Body)
 	if command.Verb == clearance.VerbNone {
-		return writeReport(cmd, report, noColor, ui.Row{
+		return writeReport(cmd, report, opt.noColor, ui.Row{
 			Status: ui.StatusContext,
 			Label:  "not addressed to lydite",
 			Value:  "ignored",
@@ -140,35 +189,37 @@ func runClearance(ctx context.Context, cmd *cobra.Command, dir, eventPath, statu
 	// to the job log; the commenter reads a refusal, because a command that
 	// errors out with no reply is one whose author has only silence to go on.
 	uncover := func() ([]string, error) {
-		uncovered, err := uncoveredPaths(ctx, client, repo, dir, event.Issue.Number)
+		uncovered, err := uncoveredPaths(ctx, client, repo, opt.dir, event.Issue.Number)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lydite: deriving the change's uncovered paths: %v\n", err)
 		}
 		return uncovered, err
 	}
 
-	row, err := applyAction(ctx, client, repo, event, head, statusOut, clearance.Decide(request, uncover))
+	row, err := applyAction(ctx, cmd, client, repo, event, head, opt, clearance.Decide(request, uncover))
 	if err != nil {
 		return err
 	}
-	return writeReport(cmd, report, noColor, row)
+	return writeReport(cmd, report, opt.noColor, row)
 }
 
 // applyAction carries out the decision and returns the row describing it.
 //
-// statusOut names where a clearance is rendered instead of posted. It is read
-// by this one branch: a decision that clears nothing has no status to write,
-// and rendering one anyway would hand the posting step a document saying a
-// referral was resolved by a comment that resolved nothing.
-func applyAction(ctx context.Context, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head, statusOut string, action clearance.Action) (ui.Row, error) {
+// opt.statusOut names where a clearance is rendered instead of posted. It is
+// read by this one branch: a decision that clears nothing has no status to
+// write, and rendering one anyway would hand the posting step a document
+// saying a referral was resolved by a comment that resolved nothing.
+func applyAction(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, event forge.CommentEvent, head string, opt clearanceOptions, action clearance.Action) (ui.Row, error) {
 	switch action.Kind {
 	case clearance.KindClear:
-		description := fmt.Sprintf("cleared by @%s at %s", event.Comment.User.Login, shortSHA(head))
+		description := clearance.WithFingerprint(
+			fmt.Sprintf("cleared by @%s at %s", event.Comment.User.Login, shortSHA(head)),
+			clearedFingerprint(ctx, cmd, client, repo, event.Issue.Number, opt, head))
 		// The head is the one the platform answered for this pull request a
 		// moment ago, never anything the comment named: the poster resolves
 		// it again and refuses a document naming anything else.
 		ref := pullRequestRef{SHA: head, Number: event.Issue.Number}
-		if err := recordClearance(ctx, client, repo, statusOut, clearanceStatus(ref, description)); err != nil {
+		if err := recordClearance(ctx, client, repo, opt.statusOut, clearanceStatus(ref, description)); err != nil {
 			return ui.Row{}, err
 		}
 		reply(ctx, client, repo, event.Issue.Number, ui.Comment{
@@ -198,6 +249,158 @@ func applyAction(ctx context.Context, client *forge.Client, repo forge.Repo, eve
 	default:
 		return ui.Row{Status: ui.StatusContext, Label: "no action", Value: "ignored"}, nil
 	}
+}
+
+// clearedFingerprint is the fingerprint of the decision this clearance is
+// given for, and is empty when it could not be computed here.
+//
+// Empty is a recorded answer rather than a silent one: clearance.WithFingerprint
+// appends nothing, which clearance.FingerprintIn reads back as absent, and the
+// relay refuses a comparison it cannot make rather than treating absence as
+// agreement — so a clearance recorded without one still resolves the referral
+// on this head and simply does not carry onto a merge-queue entry. Every way
+// that can happen is named on stderr, because a clearance that quietly stops
+// travelling is one nobody can tell from a queue entry that legitimately
+// re-refers.
+//
+// Nothing here fails the run. Answering the comment is this command's job, and
+// a fingerprint that could not be taken is not a reason to leave the referral
+// standing with the commenter told nothing.
+func clearedFingerprint(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, number int, opt clearanceOptions, head string) string {
+	decision, err := clearedDecision(ctx, cmd, client, repo, number, opt, head)
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"lydite: this clearance records no fingerprint, so it will not carry onto a merge-queue entry: %v\n", err)
+		return ""
+	}
+	return referral.Fingerprint(decision.Uncovered, decision.Disqualifications)
+}
+
+// clearedDecision recomputes, for the revision being cleared, the decision a
+// person is clearing.
+//
+// It is `review`'s own computation and not a summary of it: the exemptions at
+// the base commit, the change's own diff, the API-surface comparison every
+// opted-in component asked for, and the dependency comparison for every
+// manifest the change touches — because the fingerprint has to describe the
+// decision that was cleared. A narrower one would record a person's judgement
+// against reasons that were never the whole of what referred the change.
+//
+// opt.surfaces names a comparison `review compare` already made, and is the
+// route for a component whose comparison runs the change's own code: read here,
+// it is reconciled against what this run resolves for itself and never re-run,
+// so the job holding the credential this clearance is recorded with executes
+// none of it. A run given no document makes the comparison itself, refusing an
+// opted-in component whose comparison runs the change's own code — this
+// process always holds the token `runClearance` requires, whether or not it
+// also posts directly, so there is no invocation of `clearance` in which that
+// comparison is safe to run in-process.
+//
+// The rows both comparisons render go to a report of their own rather than to
+// the one this command writes. What this run reports is the clearance; the
+// verdict those rows describe belongs to the `review` that published the
+// referral, and restating it here as this command's own rows would put a second
+// derivation of one verdict in front of a reader.
+//
+// The evidence is the zero referral.Evidence, the same value `clearance queue`
+// recomputes under: a `versions:` condition needs the licence and SCA rows of a
+// scan document, which no comment-answering job has, and passing nothing is the
+// direction that refers.
+func clearedDecision(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, number int, opt clearanceOptions, head string) (referral.Decision, error) {
+	// Cheapest first, and refused before anything is resolved or fetched: a
+	// decision computed over some other revision is not the decision being
+	// cleared, and recording its fingerprint would attach a person's judgement
+	// to reasons that were never in front of them.
+	if err := checkoutIsHead(ctx, opt.dir, head); err != nil {
+		return referral.Decision{}, err
+	}
+	baseSHA, err := resolveReviewBase(ctx, opt.dir, opt.base, opt.baseBranch)
+	if err != nil {
+		return referral.Decision{}, err
+	}
+	var surfaces []surfaceComparison
+	if opt.surfaces != "" {
+		doc, readErr := readSurfaces(opt.surfaces)
+		switch readErr {
+		case nil:
+			// reconcileSurfaces checks the document's base against the
+			// baseSHA resolved here and requires a result for every
+			// component this tree says opted in — neither is taken on the
+			// document's own word.
+			surfaces, err = reconcileSurfaces(opt.dir, baseSHA, doc)
+		default:
+			// Unreadable, not absent: a document the computing job never
+			// wrote is no evidence any surface is clean, so every opted-in
+			// component is uncomputable. That is the decision `review`
+			// reaches from the same document, and the fingerprint has to
+			// describe the decision rather than a cleaner reading of it.
+			surfaces, err = uncomputableSurfaces(opt.dir, "the comparison document could not be read: "+readErr.Error())
+		}
+		if err != nil {
+			return referral.Decision{}, err
+		}
+	} else {
+		// Always guarded, unlike `review`'s own fallback: `review`'s guard
+		// tests whether the invocation also publishes, because a `review` run
+		// that only renders holds no credential of its own. `runClearance`
+		// requires GITHUB_TOKEN unconditionally — reading the head, the
+		// commenter's permission, the standing referral, and posting the
+		// reply all need it — so a `clearance` process holds a credential
+		// whether or not it also posts the status directly, and there is no
+		// invocation in which running a component's own build code here is
+		// safe. A document from --surfaces is the only route to a full-parity
+		// comparison for a component whose comparison runs the change's own
+		// code; see
+		// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
+		surfaces, err = computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, true)
+		if err != nil {
+			return referral.Decision{}, err
+		}
+	}
+	file, err := loadExemptionsAt(ctx, opt.dir, baseSHA)
+	if err != nil {
+		return referral.Decision{}, err
+	}
+	change, err := referral.Changes(ctx, opt.dir, baseSHA)
+	if err != nil {
+		return referral.Decision{}, err
+	}
+	decision := referral.Decide(change, file, referral.Evidence{})
+	report := ui.NewReport("cleared decision")
+	// Resolved live rather than read from the comment payload: an
+	// issue_comment event carries no pull_request.title at all, only the
+	// comment thread's own issue.title, which is the pull request's title
+	// only by convention. A break declared solely in the title would
+	// otherwise never be seen here. A failure to resolve it can only
+	// under-refer, so it is warned about rather than fatal.
+	title, err := client.PullRequestTitle(ctx, repo, number)
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"lydite: could not resolve the pull request's title (%v) — a break declared only there is not seen\n", err)
+	}
+	renderAPISurfaceRows(ctx, cmd, report, &decision, opt.dir, baseSHA, title, surfaces)
+	addDependencyRows(report, &decision, measureDependencies(ctx, opt.dir, baseSHA, change.Paths), baseSHA)
+	return decision, nil
+}
+
+// checkoutIsHead establishes that the tree the decision is recomputed over is
+// the revision being cleared.
+//
+// A job answering a comment is free to check out anything, and the default
+// branch is the ordinary choice: the change being cleared is not in that tree
+// at all, so a recomputation there answers for the default branch and
+// fingerprints a decision nobody was asked about.
+func checkoutIsHead(ctx context.Context, dir, head string) error {
+	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "HEAD")
+	at := strings.TrimSpace(r.Output)
+	if !r.Ok() || at == "" {
+		return fmt.Errorf("reading which revision %s is checked out at: %w", dir, r.Err)
+	}
+	if at != head {
+		return fmt.Errorf("the checkout is at %s, not the revision being cleared (%s) — "+
+			"the decision has to be recomputed against the pull request's own head", shortSHA(at), shortSHA(head))
+	}
+	return nil
 }
 
 // explain restates the standing verdict without changing it.

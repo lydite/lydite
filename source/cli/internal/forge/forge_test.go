@@ -103,6 +103,34 @@ func TestCanWriteAcceptsOnlyPushingPermissions(t *testing.T) {
 	}
 }
 
+// PullRequestTitle is resolved live, never read from a cached payload — a
+// comment event carries no pull_request.title of its own to fall back to.
+func TestPullRequestTitleReadsThePayload(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"title":"refactor!: move the thing","head":{"sha":"deadbeef"}}`))
+	})
+	got, err := client.PullRequestTitle(context.Background(), repo, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "refactor!: move the thing" {
+		t.Errorf("PullRequestTitle = %q, want the title field", got)
+	}
+}
+
+// A pull request the platform cannot answer for is an error, not an empty
+// title: the caller warns and proceeds with no declaration read, and that
+// decision belongs to the caller, not to this resolving silently to "".
+func TestPullRequestTitleFailsOnAnErrorResponse(t *testing.T) {
+	client := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	if _, err := client.PullRequestTitle(context.Background(), repo, 40); err == nil {
+		t.Error("PullRequestTitle on a 404 returned no error")
+	}
+}
+
 func TestPostStatusSendsTheContextAndState(t *testing.T) {
 	var body map[string]string
 	client := serve(t, func(w http.ResponseWriter, r *http.Request) {

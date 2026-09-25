@@ -32,6 +32,25 @@ func (c *Client) HeadSHA(ctx context.Context, repo Repo, number int) (string, er
 	return pr.Head.SHA, nil
 }
 
+// PullRequestTitle resolves a pull request's current title.
+//
+// A comment event names an issue, and an issue_comment payload's own title —
+// event.Issue.Title — is the comment thread's, which is the pull request's
+// title only by convention and never guaranteed to still be. Squash merge
+// lands the title as the commit that ships, so a declaration read from a
+// stale copy could pass a break the title no longer carries, or miss one a
+// later edit added — resolved live, the way the head itself is.
+func (c *Client) PullRequestTitle(ctx context.Context, repo Repo, number int) (string, error) {
+	var pr struct {
+		Title string `json:"title"`
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "GET", path, nil, &pr); err != nil {
+		return "", fmt.Errorf("resolving the title of %s#%d: %w", repo, number, err)
+	}
+	return pr.Title, nil
+}
+
 // CanWrite reports whether a user may push to the repository.
 //
 // This is read about the commenter rather than taken from the comment, which
