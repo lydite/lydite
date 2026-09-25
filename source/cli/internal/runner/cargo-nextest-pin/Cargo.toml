@@ -26,4 +26,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
-cargo-nextest = "=0.9.144"
+cargo-nextest = "=0.9.145"
