@@ -31,7 +31,11 @@ type fakeForge struct {
 	// defaulting to the head constant. A test whose run recomputes the cleared
 	// decision sets it to its own checkout's revision, which is the agreement
 	// the recomputation refuses to proceed without.
-	headSHA  string
+	headSHA string
+	// title is the pull request's title, resolved live by clearedDecision's
+	// break-declaration check — never read from the comment event, which
+	// carries none of its own.
+	title    string
 	statuses []map[string]any
 	// changed is the platform's own list-files answer, which is the only
 	// thing the comment surface asks about the pull request itself.
@@ -68,7 +72,7 @@ func (f *fakeForge) start(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(f.changed)
 		case strings.Contains(r.URL.Path, "/pulls/"):
-			_, _ = w.Write([]byte(`{"head":{"sha":"` + f.headSHA + `"}}`))
+			_, _ = w.Write([]byte(`{"head":{"sha":"` + f.headSHA + `"},"title":"` + f.title + `"}`))
 		case strings.Contains(r.URL.Path, "/permission"):
 			_, _ = w.Write([]byte(`{"permission":"` + f.permission + `"}`))
 		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodGet:
@@ -392,6 +396,89 @@ func recordedFingerprint(t *testing.T, statusOut string) string {
 		t.Fatalf("the clearance carries no fingerprint: %q", description)
 	}
 	return fingerprint
+}
+
+// A break declared only in the pull request's title reaches the cleared
+// decision, because clearedDecision resolves the title live through the
+// platform rather than reading the comment event, which carries none of its
+// own. Two real clearances of the same tree — one where the platform answers
+// with a declaring title, one where it does not — must fingerprint
+// differently, or the declaration was never read.
+func TestAClearanceRecordsWhatThePullRequestTitleDeclares(t *testing.T) {
+	dir, base, head := clearedCheckout(t)
+
+	undeclared := filepath.Join(t.TempDir(), "undeclared.json")
+	plain := &fakeForge{permission: "admin", headSHA: head, statuses: []map[string]any{statusEntry("pending", earlier)}}
+	plain.start(t)
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: undeclared, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	declared := filepath.Join(t.TempDir(), "declared.json")
+	declaring := &fakeForge{
+		permission: "admin", headSHA: head, title: "feat!: break the thing",
+		statuses: []map[string]any{statusEntry("pending", earlier)},
+	}
+	declaring.start(t)
+	if _, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: declared, noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	}); err != nil {
+		t.Fatalf("runClearance: %v", err)
+	}
+
+	if recordedFingerprint(t, declared) == recordedFingerprint(t, undeclared) {
+		t.Error("a break declared only in the pull request's title did not change the recorded fingerprint")
+	}
+}
+
+// A title the platform cannot answer for still clears the referral: the
+// declaration check can only under-refer on a failure to resolve it, so it is
+// warned about rather than fatal, and the run's job is answering the comment.
+// runClearance already resolved the head over the same endpoint before
+// clearedDecision asks it again for the title, so the first call to /pulls/
+// succeeds and the second — the title lookup — is the one that fails.
+func TestAClearanceWarnsWhenTheTitleCannotBeResolved(t *testing.T) {
+	dir, base, head := clearedCheckout(t)
+	var pullsCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/pulls/"):
+			pullsCalls++
+			if pullsCalls > 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"}}`))
+		case strings.Contains(r.URL.Path, "/permission"):
+			_, _ = w.Write([]byte(`{"permission":"admin"}`))
+		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]map[string]any{statusEntry("pending", earlier)})
+		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+		case strings.Contains(r.URL.Path, "/comments"):
+			w.WriteHeader(http.StatusCreated)
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("GITHUB_API_URL", server.URL)
+	t.Setenv("GITHUB_TOKEN", "token")
+
+	out, err := runClearanceWith(t, clearanceOptions{
+		dir: dir, base: base, statusOut: filepath.Join(t.TempDir(), "status.json"), noColor: true,
+		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+	})
+	if err != nil {
+		t.Fatalf("runClearance: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "could not resolve the pull request's title") {
+		t.Errorf("the run did not say the title could not be resolved:\n%s", out)
+	}
 }
 
 // A clearance given a comparison document fingerprints the real comparison the
