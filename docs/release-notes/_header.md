@@ -1,7 +1,7 @@
 ## lydite
 
-Unified code-quality and security scanning for Rust, TypeScript, and Go —
-one CLI, run identically locally and in CI.
+Unified code-quality and security scanning for Rust, TypeScript, Go and Python,
+with shell scanned too — one CLI, run identically locally and in CI.
 
 **Install / update**
 
