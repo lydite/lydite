@@ -25,7 +25,7 @@ AUDIENCE = "https://pr.lydite.org"
 # Empty admits no job, which is the state in which `lydite/referral` and
 # `lydite/clearance` are refused to every caller.
 REFERRAL_WORKFLOW_REFS = ""
-CLEARANCE_WORKFLOW_REFS = ""
+CLEARANCE_WORKFLOW_REFS = "lydite/actions/.github/workflows/lydite-clearance.yml@refs/tags/v1"
 MERGE_GROUP_WORKFLOW_REFS = "lydite/actions/.github/workflows/lydite.yml@refs/tags/v1"
 
 # LYDITE_APP_PRIVATE_KEY is a per-Worker secret, set by workers-secrets-sync.yml
