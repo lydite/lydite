@@ -1,9 +1,11 @@
 package shell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -249,5 +251,43 @@ func TestASiteIsNormalised(t *testing.T) {
 	got := newTree(dir).prefix("x.sh", 1, 10)
 	if got != finding.Normalise("a\t\tb   c") {
 		t.Errorf("prefix = %q", got)
+	}
+}
+
+// exited is a result carrying a real exit status and the given report, the
+// shape executil hands result. An invented error carries no status, and the
+// status is what separates a diagnostic from a file ShellCheck never read.
+func exited(t *testing.T, code int, output string) executil.Result {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), "", "sh", "-c", "exit "+strconv.Itoa(code))
+	if status, ok := r.ExitStatus(); !ok || status != code {
+		t.Fatalf("running a command that exits %d answered %d, %v", code, status, ok)
+	}
+	r.Name, r.Output = Gate, output
+	return r
+}
+
+// ShellCheck exits 1 for a diagnostic, so a failing run that says so is a
+// whole answer. A file it could not read, an invocation it refused and a
+// report that does not parse each leave diagnostics missing rather than
+// cleared.
+func TestResultCrashesOnlyWhereItsClaimsAreIncomplete(t *testing.T) {
+	dir := captureTree(t)
+	found := result(dir, exited(t, findingsExit, captured))
+	if len(found.Findings) == 0 || found.Crashed {
+		t.Errorf("%d claims, crashed %v; want a failing run with its diagnostics and no crash", len(found.Findings), found.Crashed)
+	}
+	if clean := result(dir, exited(t, 0, `{"comments":[]}`)); clean.Crashed {
+		t.Error("a clean run read as a crash")
+	}
+	for name, r := range map[string]executil.Result{
+		"a file it could not read":  exited(t, 2, captured),
+		"a refused invocation":      exited(t, 4, `{"comments":[]}`),
+		"an unparseable report":     exited(t, findingsExit, "not json"),
+		"a run with no exit status": {Name: Gate, Output: captured, Err: errors.New("not started")},
+	} {
+		if got := result(dir, r); !got.Crashed {
+			t.Errorf("%s: not crashed", name)
+		}
 	}
 }

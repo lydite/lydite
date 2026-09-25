@@ -1,11 +1,13 @@
 package golang
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -434,5 +436,68 @@ func TestGosecResultFailsACleanRunThatCompiledNothing(t *testing.T) {
 	}
 	if got := gosecResult(executil.Result{Name: "gosec"}, dir, clean); got.Err != nil {
 		t.Errorf("a clean report failed the row: %v", got.Err)
+	}
+}
+
+// exited is a result carrying a real exit status, the shape executil hands a
+// wrapper for a scanner that exited non-zero. An invented error carries no
+// status, and a test asserting on it asserts on the statusless case.
+func exited(t *testing.T, code int) executil.Result {
+	t.Helper()
+	r := executil.RunQuiet(context.Background(), "", "sh", "-c", "exit "+strconv.Itoa(code))
+	if status, ok := r.ExitStatus(); !ok || status != code {
+		t.Fatalf("running a command that exits %d answered %d, %v", code, status, ok)
+	}
+	return r
+}
+
+// gosec exits non-zero for a run that found something, so a failing run whose
+// report parsed is a whole answer and not a crash: every claim it made is
+// true, and every claim it did not make is one the code does not warrant.
+func TestGosecResultWithFindingsIsNotACrash(t *testing.T) {
+	data, err := os.ReadFile("testdata/gosec-report.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := fixture.Tree(t, "testdata/gosecprobe")
+	path := filepath.Join(t.TempDir(), "report.json")
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(data), "{{DIR}}", dir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := gosecResult(exited(t, 1), dir, path)
+	if len(got.Findings) == 0 || got.Ok() {
+		t.Fatalf("got %d claims, ok %v; want the failing run's claims", len(got.Findings), got.Ok())
+	}
+	if got.Crashed {
+		t.Error("a failing run with a parsed report read as a crash: its non-zero exit is how gosec says it found something")
+	}
+}
+
+// Every way gosec can leave its claims incomplete is a crash, whatever it
+// exited with: no report, a report that will not parse, and a report naming a
+// package that did not compile — gosec scanned nothing there, so a claim it
+// held open is missing rather than cleared.
+func TestGosecResultCrashesWhereItsClaimsAreIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(dir, "broken.json")
+	report := `{"Golang errors":{"":[{"line":0,"column":0,"error":"# m\nbroken"}]},"Issues":[],"Stats":{}}`
+	if err := os.WriteFile(broken, []byte(report), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"no report":       filepath.Join(dir, "absent.json"),
+		"unparseable":     bad,
+		"a build failure": broken,
+	} {
+		for _, r := range []executil.Result{{Name: "gosec"}, exited(t, 1)} {
+			if got := gosecResult(r, dir, path); !got.Crashed {
+				t.Errorf("%s, exit %v: not crashed", name, r.Err)
+			}
+		}
 	}
 }

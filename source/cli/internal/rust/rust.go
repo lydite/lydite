@@ -79,13 +79,13 @@ func Check(ctx context.Context, dir string, env executil.Env) []executil.Result 
 		// Detail as well as Err: report() prints Detail under a failing row
 		// and nothing else, so a tool that would not install renders as a
 		// bare `✗ cargo-audit` with the cause nowhere in the report.
-		results = append(results, executil.Result{Name: GateAudit, Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateAudit, Err: err, Detail: err.Error(), Crashed: true})
 	} else {
 		results = append(results, runAudit(ctx, dir, env.Check, bin))
 	}
 
 	if bin, err := ensure(ctx, env.Install, "cargo-deny", cargoDenyVersion); err != nil {
-		results = append(results, executil.Result{Name: GateDeny, Err: err, Detail: err.Error()})
+		results = append(results, executil.Result{Name: GateDeny, Err: err, Detail: err.Error(), Crashed: true})
 	} else {
 		results = append(results, runDeny(ctx, dir, env.Check, bin))
 	}

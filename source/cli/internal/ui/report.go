@@ -37,6 +37,7 @@ type Report struct {
 	command  string
 	rows     []Row
 	findings finding.Set
+	crashed  []finding.Crash
 	started  time.Time
 }
 
@@ -75,6 +76,21 @@ func (r *Report) AddFindings(f ...finding.Finding) { r.findings.Add(f...) }
 
 // Findings returns every located claim added so far.
 func (r *Report) Findings() []finding.Finding { return r.findings.Findings() }
+
+// AddCrashed collects the gates that did not finish a trustworthy scan.
+//
+// Beside the findings and for the same reasons: a crash names its own gate and
+// component and needs no row to be understood, and it is data a consumer reads
+// rather than prose a reader does. It is what makes the findings readable — a
+// crashed gate's missing claims are unmeasured rather than cleared — so it
+// travels in the same document they do.
+//
+// Crashes never vote either. The gate's row already failed, or says why it did
+// not.
+func (r *Report) AddCrashed(c ...finding.Crash) { r.crashed = append(r.crashed, c...) }
+
+// Crashed returns every crash added so far.
+func (r *Report) Crashed() []finding.Crash { return r.crashed }
 
 // Command names the run. It is what the document is keyed by on disk, so a
 // caller saving one does not have to restate a name the report already holds
@@ -180,6 +196,10 @@ type jsonReport struct {
 	// Rows. A consumer anchoring one to a line reads these; a human reads the
 	// rows, which say the same thing in prose.
 	Findings []finding.Finding `json:"findings,omitempty"`
+	// Crashed are the gates whose findings are not a complete answer, so a
+	// consumer comparing Findings against an earlier run's leaves each one's
+	// bucket alone.
+	Crashed []finding.Crash `json:"crashed,omitempty"`
 }
 
 // Document is a report read back — the published shape of WriteJSON, and the
@@ -197,6 +217,7 @@ type Document struct {
 	DurationMS int64
 	Rows       []Row
 	Findings   []finding.Finding
+	Crashed    []finding.Crash
 }
 
 // ReadDocument decodes one report document.
@@ -229,6 +250,7 @@ func ReadDocument(r io.Reader) (Document, error) {
 		DurationMS: doc.DurationMS,
 		Rows:       rows,
 		Findings:   doc.Findings,
+		Crashed:    doc.Crashed,
 	}, nil
 }
 
@@ -251,6 +273,7 @@ func (r *Report) WriteJSON(w io.Writer) error {
 		DurationMS: time.Since(r.started).Milliseconds(),
 		Rows:       rows,
 		Findings:   r.findings.Findings(),
+		Crashed:    r.crashed,
 	})
 }
 

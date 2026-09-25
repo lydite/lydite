@@ -1,6 +1,8 @@
 package secrets
 
 import (
+	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -72,5 +74,40 @@ func TestThePinIsTheVersionTheInstallAsksFor(t *testing.T) {
 	want := "github.com/zricethezav/gitleaks/v8@" + gitleaksVersion
 	if gitleaksPkg != want {
 		t.Errorf("gitleaksPkg = %q, want %q", gitleaksPkg, want)
+	}
+}
+
+// gitleaks exits leaksExit for a leak, so a failing run whose report names one
+// is a whole walk. A report lydite could not read, a walk the status says did
+// not finish and a scope git could not be asked for each leave claims whose
+// difference from the last run's says nothing about the tree.
+func TestCrashedOnlyWhereTheWalkIsNotAWholeAnswer(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "leaks.json", `[{"RuleID":"generic-api-key","File":"a.env","StartLine":1,"StartColumn":2}]`)
+	write(t, dir, "empty.json", `[]`)
+	write(t, dir, "bad.json", `not json`)
+	leaks, empty := filepath.Join(dir, "leaks.json"), filepath.Join(dir, "empty.json")
+
+	if crashed(exitedWith(t, leaksExit), leaks, nil) {
+		t.Error("a walk that found a leak read as a crash")
+	}
+	if crashed(nil, empty, nil) {
+		t.Error("a clean walk read as a crash")
+	}
+	if crashed(nil, empty, errNoScope) {
+		t.Error("git listing nothing beside a report naming nothing read as a crash")
+	}
+	cases := map[string]bool{
+		"no report":                       crashed(nil, filepath.Join(dir, "absent.json"), nil),
+		"an unparseable report":           crashed(nil, filepath.Join(dir, "bad.json"), nil),
+		"a walk that did not finish":      crashed(exitedWith(t, leaksExit), empty, nil),
+		"an unknown status":               crashed(exitedWith(t, 126), leaks, nil),
+		"a scope git could not answer":    crashed(nil, leaks, errors.New("git failed")),
+		"no scope beside a reported leak": crashed(exitedWith(t, leaksExit), leaks, errNoScope),
+	}
+	for name, got := range cases {
+		if !got {
+			t.Errorf("%s: not crashed", name)
+		}
 	}
 }

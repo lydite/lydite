@@ -104,9 +104,12 @@ func projectionFile(branch string, at time.Time) string {
 // dashboard fetches a file through; this leaves headroom so the record that
 // crosses the line is written to the next part rather than being the one that
 // makes a file unfetchable. A month is the granularity ADR 0009 chose and it
-// suffices for every repository anyone has: at roughly 300 bytes a record, a
-// month holds around 3,000 recordings. The roll is what a busier repository
-// does — the partition stays a month, and the month grows parts.
+// suffices for every repository anyone has. A record's size is not a fixed
+// number: a quiet commit, one on which no finding appeared or resolved, costs
+// only its scalars, while each finding that transitioned adds roughly 100-150
+// bytes — proportional to churn, never to how many findings are open. The roll
+// is what a busier or churnier month does — the partition stays a month, and
+// the month grows parts.
 const maxPartitionBytes = 900 * 1024
 
 // lookbackMonths is how far back a writer looks for the branch's previous
@@ -180,9 +183,68 @@ type Record struct {
 	// repository-wide figures ARE sums nobody stores; this is a different
 	// measurement, taken once over the whole tree.
 	RootFindings map[string]int `json:"root_findings,omitempty"`
+	// FindingEvents is which located claims appeared or resolved on this
+	// commit, against the branch's open set replayed up to it.
+	//
+	// Transitions and not the whole open set, because a finding that stays
+	// open would otherwise be written into every recording for as long as it
+	// lives — for pre-existing debt, indefinitely — so a quiet commit carries
+	// none and the field is omitted. BranchState is how the set is read back.
+	//
+	// Not named Findings: Component.Findings is already the per-gate counts
+	// this is additive to, and one word must not answer two different
+	// questions on two types in one package. Adding it needs no new Dir
+	// version, because a record written without it reads back as one with no
+	// finding events, which is honestly what it has.
+	FindingEvents []FindingEvent `json:"finding_events,omitempty"`
 	// Gap says how wide the break before this record is, and is set only on a
 	// gap record.
 	Gap *Gap `json:"gap,omitempty"`
+}
+
+// FindingTransition is what happened to a fingerprint between the branch's
+// last recording and this one.
+type FindingTransition string
+
+const (
+	// FindingAppeared is a fingerprint this recording's scan holds that the
+	// branch's open set, replayed up to this commit, did not.
+	FindingAppeared FindingTransition = "appeared"
+	// FindingResolved is a fingerprint the branch's open set held that this
+	// recording's scan, for the same gate and component, does not.
+	FindingResolved FindingTransition = "resolved"
+)
+
+// FindingEvent is one fingerprint's transition, carried on the record it
+// transitioned on.
+//
+// Gate and Component are structural — a transition without them cannot be
+// bucketed — while Path and Rule are what a history view renders without a
+// second lookup. The claim's message is deliberately absent: a tool that
+// rewords its own diagnostic has not found something different, which is why
+// the fingerprint excludes it too, and a message frozen at first appearance
+// would render wording a current run no longer produces beside a fingerprint
+// that correctly says nothing changed.
+type FindingEvent struct {
+	Transition FindingTransition `json:"transition"`
+	// Fingerprint is exactly what finding.Finding.Fingerprint returns.
+	Fingerprint string `json:"fingerprint"`
+	Gate        string `json:"gate"`
+	// Component is empty for a root-scoped gate, as RootFindings treats one.
+	Component string `json:"component,omitempty"`
+	Path      string `json:"path"`
+	Rule      string `json:"rule,omitempty"`
+}
+
+// FindingBucket is the scope a fingerprint is open or resolved in: one gate
+// over one component, or over the repository when Component is empty.
+//
+// A fingerprint is only ever resolved within its bucket, so a recording that
+// did not measure a bucket — a gate switched off, a partial run — leaves that
+// bucket's findings open rather than manufacturing a resolution for them.
+type FindingBucket struct {
+	Gate      string
+	Component string
 }
 
 // Component is one component's scalars for one commit.
@@ -438,6 +500,89 @@ func Latest(root, branch string, at time.Time) (Record, bool) {
 		month = month.AddDate(0, -1, 0)
 	}
 	return Record{}, false
+}
+
+// BranchState is what a writer needs from a branch's own history before it
+// appends a new record: the newest entry recorded so far, for gap detection,
+// and the fingerprints open in each bucket, replayed from the finding events
+// of every entry recorded for it in the last lookbackMonths, for finding
+// transitions. One walk of the branch's own partitions answers both, because
+// gitstate.Write retries its closure up to three times on a push race — three
+// attempts at one commit would otherwise parse a year of history as many as
+// six times, on a path that runs on every commit.
+//
+// It is the one implementation of the finding-events replay. Records are
+// applied in the order of their own timestamps and not their positions in the
+// files, because two recordings can land out of order and a resolution
+// applied ahead of the appearance it resolves would leave a finding open
+// forever. A bucket no event ever mentioned, and one whose every fingerprint
+// has resolved, is simply absent from open.
+//
+// The two answers keep their own rules rather than share one. previous
+// tolerates a record at or before before, so a commit recorded in the same
+// second as an earlier one on this branch is still found as its previous —
+// the same tie Latest tolerates, for the same reason. The finding-events
+// replay excludes a record at exactly before, because before is the commit
+// about to be recorded and its own events, once appended, must never be read
+// back as history for themselves.
+//
+// Bounded by the same lookbackMonths walk Latest makes and for the same
+// reason: a branch with nothing in that window is adopting finding history,
+// not resuming one worth reconstructing further back.
+func BranchState(root, branch string, before time.Time) (open map[FindingBucket]map[string]bool, previous Record, hasPrevious bool) {
+	var recs []Record
+	month := time.Date(before.UTC().Year(), before.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	for range lookbackMonths {
+		parts, err := partsFor(root, month)
+		if err != nil {
+			break
+		}
+		for _, p := range parts {
+			_, _ = scan(filepath.Join(root, filepath.FromSlash(p)), func(rec Record) bool {
+				if rec.Kind == KindEntry && rec.Branch == branch {
+					recs = append(recs, rec)
+				}
+				return false
+			})
+		}
+		month = month.AddDate(0, -1, 0)
+	}
+
+	for _, rec := range recs {
+		if rec.At.After(before) {
+			continue
+		}
+		if !hasPrevious || rec.At.After(previous.At) {
+			previous, hasPrevious = rec, true
+		}
+	}
+
+	replay := make([]Record, 0, len(recs))
+	for _, rec := range recs {
+		if rec.At.Before(before) && len(rec.FindingEvents) > 0 {
+			replay = append(replay, rec)
+		}
+	}
+	sort.SliceStable(replay, func(i, j int) bool { return replay[i].At.Before(replay[j].At) })
+	open = map[FindingBucket]map[string]bool{}
+	for _, rec := range replay {
+		for _, ev := range rec.FindingEvents {
+			bucket := FindingBucket{Gate: ev.Gate, Component: ev.Component}
+			switch ev.Transition {
+			case FindingAppeared:
+				if open[bucket] == nil {
+					open[bucket] = map[string]bool{}
+				}
+				open[bucket][ev.Fingerprint] = true
+			case FindingResolved:
+				delete(open[bucket], ev.Fingerprint)
+				if len(open[bucket]) == 0 {
+					delete(open, bucket)
+				}
+			}
+		}
+	}
+	return open, previous, hasPrevious
 }
 
 // appendRecord adds one line to the month's current part, rolling to the next

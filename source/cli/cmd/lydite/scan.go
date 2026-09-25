@@ -205,6 +205,10 @@ func newScanCmd() *cobra.Command {
 				case runner.Shell:
 					results = shell.Check(ctx, cdir, env)
 				}
+				// Before labelled, which folds the gate into the row's prose:
+				// this is the one place the bare gate and the component are
+				// both still structured.
+				rep.AddCrashed(crashesOf(results, c.Name)...)
 				record(rep, dir, changed, labelled(results, c.Name, c.Dir))
 				switch lang {
 				case runner.Go:
@@ -270,6 +274,9 @@ func newScanCmd() *cobra.Command {
 				})
 			}
 
+			// Root-scoped, so each crash names no component — the bucket
+			// their findings already sit in.
+			rep.AddCrashed(crashesOf(results, "")...)
 			return report(cmd, rep, dir, changed, results, asJSON, noColor)
 		},
 	}
@@ -531,6 +538,36 @@ func scannerGates(lang runner.Lang) []string {
 	return nil
 }
 
+// crashesOf is each result whose findings are not a complete answer, as the
+// bucket they would have been recorded in: the bare gate, and the component it
+// scanned or none for a root-scoped gate.
+//
+// Read before labelled, whose suffix makes the gate prose; a crash is data a
+// consumer buckets by, never a label it parses.
+func crashesOf(results []executil.Result, component string) []finding.Crash {
+	var out []finding.Crash
+	for _, r := range results {
+		if r.Crashed {
+			out = append(out, finding.Crash{Gate: r.Name, Component: component})
+		}
+	}
+	return out
+}
+
+// licenceCrashed says so for a component whose licence gate made no claim it
+// could stand behind.
+//
+// The gate only ever claims the pairs a failing verdict is about. A component
+// whose dependencies could not be read, a base that could not be built and a
+// run with no base to compare against all report no pair at all, and that
+// absence says nothing about which dependencies conform — so the bucket is
+// named as crashed rather than read as clean.
+func licenceCrashed(rep *ui.Report, component string, c licence.Comparison, err error) {
+	if err != nil || c.Verdict == licence.VerdictUnmeasured || c.Verdict == licence.VerdictContext {
+		rep.AddCrashed(finding.Crash{Gate: licence.Gate, Component: component})
+	}
+}
+
 // labelled attributes each of a component's results to the component that
 // produced them — `gosec(cli)`, `cargo clippy(api)` — in the row's name and in
 // every located claim beneath it.
@@ -629,6 +666,7 @@ func recordGoLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTree,
 		base = goLicenceBase(ctx, tree, c.Dir, env, policy)
 	}
 	comparison, found, err := golang.LicenceCheck(ctx, cdir, env, policy, base)
+	licenceCrashed(rep, c.Name, comparison, err)
 	if err != nil {
 		// Unmeasured and never fail: a component whose own dependencies could
 		// not be enumerated has had nothing decided about it, and a red row
@@ -665,6 +703,7 @@ func recordRustLicence(ctx context.Context, rep *ui.Report, tree *licenceBaseTre
 		base = rustLicenceBase(ctx, tree, c.Dir, env, policy)
 	}
 	comparison, source, found, err := rust.LicenceCheck(ctx, cdir, env, policy, base)
+	licenceCrashed(rep, c.Name, comparison, err)
 	if err != nil {
 		// Unmeasured and never fail: a component whose own dependencies could
 		// not be enumerated has had nothing decided about it, and a red row here
@@ -729,6 +768,7 @@ func recordTypeScriptLicence(ctx context.Context, rep *ui.Report, tree *licenceB
 	// at.
 	current, err := typescript.LicenceSet(ctx, cdir, tree.root, policy)
 	if err != nil {
+		licenceCrashed(rep, c.Name, licence.Comparison{}, err)
 		// Unmeasured and never fail: a component whose own dependencies could
 		// not be enumerated has had nothing decided about it, and a red row
 		// here would ask its author to answer for a claim the gate never made.
@@ -737,6 +777,7 @@ func recordTypeScriptLicence(ctx context.Context, rep *ui.Report, tree *licenceB
 		return
 	}
 	comparison := licence.Compare(policy, current, base)
+	licenceCrashed(rep, c.Name, comparison, nil)
 	rep.Add(licenceRow(label, comparison))
 	if comparison.Verdict != licence.VerdictFail {
 		// A claim per pair only where the gate failed on them. Every other

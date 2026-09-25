@@ -143,8 +143,15 @@ func runAudit(ctx context.Context, dir string, env []string, bin string) executi
 // one: an advisory it sorts into `warnings` is a claim on a run it exits zero
 // for, and a run that cannot read the lockfile fails before writing a report at
 // all.
+//
+// Crashed is exactly that last case: no report on stdout that parses. A
+// report that does parse is every advisory cargo-audit holds against the
+// lockfile, whatever it exited with — its non-zero status is how it says one
+// of them is a vulnerability.
 func auditResult(dir string, r executil.Result) executil.Result {
-	if report, ok := parseAudit([]byte(r.Output)); ok {
+	report, ok := parseAudit([]byte(r.Output))
+	r.Crashed = !ok
+	if ok {
 		r.Findings = auditFindings(dir, report)
 	}
 	if r.Ok() {

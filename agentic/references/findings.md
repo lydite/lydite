@@ -35,9 +35,18 @@ already failed a row would otherwise be counted twice.
 
 **A count of them is a scalar the quality history holds**, per gate and per component, read out of
 `scan.json` by `lydite test record` — see [quality-history.md](quality-history.md) and
-[ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md). Nothing else about a
-finding reaches the branch: the per-finding history that would need is additive and unbuilt, and
-every claim already carries the identity it would be keyed by.
+[ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md). A specific finding
+also reaches the branch now, as a transition rather than a count: `lydite test record` diffs a
+recording's own findings against `ledger.BranchState`'s replay and appends a `FindingAppeared` or
+`FindingResolved` event for each fingerprint that changed state, keyed by the fingerprint alone —
+`v1:<16 hex>`, never `lydite:finding:v1:<hash>`, which is a different string for a different
+purpose (`internal/threads`'s thread-marker prefix). See
+[ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md) and
+`internal/ledger`'s `FindingEvent`/`BranchState`. `finding.Crash` travels beside `Finding` in the
+same document for exactly this diff: it names a `(gate, component)` the scan could not finish, so
+the diff can leave that bucket's open set untouched instead of reading a crashed run's empty
+claims as every one of them resolved. See [scanning.md](scanning.md) for how a wrapper decides
+`Crashed` and [quality-history.md](quality-history.md) for `findingScope`, the reader.
 
 **The channel is a document key and deliberately not a sibling file.** `measurements.json` is
 the obvious precedent and it does not carry over: it has one writer, `lydite test`, while

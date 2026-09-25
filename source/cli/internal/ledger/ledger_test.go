@@ -820,3 +820,127 @@ func TestAFailedReadHandsBackTheZeroValueBesideItsError(t *testing.T) {
 		t.Errorf("project named %q alongside its error, which a caller would stage", file)
 	}
 }
+
+func appeared(fingerprint, gate, component string) FindingEvent {
+	return FindingEvent{Transition: FindingAppeared, Fingerprint: fingerprint, Gate: gate, Component: component, Path: "internal/foo.go", Rule: "G101"}
+}
+
+func resolved(fingerprint, gate, component string) FindingEvent {
+	return FindingEvent{Transition: FindingResolved, Fingerprint: fingerprint, Gate: gate, Component: component, Path: "internal/foo.go", Rule: "G101"}
+}
+
+func withEvents(rec Record, events ...FindingEvent) Record {
+	rec.FindingEvents = events
+	return rec
+}
+
+// A branch with nothing recorded has nothing open, so every finding its first
+// recording holds reads as newly appeared rather than as something the ledger
+// claims to have seen before.
+func TestBranchStateOnAnUnrecordedBranchIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	if _, _, err := Append(root, []Record{
+		withEvents(entry("x", "", "release", "2026-03-15T08:00:00Z"), appeared("v1:aaaa", "gosec", "cli")),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	open, _, hasPrevious := BranchState(root, "main", at("2026-03-31T00:00:00Z"))
+	if len(open) != 0 {
+		t.Errorf("BranchState open for a branch with no records = %v, want nothing open", open)
+	}
+	if hasPrevious {
+		t.Error("BranchState found a previous record for a branch with none of its own")
+	}
+}
+
+// A resolution closes the finding it names. A replay that only ever added
+// would report every finding the branch has ever had as open forever.
+func TestAResolvedFindingIsNoLongerOpen(t *testing.T) {
+	root := t.TempDir()
+	if _, _, err := Append(root, []Record{
+		withEvents(entry("a", "", "main", "2026-01-10T08:00:00Z"),
+			appeared("v1:aaaa", "gosec", "cli"), appeared("v1:bbbb", "gosec", "cli")),
+		withEvents(entry("b", "a", "main", "2026-03-15T08:00:00Z"), resolved("v1:aaaa", "gosec", "cli")),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, _, _ := BranchState(root, "main", at("2026-03-31T00:00:00Z"))
+	bucket := got[FindingBucket{Gate: "gosec", Component: "cli"}]
+	if bucket["v1:aaaa"] {
+		t.Errorf("v1:aaaa is still open after the record that resolved it: %v", got)
+	}
+	// The appearance two months earlier is read too: the replay crosses the
+	// month boundary the way Latest's own walk does.
+	if !bucket["v1:bbbb"] {
+		t.Errorf("v1:bbbb, which never resolved, is not open: %v", got)
+	}
+}
+
+// A fingerprint is open within its gate and component and nowhere else. A
+// resolution in one bucket that closed the same string in another would mark
+// a finding resolved by a scan that never measured it.
+func TestAFindingIsOpenOnlyInItsOwnBucket(t *testing.T) {
+	root := t.TempDir()
+	if _, _, err := Append(root, []Record{
+		withEvents(entry("a", "", "main", "2026-03-10T08:00:00Z"),
+			appeared("v1:aaaa", "gosec", "cli"), appeared("v1:aaaa", "semgrep", "")),
+		withEvents(entry("b", "a", "main", "2026-03-15T08:00:00Z"), resolved("v1:aaaa", "gosec", "cli")),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, _, _ := BranchState(root, "main", at("2026-03-31T00:00:00Z"))
+	if got[FindingBucket{Gate: "gosec", Component: "cli"}]["v1:aaaa"] {
+		t.Errorf("v1:aaaa is still open for gosec(cli) after resolving there: %v", got)
+	}
+	if !got[FindingBucket{Gate: "semgrep"}]["v1:aaaa"] {
+		t.Errorf("resolving v1:aaaa for gosec(cli) closed it for semgrep too: %v", got)
+	}
+	if _, ok := got[FindingBucket{Gate: "semgrep", Component: "cli"}]; ok {
+		t.Errorf("a bucket no event named appeared in the result: %v", got)
+	}
+}
+
+// Recordings can land out of order, and the replay follows the commits' own
+// dates rather than the file: applied in file order here, the resolution would
+// run ahead of the appearance it resolves and leave the finding open forever.
+func TestBranchStateReplaysInTimestampOrderNotFileOrder(t *testing.T) {
+	root := t.TempDir()
+	later := withEvents(entry("b", "a", "main", "2026-03-15T20:00:00Z"), resolved("v1:aaaa", "gosec", "cli"))
+	earlier := withEvents(entry("a", "", "main", "2026-03-15T08:00:00Z"), appeared("v1:aaaa", "gosec", "cli"))
+	if _, _, err := Append(root, []Record{later}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, _, err := Append(root, []Record{earlier}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if recs := lines(t, root, "history/v1/2026-03.ndjson"); len(recs) != 2 || recs[0].Commit != "b" {
+		t.Fatalf("the partition = %+v, want the later record written first", recs)
+	}
+	if got, _, _ := BranchState(root, "main", at("2026-03-31T00:00:00Z")); len(got) != 0 {
+		t.Errorf("BranchState open = %v, want v1:aaaa resolved by the later commit", got)
+	}
+}
+
+// before is exclusive, so a writer asking what was open ahead of the commit it
+// is recording never reads that commit's own events back as history.
+func TestBranchStateExcludesARecordAtBefore(t *testing.T) {
+	root := t.TempDir()
+	if _, _, err := Append(root, []Record{
+		withEvents(entry("a", "", "main", "2026-03-15T08:00:00Z"), appeared("v1:aaaa", "gosec", "cli")),
+		withEvents(entry("b", "a", "main", "2026-03-15T20:00:00Z"),
+			resolved("v1:aaaa", "gosec", "cli"), appeared("v1:bbbb", "gosec", "cli")),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, previous, hasPrevious := BranchState(root, "main", at("2026-03-15T20:00:00Z"))
+	bucket := got[FindingBucket{Gate: "gosec", Component: "cli"}]
+	if !bucket["v1:aaaa"] || bucket["v1:bbbb"] {
+		t.Errorf("BranchState open before commit b = %v, want only a's v1:aaaa — b's own events excluded", got)
+	}
+	// previous is not exclusive the same way: a record at exactly before is
+	// still a legitimate "previous" for gap detection, the same tie Latest
+	// tolerates.
+	if !hasPrevious || previous.Commit != "b" {
+		t.Errorf("BranchState previous = %+v, hasPrevious = %v, want commit b at exactly before", previous, hasPrevious)
+	}
+}

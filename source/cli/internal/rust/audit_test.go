@@ -293,3 +293,22 @@ func TestAuditFallsBackToTheAdvisoryIDWithNoTitle(t *testing.T) {
 		t.Errorf("detail = %q, want the advisory's URL", got[0].Detail)
 	}
 }
+
+// cargo-audit exits non-zero for a vulnerability, so a failing run whose report
+// parsed is a whole answer; a run with no report that parses is not one.
+func TestAuditCrashesOnlyWithoutAReport(t *testing.T) {
+	found := auditResult(crateDir(t), stdoutRun(t, "audit.json"))
+	if found.Ok() || len(found.Findings) == 0 {
+		t.Fatalf("ok %v with %d claims, want the failing run's advisories", found.Ok(), len(found.Findings))
+	}
+	if found.Crashed {
+		t.Error("a run that found a vulnerability read as a crash")
+	}
+	if clean := auditResult(crateDir(t), stdoutRun(t, "audit-clean.json")); clean.Crashed {
+		t.Error("a clean run read as a crash")
+	}
+	unreadable := auditResult(t.TempDir(), executil.Result{Output: "", Err: fmt.Errorf("exit status 1")})
+	if !unreadable.Crashed {
+		t.Error("a run with no report read as a whole answer")
+	}
+}

@@ -194,8 +194,38 @@ the `scan` job beside the measure matrix, the `mutate` job's `--no-gate` — is 
 material for whatever calls `lydite test record` next, not as a description of a route running
 today.
 
-**The dashboard is not this slice.** `source/web/` is still empty, the hosted read path is
-[ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work, and per-finding
-fingerprints are additive, and cheap: every finding already carries the identity they would be
-keyed by.
+**The dashboard is not this slice.** `source/web/` is still empty; the hosted read path is
+[ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work.
+
+**A finding's own detail reaches the branch too, as a transition and never as the full open
+set.** Coverage, tests, CRAP and mutation stay scalars-only — that has not changed, and neither
+has `Component.Findings`/`Record.RootFindings`, still a per-gate count. What is new is
+`Record.FindingEvents`: `lydite test record` diffs the buckets a recording actually measured
+against `ledger.BranchState`'s replay of the branch's own history and appends only the
+fingerprints that newly appeared or resolved since that branch's last recording, never the
+fingerprints still open and unchanged. A stable repository's ledger grows exactly as before;
+growth is proportional to churn, not to the size of what is currently open, which is the same
+reasoning ADR 0009 used to keep detail out of the ledger in the first place, applied one level
+down instead of reopened. The cost this accepts: answering "is fingerprint X open right now"
+needs a replay bounded by `lookbackMonths`, the same window `Latest` already bounds its own
+back-walk by, rather than a single record read — `BranchState` is the one implementation of
+that replay, and it answers `gapBefore`'s "newest previous record" question from the same
+partition walk rather than each reading the branch's history separately. See
+[ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md).
+
+**A bucket the scan crashed on is excluded from the diff, not diffed as empty.**
+`cmd/lydite/record.go`'s `findingScope` reads the buckets a recording measured off the same
+counts `Component.Findings`/`RootFindings` already hold, then drops every `(gate, component)`
+`scan.json`'s `Crashed` names — see [findings.md](findings.md) for `finding.Crash` and
+[scanning.md](scanning.md) for how each wrapper decides `executil.Result.Crashed`. Without the
+exclusion a crashed scanner reports zero claims exactly like a clean one, `findingEvents` would
+read every fingerprint the branch held open there as resolved, and the next clean run would
+reopen every one of them as newly appeared — permanent, self-inflicted churn a scan that never
+ran should not be able to cause.
+
+A record's size is therefore no longer a single fixed number the way the paragraph above this
+one might suggest for the scalar fields alone: a quiet commit — nothing appeared or resolved —
+costs exactly what it always did, since `finding_events` is empty and omitted, while a commit
+that introduces or clears findings costs more, in proportion to how many transitioned rather
+than to how many are open.
 

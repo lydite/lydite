@@ -2576,3 +2576,46 @@ func TestScanWarnsAboutADeclaredEnvironmentOnItsStderr(t *testing.T) {
 		t.Fatalf("a declared value reached the scan's output:\nstderr: %s\nstdout: %s", errOut.String(), out.String())
 	}
 }
+
+// A crash is named by the gate its findings carry and the component they are
+// bucketed under — never by the row's label, which is prose — and only for a
+// result that says it crashed: a failing one that parsed is what found
+// something.
+func TestCrashesOfNamesTheBareGateAndTheComponent(t *testing.T) {
+	results := []executil.Result{
+		{Name: "gosec", Crashed: true, Err: errors.New("did not compile")},
+		{Name: "govulncheck", Err: errors.New("exit status 3")},
+	}
+	got := crashesOf(results, "api")
+	want := []finding.Crash{{Gate: "gosec", Component: "api"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("crashes = %+v, want %+v", got, want)
+	}
+	if root := crashesOf([]executil.Result{{Name: "gitleaks", Crashed: true}}, ""); !slices.Equal(root, []finding.Crash{{Gate: "gitleaks"}}) {
+		t.Errorf("root crashes = %+v, want gitleaks naming no component", root)
+	}
+}
+
+// The licence gate claims only the pairs a failing verdict is about, so every
+// verdict that gates nothing — and a set that could not be read — reports no
+// pair whatever conforms, and is named crashed rather than read as clean.
+func TestLicenceCrashedOnlyWhereTheGateClaimedNothingItCouldStandBehind(t *testing.T) {
+	cases := []struct {
+		c    licence.Comparison
+		err  error
+		want bool
+	}{
+		{licence.Comparison{Verdict: licence.VerdictPass}, nil, false},
+		{licence.Comparison{Verdict: licence.VerdictFail}, nil, false},
+		{licence.Comparison{Verdict: licence.VerdictUnmeasured}, nil, true},
+		{licence.Comparison{Verdict: licence.VerdictContext}, nil, true},
+		{licence.Comparison{}, errors.New("go list failed"), true},
+	}
+	for _, tc := range cases {
+		rep := ui.NewReport("scan")
+		licenceCrashed(rep, "api", tc.c, tc.err)
+		if got := len(rep.Crashed()) == 1; got != tc.want {
+			t.Errorf("verdict %q, err %v: crashed %v, want %v", tc.c.Verdict, tc.err, got, tc.want)
+		}
+	}
+}

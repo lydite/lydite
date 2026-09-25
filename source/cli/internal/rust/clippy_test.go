@@ -319,3 +319,55 @@ func TestClippyPrimaryFallsBackToTheFirstSpan(t *testing.T) {
 		t.Error("clippyPrimary claimed a span for a diagnostic with none")
 	}
 }
+
+func TestClippyCrashesOnlyWhereItsDiagnosticsAreNotAllLints(t *testing.T) {
+	// cargo exits 101 over a lint and over a crate that will not build alike,
+	// so the status alone cannot say whether the claims are a whole answer. A
+	// crate that does not type-check is one clippy linted none of, and a
+	// history diffing its missing claims would read them as resolved.
+	if broken := clippyResult(fixture.Tree(t, "testdata/brokenprobe"), stdoutRun(t, "clippy-nocompile.ndjson")); !broken.Crashed {
+		t.Error("crashed = false over a crate that does not compile, want true")
+	}
+	if linted := clippyResult(crateUnderClippy(t), stdoutRun(t, "clippy.ndjson")); linted.Ok() || linted.Crashed {
+		t.Errorf("ok %v, crashed %v; want a failing run its lints account for", linted.Ok(), linted.Crashed)
+	}
+	if clean := clippyResult(crateUnderClippy(t), stdoutRun(t, "clippy-clean.ndjson")); clean.Crashed {
+		t.Error("crashed = true over a clean report, want false")
+	}
+	// No diagnostic at all: cargo failed before rustc said anything.
+	unreadable := clippyResult(t.TempDir(), executil.Result{
+		Output: "not json at all\n",
+		Err:    fmt.Errorf("exit status 101"),
+	})
+	if !unreadable.Crashed {
+		t.Error("crashed = false over a failing run stating no diagnostic, want true")
+	}
+}
+
+func TestClippyCrashesOnAnErrorCarryingNoCode(t *testing.T) {
+	// A parse error carries no code at all, and a crate that does not parse
+	// is one nothing was linted in, however many lints another target raised.
+	lint := `{"reason":"compiler-message","message":{"level":"error","code":{"code":"clippy::ptr_arg"},"message":"lint","spans":[],"rendered":"lint"}}`
+	parse := `{"reason":"compiler-message","message":{"level":"error","code":null,"message":"expected one of","spans":[],"rendered":"expected one of"}}`
+	r := clippyResult(t.TempDir(), executil.Result{
+		Output: lint + "\n" + parse + "\n",
+		Err:    fmt.Errorf("exit status 101"),
+	})
+	if !r.Crashed {
+		t.Error("crashed = false beside an error with no code, want true")
+	}
+}
+
+func TestRustcErrorCodeTellsAnErrorFromALint(t *testing.T) {
+	for code, want := range map[string]bool{
+		"E0277":            true,
+		"E":                false,
+		"clippy::ptr_arg":  false,
+		"unused_variables": false,
+		"Exx":              false,
+	} {
+		if got := rustcErrorCode(code); got != want {
+			t.Errorf("rustcErrorCode(%q) = %v, want %v", code, got, want)
+		}
+	}
+}

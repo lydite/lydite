@@ -399,7 +399,7 @@ func TestGovulncheckResultLeavesTheTextPassAlone(t *testing.T) {
 	// whether or not it found anything. An empty data stream must therefore
 	// change neither the verdict nor the output.
 	failing := executil.Result{Name: "govulncheck", Err: errors.New("exit status 3"), Output: "govulncheck said so"}
-	got := govulncheckResult(failing, t.TempDir(), "")
+	got := govulncheckResult(failing, t.TempDir(), executil.Result{})
 	if got.Err == nil || got.Output != "govulncheck said so" {
 		t.Errorf("an empty stream changed the verdict: %+v", got)
 	}
@@ -409,11 +409,45 @@ func TestGovulncheckResultLeavesTheTextPassAlone(t *testing.T) {
 
 	// A stream that parses adds claims and still leaves the verdict alone.
 	stream := `{"finding":{"osv":"GO-1","fixed_version":"v2","trace":[{"module":"m"}]}}`
-	withClaims := govulncheckResult(failing, t.TempDir(), stream)
+	withClaims := govulncheckResult(failing, t.TempDir(), executil.Result{Output: stream})
 	if len(withClaims.Findings) != 1 {
 		t.Fatalf("got %d claims, want 1", len(withClaims.Findings))
 	}
 	if withClaims.Err == nil {
 		t.Error("parsing the data pass cleared the text pass's failure")
+	}
+}
+
+// The text pass exits 3 for a vulnerability and the data pass 0 whatever it
+// found, so a run where both did exactly that and the stream parsed to its end
+// is a whole answer.
+func TestGovulncheckResultWithFindingsIsNotACrash(t *testing.T) {
+	stream := `{"finding":{"osv":"GO-1","fixed_version":"v2","trace":[{"module":"m"}]}}`
+	got := govulncheckResult(exited(t, govulncheckFound), t.TempDir(), executil.Result{Output: stream})
+	if len(got.Findings) != 1 {
+		t.Fatalf("got %d claims, want 1", len(got.Findings))
+	}
+	if got.Crashed {
+		t.Error("a run that found a vulnerability read as a crash")
+	}
+	if clean := govulncheckResult(executil.Result{}, t.TempDir(), executil.Result{Output: `{"config":{}}`}); clean.Crashed {
+		t.Error("a clean run read as a crash")
+	}
+}
+
+// Every other shape is a run whose claims are not all of them.
+func TestGovulncheckResultCrashesWhereItsClaimsAreIncomplete(t *testing.T) {
+	stream := `{"finding":{"osv":"GO-1","fixed_version":"v2","trace":[{"module":"m"}]}}`
+	cases := map[string]struct{ text, data executil.Result }{
+		"an empty stream":            {exited(t, govulncheckFound), executil.Result{}},
+		"a failed data pass":         {exited(t, govulncheckFound), executil.Result{Output: stream, Err: errors.New("killed")}},
+		"a truncated stream":         {exited(t, govulncheckFound), executil.Result{Output: stream + `{"finding":{"osv":`}},
+		"a text pass that failed":    {exited(t, 1), executil.Result{Output: stream}},
+		"a text pass with no status": {executil.Result{Err: errors.New("not started")}, executil.Result{Output: stream}},
+	}
+	for name, tc := range cases {
+		if got := govulncheckResult(tc.text, t.TempDir(), tc.data); !got.Crashed {
+			t.Errorf("%s: not crashed", name)
+		}
 	}
 }

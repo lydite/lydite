@@ -265,3 +265,31 @@ func TestAScannersClaimIsUnanchorable(t *testing.T) {
 		t.Errorf("a scanner's claim anchored %q, want nowhere", got[0].Anchor)
 	}
 }
+
+// A rule opinion lydite gates on is a finding, and a report of nothing else is
+// a whole answer. A diagnostic that is not a rule opinion — a file Biome could
+// not parse or read, located or not — is a file whose claims are missing
+// rather than cleared.
+func TestBiomeIncompleteOnlyWhereBiomeCouldNotLint(t *testing.T) {
+	diagnostic := func(category string) biomeDiagnostic { return biomeDiagnostic{Category: category} }
+	cases := []struct {
+		category string
+		want     bool
+	}{
+		{"lint/security/noGlobalEval", false},
+		{"lint/correctness/noUnusedVariables", false},
+		{"lint/style/useConst", false},
+		{"suppressions/unused", false},
+		{"parse", true},
+		{"internalError/io", true},
+		{"a-category-from-a-later-biome", true},
+	}
+	for _, tc := range cases {
+		if got := biomeIncomplete(biomeReport{Diagnostics: []biomeDiagnostic{diagnostic(tc.category)}}); got != tc.want {
+			t.Errorf("%s: incomplete = %v, want %v", tc.category, got, tc.want)
+		}
+	}
+	if biomeIncomplete(biomeReport{}) {
+		t.Error("an empty report read as incomplete")
+	}
+}

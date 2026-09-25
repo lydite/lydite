@@ -178,6 +178,18 @@ parse falls back to the exit status — except gitleaks', where the claims are t
 unreadable report is a gate that could not run and fails the row saying so. A parser that
 silently drops what it does not recognise is how a gate stops gating.
 
+**`Result.Crashed` is a second, narrower answer, read from the same reports and never from the
+exit code.** A row's status already tolerates "failed because it found something" and "failed
+because it broke" being the same signal; `Crashed` is `lydite test record`'s way of asking the
+second question alone, for a consumer that diffs one run's findings against another's rather than
+just rendering a row — see [quality-history.md](quality-history.md) for `findingScope`, the
+reader. Every wrapper (gosec, govulncheck, Biome, cargo-audit, cargo-deny, clippy, Semgrep,
+gitleaks, shellcheck, and the licence gate) sets it from what its own report says it could not
+finish — a package that would not compile, a file it could not read, an install that never ran —
+never from `Err`/`Ok`, for the same reason those two do not decide the row: a tool here exits
+non-zero when it finds something, so a failing exit means "crashed or found something" and cannot
+tell the two apart.
+
 **A scan anchors what it found, against the lines the change touched.**
 `coverage.ChangedLines` is asked once and `record` anchors each check's claims —
 after `labelled` has rebased them onto the scan root, because the map is keyed
