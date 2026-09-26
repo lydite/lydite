@@ -33,13 +33,26 @@ jobs:
     strategy:
       # One at a time. Two wrangler deploys against one account racing to
       # create the same DNS record is a failure that reads as a Cloudflare
-      # problem, and there are two Workers — the parallelism is worth nothing.
+      # problem, and a handful of Workers is never enough of them for the
+      # parallelism to be worth that.
       max-parallel: 1
-      # A failed pr-relay must not stop oauth-exchange from being deployed:
-      # they share an account and nothing else.
+      # One worker's failure must not stop another's: they share a Cloudflare
+      # account and nothing else.
       fail-fast: false
       matrix:
-        worker: [pr-relay, oauth-exchange]
+        # oauth-exchange is absent, and its absence is the accurate statement.
+        # It exchanges a GitHub OAuth code for the dashboard, and there is no
+        # dashboard and no OAuth App, so `LYDITE_DASHBOARD_CLIENT_ID` does not
+        # exist and the deploy refuses — correctly, since an exchange with no
+        # client to be would answer every caller as nobody. It has never
+        # deployed successfully. Listing it anyway made every run of this
+        # workflow red, which is worse than not listing it: a red run nobody
+        # can act on is a red run nobody reads, and the one thing this workflow
+        # must never hide is a pr-relay deploy that failed.
+        #
+        # It goes back when the dashboard does, together with the client ID it
+        # needs (#27).
+        worker: [pr-relay]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
