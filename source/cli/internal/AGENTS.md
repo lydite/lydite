@@ -6,6 +6,7 @@ says why it is that way and what breaks if it changes.
 
 | Package | Read |
 |---|---|
+| `flow`, `stages/*`, `flows/*`, `trust` | [`architecture.md`](../../../agentic/references/architecture.md) |
 | `component`, `runner`, `nodedeps`, `cargotool` | [`components.md`](../../../agentic/references/components.md) |
 | `compose`, `scheduler` | [`services-and-scheduling.md`](../../../agentic/references/services-and-scheduling.md) |
 | `orphan`, `affected`, `pathmatch`, `gitdiff` | [`orphan-and-affected.md`](../../../agentic/references/orphan-and-affected.md) |
@@ -24,7 +25,7 @@ says why it is that way and what breaks if it changes.
 | `config` | [`configuration.md`](../../../agentic/references/configuration.md) |
 | `secrets` | [`scanning.md`](../../../agentic/references/scanning.md), and [`tool-pins.md`](../../../agentic/references/tool-pins.md) for the gitleaks pin |
 | `ui` | [`output-grammar.md`](../../../agentic/references/output-grammar.md), and [`surface.md`](../../../agentic/references/surface.md) for the comment |
-| `referral`, `clearance`, `forge`, `depdelta`, `apisurface`, `rustapisurface`, `tsapisurface`, `declaration` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
+| `referral`, `clearance`, `forge`, `depdelta`, `apisurface`, `rustapisurface`, `tsapisurface`, `declaration`, `reviewdecision` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |
 
 A `*-pin/` directory is a tool pin, not a component: see

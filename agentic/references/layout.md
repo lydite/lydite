@@ -6,6 +6,16 @@
 ```
 source/cli/                       # the Go module (module path lydite/lydite); every go command runs here
 source/cli/cmd/lydite/            # the lydite CLI (scan, test, review, version, update)
+source/cli/internal/flow/         # the flow engine: stages, bindings, conditions and policies
+                                  #   (see architecture.md)
+source/cli/internal/stages/       # per-concern stage packages a flow definition wires together,
+                                  #   generic (trust, scm) and domain (clearance) alike (see architecture.md)
+source/cli/internal/flows/        # one package per command's flow declaration, e.g. clearance
+                                  #   (see architecture.md)
+source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
+                                  #   decided into, once, from the environment (see architecture.md)
+source/cli/internal/reviewdecision/ # the referral decision review, clearance and clearance queue
+                                  #   all recompute (see referral-and-clearance.md)
 source/cli/internal/ui/           # the output grammar every command renders through, plus --json
                                   #   and the standing PR comment (see surface.md)
 source/cli/internal/referral/     # exemptions, disqualifiers, the referral decision (see referral-and-clearance.md)
