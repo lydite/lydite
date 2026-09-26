@@ -2,11 +2,9 @@ package forge
 
 import (
 	"context"
-	"errors"
-	"os"
+	"fmt"
 
 	"lydite/lydite/internal/clearance"
-	"lydite/lydite/internal/flow"
 	"lydite/lydite/internal/trust"
 )
 
@@ -18,6 +16,7 @@ import (
 // so nothing holding one depends on the platform's own payload shapes. The
 // set is exactly what clearance reaches for; review threads are not here.
 type SCMRepository interface {
+	IssueComment(ctx context.Context, id int64) (IssueComment, error)
 	HeadSHA(ctx context.Context, number int) (string, error)
 	PullRequestTitle(ctx context.Context, number int) (string, error)
 	ChangedPaths(ctx context.Context, number int) ([]string, error)
@@ -34,6 +33,28 @@ var _ SCMRepository = (*GitHubRepository)(nil)
 type GitHubRepository struct {
 	Client *Client
 	Repo   Repo
+}
+
+// NewGitHubRepository binds a Client holding t's credential to the repository
+// t names.
+//
+// Both come from t and from nothing else, so the repository every call is
+// made against is the one the run was started in, never one a payload or a
+// flag named. A TrustedContext naming no repository — the zero value — is an
+// error. One holding no credential is not: it builds a client that sends
+// unauthenticated requests, and whether a run may write at all is
+// t.CanWrite's answer, asked by whoever holds t.
+func NewGitHubRepository(t trust.TrustedContext) (*GitHubRepository, error) {
+	repo, err := ParseRepo(t.Repository())
+	if err != nil {
+		return nil, fmt.Errorf("the trusted repository: %w", err)
+	}
+	return &GitHubRepository{Client: New(t.Token()), Repo: repo}, nil
+}
+
+// IssueComment resolves comment id, and the issue or pull request it is on.
+func (g *GitHubRepository) IssueComment(ctx context.Context, id int64) (IssueComment, error) {
+	return g.Client.IssueComment(ctx, g.Repo, id)
 }
 
 // HeadSHA resolves pull request number's current head.
@@ -71,56 +92,3 @@ func (g *GitHubRepository) PostStatus(ctx context.Context, s Status) error {
 func (g *GitHubRepository) CreateComment(ctx context.Context, number int, body string) error {
 	return g.Client.CreateComment(ctx, g.Repo, number, body)
 }
-
-// repositoryKey is unexported so the only Write that can store an
-// SCMRepository on a Context is the one InitializeSCM's Run returns.
-var repositoryKey = flow.NewKey[SCMRepository]("scm-repository")
-
-// Get reads the SCMRepository InitializeSCM joined into r, reporting false
-// when no stage has run it.
-func Get(r flow.Reader) (SCMRepository, bool) {
-	return flow.Get(r, repositoryKey)
-}
-
-// errNoToken is the refusal a run without a write-capable credential gets.
-// Clearance posts statuses and comments, so there is nothing it can do
-// read-only.
-var errNoToken = errors.New("clearance needs GITHUB_TOKEN with `statuses: write` and `pull-requests: write`")
-
-// InitializeSCM is the StageComponent that joins a GitHubRepository for Repo
-// into the Flow's Context. It runs after trust.InitializeTrustContext, whose
-// TrustedContext it reads.
-type InitializeSCM struct {
-	Repo Repo
-}
-
-// Name is the component's name in a Flow's reports.
-func (InitializeSCM) Name() string {
-	return "initialize-scm"
-}
-
-// Run refuses a run the TrustedContext says holds no credential, and
-// otherwise builds the client from the token in the environment.
-//
-// TrustedContext answers only whether a credential exists, never what it is,
-// so the token is read here from the same variables trust decides from. A
-// missing TrustedContext is treated as no credential, and an environment that
-// no longer carries a token is refused the same way rather than building a
-// client that would send unauthenticated requests.
-func (i InitializeSCM) Run(_ context.Context, in flow.View) (flow.Result, error) {
-	result := flow.Result{Policy: flow.FailFlow}
-	if trusted, ok := trust.Get(in); !ok || !trusted.CanWrite() {
-		return result, errNoToken
-	}
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
-	}
-	if token == "" {
-		return result, errNoToken
-	}
-	var repository SCMRepository = &GitHubRepository{Client: New(token), Repo: i.Repo}
-	result.Writes = []flow.Write{flow.Put(repositoryKey, repository)}
-	return result, nil
-}
-

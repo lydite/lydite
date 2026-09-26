@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -201,6 +202,86 @@ type Comment struct {
 	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
+}
+
+// IssueComment is one comment on an issue's or a pull request's
+// conversation, as the platform holds it now.
+type IssueComment struct {
+	Body      string
+	Author    string
+	CreatedAt time.Time
+	// Number is the issue or pull request the comment is on. The two share
+	// one numbering, and OnPullRequest says which this is.
+	Number        int
+	OnPullRequest bool
+}
+
+// IssueComment resolves one conversation comment by its id, and whether the
+// thread it is on is a pull request.
+//
+// A webhook payload carries a copy of all of this, and that copy is only what
+// the comment said when the event was delivered: a comment edited since then
+// reads differently here, and one deleted since then is a 404 rather than a
+// command. Everything a decision is made from is read live, so the payload
+// only ever contributes the id.
+//
+// That makes two requests. The comment names its thread only as an issue URL,
+// which is the same for an issue and a pull request, and the issue is the one
+// document that tells the two apart. A comment with no author — a deleted
+// account — or no readable thread is refused rather than answered: a
+// permission is read about the author, and a decision is about a pull request.
+func (c *Client) IssueComment(ctx context.Context, repo Repo, id int64) (IssueComment, error) {
+	var comment struct {
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"created_at"`
+		IssueURL  string    `json:"issue_url"`
+		User      *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", escape(repo.Owner), escape(repo.Name), id)
+	if err := c.do(ctx, "GET", path, nil, &comment); err != nil {
+		return IssueComment{}, fmt.Errorf("reading comment %d on %s: %w", id, repo, err)
+	}
+	if comment.User == nil || comment.User.Login == "" {
+		return IssueComment{}, fmt.Errorf("comment %d on %s reports no author", id, repo)
+	}
+	number, err := issueNumber(comment.IssueURL)
+	if err != nil {
+		return IssueComment{}, fmt.Errorf("comment %d on %s: %w", id, repo, err)
+	}
+
+	var issue struct {
+		// PullRequest is present only on an issue that is a pull request.
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	}
+	path = fmt.Sprintf("/repos/%s/%s/issues/%d", escape(repo.Owner), escape(repo.Name), number)
+	if err := c.do(ctx, "GET", path, nil, &issue); err != nil {
+		return IssueComment{}, fmt.Errorf("reading %s#%d, which comment %d is on: %w", repo, number, id, err)
+	}
+	return IssueComment{
+		Body:          comment.Body,
+		Author:        comment.User.Login,
+		CreatedAt:     comment.CreatedAt,
+		Number:        number,
+		OnPullRequest: issue.PullRequest != nil,
+	}, nil
+}
+
+// issueNumber reads the number an issue URL ends in. The last `/issues/` is
+// the one read, since an owner or a repository may itself be named `issues`.
+func issueNumber(issueURL string) (int, error) {
+	i := strings.LastIndex(issueURL, "/issues/")
+	if i < 0 {
+		return 0, fmt.Errorf("the issue URL %q names no issue", issueURL)
+	}
+	number, err := strconv.Atoi(issueURL[i+len("/issues/"):])
+	if err != nil || number <= 0 {
+		return 0, fmt.Errorf("the issue URL %q names no issue number", issueURL)
+	}
+	return number, nil
 }
 
 // FindComment returns the first comment opening with marker, or nil.

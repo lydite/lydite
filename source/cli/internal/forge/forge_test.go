@@ -569,3 +569,114 @@ func TestUpsertNeverWritesOverAQuotedMarker(t *testing.T) {
 		t.Fatalf("a person's comment was edited instead of a fresh one posted: %v", posted)
 	}
 }
+
+// issueCommentServer answers a comment lookup with comment and the issue it
+// names with issue, and 404s anything else.
+func issueCommentServer(t *testing.T, comment, issue map[string]any) *Client {
+	t.Helper()
+	return serve(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/lydite/lydite/issues/comments/55":
+			_ = json.NewEncoder(w).Encode(comment)
+		case "/repos/lydite/lydite/issues/40":
+			_ = json.NewEncoder(w).Encode(issue)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+// Everything a decision is made from — what the comment says, who wrote it,
+// when, and which pull request it is on — is the platform's answer now.
+func TestIssueCommentReadsTheCommentAndItsPullRequest(t *testing.T) {
+	client := issueCommentServer(t, map[string]any{
+		"id": 55, "body": "/lydite clear", "created_at": "2026-08-31T12:00:00Z",
+		"issue_url": "https://api.github.com/repos/lydite/lydite/issues/40",
+		"user":      map[string]string{"login": "pedromvgomes"},
+	}, map[string]any{"number": 40, "pull_request": map[string]string{"url": "https://api.github.com/repos/lydite/lydite/pulls/40"}})
+
+	got, err := client.IssueComment(context.Background(), repo, 55)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := IssueComment{
+		Body: "/lydite clear", Author: "pedromvgomes",
+		CreatedAt: time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC),
+		Number:    40, OnPullRequest: true,
+	}
+	if got != want {
+		t.Errorf("IssueComment = %+v, want %+v", got, want)
+	}
+}
+
+// An issue and a pull request share one numbering and one comment URL shape;
+// only the issue document tells them apart.
+func TestIssueCommentOnAPlainIssueIsNotOnAPullRequest(t *testing.T) {
+	client := issueCommentServer(t, map[string]any{
+		"body": "/lydite clear", "issue_url": "https://api.github.com/repos/lydite/lydite/issues/40",
+		"user": map[string]string{"login": "pedromvgomes"},
+	}, map[string]any{"number": 40})
+
+	got, err := client.IssueComment(context.Background(), repo, 55)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OnPullRequest || got.Number != 40 {
+		t.Errorf("IssueComment = %+v, want issue 40 and not a pull request", got)
+	}
+}
+
+// A comment deleted since the event was delivered is gone, and reads as the
+// platform's 404 rather than as the payload's stale copy.
+func TestIssueCommentReportsADeletedCommentAsNotFound(t *testing.T) {
+	client := issueCommentServer(t, nil, nil)
+	if _, err := client.IssueComment(context.Background(), repo, 56); !NotFound(err) {
+		t.Errorf("err = %v, want a 404", err)
+	}
+}
+
+// A permission is read about the author and a decision is about a thread, so
+// a comment naming neither is refused rather than answered with a blank.
+func TestIssueCommentRefusesACommentWithNoAuthorOrThread(t *testing.T) {
+	cases := []struct {
+		name    string
+		comment map[string]any
+		want    string
+	}{
+		{
+			name:    "deleted account",
+			comment: map[string]any{"body": "x", "issue_url": "https://api.github.com/repos/lydite/lydite/issues/40", "user": nil},
+			want:    "reports no author",
+		},
+		{
+			name:    "no issue URL",
+			comment: map[string]any{"body": "x", "user": map[string]string{"login": "a"}},
+			want:    "names no issue",
+		},
+		{
+			name:    "no issue number",
+			comment: map[string]any{"body": "x", "issue_url": "https://api.github.com/repos/lydite/lydite/issues/x", "user": map[string]string{"login": "a"}},
+			want:    "names no issue number",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := issueCommentServer(t, tc.comment, map[string]any{"number": 40})
+			if _, err := client.IssueComment(context.Background(), repo, 55); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want a refusal carrying %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// An owner or a repository may itself be called `issues`; the number is the
+// one after the last such segment.
+func TestIssueNumberReadsTheLastIssuesSegment(t *testing.T) {
+	got, err := issueNumber("https://api.github.com/repos/issues/issues/issues/12")
+	if err != nil || got != 12 {
+		t.Errorf("issueNumber = %d, %v, want 12", got, err)
+	}
+	if _, err := issueNumber("https://api.github.com/repos/lydite/lydite/issues/0"); err == nil {
+		t.Error("issue 0 was read as a number")
+	}
+}

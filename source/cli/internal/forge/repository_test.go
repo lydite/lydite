@@ -3,14 +3,12 @@ package forge
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
 	"lydite/lydite/internal/clearance"
-	"lydite/lydite/internal/flow"
 	"lydite/lydite/internal/trust"
 )
 
@@ -28,6 +26,14 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		got = append(got, request{method: r.Method, path: r.URL.Path, body: string(body)})
 		switch {
+		case strings.Contains(r.URL.Path, "/issues/comments/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"body": "/lydite clear", "created_at": "2026-08-31T12:00:00Z",
+				"issue_url": "https://api.github.com/repos/lydite/lydite/issues/7",
+				"user":      map[string]string{"login": "octocat"},
+			})
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/issues/7"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "pull_request": map[string]string{"url": "x"}})
 		case strings.HasSuffix(r.URL.Path, "/files"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"filename": "a.go", "status": "modified"}})
 		case strings.HasSuffix(r.URL.Path, "/statuses"):
@@ -43,6 +49,9 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 	var scm SCMRepository = &GitHubRepository{Client: client, Repo: repo}
 	ctx := context.Background()
 
+	if c, err := scm.IssueComment(ctx, 55); err != nil || c.Author != "octocat" || c.Number != 7 || !c.OnPullRequest {
+		t.Errorf("IssueComment = %+v, %v", c, err)
+	}
 	if head, err := scm.HeadSHA(ctx, 7); err != nil || head != "abc123" {
 		t.Errorf("HeadSHA = %q, %v", head, err)
 	}
@@ -67,6 +76,8 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 	}
 
 	want := []request{
+		{method: "GET", path: "/repos/lydite/lydite/issues/comments/55"},
+		{method: "GET", path: "/repos/lydite/lydite/issues/7"},
 		{method: "GET", path: "/repos/lydite/lydite/pulls/7"},
 		{method: "GET", path: "/repos/lydite/lydite/pulls/7"},
 		{method: "GET", path: "/repos/lydite/lydite/pulls/7/files"},
@@ -88,17 +99,21 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 	}
 }
 
-func initializeSCM(t *testing.T, r Repo) (*flow.Context, error) {
+func trusted(t *testing.T, repository, githubToken, ghToken string) trust.TrustedContext {
 	t.Helper()
-	c := flow.NewContext()
-	f := flow.Flow{Stages: []flow.Stage{
-		{Name: "trust", Components: []flow.StageComponent{trust.InitializeTrustContext{}}},
-		{Name: "scm", Components: []flow.StageComponent{InitializeSCM{Repo: r}}},
-	}}
-	return c, f.Run(context.Background(), c)
+	t.Setenv("GITHUB_REPOSITORY", repository)
+	t.Setenv("GITHUB_TOKEN", githubToken)
+	t.Setenv("GH_TOKEN", ghToken)
+	tc, err := trust.FromEnvironment()
+	if err != nil {
+		t.Fatalf("trust.FromEnvironment: %v", err)
+	}
+	return tc
 }
 
-func TestInitializeSCMJoinsARepositoryBuiltFromTheToken(t *testing.T) {
+// The repository every call is made against and the credential it is made
+// with are the TrustedContext's, whichever variable the credential came from.
+func TestNewGitHubRepositoryIsBoundToTheTrustedRepositoryAndToken(t *testing.T) {
 	cases := []struct {
 		name        string
 		githubToken string
@@ -111,19 +126,9 @@ func TestInitializeSCMJoinsARepositoryBuiltFromTheToken(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GITHUB_TOKEN", tc.githubToken)
-			t.Setenv("GH_TOKEN", tc.ghToken)
-			c, err := initializeSCM(t, repo)
+			gh, err := NewGitHubRepository(trusted(t, "lydite/lydite", tc.githubToken, tc.ghToken))
 			if err != nil {
-				t.Fatalf("Flow.Run: %v", err)
-			}
-			scm, ok := Get(c)
-			if !ok {
-				t.Fatal("no SCMRepository joined after InitializeSCM ran")
-			}
-			gh, ok := scm.(*GitHubRepository)
-			if !ok {
-				t.Fatalf("joined %T, want *GitHubRepository", scm)
+				t.Fatalf("NewGitHubRepository: %v", err)
 			}
 			if gh.Repo != repo {
 				t.Errorf("Repo = %v, want %v", gh.Repo, repo)
@@ -135,47 +140,28 @@ func TestInitializeSCMJoinsARepositoryBuiltFromTheToken(t *testing.T) {
 	}
 }
 
-// Clearance posts statuses and comments; a run with no credential has
-// nothing it can do, so the Flow fails with the message naming what it needs.
-func TestInitializeSCMFailsTheFlowWithoutAToken(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	t.Setenv("GH_TOKEN", "")
-	c, err := initializeSCM(t, repo)
+// Whether a run may write is the TrustedContext's answer, not this
+// constructor's: one holding no credential still binds a repository, with a
+// client that sends no Authorization header.
+func TestNewGitHubRepositoryWithoutACredentialBindsAnUnauthenticatedClient(t *testing.T) {
+	tc := trusted(t, "lydite/lydite", "", "")
+	gh, err := NewGitHubRepository(tc)
+	if err != nil {
+		t.Fatalf("NewGitHubRepository: %v", err)
+	}
+	if gh.Repo != repo || gh.Client == nil || gh.Client.Token != "" {
+		t.Errorf("GitHubRepository = %+v, want %v with no token", gh, repo)
+	}
+}
+
+// The zero TrustedContext is the only one outside internal/trust that
+// FromEnvironment did not build, and it names no repository to bind.
+func TestNewGitHubRepositoryRefusesATrustedContextNamingNoRepository(t *testing.T) {
+	gh, err := NewGitHubRepository(trust.TrustedContext{})
 	if err == nil {
-		t.Fatal("Flow.Run succeeded with no token")
+		t.Fatalf("NewGitHubRepository = %+v, want a refusal", gh)
 	}
-	const message = "clearance needs GITHUB_TOKEN with `statuses: write` and `pull-requests: write`"
-	if !strings.Contains(err.Error(), message) {
-		t.Errorf("error %q does not carry %q", err, message)
-	}
-	if _, ok := Get(c); ok {
-		t.Error("an SCMRepository was joined with no token")
-	}
-
-	result, err := InitializeSCM{Repo: repo}.Run(context.Background(), c.View())
-	if !errors.Is(err, errNoToken) {
-		t.Errorf("Run error = %v, want errNoToken", err)
-	}
-	if result.Policy != flow.FailFlow {
-		t.Errorf("Policy = %v, want %v", result.Policy, flow.FailFlow)
-	}
-}
-
-// A Context no trust stage has run on answers as holding no credential, even
-// when the environment carries a token.
-func TestInitializeSCMRefusesAContextWithNoTrustDecision(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "primary")
-	result, err := InitializeSCM{Repo: repo}.Run(context.Background(), flow.NewContext().View())
-	if !errors.Is(err, errNoToken) {
-		t.Errorf("Run error = %v, want errNoToken", err)
-	}
-	if result.Policy != flow.FailFlow || len(result.Writes) != 0 {
-		t.Errorf("Result = %+v, want FailFlow with no writes", result)
-	}
-}
-
-func TestGetReportsAbsentBeforeInitialization(t *testing.T) {
-	if _, ok := Get(flow.NewContext()); ok {
-		t.Fatal("Get on a Context no stage initialized reported present")
+	if !strings.Contains(err.Error(), "the trusted repository") {
+		t.Errorf("err = %v, want one naming the trusted repository", err)
 	}
 }
