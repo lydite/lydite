@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
+	"lydite/lydite/internal/referral"
 )
 
 const runURL = "https://example.invalid/lydite/lydite/actions/runs/12"
@@ -130,6 +132,45 @@ func TestRenderStatusesFailsOnAnUnwritablePath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a status that could not be written was reported as rendered")
+	}
+}
+
+// A clearance's fingerprint lives in the status description and nowhere
+// else, and forge clips that description to the platform's cap on the way
+// out — so the fingerprint has to survive the write and not merely the
+// composition. Both documents a clearance records carry it, because both are
+// written from one document.
+func TestARecordedClearanceCarriesTheFingerprintThroughTheWrite(t *testing.T) {
+	want := referral.Fingerprint([]string{"src/auth.go"}, nil)
+	// Longer than any login the platform issues: the attribution is what
+	// gives way to the budget, and asserting that needs a handle that spends
+	// it.
+	handle := strings.Repeat("handle", 40)
+	described, err := DescribeClearance(context.Background(), DescribeClearanceIn{
+		Login: handle, Head: head, Fingerprint: want,
+	})
+	if err != nil {
+		t.Fatalf("DescribeClearance: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "lydite-status.json")
+	if _, err := RenderStatuses(context.Background(), RenderStatusesIn{
+		Path: path, Head: head, Number: 40, Description: described.Description, TargetURL: runURL,
+	}); err != nil {
+		t.Fatalf("RenderStatuses: %v", err)
+	}
+
+	for _, p := range []string{path, referralDocument(path)} {
+		got := readStatus(t, p)
+		if n := len([]rune(got.Description)); n > clearance.DescriptionLimit {
+			t.Errorf("%s: the description is %d characters, past the cap of %d: %q",
+				filepath.Base(p), n, clearance.DescriptionLimit, got.Description)
+		}
+		fingerprint, ok := clearance.FingerprintIn(got.Description)
+		if !ok || fingerprint != want {
+			t.Errorf("%s: the recorded description reads back as %q, %v; want %q, true",
+				filepath.Base(p), fingerprint, ok, want)
+		}
 	}
 }
 
