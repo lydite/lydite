@@ -125,6 +125,9 @@ already established elsewhere in this codebase's own language:
 
 ## The payload only points; trust and SCM come first
 
+See [ADR 0061](../../docs/adr/0061-trust-and-the-repository-come-first-and-a-webhook-payload-only-points.md)
+for the decision and why reading the payload's body or its repository claim directly was rejected.
+
 `clearanceflow.New` declares `init-trust` and `init-scm` before anything else, and
 `init-trust` is the only stage in the flow that reads the process environment (every later stage
 receives the `trust.TrustedContext` it built). The comment a command arrived on is then resolved
@@ -146,7 +149,10 @@ fetching first and refusing to act on the result.
   their `In`/`Out` types. Two kinds:
   - **Generic** — `truststages` (`internal/stages/trust`) and `scmstages`
     (`internal/stages/scm`) hold stages usable by any flow that needs a `TrustedContext` or reads
-    and writes the hosting platform through `forge.SCMRepository`.
+    and writes the hosting platform through `forge.SCMRepository` — see
+    [ADR 0060](../../docs/adr/0060-stages-read-and-write-the-platform-through-an-scmrepository-interface-ahead-of-a-second-vendor.md)
+    for why that is an interface, and built from a `TrustedContext` alone, ahead of a second
+    vendor.
   - **Domain** — `clearancestages` (`internal/stages/clearance`) holds stages specific to
     answering a clearance command: parsing it, deciding it, fingerprinting it, composing its
     reply.
@@ -162,6 +168,10 @@ own doc comment, rather than left for a reader to infer from the fact that two p
 directory prefix.
 
 ## Why hand-rolled, over a pipeline library
+
+See [ADR 0059](../../docs/adr/0059-a-flow-is-a-hand-rolled-engine-of-typed-bindings-not-a-pipeline-library-or-a-shared-context.md)
+for the decision and its rejected alternatives — a pipeline library, a shared typed context, and
+stages defined inside `cmd/lydite`.
 
 `internal/flow` is under 700 lines across its two files and depends on nothing beyond the
 standard library's `context`, `errors`, `reflect` and `io`. Reaching for a general pipeline
