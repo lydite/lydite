@@ -39,7 +39,7 @@ Five properties are load-bearing and easy to weaken by accident:
 
 - **The file is read from the merge-base, never from the branch.** A change that widens the
   gate gets no benefit from its own widening — otherwise one pull request declares itself
-  exempt. `loadExemptionsAt` does this with `git show <base>:<path>`.
+  exempt. `internal/reviewdecision`'s `exemptionsAt` does this with `git show <base>:<path>`.
 - **All-or-nothing, against a single exemption.** Every changed path must be covered by one
   exemption. Matching on *any* path would let an agent staple a README tweak onto a dangerous
   change; matching on the *union* of two exemptions would mean adding a narrow entry silently
@@ -121,13 +121,15 @@ the one way this command gives a confidently wrong answer.
 
 ## A declared API break refers, an undeclared one fails
 
-`review`'s `addAPISurfaceRows` (`cmd/lydite/review_apisurface.go`) is the one check in the
-command, and it renders three verdicts for a component that opted in with `api_surface`,
-whichever language it compares: the comparison itself is `internal/apisurface`'s
-`golang.org/x/exp/apidiff` for Go, `internal/rustapisurface`'s pinned `cargo-semver-checks`
-subprocess for Rust, and `internal/tsapisurface`'s pinned `@microsoft/api-extractor` subprocess
-for TypeScript — see the ADR's amendments for those two halves — but the verdicts
-`addAPISurfaceRows` draws from any of the three results are the same three:
+`review`'s API-surface check is the one in the command that can fail rather than only refer, and
+it reaches three verdicts for a component that opted in with `api_surface`, whichever language it
+compares: the comparison itself is `internal/apisurface`'s `golang.org/x/exp/apidiff` for Go,
+`internal/rustapisurface`'s pinned `cargo-semver-checks` subprocess for Rust, and
+`internal/tsapisurface`'s pinned `@microsoft/api-extractor` subprocess for TypeScript — see the
+ADR's amendments for those two halves. `internal/reviewdecision`'s `referSurfaces` folds the
+verdict into the `referral.Decision` that `Decide` returns; `cmd/lydite`'s `renderAPISurfaceRows`
+(`review_apisurface.go`) only renders the row for a result the decision already classified, and
+never decides anything itself. The three verdicts are:
 
 - an undeclared incompatible change is `ui.StatusFail` — the author clears it by restoring the
   API or by declaring the break, and both are work they can do;
@@ -144,10 +146,10 @@ for TypeScript — see the ADR's amendments for those two halves — but the ver
 Both API-surface `Disqualification` kinds are the first ones `internal/referral` carries that are not
 derived from the line-level diff evidence `Disqualifications` computes everything else from.
 `internal/referral` still imports nothing about git history or webhooks — it never reads a
-commit message or a PR title itself. `breakDeclaration`, in `cmd/lydite`, is what reads the
-declaration (through `declaration.Declared`, over a title the caller resolves and over every
-commit in `base..HEAD` from `internal/gitstate.CommitMessages`) and hands `review` only the
-resulting `referral.Disqualification` to append. The title itself is resolved differently by
+commit message or a PR title itself. `breakDeclaration`, in `internal/reviewdecision`, is what
+reads the declaration (through `declaration.Declared`, over a title the caller resolves and over
+every commit in `base..HEAD` from `internal/gitstate.CommitMessages`) and hands `referSurfaces`
+only where the declaration was found, for the disqualification it folds into the decision. The title itself is resolved differently by
 each caller: `review` reads `pull_request.title` off the webhook payload
 (`internal/forge.PullRequestEvent`), while `clearance` resolves it live through
 `client.PullRequestTitle` (`GET /pulls/:n`), because an `issue_comment` payload carries no
@@ -170,22 +172,23 @@ and [`ci.md`](ci.md) for `lydite release check`.
 Computing any of this costs `review` three things it otherwise has no reason to pay for:
 loading components, resolving a Go toolchain, and materialising the merge-base as a real tree on
 disk, since `go/packages` loads a module by running the `go` tool over one and `git show
-<base>:<path>` cannot supply that. `baseWorktree` in `review_apisurface.go` does the last of
-those with `git worktree add --detach` and a `context.WithoutCancel` cleanup — the same shape
-`cmd/lydite/coverage.go`'s `measureBaseTree` already uses, kept as its own separate
+<base>:<path>` cannot supply that. `baseWorktree` in `internal/reviewdecision/surface.go` does
+the last of those with `git worktree add --detach` and a `context.WithoutCancel` cleanup — the
+same shape `cmd/lydite/coverage.go`'s `measureBaseTree` already uses, kept as its own separate
 implementation rather than shared, since `coverage.go` is not this feature's file to touch. A
-repository where no component opts in pays none of it: `addAPISurfaceRows` returns before
+repository where no component opts in pays none of it: `CompareSurfaces` returns before
 loading a toolchain or adding a worktree once it finds no component asked, the same "day-one
 state" an absent `.lydite/exemptions.yml` gets above — nothing was asked for, so there is
 nothing here that could fail to run.
 
 ## An added dependency refers
 
-`review`'s `measureDependencies` (`cmd/lydite/review_depdelta.go`) compares, for every
-dependency manifest the change touches, the packages the merge-base pins against the ones HEAD
-pins — both sides read with `git show <rev>:<path>`, never off the working tree or a worktree,
-since `internal/depdelta`'s readers only need a manifest's bytes. `addDependencyRows` turns
-that comparison into rows and disqualifications:
+`internal/reviewdecision`'s `measureDependencies` compares, for every dependency manifest the
+change touches, the packages the merge-base pins against the ones HEAD pins — both sides read
+with `git show <rev>:<path>`, never off the working tree or a worktree, since
+`internal/depdelta`'s readers only need a manifest's bytes. `referDependencies` folds that
+comparison into the decision `Decide` returns; `cmd/lydite`'s `addDependencyRows`
+(`review_depdelta.go`) only turns the same comparison into rows:
 
 - a package present at HEAD and absent at the base is `referral.DisqualificationDependencyAdded`,
   direct or transitive alike — a version move on a name already present is not an addition, and
@@ -205,7 +208,7 @@ per-component opt-in — unlike `api_surface`, every repository with a dependenc
 covered from the day this shipped. See
 [ADR 0047](../../docs/adr/0047-an-added-dependency-refers-and-a-version-bump-is-conditionally-exempt.md).
 
-`measureDependencies` runs once per `review` invocation and its result, `[]manifestDelta`, feeds
+`measureDependencies` runs once per `Decide` call and its result, `[]ManifestDelta`, feeds
 both the rows above and the `versions: patch-and-minor` condition below — one comparison
 answering two questions, so a manifest is never read off two trees twice for two different
 callers.
@@ -228,10 +231,10 @@ condition goes unmet lands exactly where an uncovered one lands, referred, and
 "nothing declares this shape" and "the shape is declared, conditionally" have different
 remedies.
 
-Two halves have to hold together, and `review.go` computes both:
+Two halves have to hold together, and `internal/reviewdecision.Decide` computes both:
 
 - **every version pair in every manifest the change touches moved by a patch or a minor**
-  (`versionsPatchAndMinor` over the `manifestDelta` values `measureDependencies` already built
+  (`versionsPatchAndMinor` over the `ManifestDelta` values `measureDependencies` already built
   for the added-dependency disqualifier, through `depdelta.Delta.PatchOrMinorEligible`). A
   manifest that could not be measured fails it for the reason it also disqualifies, and a
   `0.x` line is not boring the way a `1.x` one is — the classification lives in
@@ -290,7 +293,7 @@ a failure of either post fails the run. The rendered route writes two documents,
 `forge.Status` object: the `lydite/clearance` status at the path `--status-out` names, and the
 `lydite/referral` status at the sibling with `.referral` before that path's extension —
 `lydite-status.json` beside `lydite-status.referral.json` (`referralDocument` in
-`cmd/lydite/status.go`). The split is what the relay's authority model requires: a clearance ref is
+`internal/stages/clearance/statuses.go`). The split is what the relay's authority model requires: a clearance ref is
 admitted to `lydite/clearance` alone, so only the clearance document is ever relayed and the
 referral document is posted by the workflow with its own `statuses: write` token. The path is
 derived rather than configured, so a caller cannot render a clearance without rendering the
@@ -375,7 +378,7 @@ shape `referral.IsExemptionsPath` supports. Reading the fixed path relative to t
 process's own directory finds nothing there, and an absent file is the day-one state:
 every changed path comes back uncovered and the proposal covers the whole change under
 a headline calling those the paths no declared exemption covers. The read is off the
-working tree rather than out of a commit, unlike `review`'s `loadExemptionsAt`, because
+working tree rather than out of a commit, unlike `review`'s `exemptionsAt`, because
 this job's checkout *is* the default branch — there is no branch here whose own
 widening it could read.
 
@@ -386,7 +389,7 @@ lydite's output and the reviewer who would have interrogated a colleague's glob 
 the same glob from a tool.
 
 **A derived path is glob-escaped too**, because a `paths:` entry is a `pathmatch` pattern
-and a filename is not. `cmd/lydite/clearance.go`'s `escapeGlob` prefixes `\`, `*`, `?`, `[`
+and a filename is not. `internal/stages/clearance`'s `escapeGlob` prefixes `\`, `*`, `?`, `[`
 and `]` with a backslash in every path before `proposalYAML` encodes it, so an entry matches
 exactly the file it was derived from: without it, `app/[slug]/page.tsx` proposes a character
 class covering `app/s/page.tsx` and missing its own file, and a file named `**` proposes the
@@ -485,13 +488,14 @@ such rather than silently read as a match.
 the merge_group-aware CLI path. It answers a `merge_group` event payload rather than a pull
 request: it reads the queue ref's own `QueueEntry` (`internal/forge.MergeGroupEvent.QueueEntry`)
 for the originating pull-request number, resolves the base commit the same way `review` does,
-recomputes `referral.Decide` against the queue's own tree and — deliberately — the base branch's
+recomputes the decision against the queue's own tree and — deliberately — the base branch's
 *current* exemptions rather than any pinned revision, and derives the fingerprint from the
-result. `queueDecision` calls `referral.Decide` alone — never `measureDependencies` and never
-`computeAPISurfaces` — and hands it the zero `referral.Evidence{}`, under which every `versions:`
-condition fails: no dependency-delta comparison and no API-surface comparison runs here at all.
-That is deliberate scope, in the same spirit as why `review`'s own `computeAPISurfaces` gates a
-component's comparison behind `guardCredential` at all — that guard exists to keep a component's
+result. `queueDecision` calls `reviewdecision.DecideFromDiff` — never `measureDependencies` and
+never `CompareSurfaces` — which decides from the diff and the base's exemptions under the zero
+`referral.Evidence{}`, so every `versions:` condition fails: no dependency-delta comparison and no
+API-surface comparison runs here at all. That is deliberate scope, in the same spirit as why
+`review`'s own `CompareSurfaces` gates a component's comparison behind `guardCredential` at all —
+that guard exists to keep a component's
 untrusted build code (a Rust crate's `build.rs`, a TypeScript package's lifecycle scripts) out of
 a process about to publish with a writing credential. This job holds no writing credential to
 protect in the first place, but it also has none of the toolchain provisioning or worktree
@@ -549,8 +553,9 @@ mechanism removes. The entry then drops out of the queue exactly as any required
 pending would, and the author clears the pull request again to re-enter it.
 
 **`/lydite clear` computes and embeds the fingerprint, at full `review` parity.**
-`cmd/lydite/clearance.go`'s `applyAction` (`KindClear` branch) calls `clearedFingerprint`, which
-recomputes `clearedDecision` — the same evidence `review` decides on: `referral.Changes` against
+The clearance flow's `Fingerprint` stage (`internal/stages/clearance/fingerprint.go`), which runs
+only on the `KindClear` branch `Decide` reached, recomputes `clearedDecision` — the same evidence
+`review` decides on: `referral.Changes` against
 the resolved base, the base commit's own `.lydite/exemptions.yml`, the break declaration (title
 and commit messages), the API-surface comparison of every opted-in component, and the dependency
 delta of every manifest the change touches — and hashes `Uncovered`/`Disqualifications` with the
@@ -568,16 +573,19 @@ whose in-process fallback is guarded only when the run also publishes):
   revision being cleared — a job answering a comment is free to have checked out the default
   branch, and a decision recomputed there is not the decision anyone was asked about.
 - **The in-process API-surface comparison is guarded unconditionally.** `clearedDecision` calls
-  `computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, true)` — the `guardCredential` argument is always
-  `true` here, never conditioned on `--status-out` the way `review`'s own fallback is, because
-  `runClearance` requires `GITHUB_TOKEN` on every invocation regardless of whether that invocation
-  also posts. **`--surfaces <file>`** (mirroring `review`'s own flag) is the route around the
-  guard: it reads a comparison a separate, credential-free job already made with `review
-  compare`, reconciles it against the base resolved here through `reconcileSurfaces` (never
-  re-running it), and is the only way a component whose comparison runs the change's own code
-  (`untrustedBuild`) gets a full-parity fingerprint. Given neither a readable `--surfaces` document
-  nor an opted-out component, `uncomputableSurfaces` records the comparison as a disqualification
-  naming why — the same "could not run" shape [the rule](../rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
+  `reviewdecision.Surfaces(ctx, in.Dir, baseSHA, in.SurfacesDocument, true, in.Toolchains,
+  in.Progress)` — the `guardCredential` argument is always `true` here, never conditioned on
+  `--status-out`/`Render` the way `review`'s own fallback is, because the flow's `init-scm` stage
+  (`scmstages.InitSCM`) refuses the whole run with `ErrNoCredential` when the `TrustedContext`
+  holds no token, so every stage that reaches `clearedDecision` already holds one regardless of
+  whether this invocation also posts. **`--surfaces <file>`** (mirroring `review`'s own flag) is
+  the route around the guard: it reads a comparison a separate, credential-free job already made
+  with `review compare`, which `reviewdecision.Surfaces` reconciles against the base resolved
+  here through `reconcileSurfaces` (never re-running it), and is the only way a component whose
+  comparison runs the change's own code (`untrustedBuild`) gets a full-parity fingerprint. Given
+  neither a readable `--surfaces` document nor an opted-out component, `uncomputableSurfaces`
+  records the comparison as a disqualification naming why — the same "could not run" shape
+  [the rule](../rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
   above requires — rather than silently treating it as clean. The two-job split this enables (a computing job holding no credential, a
   posting job that never re-runs the comparison) lands in `lydite/actions`' `lydite-clearance.yml`,
   not in this repository's own diff.
@@ -595,8 +603,8 @@ merge-queue entry — named on stderr every time, so a clearance that quietly st
 never indistinguishable from one that legitimately re-refers.
 
 **What still does not carry forward.** `queueDecision` (`cmd/lydite/mergequeue.go`) still calls
-`referral.Decide` alone against the zero `referral.Evidence{}` — never `computeAPISurfaces`, never
-`measureDependencies` — so however faithfully `/lydite clear` computed the fingerprint, an entry
+`reviewdecision.DecideFromDiff` against the zero `referral.Evidence{}` — never `CompareSurfaces`,
+never `measureDependencies` — so however faithfully `/lydite clear` computed the fingerprint, an entry
 referred for a declared API break or an added dependency fingerprints differently at queue time
 and goes back to a person. That gap is unchanged by ADR 0057 and is the referral job's `--reports`
 to close, not `clearedDecision`'s. This does not affect an *unreferred* entry (a fully exempt

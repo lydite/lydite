@@ -1054,8 +1054,8 @@ func resolveDiffBase(ctx context.Context, dir, diffBase, baseBranch string) (str
 	// would make git write the diff to a path of the caller's choosing.
 	// --end-of-options is what stops that here, and resolving once is what
 	// makes verifying it here sufficient for every later invocation.
-	// resolveReviewBase does the same for --base, and executil.RunQuiet's own
-	// doc names this as the caller's duty.
+	// reviewdecision.ResolveBase does the same for --base, and executil.RunQuiet's
+	// own doc names this as the caller's duty.
 	rev := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--verify", "--quiet", "--end-of-options", diffBase+"^{commit}")
 	resolved := strings.TrimSpace(rev.Output)
 	if !rev.Ok() || resolved == "" {

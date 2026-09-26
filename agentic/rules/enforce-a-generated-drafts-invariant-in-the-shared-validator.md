@@ -4,7 +4,7 @@ A draft `.lydite/exemptions.yml` entry lydite proposes in a comment is only "not
 if something checks that at the file's one point of entry. `/lydite exempt` reserves the literal
 `TODO(lydite):` as its `reason` placeholder, but the check that rejects a reason still carrying
 it lives in `internal/referral`'s file parser, not in the code that generates the comment
-(`cmd/lydite/clearance.go`). The generator is one route from a proposal into the file, and not a
+(`internal/stages/clearance`). The generator is one route from a proposal into the file, and not a
 route lydite controls — the block is copied by hand, or pasted by whatever an author's editor or
 agent does with a fenced code block. `validate` is the one place every route already passes
 through: a hand-written file, a generated one, and any future producer nobody has thought of yet.

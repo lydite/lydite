@@ -2,6 +2,7 @@ package forge
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -55,6 +56,49 @@ func LoadCommentEvent(path string) (CommentEvent, error) {
 
 // OnPullRequest reports whether the comment is on a pull request.
 func (e CommentEvent) OnPullRequest() bool { return e.Issue.PullRequest != nil }
+
+// CommentRef is what an issue_comment payload points at: the comment's id,
+// and the repository the payload claims it is in.
+//
+// It is a pointer and not a description. The body, the author, the time and
+// the thread are the payload's copy of a comment that can have been edited or
+// deleted since, so they are resolved live through Client.IssueComment from
+// the id alone. Repository is the payload's claim and is not trusted either:
+// it is read only so a caller can compare it against the repository the run
+// was started in and refuse a payload naming any other.
+type CommentRef struct {
+	ID         int64
+	Repository string
+}
+
+// ReadCommentRef reads a CommentRef out of an issue_comment payload on disk,
+// and deliberately nothing else. A payload naming no comment, or no
+// repository, is refused: there is nothing to resolve, or nothing to check the
+// claim against.
+func ReadCommentRef(path string) (CommentRef, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- path is the platform's own GITHUB_EVENT_PATH or the --event flag, supplied by whoever runs lydite, not untrusted remote input
+	if err != nil {
+		return CommentRef{}, fmt.Errorf("reading the event payload: %w", err)
+	}
+	var event struct {
+		Comment struct {
+			ID int64 `json:"id"`
+		} `json:"comment"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return CommentRef{}, fmt.Errorf("parsing the event payload: %w", err)
+	}
+	if event.Comment.ID <= 0 {
+		return CommentRef{}, errors.New("the event payload names no comment")
+	}
+	if event.Repository.FullName == "" {
+		return CommentRef{}, errors.New("the event payload names no repository")
+	}
+	return CommentRef{ID: event.Comment.ID, Repository: event.Repository.FullName}, nil
+}
 
 // PullRequestEvent is the part of a pull_request payload the producing side
 // needs: which pull request, which revision is its head, and what it is

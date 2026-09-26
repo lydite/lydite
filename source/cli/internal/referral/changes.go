@@ -58,7 +58,7 @@ type Change struct {
 //
 // base must already be a verified commit. Passing an unvalidated flag value
 // here is how the gate reads a diff of nothing and passes everything; see
-// cmd/lydite's resolveReviewBase.
+// internal/reviewdecision's ResolveBase.
 func Changes(ctx context.Context, dir, base string) (Change, error) {
 	touched, err := gitdiff.Changed(ctx, dir, base)
 	if err != nil {

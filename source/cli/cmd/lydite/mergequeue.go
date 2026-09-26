@@ -16,6 +16,7 @@ import (
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/ui"
 )
 
@@ -183,7 +184,7 @@ func runQueue(ctx context.Context, cmd *cobra.Command, client doer, opt queueOpt
 	// base_sha, for the reason review resolves its own: the revision the diff
 	// is read against decides what the decision is computed over, and this run
 	// can establish it from the checkout it holds.
-	baseSHA, err := resolveReviewBase(ctx, opt.dir, opt.base, event.BaseBranch())
+	baseSHA, err := reviewdecision.ResolveBase(ctx, opt.dir, opt.base, event.BaseBranch())
 	if err != nil {
 		return err
 	}
@@ -217,33 +218,17 @@ func runQueue(ctx context.Context, cmd *cobra.Command, client doer, opt queueOpt
 	return writeReport(cmd, report, opt.noColor, append(rows, queueRow(answer))...)
 }
 
-// queueDecision recomputes the decision this entry renders.
+// queueDecision recomputes the decision this entry renders:
+// reviewdecision.DecideFromDiff, over the diff and the base commit's
+// exemptions alone.
 //
-// The exemptions come from the base commit through loadExemptionsAt, which at
-// queue time is the base branch's current tip: a clearance carried forward
-// under rules that have since moved would be a clearance issued under rules
-// that no longer apply, and Decide already always reads the file from the
-// merge-base for the neighbouring reason — a change gets no benefit from its
-// own widening. If the file moved in a way that changes the recomputed set, the
-// fingerprint legitimately differs and the entry re-refers.
-//
-// The evidence is the zero referral.Evidence, under which every condition
-// fails. A `versions: patch-and-minor` exemption needs a dependency comparison
-// and a scan document, neither of which this job has; passing nothing is the
-// direction that refers, and an entry whose clearance was given against a
-// condition met at pull-request time therefore fingerprints differently here
-// and goes back to a person. Measuring it at queue time is worth doing and is
-// not this path's to do — see the referral job's own --reports.
+// The base is the base branch's current tip at queue time, so the exemptions
+// are the ones in force now: a clearance carried forward under rules that have
+// since moved would be a clearance issued under rules that no longer apply. If
+// the file moved in a way that changes the recomputed set, the fingerprint
+// legitimately differs and the entry re-refers.
 func queueDecision(ctx context.Context, dir, baseSHA string) (referral.Decision, error) {
-	file, err := loadExemptionsAt(ctx, dir, baseSHA)
-	if err != nil {
-		return referral.Decision{}, err
-	}
-	change, err := referral.Changes(ctx, dir, baseSHA)
-	if err != nil {
-		return referral.Decision{}, err
-	}
-	return referral.Decide(change, file, referral.Evidence{}), nil
+	return reviewdecision.DecideFromDiff(ctx, dir, baseSHA)
 }
 
 // queueReasons says what the fingerprint was taken over, so a log reading
