@@ -346,10 +346,16 @@ func signature(fn any) (v reflect.Value, in, out reflect.Type, err error) {
 }
 
 // exportedField is t's own exported field called name. A field promoted from
-// an embedded struct is not one: only the embedded field itself is.
+// an embedded struct is not one: only the embedded field itself is, and
+// walking t's own fields rather than resolving the name never reaches a
+// promoted one.
 func exportedField(t reflect.Type, name string) (reflect.StructField, bool) {
-	sf, ok := t.FieldByName(name)
-	return sf, ok && sf.IsExported() && len(sf.Index) == 1
+	for i := range t.NumField() {
+		if sf := t.Field(i); sf.Name == name {
+			return sf, sf.IsExported()
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 func nillable(t reflect.Type) bool {

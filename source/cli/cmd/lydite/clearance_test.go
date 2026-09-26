@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +18,11 @@ import (
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/flow"
+	clearanceflow "lydite/lydite/internal/flows/clearance"
 	"lydite/lydite/internal/pathmatch"
 	"lydite/lydite/internal/referral"
+	clearancestages "lydite/lydite/internal/stages/clearance"
 	"lydite/lydite/internal/ui"
 )
 
@@ -1703,6 +1707,83 @@ func TestPublishedDescriptionsFitThePlatformsLimit(t *testing.T) {
 		got := describe(d, verdict)
 		if n := len([]rune(got)); n == 0 || n > 140 {
 			t.Errorf("%s description is %d characters: %q", verdict, n, got)
+		}
+	}
+}
+
+// returns is a stage that answers out, whatever it is given.
+func returns[T any](out T) func(context.Context, struct{}) (T, error) {
+	return func(context.Context, struct{}) (T, error) { return out, nil }
+}
+
+// ranClearance is a run whose command was addressed to lydite and decided
+// action, with the clearance's description and the reply's headline composed
+// only when composed says so.
+func ranClearance(t *testing.T, action clearance.Action, composed bool) *flow.Result {
+	t.Helper()
+	f, err := flow.New("clearance").
+		Stage(clearanceflow.StageParseCommand, returns(clearancestages.ParseCommandOut{OnPullRequest: true, Addressed: true})).
+		Stage(clearanceflow.StageDecide, returns(clearancestages.DecideOut{Action: action})).
+		Stage(clearanceflow.StageDescribeClearance, returns(clearancestages.DescribeClearanceOut{Description: "cleared by @a at 0123456789ab"})).
+		When(flow.Literal(composed)).
+		Stage(clearanceflow.StageComposeReply, returns(clearancestages.ComposeReplyOut{Headline: "the reply's headline"})).
+		When(flow.Literal(composed)).
+		Build()
+	if err != nil {
+		t.Fatalf("building the run: %v", err)
+	}
+	r, err := f.Run(context.Background(), flow.Inputs{})
+	if err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	return r
+}
+
+// The run's one row names what it did: a clearance by its description, an
+// explanation as context, and a refusal as a referral naming its reason — the
+// two replies being told apart by the action, not by the reply's wording.
+func TestTheClearanceRowNamesWhatTheRunDid(t *testing.T) {
+	cases := []struct {
+		name   string
+		action clearance.Action
+		want   ui.Row
+	}{
+		{
+			"a clearance",
+			clearance.Action{Kind: clearance.KindClear},
+			ui.Row{Status: ui.StatusPass, Label: "clearance", Value: "cleared by @a at 0123456789ab"},
+		},
+		{
+			"an explanation",
+			clearance.Action{Kind: clearance.KindExplain},
+			ui.Row{Status: ui.StatusContext, Label: "explain", Value: "the reply's headline"},
+		},
+		{
+			"a refusal",
+			clearance.Action{Kind: clearance.KindRefuse, Reason: clearance.ReasonNotPermitted},
+			ui.Row{Status: ui.StatusRefer, Label: string(clearance.ReasonNotPermitted), Value: "the reply's headline"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := clearanceRow(ranClearance(t, tc.action, true))
+			if err != nil {
+				t.Fatalf("clearanceRow: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("row = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A row describing a clearance or a reply that was never composed is an error
+// rather than a blank row: a run that skipped the composition has nothing
+// true to report under that action.
+func TestTheClearanceRowRefusesWhatWasNeverComposed(t *testing.T) {
+	for _, kind := range []clearance.Kind{clearance.KindClear, clearance.KindExplain, clearance.KindRefuse} {
+		if got, err := clearanceRow(ranClearance(t, clearance.Action{Kind: kind}, false)); err == nil {
+			t.Errorf("kind %v rendered %+v from nothing composed", kind, got)
 		}
 	}
 }

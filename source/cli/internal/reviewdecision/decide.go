@@ -350,8 +350,5 @@ func Capped(items []string) []string {
 
 // short is a commit as a reader is shown it.
 func short(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
+	return sha[:min(len(sha), 12)]
 }

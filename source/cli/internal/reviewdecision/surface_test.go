@@ -133,6 +133,11 @@ func TestCappedTruncatesWithACount(t *testing.T) {
 	if short := []string{"a", "b"}; len(Capped(short)) != 2 {
 		t.Errorf("a list within the cap must pass through unchanged")
 	}
+	// A list exactly at the cap is shown whole: a tail counting nothing
+	// would imply something was left out.
+	if full := items[:ListCap]; fmt.Sprint(Capped(full)) != fmt.Sprint(full) {
+		t.Errorf("a list at the cap = %q, want it unchanged", Capped(full))
+	}
 }
 
 // Only Rust and TypeScript execute the tree under review to compare it. A Go

@@ -130,6 +130,10 @@ func TestDecideRefersABreakDeclaredInACommit(t *testing.T) {
 	if got.Decision.Disqualifications[0].Evidence != "declared in a commit in "+short(base)+"..HEAD" {
 		t.Errorf("evidence = %q", got.Decision.Disqualifications[0].Evidence)
 	}
+	// The commits were read, so there is nothing unread to warn about.
+	if len(got.Warnings) != 0 {
+		t.Errorf("warnings = %q, want none", got.Warnings)
+	}
 }
 
 // The title is read once, after the exemptions and the diff, and a break it
@@ -152,6 +156,11 @@ func TestDecideReadsTheDeclarationFromTheTitle(t *testing.T) {
 	}
 	if got.BreakDeclared != "the pull request title" || !got.Decision.Referred {
 		t.Errorf("result = %+v, want a referral naming the title", got)
+	}
+	// A declaration the title makes is found without the commits, so nothing
+	// went unread.
+	if len(got.Warnings) != 0 {
+		t.Errorf("warnings = %q, want none", got.Warnings)
 	}
 }
 
@@ -343,7 +352,8 @@ func TestBreakDeclarationWarnsWhenTheCommitsCannotBeRead(t *testing.T) {
 }
 
 // ResolveBase refuses every base that would turn the gate into a rubber stamp,
-// and returns the full SHA of one it accepts.
+// naming no commit alongside the refusal, and returns the full SHA of one it
+// accepts.
 func TestResolveBase(t *testing.T) {
 	dir, base := repo(t, map[string]string{"README.md": "hello"}, map[string]string{"README.md": "x"})
 	ctx := context.Background()
@@ -358,8 +368,8 @@ func TestResolveBase(t *testing.T) {
 		"not a commit": "--output=/tmp/x",
 		"unknown":      "0000000000000000000000000000000000000000",
 	} {
-		if _, err := ResolveBase(ctx, dir, requested, ""); err == nil {
-			t.Errorf("ResolveBase(%s) was accepted", name)
+		if got, err := ResolveBase(ctx, dir, requested, ""); err == nil || got != "" {
+			t.Errorf("ResolveBase(%s) = %q, %v, want it refused naming no commit", name, got, err)
 		}
 	}
 
@@ -375,11 +385,11 @@ func TestResolveBase(t *testing.T) {
 	run("commit", "--quiet", "--allow-empty", "-m", "side")
 	side := strings.TrimSpace(executil.RunQuiet(ctx, dir, "git", "rev-parse", "HEAD").Output)
 	run("checkout", "--quiet", head)
-	if _, err := ResolveBase(ctx, dir, side, ""); err == nil || !strings.Contains(err.Error(), "not an ancestor") {
-		t.Errorf("ResolveBase(side) = %v, want it refused as no ancestor", err)
+	if got, err := ResolveBase(ctx, dir, side, ""); err == nil || !strings.Contains(err.Error(), "not an ancestor") || got != "" {
+		t.Errorf("ResolveBase(side) = %q, %v, want it refused as no ancestor, naming no commit", got, err)
 	}
 
-	if _, err := ResolveBase(ctx, dir, "auto", ""); err == nil || !strings.Contains(err.Error(), "--base auto") {
-		t.Errorf("ResolveBase(auto) with no origin = %v, want it refused", err)
+	if got, err := ResolveBase(ctx, dir, "auto", ""); err == nil || !strings.Contains(err.Error(), "--base auto") || got != "" {
+		t.Errorf("ResolveBase(auto) with no origin = %q, %v, want it refused, naming no commit", got, err)
 	}
 }

@@ -255,8 +255,5 @@ func proposalYAML(name string, paths []string) ([]string, error) {
 
 // shortSHA is a revision as a reader is shown it.
 func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
+	return sha[:min(len(sha), 12)]
 }

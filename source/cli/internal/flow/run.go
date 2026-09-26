@@ -250,15 +250,13 @@ func (f *Flow) check(in Inputs) error {
 }
 
 // holds reports whether every one of s's conditions holds, stopping at the
-// first that does not.
+// first that does not or that cannot be read. A condition that cannot be read
+// holds no more than one that is false, and the error says why.
 func (f *Flow) holds(r *Result, s *stage, in Inputs) (bool, error) {
 	for _, c := range s.conds {
 		v, err := f.value(r, s, condName(c.want)+" condition", c.src, in)
-		if err != nil {
+		if err != nil || v.Bool() != c.want {
 			return false, err
-		}
-		if v.Bool() != c.want {
-			return false, nil
 		}
 	}
 	return true, nil

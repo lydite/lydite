@@ -679,4 +679,23 @@ func TestIssueNumberReadsTheLastIssuesSegment(t *testing.T) {
 	if _, err := issueNumber("https://api.github.com/repos/lydite/lydite/issues/0"); err == nil {
 		t.Error("issue 0 was read as a number")
 	}
+	// The segment is found wherever it sits, the very start included.
+	if got, err := issueNumber("/issues/12"); err != nil || got != 12 {
+		t.Errorf("issueNumber(/issues/12) = %d, %v, want 12", got, err)
+	}
+}
+
+// A URL naming no issue number is refused with no number alongside it, so a
+// caller that reads the number past the error still reads none.
+func TestIssueNumberNamesNoNumberWithARefusal(t *testing.T) {
+	for _, url := range []string{
+		"https://api.github.com/repos/lydite/lydite/pulls/12",
+		"https://api.github.com/repos/lydite/lydite/issues/x",
+		"https://api.github.com/repos/lydite/lydite/issues/-3",
+		"https://api.github.com/repos/lydite/lydite/issues/0",
+	} {
+		if got, err := issueNumber(url); err == nil || got != 0 {
+			t.Errorf("issueNumber(%s) = %d, %v, want a refusal naming no number", url, got, err)
+		}
+	}
 }

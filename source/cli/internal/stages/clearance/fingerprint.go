@@ -61,9 +61,6 @@ type FingerprintOut struct {
 // fingerprint that could not be taken is not a reason to leave the referral
 // standing with the commenter told nothing.
 func Fingerprint(ctx context.Context, in FingerprintIn) (FingerprintOut, error) {
-	if in.Progress == nil {
-		in.Progress = io.Discard
-	}
 	decision, warnings, err := clearedDecision(ctx, in)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf(
