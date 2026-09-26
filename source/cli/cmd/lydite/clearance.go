@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/ui"
 )
 
@@ -296,16 +297,15 @@ func clearedFingerprint(ctx context.Context, cmd *cobra.Command, client *forge.C
 // also posts directly, so there is no invocation of `clearance` in which that
 // comparison is safe to run in-process.
 //
-// The rows both comparisons render go to a report of their own rather than to
-// the one this command writes. What this run reports is the clearance; the
-// verdict those rows describe belongs to the `review` that published the
-// referral, and restating it here as this command's own rows would put a second
-// derivation of one verdict in front of a reader.
+// No row is rendered from the result. What this run reports is the clearance;
+// the verdict those rows would describe belongs to the `review` that published
+// the referral, and restating it here as this command's own rows would put a
+// second derivation of one verdict in front of a reader.
 //
-// The evidence is the zero referral.Evidence, the same value `clearance queue`
-// recomputes under: a `versions:` condition needs the licence and SCA rows of a
-// scan document, which no comment-answering job has, and passing nothing is the
-// direction that refers.
+// No scan evidence is given, so every `versions:` condition fails — the same
+// answer `clearance queue` recomputes under: a condition needs the licence and
+// SCA rows of a scan document, which no comment-answering job has, and passing
+// nothing is the direction that refers.
 func clearedDecision(ctx context.Context, cmd *cobra.Command, client *forge.Client, repo forge.Repo, number int, opt clearanceOptions, head string) (referral.Decision, error) {
 	// Cheapest first, and refused before anything is resolved or fetched: a
 	// decision computed over some other revision is not the decision being
@@ -314,73 +314,54 @@ func clearedDecision(ctx context.Context, cmd *cobra.Command, client *forge.Clie
 	if err := checkoutIsHead(ctx, opt.dir, head); err != nil {
 		return referral.Decision{}, err
 	}
-	baseSHA, err := resolveReviewBase(ctx, opt.dir, opt.base, opt.baseBranch)
+	baseSHA, err := reviewdecision.ResolveBase(ctx, opt.dir, opt.base, opt.baseBranch)
 	if err != nil {
 		return referral.Decision{}, err
 	}
-	var surfaces []surfaceComparison
-	if opt.surfaces != "" {
-		doc, readErr := readSurfaces(opt.surfaces)
-		switch readErr {
-		case nil:
-			// reconcileSurfaces checks the document's base against the
-			// baseSHA resolved here and requires a result for every
-			// component this tree says opted in — neither is taken on the
-			// document's own word.
-			surfaces, err = reconcileSurfaces(opt.dir, baseSHA, doc)
-		default:
-			// Unreadable, not absent: a document the computing job never
-			// wrote is no evidence any surface is clean, so every opted-in
-			// component is uncomputable. That is the decision `review`
-			// reaches from the same document, and the fingerprint has to
-			// describe the decision rather than a cleaner reading of it.
-			surfaces, err = uncomputableSurfaces(opt.dir, "the comparison document could not be read: "+readErr.Error())
-		}
-		if err != nil {
-			return referral.Decision{}, err
-		}
-	} else {
-		// Always guarded, unlike `review`'s own fallback: `review`'s guard
-		// tests whether the invocation also publishes, because a `review` run
-		// that only renders holds no credential of its own. `runClearance`
-		// requires GITHUB_TOKEN unconditionally — reading the head, the
-		// commenter's permission, the standing referral, and posting the
-		// reply all need it — so a `clearance` process holds a credential
-		// whether or not it also posts the status directly, and there is no
-		// invocation in which running a component's own build code here is
-		// safe. A document from --surfaces is the only route to a full-parity
-		// comparison for a component whose comparison runs the change's own
-		// code; see
-		// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
-		surfaces, err = computeAPISurfaces(ctx, cmd, opt.dir, baseSHA, true)
-		if err != nil {
-			return referral.Decision{}, err
-		}
-	}
-	file, err := loadExemptionsAt(ctx, opt.dir, baseSHA)
+	// Always guarded, unlike `review`'s own fallback: `review`'s guard tests
+	// whether the invocation also publishes, because a `review` run that only
+	// renders holds no credential of its own. `runClearance` requires
+	// GITHUB_TOKEN unconditionally — reading the head, the commenter's
+	// permission, the standing referral, and posting the reply all need it —
+	// so a `clearance` process holds a credential whether or not it also posts
+	// the status directly, and there is no invocation in which running a
+	// component's own build code here is safe. A document from --surfaces is
+	// the only route to a full-parity comparison for a component whose
+	// comparison runs the change's own code, and an unreadable one makes every
+	// opted-in component uncomputable — the decision `review` reaches from the
+	// same document, which the fingerprint has to describe rather than a
+	// cleaner reading of it; see
+	// agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md.
+	surfaces, err := reviewdecision.Surfaces(ctx, opt.dir, baseSHA, opt.surfaces, true, commandToolchains{cmd}, cmd.ErrOrStderr())
 	if err != nil {
 		return referral.Decision{}, err
 	}
-	change, err := referral.Changes(ctx, opt.dir, baseSHA)
+	result, err := reviewdecision.Decide(ctx, reviewdecision.Input{
+		Dir:      opt.dir,
+		Base:     baseSHA,
+		Surfaces: surfaces,
+		// Resolved live rather than read from the comment payload: an
+		// issue_comment event carries no pull_request.title at all, only the
+		// comment thread's own issue.title, which is the pull request's title
+		// only by convention. A break declared solely in the title would
+		// otherwise never be seen here. A failure to resolve it can only
+		// under-refer, so it is warned about rather than fatal.
+		Title: func() string {
+			title, err := client.PullRequestTitle(ctx, repo, number)
+			if err != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"lydite: could not resolve the pull request's title (%v) — a break declared only there is not seen\n", err)
+			}
+			return title
+		},
+	})
 	if err != nil {
 		return referral.Decision{}, err
 	}
-	decision := referral.Decide(change, file, referral.Evidence{})
-	report := ui.NewReport("cleared decision")
-	// Resolved live rather than read from the comment payload: an
-	// issue_comment event carries no pull_request.title at all, only the
-	// comment thread's own issue.title, which is the pull request's title
-	// only by convention. A break declared solely in the title would
-	// otherwise never be seen here. A failure to resolve it can only
-	// under-refer, so it is warned about rather than fatal.
-	title, err := client.PullRequestTitle(ctx, repo, number)
-	if err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"lydite: could not resolve the pull request's title (%v) — a break declared only there is not seen\n", err)
+	for _, warning := range result.Warnings {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warning)
 	}
-	renderAPISurfaceRows(ctx, cmd, report, &decision, opt.dir, baseSHA, title, surfaces)
-	addDependencyRows(report, &decision, measureDependencies(ctx, opt.dir, baseSHA, change.Paths), baseSHA)
-	return decision, nil
+	return result.Decision, nil
 }
 
 // checkoutIsHead establishes that the tree the decision is recomputed over is

@@ -17,9 +17,8 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/referral"
+	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/rust"
-	"lydite/lydite/internal/runner"
-	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -332,31 +331,6 @@ func TestReviewAutoWithNoOriginIsAnError(t *testing.T) {
 	var exit ui.ExitError
 	if errors.As(err, &exit) {
 		t.Fatalf("an unresolvable auto produced a verdict (exit %d) rather than an error", exit.Code)
-	}
-}
-
-// A referral on a large change names a few examples rather than every path:
-// a verdict a reader has to scroll past hundreds of lines to reach is one
-// they stop reading.
-func TestCappedTruncatesWithACount(t *testing.T) {
-	var items []string
-	for i := 0; i < listCap+5; i++ {
-		items = append(items, fmt.Sprintf("path/%d.go", i))
-	}
-	got := capped(items)
-	if len(got) != listCap+1 {
-		t.Fatalf("got %d entries, want %d plus a tail", len(got), listCap)
-	}
-	if got[len(got)-1] != "…and 5 more" {
-		t.Errorf("tail = %q, want a count of what is not shown", got[len(got)-1])
-	}
-	// The three-index slice keeps the tail out of the caller's backing
-	// array, so a second call cannot see the first call's tail.
-	if items[listCap] != fmt.Sprintf("path/%d.go", listCap) {
-		t.Errorf("capped overwrote its input: %q", items[listCap])
-	}
-	if short := []string{"a", "b"}; len(capped(short)) != 2 {
-		t.Errorf("a list within the cap must pass through unchanged")
 	}
 }
 
@@ -1059,33 +1033,6 @@ func npmStubs(t *testing.T, build string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// Only Rust and TypeScript execute the tree under review to compare it. A Go
-// component's comparison loads the two trees with the Go tool and compiles
-// nothing the change wrote, so guardCredential must never refuse one.
-func TestUntrustedBuildNamesWhatOnlyRustAndTypeScriptExecute(t *testing.T) {
-	if got := untrustedBuild(component.Component{Runner: runner.GoTest}); got != "" {
-		t.Errorf("untrustedBuild(Go) = %q, want empty", got)
-	}
-	if got := untrustedBuild(component.Component{Runner: runner.CargoNextest}); got == "" {
-		t.Error("untrustedBuild(Rust) must name what it executes")
-	}
-	if got := untrustedBuild(component.Component{Runner: runner.Vitest}); got == "" {
-		t.Error("untrustedBuild(TypeScript) must name what it executes")
-	}
-}
-
-// A component with nothing skipped gets no note, so a row that compared every
-// package carries no stray detail line about one it never left out.
-func TestSkippedNoteNamesEveryPackageLeftOutAndNothingWhenNoneWas(t *testing.T) {
-	if got := skippedNote(nil); got != "" {
-		t.Errorf("skippedNote(nil) = %q, want empty", got)
-	}
-	want := "not compared, because it names no entry point: @probe/tools"
-	if got := skippedNote([]string{"@probe/tools"}); got != want {
-		t.Errorf("skippedNote = %q, want %q", got, want)
-	}
-}
-
 // detailOf renders exactly one line for a note, and no line at all — not an
 // empty one — for none: a row whose detail is a blank line says something
 // happened and then does not say what.
@@ -1095,17 +1042,6 @@ func TestDetailOfIsNoLineForAnEmptyNote(t *testing.T) {
 	}
 	if got := detailOf("x"); len(got) != 1 || got[0] != "x" {
 		t.Errorf("detailOf(\"x\") = %v, want [\"x\"]", got)
-	}
-}
-
-// withNote appends a note to a reason only when there is one, so a reason with
-// nothing to add is not left carrying a trailing separator.
-func TestWithNoteAppendsOnlyWhenThereIsOne(t *testing.T) {
-	if got := withNote("reason", ""); got != "reason" {
-		t.Errorf("withNote with no note = %q, want %q", got, "reason")
-	}
-	if got := withNote("reason", "note"); got != "reason; note" {
-		t.Errorf("withNote = %q, want %q", got, "reason; note")
 	}
 }
 
@@ -1332,7 +1268,7 @@ func TestReviewCompareRecordsTheBaseItResolved(t *testing.T) {
 		t.Fatalf("review compare: %v: %s", err, compareOut.String())
 	}
 
-	doc, err := readSurfaces(surfacesPath)
+	doc, err := reviewdecision.ReadSurfaces(surfacesPath)
 	if err != nil {
 		t.Fatalf("readSurfaces: %v", err)
 	}
@@ -1362,7 +1298,7 @@ func TestReviewCompareRunsAsASubcommandOfReview(t *testing.T) {
 	if err := review.Execute(); err != nil {
 		t.Fatalf("review compare: %v: %s", err, out.String())
 	}
-	if _, err := readSurfaces(surfacesPath); err != nil {
+	if _, err := reviewdecision.ReadSurfaces(surfacesPath); err != nil {
 		t.Fatalf("readSurfaces: %v", err)
 	}
 }
@@ -1399,7 +1335,7 @@ func TestReviewCompareAutoBaseUsesBaseBranch(t *testing.T) {
 		t.Fatalf("review compare: %v: %s", err, out.String())
 	}
 
-	doc, err := readSurfaces(surfacesPath)
+	doc, err := reviewdecision.ReadSurfaces(surfacesPath)
 	if err != nil {
 		t.Fatalf("readSurfaces: %v", err)
 	}
@@ -1442,7 +1378,7 @@ func TestReviewRefersAForgedBaseInTheSurfacesDocument(t *testing.T) {
 	head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
 
 	forged := filepath.Join(t.TempDir(), "surfaces.json")
-	if err := writeSurfaces(forged, head, nil); err != nil {
+	if err := reviewdecision.WriteSurfaces(forged, head, nil); err != nil {
 		t.Fatalf("writeSurfaces: %v", err)
 	}
 
@@ -1469,7 +1405,7 @@ func TestReviewRefersAMissingResultInTheSurfacesDocument(t *testing.T) {
 		map[string]string{"probe/src/lib.rs": "pub fn other() {}\n"})
 
 	missing := filepath.Join(t.TempDir(), "surfaces.json")
-	if err := writeSurfaces(missing, base, nil); err != nil {
+	if err := reviewdecision.WriteSurfaces(missing, base, nil); err != nil {
 		t.Fatalf("writeSurfaces: %v", err)
 	}
 
@@ -1483,59 +1419,6 @@ func TestReviewRefersAMissingResultInTheSurfacesDocument(t *testing.T) {
 	}
 	if !strings.Contains(out, "carries no result") {
 		t.Errorf("the referral must say the result was missing, got:\n%s", out)
-	}
-}
-
-// A result's Dir is this tree's own component directory, never whatever the
-// document claims for it: Dir decides where a finding's path is rebased and
-// rendered, and the document is exactly what a malicious build script could
-// have written.
-func TestReconcileSurfacesTakesDirFromTheTreeNotTheDocument(t *testing.T) {
-	dir, base := reviewRepo(t, crateBase(crateOptIn),
-		map[string]string{"README.md": "hello again"})
-
-	doc := surfaceDocument{
-		Base: base,
-		Results: []surfaceComparison{
-			{Component: "probe", Dir: "somewhere/else/entirely"},
-		},
-	}
-	got, err := reconcileSurfaces(dir, base, doc)
-	if err != nil {
-		t.Fatalf("reconcileSurfaces: %v", err)
-	}
-	if len(got) != 1 || got[0].Dir != "probe" {
-		t.Errorf("reconcileSurfaces = %+v, want Dir %q from the tree's own component", got, "probe")
-	}
-}
-
-// A document that opens fine but decodes into nothing readable, or names no
-// base commit, is exactly as unreadable as a missing file: readSurfaces
-// refuses both rather than handing review a document with nothing in it.
-func TestReadSurfacesRejectsAMalformedDocument(t *testing.T) {
-	for name, raw := range map[string]string{
-		"invalid json": `{not json`,
-		"no base":      `{"results":[]}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "surfaces.json")
-			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := readSurfaces(path); err == nil {
-				t.Errorf("readSurfaces(%s) was accepted, want it refused", raw)
-			}
-		})
-	}
-}
-
-// writeSurfaces reports the underlying failure rather than losing it: a path
-// under a directory that does not exist cannot be created, and the caller
-// needs that reason, not a silent success.
-func TestWriteSurfacesReportsAnUnwritablePath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "does-not-exist", "surfaces.json")
-	if err := writeSurfaces(path, "deadbeef", nil); err == nil {
-		t.Error("writeSurfaces under a missing directory was accepted")
 	}
 }
 
@@ -1606,66 +1489,6 @@ func TestLocateReportsAnUnplacedFindingsMessageAlone(t *testing.T) {
 	got := locate([]finding.Finding{{Message: "Removed: removed"}}, "sdk")
 	if len(got) != 1 || got[0] != "Removed: removed" {
 		t.Errorf("locate = %v, want the bare message", got)
-	}
-}
-
-// component.Load refuses api_surface on a component that declares no language,
-// so a component reaching compareSurface without one is a defensive path rather
-// than one reachable through review — this exercises it directly against a
-// command-invoked component, which resolves to no language at all.
-func TestCompareSurfaceHasNoComparisonForALanguagelessComponent(t *testing.T) {
-	c := component.Component{Name: "tools", Dir: "tools", Command: []string{"make", "test"}}
-	findings, skipped, uncomputable := compareSurface(context.Background(), newReviewCmd(), c, t.TempDir(), t.TempDir(), toolchain.Envs(nil))
-	if findings != nil {
-		t.Errorf("findings = %+v, want none", findings)
-	}
-	if skipped != nil {
-		t.Errorf("skipped = %v, want none — nothing was selected to compare in the first place", skipped)
-	}
-	if uncomputable != "no public-API comparison exists for a component that declares no language" {
-		t.Errorf("uncomputable = %q, want the missing language named as the reason", uncomputable)
-	}
-}
-
-// A directory that is not a git repository at all cannot be entered at any
-// prefix, so the failure is reported before a worktree is ever attempted.
-func TestBaseWorktreeFailsOutsideAGitRepository(t *testing.T) {
-	root, _, err := baseWorktree(context.Background(), t.TempDir(), "HEAD")
-	if err == nil {
-		t.Fatal("baseWorktree over a non-repository directory must fail")
-	}
-	if root != "" {
-		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
-	}
-}
-
-// A base that resolves the repository but names no real commit fails at the
-// worktree checkout itself, and the temp directory it made is cleaned up
-// rather than left behind.
-func TestBaseWorktreeFailsOnAnUnknownCommit(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		if r := executil.RunQuiet(ctx, dir, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Output)
-		}
-	}
-	run("init", "-b", "main")
-	run("config", "user.email", "t@example.com")
-	run("config", "user.name", "t")
-	if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "-A")
-	run("commit", "-m", "one")
-
-	root, _, err := baseWorktree(ctx, dir, "0000000000000000000000000000000000000000")
-	if err == nil {
-		t.Fatal("baseWorktree over an unknown commit must fail")
-	}
-	if root != "" {
-		t.Errorf("root = %q on error, want empty — a caller must not act on it", root)
 	}
 }
 
