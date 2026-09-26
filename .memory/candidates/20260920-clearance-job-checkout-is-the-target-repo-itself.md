@@ -1,29 +1,44 @@
 ---
-about: the clearance job's checkout is the same repository the pull request belongs to, at its default branch — not a separate copy of lydite's own source
+about: a clearance job's checkout is the target repository itself — and two clearance stages disagree about which revision of it that should be; /lydite exempt reads exemptions off the working tree assuming the default branch, while a clearance's fingerprint is only taken when the checkout is the pull request's head
 saw:
+  - source/cli/internal/stages/clearance/clearance.go
+  - source/cli/internal/stages/clearance/fingerprint.go
+  - source/cli/internal/reviewdecision/decide.go
+  - source/cli/cmd/lydite/clearance.go
   - docs/adr/0015-clearance-binds-to-a-commit.md
 ---
 
-**2026-09-22: `.github/workflows/lydite-clearance.yml` (this file) was deleted on this date**
-(ADR 0051's 2026-09-22 amendment) — lydite carries no clearance workflow of its own until
-`gt#72` repoints its bulwark stage. The mechanism below (`actions/checkout` with no
-`repository:` override checks out the target repo's default branch, not a separate copy)
-still holds and applies identically to `lydite/actions`' own reusable
-`lydite-clearance.yml`.
+Re-checked on `refactor/flow-architecture-clearance-pilot`, where `lydite clearance` became a
+Flow. The checkout claim holds; the pointers moved and a second, conflicting assumption about
+the same checkout is now visible side by side in one package.
 
-`.github/workflows/lydite-clearance.yml` runs `actions/checkout` with no `repository:`
-override, which checks out whatever repository the workflow file lives in — the same
-repository the triggering pull request belongs to, at its default branch. ADR 0015's
-"the default branch's own copy of lydite" language is easy to misread as "a separate
-checkout of lydite's own source distinct from the target repository" (as if the clearance
-job somehow fetched a second, unrelated repo); it does not — the checkout IS the target
-repository, just its default branch's tree rather than the pull request's.
+**The checkout is the target repository.** A clearance workflow's `actions/checkout` with no
+`repository:` override checks out the repository the pull request belongs to, not a separate
+copy of lydite's source. ADR 0015's "the default branch's own copy of lydite" is easy to misread
+as the latter. (lydite's own `.github/workflows/lydite-clearance.yml` was deleted 2026-09-22 by
+ADR 0051's amendment; the mechanism applies identically to `lydite/actions`' reusable
+`lydite-clearance.yml`.)
 
-This matters concretely: `.lydite/exemptions.yml` at the scan root is already present in
-the working directory when `lydite clearance` runs, and can be read with a plain
-`os.ReadFile` — no git-show-at-a-ref trick and no new forge API call is needed to read it,
-unlike `cmd/lydite/review.go`'s `loadExemptionsAt` (which needs `git show <base>:<path>`
-because *that* job's checkout is the pull request's own branch with history, and reading
-the working tree there would let a PR benefit from its own widening). What genuinely is
-missing from this checkout is the pull request's *diff* — the changed-path list and any
-line content — since only the default branch's tree is present, not the PR's commits.
+**`/lydite exempt` assumes that checkout is the default branch.** `clearancestages.uncoveredPaths`
+(`internal/stages/clearance/clearance.go`) reads `.lydite/exemptions.yml` with a plain
+`os.ReadFile(filepath.Join(dir, referral.FileName))`, and its doc says the working tree is "the
+clearance job's own checkout of the default branch — so the declarations consulted are the ones
+in force, never the ones the pull request proposes for itself". The changed paths come live from
+`SCMRepository.ChangedPaths`, since no PR commits are in that tree. Contrast `review`, whose
+checkout is the PR branch: `reviewdecision.exemptionsAt` (`internal/reviewdecision/decide.go`)
+reads the file with `git show <base>:<path>` precisely so a PR cannot widen its own allowlist.
+
+**`/lydite clear`'s fingerprint requires the checkout to be the PR head.** `clearedDecision`
+(`internal/stages/clearance/fingerprint.go`) first runs `checkoutIsHead`, which refuses unless
+`git rev-parse HEAD` in `dir` equals the live head. On a default-branch checkout — the ordinary
+shape described above — the Fingerprint stage returns an empty fingerprint plus a warning
+("this clearance records no fingerprint, so it will not carry onto a merge-queue entry"); the
+clearance still resolves the referral on that head, it just does not carry onto a queue entry.
+
+Consequence: one job's checkout cannot satisfy both at once. A job checked out at the PR head
+gets a fingerprint, but `uncoveredPaths` then reads the exemptions file the pull request itself
+proposes (only affecting the draft `/lydite exempt` proposes, which lands nothing). A job on the
+default branch reads the exemptions in force but never fingerprints. Anyone changing which
+revision a clearance job checks out, or migrating `uncoveredPaths` to read at a base, has to
+decide this deliberately. The tension predates the Flow refactor (both functions existed in
+`cmd/lydite/clearance.go` on `main`); the refactor only placed them in one package.
