@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ type fakeForge struct {
 	// decision sets it to its own checkout's revision, which is the agreement
 	// the recomputation refuses to proceed without.
 	headSHA string
-	// title is the pull request's title, resolved live by clearedDecision's
+	// title is the pull request's title, resolved live by the fingerprint's
 	// break-declaration check — never read from the comment event, which
 	// carries none of its own.
 	title    string
@@ -55,6 +54,18 @@ type fakeForge struct {
 	failPost int
 	posts    int
 	comments []string
+	// comment is the comment the platform holds under commentID, which is
+	// what the command is read from: event sets it, and the payload only ever
+	// points at it.
+	comment map[string]any
+	// commentReads counts how often the comment was fetched, so a test can
+	// assert a payload naming another repository fetched nothing.
+	commentReads int
+	// onIssue puts the comment on a plain issue rather than on a pull
+	// request.
+	onIssue bool
+	// replyFails stands in for a platform that refuses every reply.
+	replyFails bool
 }
 
 func (f *fakeForge) start(t *testing.T) {
@@ -88,8 +99,17 @@ func (f *fakeForge) start(t *testing.T) {
 			f.published = append(f.published, body)
 			f.postPaths = append(f.postPaths, r.URL.Path)
 			w.WriteHeader(http.StatusCreated)
+		case strings.Contains(r.URL.Path, "/issues/comments/"):
+			f.commentReads++
+			_ = json.NewEncoder(w).Encode(f.comment)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues/40"):
+			_ = json.NewEncoder(w).Encode(issue(!f.onIssue))
 		case strings.Contains(r.URL.Path, "/comments"):
 			if r.Method == http.MethodPost {
+				if f.replyFails {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
 				var body map[string]string
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				f.comments = append(f.comments, body["body"])
@@ -104,25 +124,65 @@ func (f *fakeForge) start(t *testing.T) {
 	t.Cleanup(server.Close)
 	t.Setenv("GITHUB_API_URL", server.URL)
 	t.Setenv("GITHUB_TOKEN", "token")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
 }
 
 const head = "4c2eaea1f2b3c4d5e6f708192a3b4c5d6e7f8091"
 
-func eventFile(t *testing.T, body, login string, at time.Time) string {
+// commentID is the id every payload here points at.
+const commentID = 7001
+
+// event puts a comment on pull request 40, as the platform holds it, and
+// writes the payload an issue_comment run is handed for it.
+func (f *fakeForge) event(t *testing.T, body, login string, at time.Time) string {
 	t.Helper()
-	payload := map[string]any{
+	f.comment = liveComment(body, login, at)
+	return payloadFile(t, commentPayload("lydite/lydite", body, login, at))
+}
+
+// liveComment is a comment on pull request 40 as the platform answers for it
+// by id: the thread it is on named only by its issue URL.
+func liveComment(body, login string, at time.Time) map[string]any {
+	return map[string]any{
+		"id":         commentID,
+		"body":       body,
+		"created_at": at.Format(time.RFC3339),
+		"user":       map[string]any{"login": login},
+		"issue_url":  "https://api.github.invalid/repos/lydite/lydite/issues/40",
+	}
+}
+
+// issue is issue 40 as the platform answers for it, carrying a pull_request
+// key only when it is one.
+func issue(pullRequest bool) map[string]any {
+	doc := map[string]any{"number": 40}
+	if pullRequest {
+		doc["pull_request"] = map[string]any{"url": "https://api.github.invalid/repos/lydite/lydite/pulls/40"}
+	}
+	return doc
+}
+
+// commentPayload is the issue_comment payload for commentID, claiming to be
+// in repository, with the payload's own copy of what the comment said.
+func commentPayload(repository, body, login string, at time.Time) map[string]any {
+	return map[string]any{
 		"action": "created",
 		"issue": map[string]any{
 			"number":       40,
 			"pull_request": map[string]any{"url": "https://example.invalid/pulls/40"},
 		},
 		"comment": map[string]any{
+			"id":         commentID,
 			"body":       body,
 			"created_at": at.Format(time.RFC3339),
 			"user":       map[string]any{"login": login},
 		},
-		"repository": map[string]any{"full_name": "lydite/lydite"},
+		"repository": map[string]any{"full_name": repository},
 	}
+}
+
+func payloadFile(t *testing.T, payload map[string]any) string {
+	t.Helper()
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +299,7 @@ func TestClearPostsTheClearanceThenResolvesTheReferralOnTheHead(t *testing.T) {
 
 	out, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	})
 	if err != nil {
 		t.Fatalf("runClearance: %v\n%s", err, out)
@@ -290,7 +350,7 @@ func TestAClearanceRecordsTheFingerprintTheQueueRecomputes(t *testing.T) {
 
 	out, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	})
 	if err != nil {
 		t.Fatalf("runClearance: %v\n%s", err, out)
@@ -331,7 +391,7 @@ func TestAClearanceRecordsNoFingerprintOffTheRevisionItClears(t *testing.T) {
 
 	out, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	})
 	if err != nil {
 		t.Fatalf("runClearance: %v\n%s", err, out)
@@ -399,7 +459,7 @@ func recordedFingerprint(t *testing.T, statusOut string) string {
 }
 
 // A break declared only in the pull request's title reaches the cleared
-// decision, because clearedDecision resolves the title live through the
+// decision, because the fingerprint resolves the title live through the
 // platform rather than reading the comment event, which carries none of its
 // own. Two real clearances of the same tree — one where the platform answers
 // with a declaring title, one where it does not — must fingerprint
@@ -412,7 +472,7 @@ func TestAClearanceRecordsWhatThePullRequestTitleDeclares(t *testing.T) {
 	plain.start(t)
 	if _, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: undeclared, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: plain.event(t, "/lydite clear", "pedromvgomes", commented),
 	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
@@ -425,7 +485,7 @@ func TestAClearanceRecordsWhatThePullRequestTitleDeclares(t *testing.T) {
 	declaring.start(t)
 	if _, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: declared, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: declaring.event(t, "/lydite clear", "pedromvgomes", commented),
 	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
@@ -438,9 +498,9 @@ func TestAClearanceRecordsWhatThePullRequestTitleDeclares(t *testing.T) {
 // A title the platform cannot answer for still clears the referral: the
 // declaration check can only under-refer on a failure to resolve it, so it is
 // warned about rather than fatal, and the run's job is answering the comment.
-// runClearance already resolved the head over the same endpoint before
-// clearedDecision asks it again for the title, so the first call to /pulls/
-// succeeds and the second — the title lookup — is the one that fails.
+// The head is resolved over the same endpoint before the fingerprint asks it
+// again for the title, so the first call to /pulls/ succeeds and the second —
+// the title lookup — is the one that fails.
 func TestAClearanceWarnsWhenTheTitleCannotBeResolved(t *testing.T) {
 	dir, base, head := clearedCheckout(t)
 	var pullsCalls int
@@ -459,6 +519,10 @@ func TestAClearanceWarnsWhenTheTitleCannotBeResolved(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{statusEntry("pending", earlier)})
 		case strings.Contains(r.URL.Path, "/statuses") && r.Method == http.MethodPost:
 			w.WriteHeader(http.StatusCreated)
+		case strings.Contains(r.URL.Path, "/issues/comments/"):
+			_ = json.NewEncoder(w).Encode(liveComment("/lydite clear", "pedromvgomes", commented))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues/40"):
+			_ = json.NewEncoder(w).Encode(issue(true))
 		case strings.Contains(r.URL.Path, "/comments"):
 			w.WriteHeader(http.StatusCreated)
 		default:
@@ -468,10 +532,11 @@ func TestAClearanceWarnsWhenTheTitleCannotBeResolved(t *testing.T) {
 	t.Cleanup(server.Close)
 	t.Setenv("GITHUB_API_URL", server.URL)
 	t.Setenv("GITHUB_TOKEN", "token")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
 
 	out, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: filepath.Join(t.TempDir(), "status.json"), noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: payloadFile(t, commentPayload("lydite/lydite", "/lydite clear", "pedromvgomes", commented)),
 	})
 	if err != nil {
 		t.Fatalf("runClearance: %v\n%s", err, out)
@@ -484,7 +549,7 @@ func TestAClearanceWarnsWhenTheTitleCannotBeResolved(t *testing.T) {
 // A clearance given a comparison document fingerprints the real comparison the
 // document carries, not the "could not be compared" disqualification a run
 // with no document is always guarded into — `clearance` holds the credential
-// `runClearance` requires whether or not it also posts directly, so there is
+// its SCM stages require whether or not it also posts directly, so there is
 // no invocation of the command in which it may make the comparison itself.
 // `review` reads the same document independently and reports the comparison
 // as genuinely clean, which is what corroborates that the fingerprint the
@@ -521,7 +586,7 @@ func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(
 		"--base", base,
 		"--surfaces", document,
 		"--status-out", fromDocument,
-		"--event", eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		"--event", forge.event(t, "/lydite clear", "pedromvgomes", commented),
 		"--no-color",
 	})
 	if err := cmd.Execute(); err != nil {
@@ -534,7 +599,7 @@ func TestAClearanceFromASurfacesDocumentFingerprintsWhatTheComparisonItselfDoes(
 	noDocument := filepath.Join(t.TempDir(), "no-document.json")
 	if _, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: noDocument, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
@@ -566,7 +631,7 @@ func TestAClearanceFromAnUnreadableSurfacesDocumentFingerprintsTheUncomparedSurf
 		t.Helper()
 		if _, err := runClearanceWith(t, clearanceOptions{
 			dir: dir, base: base, surfaces: surfaces, statusOut: statusOut, noColor: true,
-			eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+			eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 		}); err != nil {
 			t.Fatalf("runClearance: %v", err)
 		}
@@ -588,7 +653,7 @@ func TestAFailedReferralPostAfterTheClearanceFailsTheRun(t *testing.T) {
 	forge := &fakeForge{permission: "admin", failPost: 2, statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), "")
+	err := runClearanceRendering(t, forge.event(t, "/lydite clear", "pedromvgomes", commented), "")
 
 	if err == nil {
 		t.Fatal("a referral that could not be resolved was reported as cleared")
@@ -604,7 +669,7 @@ func TestAFailedClearancePostPostsNothingElse(t *testing.T) {
 	forge := &fakeForge{permission: "admin", failPost: 1, statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	err := runClearanceRendering(t, eventFile(t, "/lydite clear", "pedromvgomes", commented), "")
+	err := runClearanceRendering(t, forge.event(t, "/lydite clear", "pedromvgomes", commented), "")
 
 	if err == nil {
 		t.Fatal("a clearance that could not be posted was reported as recorded")
@@ -632,7 +697,7 @@ func TestClearRendersTheStatusDocumentInsteadOfPostingIt(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "clearance", "status.json")
 	if _, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: out, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
@@ -681,7 +746,7 @@ func TestACommandThatClearsNothingRendersNoDocument(t *testing.T) {
 	forge.start(t)
 
 	out := filepath.Join(t.TempDir(), "status.json")
-	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "passer-by", commented), out); err != nil {
+	if err := runClearanceRendering(t, forge.event(t, "/lydite clear", "passer-by", commented), out); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
 
@@ -705,7 +770,7 @@ func TestAClearanceThatCannotBeRenderedFailsTheRun(t *testing.T) {
 	}
 
 	err := runClearanceRendering(t,
-		eventFile(t, "/lydite clear", "pedromvgomes", commented), filepath.Join(occupied, "status.json"))
+		forge.event(t, "/lydite clear", "pedromvgomes", commented), filepath.Join(occupied, "status.json"))
 
 	if err == nil {
 		t.Fatal("a clearance that could not be rendered was reported as recorded")
@@ -728,7 +793,7 @@ func TestTheStatusOutFlagIsWiredIntoTheCommand(t *testing.T) {
 	cmd := newClearanceCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{
-		"--event", eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		"--event", forge.event(t, "/lydite clear", "pedromvgomes", commented),
 		"--status-out", out,
 		"--no-color",
 	})
@@ -763,7 +828,7 @@ func TestTheBaseFlagsAreWiredIntoTheCommand(t *testing.T) {
 		"--dir", dir,
 		"--base", base,
 		"--base-branch", "main",
-		"--event", eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		"--event", forge.event(t, "/lydite clear", "pedromvgomes", commented),
 		"--status-out", out,
 		"--no-color",
 	})
@@ -796,7 +861,7 @@ func TestARenderedClearanceAlsoRendersTheResolvedReferral(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "rendered", "lydite-status.json")
 	if _, err := runClearanceWith(t, clearanceOptions{
 		dir: dir, base: base, statusOut: out, noColor: true,
-		eventPath: eventFile(t, "/lydite clear", "pedromvgomes", commented),
+		eventPath: forge.event(t, "/lydite clear", "pedromvgomes", commented),
 	}); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
@@ -837,28 +902,13 @@ func TestACommandThatClearsNothingRendersNoReferralDocument(t *testing.T) {
 	forge.start(t)
 
 	out := filepath.Join(t.TempDir(), "lydite-status.json")
-	if err := runClearanceRendering(t, eventFile(t, "/lydite clear", "passer-by", commented), out); err != nil {
+	if err := runClearanceRendering(t, forge.event(t, "/lydite clear", "passer-by", commented), out); err != nil {
 		t.Fatalf("runClearance: %v", err)
 	}
 
 	sibling := filepath.Join(filepath.Dir(out), "lydite-status.referral.json")
 	if _, err := os.Stat(sibling); err == nil {
 		t.Fatalf("a refused command rendered a referral document at %s", sibling)
-	}
-}
-
-// The sibling is derived from whatever --status-out names, so the step that
-// posts it can compute the path without lydite telling it.
-func TestTheReferralDocumentIsTheSiblingOfTheClearanceDocument(t *testing.T) {
-	for _, c := range []struct{ out, want string }{
-		{"lydite-status.json", "lydite-status.referral.json"},
-		{"/tmp/run/status.json", "/tmp/run/status.referral.json"},
-		{"status", "status.referral"},
-		{"/tmp/run.d/status", "/tmp/run.d/status.referral"},
-	} {
-		if got := referralDocument(c.out); got != c.want {
-			t.Errorf("referralDocument(%q) = %q, want %q", c.out, got, c.want)
-		}
 	}
 }
 
@@ -881,7 +931,7 @@ func TestAStrangerChangesNoStatus(t *testing.T) {
 	forge := &fakeForge{permission: "read", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite clear", "passer-by", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite clear", "passer-by", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("a stranger published %+v", forge.published)
@@ -897,7 +947,7 @@ func TestAHeadThatMovedAfterTheCommentIsNotCleared(t *testing.T) {
 	forge := &fakeForge{permission: "write", statuses: []map[string]any{statusEntry("pending", later)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite clear", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite clear", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("cleared a revision the commenter never read: %+v", forge.published)
@@ -912,7 +962,7 @@ func TestAFailingGateIsNotClearedByComment(t *testing.T) {
 	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("failure", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite clear", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite clear", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("a comment resolved a gate: %+v", forge.published)
@@ -925,7 +975,7 @@ func TestAnOrdinaryCommentPublishesNothing(t *testing.T) {
 	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "looks good, merging tomorrow", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "looks good, merging tomorrow", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 || len(forge.comments) != 0 {
 		t.Fatalf("conversation caused %+v / %+v", forge.published, forge.comments)
@@ -936,7 +986,7 @@ func TestExplainAnswersWithoutChangingTheVerdict(t *testing.T) {
 	forge := &fakeForge{permission: "write", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite explain", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite explain", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("explain changed a status: %+v", forge.published)
@@ -952,7 +1002,7 @@ func TestAMistypedVerbIsAnsweredAndClearsNothing(t *testing.T) {
 	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite cler", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite cler", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("a typo cleared the change: %+v", forge.published)
@@ -1009,7 +1059,7 @@ func TestExemptReadsTheExemptionsFileUnderTheScanRoot(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmdIn(t, "source", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+	runClearanceCmdIn(t, "source", forge.event(t, "/lydite exempt sources", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 {
 		t.Fatalf("posted %d comments, want 1", len(forge.comments))
@@ -1053,7 +1103,7 @@ func TestExemptReadsTheExemptionsFileFromInsideTheScanRoot(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmdIn(t, ".", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+	runClearanceCmdIn(t, ".", forge.event(t, "/lydite exempt sources", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 {
 		t.Fatalf("posted %d comments, want 1", len(forge.comments))
@@ -1088,7 +1138,7 @@ func TestTheDirFlagIsWiredIntoTheCommand(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{
 		"--dir", "source",
-		"--event", eventFile(t, "/lydite exempt sources", "pedromvgomes", commented),
+		"--event", forge.event(t, "/lydite exempt sources", "pedromvgomes", commented),
 		"--no-color",
 	})
 	if err := cmd.Execute(); err != nil {
@@ -1118,7 +1168,7 @@ func TestExemptOutsideAGitRepositoryIsRefused(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
 		t.Fatalf("a derivation with no repository to ask went unanswered: %+v", forge.comments)
@@ -1138,7 +1188,7 @@ func TestAnUnparseableExemptionsFileIsRefused(t *testing.T) {
 	forge.start(t)
 
 	log := capturedStderr(t, func() {
-		runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+		runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 	})
 
 	if !strings.Contains(log, "deriving the change's uncovered paths") {
@@ -1165,26 +1215,10 @@ func TestAnUnreadableExemptionsFileIsRefused(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
 		t.Fatalf("an unreadable exemptions file went unanswered: %+v", forge.comments)
-	}
-}
-
-// The block a reader pastes is indented the two spaces `.lydite/exemptions.yml`
-// is written in. yaml.v3 indents four unless told otherwise, and a block that
-// has to be re-indented before it lands is one a reader edits by hand — which
-// is exactly what the encoder is here to spare them.
-func TestTheProposedBlockIsIndentedTwoSpacesPerLevel(t *testing.T) {
-	lines, err := proposalYAML("docs-only", []string{"docs/one.md"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"exemptions:", "  - name: docs-only", "    paths:", "      - docs/one.md"} {
-		if !slices.Contains(lines, want) {
-			t.Errorf("the block carries no %q line:\n%s", want, strings.Join(lines, "\n"))
-		}
 	}
 }
 
@@ -1201,7 +1235,7 @@ func TestAFailedDerivationIsNamedInTheJobLog(t *testing.T) {
 	forge.start(t)
 
 	log := capturedStderr(t, func() {
-		runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+		runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 	})
 
 	if !strings.Contains(log, "deriving the change's uncovered paths") {
@@ -1221,7 +1255,7 @@ func TestAProposalThatWorkedLogsNothing(t *testing.T) {
 	forge.start(t)
 
 	log := capturedStderr(t, func() {
-		runClearanceCmd(t, eventFile(t, "/lydite exempt sources", "pedromvgomes", commented))
+		runClearanceCmd(t, forge.event(t, "/lydite exempt sources", "pedromvgomes", commented))
 	})
 
 	if log != "" {
@@ -1247,7 +1281,7 @@ func TestExemptProposesAnEntryOverTheUncoveredPathsAlone(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt moved-sources", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt moved-sources", "pedromvgomes", commented))
 
 	if len(forge.published) != 0 {
 		t.Fatalf("a proposal changed a status: %+v", forge.published)
@@ -1278,7 +1312,7 @@ func TestTheProposedEntryDoesNotParseAsAnExemption(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 
 	block := fencedBlock(t, forge.comments[0])
 	if _, err := referral.Parse([]byte(block), referral.FileName); err == nil {
@@ -1313,7 +1347,7 @@ func TestExemptProposesNothingWhenEveryPathIsAlreadyCovered(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt everything", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt everything", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "already covered") {
 		t.Fatalf("the refusal does not say why there is nothing to propose: %+v", forge.comments)
@@ -1336,7 +1370,7 @@ func TestAStrangerProposesNothingAndCostsNothing(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "passer-by", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "passer-by", commented))
 
 	if forge.changedCalls != 0 {
 		t.Errorf("a refused command asked the platform for %d changed-path listings", forge.changedCalls)
@@ -1358,7 +1392,7 @@ func TestAnUnanswerableProposalIsRefusedInAComment(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "could not work out") {
 		t.Fatalf("a failed derivation went unanswered: %+v", forge.comments)
@@ -1384,7 +1418,7 @@ func TestAProposalsScalarsCannotReshapeTheDocument(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt docs-only", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt docs-only", "pedromvgomes", commented))
 
 	block := fencedBlock(t, forge.comments[0])
 	var file referral.File
@@ -1445,7 +1479,7 @@ func TestAProposedPathWithACharacterClassCoversOnlyThatFile(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt routes", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt routes", "pedromvgomes", commented))
 
 	block := fencedBlock(t, forge.comments[0])
 	pattern := onlyProposedPath(t, block)
@@ -1469,7 +1503,7 @@ func TestAProposedPathOfLiteralStarsCoversOnlyThatFile(t *testing.T) {
 	}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt stars", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt stars", "pedromvgomes", commented))
 
 	block := fencedBlock(t, forge.comments[0])
 	pattern := onlyProposedPath(t, block)
@@ -1501,7 +1535,7 @@ func TestExemptWithoutAShapeIsAnswered(t *testing.T) {
 	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
 	forge.start(t)
 
-	runClearanceCmd(t, eventFile(t, "/lydite exempt", "pedromvgomes", commented))
+	runClearanceCmd(t, forge.event(t, "/lydite exempt", "pedromvgomes", commented))
 
 	if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "unknown command") {
 		t.Fatalf("a command with no shape went unanswered: %+v", forge.comments)
@@ -1515,6 +1549,115 @@ func TestClearanceNeedsAnEventPayload(t *testing.T) {
 	err := runClearance(context.Background(), cmd, clearanceOptions{dir: ".", base: "auto", noColor: true})
 	if err == nil || !strings.Contains(err.Error(), "event payload") {
 		t.Fatalf("err = %v, want a message naming the missing payload", err)
+	}
+}
+
+// Everything a decision is made from is the comment as the platform holds it
+// now, not the payload's copy of it: a comment edited since the event was
+// delivered is answered as it reads now, and the permission asked about is
+// the live author's.
+func TestTheCommandAndItsAuthorAreReadFromTheLiveComment(t *testing.T) {
+	t.Run("an edited comment", func(t *testing.T) {
+		forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+		forge.start(t)
+		forge.event(t, "looks good, merging tomorrow", "pedromvgomes", commented)
+		stale := payloadFile(t, commentPayload("lydite/lydite", "/lydite clear", "pedromvgomes", commented))
+
+		out := runClearanceCmd(t, stale)
+
+		if len(forge.published) != 0 || len(forge.comments) != 0 {
+			t.Fatalf("the payload's copy of an edited comment was acted on: %+v / %+v", forge.published, forge.comments)
+		}
+		if !strings.Contains(out, "not addressed to lydite") {
+			t.Errorf("the report does not say the comment is not addressed to lydite:\n%s", out)
+		}
+	})
+	t.Run("another author", func(t *testing.T) {
+		forge := &fakeForge{permission: "read", statuses: []map[string]any{statusEntry("pending", earlier)}}
+		forge.start(t)
+		forge.event(t, "/lydite clear", "passer-by", commented)
+		claimed := payloadFile(t, commentPayload("lydite/lydite", "/lydite clear", "pedromvgomes", commented))
+
+		runClearanceCmd(t, claimed)
+
+		if len(forge.published) != 0 {
+			t.Fatalf("an author the payload claimed cleared the change: %+v", forge.published)
+		}
+		if len(forge.comments) != 1 || !strings.Contains(forge.comments[0], "@passer-by does not have write access") {
+			t.Errorf("the refusal does not name the comment's live author: %+v", forge.comments)
+		}
+	})
+}
+
+// A payload is only a pointer, and one pointing into another repository is
+// refused before anything is fetched — never resolved against the repository
+// the run is trusted for instead.
+func TestAPayloadNamingAnotherRepositoryIsRefused(t *testing.T) {
+	forge := &fakeForge{permission: "admin", statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+	forge.event(t, "/lydite clear", "pedromvgomes", commented)
+	foreign := payloadFile(t, commentPayload("someone/else", "/lydite clear", "pedromvgomes", commented))
+
+	_, err := runClearanceWith(t, clearanceOptions{dir: ".", eventPath: foreign, base: "auto", noColor: true})
+
+	if err == nil || !strings.Contains(err.Error(), "someone/else") {
+		t.Fatalf("err = %v, want a refusal naming the payload's repository", err)
+	}
+	if forge.commentReads != 0 || len(forge.published) != 0 || len(forge.comments) != 0 {
+		t.Errorf("a foreign payload read %d comment(s), published %+v and replied %+v",
+			forge.commentReads, forge.published, forge.comments)
+	}
+}
+
+// A comment on a plain issue names no revision, so there is nothing for a
+// clearance to apply to, whatever it says.
+func TestACommentOnAPlainIssueDecidesNothing(t *testing.T) {
+	forge := &fakeForge{permission: "admin", onIssue: true, statuses: []map[string]any{statusEntry("pending", earlier)}}
+	forge.start(t)
+
+	out := runClearanceCmd(t, forge.event(t, "/lydite clear", "pedromvgomes", commented))
+
+	if len(forge.published) != 0 || len(forge.comments) != 0 {
+		t.Fatalf("a comment on a plain issue caused %+v / %+v", forge.published, forge.comments)
+	}
+	if !strings.Contains(out, "not a pull request") {
+		t.Errorf("the report does not say the comment is not on a pull request:\n%s", out)
+	}
+}
+
+// The comment is resolved live before anything is decided about it, so a run
+// holding no credential is refused for every comment — conversation included —
+// by naming the permissions a workflow has to grant.
+func TestClearanceNeedsACredentialForEveryComment(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+	payload := payloadFile(t, commentPayload("lydite/lydite", "looks good, merging tomorrow", "pedromvgomes", commented))
+
+	_, err := runClearanceWith(t, clearanceOptions{dir: ".", eventPath: payload, base: "auto", noColor: true})
+
+	want := "clearance needs GITHUB_TOKEN with `statuses: write` and `pull-requests: write`"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// A reply the platform refuses fails nothing, since the decision it answers
+// already stands, and is named in the job log.
+func TestAReplyThatCannotBePostedIsLoggedAndFailsNothing(t *testing.T) {
+	for _, command := range []string{"/lydite clear", "/lydite explain"} {
+		t.Run(command, func(t *testing.T) {
+			forge := &fakeForge{permission: "admin", replyFails: true, statuses: []map[string]any{statusEntry("pending", earlier)}}
+			forge.start(t)
+
+			log := capturedStderr(t, func() {
+				runClearanceCmd(t, forge.event(t, command, "pedromvgomes", commented))
+			})
+
+			if !strings.Contains(log, "lydite: the decision was recorded but the reply was not posted: ") {
+				t.Errorf("a reply that was not posted left nothing in the job log:\n%s", log)
+			}
+		})
 	}
 }
 
