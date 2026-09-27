@@ -502,17 +502,7 @@ func offByDefaultRows(name string, lang runner.Lang) []ui.Row {
 // langEnabled reports whether .lydite/config.yml leaves one language's checks
 // switched on.
 func langEnabled(l runner.Lang, cfg config.Config) bool {
-	switch l {
-	case runner.Rust:
-		return cfg.Rust.Enabled
-	case runner.TypeScript:
-		return cfg.TypeScript.Enabled
-	case runner.Go:
-		return cfg.Go.Enabled
-	case runner.Shell:
-		return cfg.Shell.Enabled
-	}
-	return false
+	return scanlang.Enabled(l, cfg)
 }
 
 // scannerGates is the gates a language's checks report their findings under,
