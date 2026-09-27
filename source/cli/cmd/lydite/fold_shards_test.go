@@ -1,22 +1,21 @@
 package main
 
 import (
-	"context"
 	"os"
 	"reflect"
 	"testing"
 
 	"lydite/lydite/internal/finding"
-	shardstages "lydite/lydite/internal/stages/shards"
+	shardreport "lydite/lydite/internal/shard"
 	"lydite/lydite/internal/ui"
 )
 
-// shardstages keeps its own copy of where a command's document lives, since a
-// stage cannot import this package. A document every command here writes
-// through saveDocument, at documentPath, must be the one ReadShards reads
-// back: were the two copies to disagree about the name, every fold would read
-// each shard as missing its report.
-func TestShardStageReadsTheDocumentSaveDocumentWrites(t *testing.T) {
+// internal/shard keeps its own copy of where a command's document lives, since
+// nothing under internal can import this package. A document every command
+// here writes through saveDocument, at documentPath, must be the one
+// internal/shard's Read reads back: were the two copies to disagree about the
+// name, every fold would read each shard as missing its report.
+func TestShardReadReadsTheDocumentSaveDocumentWrites(t *testing.T) {
 	t.Parallel()
 	for _, command := range []string{"test", "mutation", "scan"} {
 		root := t.TempDir()
@@ -28,13 +27,8 @@ func TestShardStageReadsTheDocumentSaveDocumentWrites(t *testing.T) {
 			t.Fatalf("%s: saveDocument wrote no document at documentPath: %v", command, err)
 		}
 
-		out, err := shardstages.ReadShards(context.Background(),
-			shardstages.ReadShardsIn{Reports: []string{dir}, Command: command})
-		if err != nil {
-			t.Fatalf("%s: ReadShards: %v", command, err)
-		}
-		if shard := out.Shards[0]; !shard.Read || shard.Document.Command != command {
-			t.Errorf("%s: ReadShards read %+v from the document saveDocument wrote", command, shard)
+		if got := shardreport.Read(dir, command); !got.Read || got.Document.Command != command {
+			t.Errorf("%s: shardreport.Read read %+v from the document saveDocument wrote", command, got)
 		}
 	}
 }
@@ -48,16 +42,16 @@ func TestShardInputsAddsFindingsThenTheHookedRowPerShard(t *testing.T) {
 	t.Parallel()
 	claim := finding.Finding{Gate: "mutation", Component: "api", Path: "api/a.go", Line: 3,
 		Message: "survived", Site: "a < b"}
-	read := shardstages.Shard{Dir: "one", Read: true, Document: ui.Document{
+	read := shardreport.Shard{Dir: "one", Read: true, Document: ui.Document{
 		Command: "mutation", Verdict: ui.VerdictFail,
 		Rows:     []ui.Row{{Status: ui.StatusFail, Label: "mutation(api)"}},
 		Findings: []finding.Finding{claim},
 	}}
-	missing := shardstages.Shard{Dir: "two", Err: os.ErrNotExist}
+	missing := shardreport.Shard{Dir: "two", Err: os.ErrNotExist}
 
 	rep := ui.NewReport("mutation")
 	var hooked []string
-	inputs := shardInputs(rep, "mutation", []shardstages.Shard{read, missing},
+	inputs := shardInputs(rep, "mutation", []shardreport.Shard{read, missing},
 		func(dir string, in *shardInput, row *ui.Row) {
 			hooked = append(hooked, dir)
 			if len(rep.Findings()) != 1 {

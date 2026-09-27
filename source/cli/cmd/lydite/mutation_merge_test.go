@@ -5,21 +5,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/mutation"
-	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
 
-// twoComponents is the smallest declaration a gap in the fold is visible in:
-// one component a shard reported, and one no shard did.
-var twoComponents = component.File{Components: []component.Component{
-	{Name: "a", Dir: "moda", Runner: runner.GoTest},
-	{Name: "b", Dir: "modb", Runner: runner.GoTest},
-}}
+// mutationProjection412 and mutationProjection9 are projection lines as a run
+// writes them into a component's log: 412 mutants on a 30s baseline and 9 on a
+// 20s one, each over four workers. The spelling is mutationstages', and the
+// fold only quotes a line it reads back through that spelling.
+const (
+	mutationProjection412 = "412 mutant(s), budget 1m30s each, 4 worker(s): at most 2h34m30s"
+	mutationProjection9   = "9 mutant(s), budget 1m0s each, 4 worker(s): at most 3m0s"
+)
 
 // mutationShardDir writes one shard's report directory at dir: the document it
 // rendered, or nothing at all for a shard whose job died before it wrote one.
@@ -91,12 +90,15 @@ func mutationShardWithFindings(t *testing.T, findings []finding.Finding, rows ..
 	return dir
 }
 
-// foldedShardsRow folds the given shard directories and returns the row that
-// says whether they are one run.
+// foldedShardsRow folds the given shard directories against mergeRepo's
+// declaration — one component a shard reported, and one no shard did — and
+// returns the row that says whether they are one run.
 func foldedShardsRow(t *testing.T, reports ...string) ui.Row {
 	t.Helper()
-	rep := ui.NewReport("mutation")
-	mergeMutationShards(rep, twoComponents, reports)
+	rep, err := mergeMutationShards(t.Context(), mergeRepo(t), reports)
+	if err != nil {
+		t.Fatalf("the fold failed: %v", err)
+	}
 	for _, r := range rep.Rows() {
 		if r.Label == "shards" {
 			return r
@@ -126,7 +128,7 @@ func detailAbout(t *testing.T, row ui.Row, name string) string {
 func TestAMissingComponentIsReportedWithTheProjectionItsLogCarries(t *testing.T) {
 	ran := mutationShardDir(t, t.TempDir(), []ui.Row{mutationRowOf("a")})
 	died := mutationShardDir(t, t.TempDir(), nil)
-	line := costProjection(412, 4, budget(30*time.Second, 0))
+	line := mutationProjection412
 	writeComponentLog(t, died, "b", "running the baseline suite", line, "mutant 1/412")
 
 	detail := detailAbout(t, foldedShardsRow(t, ran, died), "b")
@@ -148,7 +150,7 @@ func TestAMissingComponentIsReportedWithTheProjectionItsLogCarries(t *testing.T)
 func TestTheFoldNamesNoCauseForAMissingComponent(t *testing.T) {
 	ran := mutationShardDir(t, t.TempDir(), []ui.Row{mutationRowOf("a")})
 	died := mutationShardDir(t, t.TempDir(), nil)
-	writeComponentLog(t, died, "b", costProjection(412, 4, budget(30*time.Second, 0)))
+	writeComponentLog(t, died, "b", mutationProjection412)
 
 	row := foldedShardsRow(t, ran, died)
 	for _, claim := range []string{"too large", "too big", "timed out", "timeout", "out of memory", "killed"} {
@@ -189,7 +191,7 @@ func TestNoLogLeavesTheSentenceAsItIs(t *testing.T) {
 // directory named for the component — so both shapes read the same, and no
 // depth is assumed.
 func TestALoneShardsUnnestedDirectoryReadsTheSameAsANestedOne(t *testing.T) {
-	line := costProjection(9, 4, budget(20*time.Second, 0))
+	line := mutationProjection9
 
 	flat := mutationShardDir(t, t.TempDir(), nil)
 	writeComponentLog(t, flat, "b", line)
@@ -207,59 +209,6 @@ func TestALoneShardsUnnestedDirectoryReadsTheSameAsANestedOne(t *testing.T) {
 	}
 	if !strings.Contains(flatDetail, flat) {
 		t.Errorf("the sentence does not name the directory the log was found in: %q", flatDetail)
-	}
-}
-
-// The projection is written through one format string and read back through the
-// same one, so a reader cannot hold a copy of the wording that drifts from the
-// writer's.
-func TestTheProjectionIsReadBackThroughTheFormatItIsWrittenWith(t *testing.T) {
-	line := costProjection(37, 3, budget(time.Minute, 0))
-	got, ok := costProjectionIn(line)
-	if !ok || got != line {
-		t.Errorf("costProjectionIn(%q) = %q, %v; want the line back", line, got, ok)
-	}
-	for _, other := range []string{
-		"running 412 tests",
-		"",
-		"9 mutant(s), budget 1m0s each, 4 worker(s): at most",
-		"app | " + line,
-	} {
-		if got, ok := costProjectionIn(other); ok || got != "" {
-			t.Errorf("%q was read as the projection %q, %v; want no line at all", other, got, ok)
-		}
-	}
-}
-
-// Every failure of the search answers with no line at all, and not with text a
-// caller taking the line without its flag would go on to quote as something a
-// run said: a component with no log and a log that never reached the projection
-// are both nothing to say.
-func TestAShardWithNoProjectionToQuoteAnswersWithNoLine(t *testing.T) {
-	dir := mutationShardDir(t, t.TempDir(), nil)
-
-	if line, ok := shardProjection(dir, "b"); ok || line != "" {
-		t.Errorf("a component with no log answered %q, %v; want no line at all", line, ok)
-	}
-
-	writeComponentLog(t, dir, "b", "running the baseline suite", "ok fixture/b 1.2s")
-	if line, ok := shardProjection(dir, "b"); ok || line != "" {
-		t.Errorf("a log that never reached the projection answered %q, %v; want no line at all", line, ok)
-	}
-}
-
-// A suite writes whatever it likes into the log the projection shares — a
-// fixture dumped whole, a payload in a panic — and such a line is far longer
-// than the limit a scanner reads with by default. The projection sits below
-// those lines rather than above them, so a run that wrote one is read past it.
-func TestTheProjectionIsFoundBelowALineLongerThanTheDefaultLimit(t *testing.T) {
-	dir := mutationShardDir(t, t.TempDir(), nil)
-	line := costProjection(412, 4, budget(30*time.Second, 0))
-	writeComponentLog(t, dir, "b", strings.Repeat("x", 512*1024), line)
-
-	got, ok := shardProjection(dir, "b")
-	if !ok || got != line {
-		t.Errorf("the projection below a long line read back as %q, %v; want %q", got, ok, line)
 	}
 }
 

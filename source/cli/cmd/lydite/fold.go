@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"lydite/lydite/internal/component"
+	shardreport "lydite/lydite/internal/shard"
 	shardstages "lydite/lydite/internal/stages/shards"
 	"lydite/lydite/internal/ui"
 )
@@ -73,7 +74,7 @@ func readShards(rep *ui.Report, reports []string, command string, alongside func
 // A shard whose document could not be read adds a failing row naming why, and
 // no findings, and is never handed to alongside — there is no report for
 // whatever else its directory holds to be read beside.
-func shardInputs(rep *ui.Report, command string, shards []shardstages.Shard, alongside func(dir string, in *shardInput, row *ui.Row)) []shardInput {
+func shardInputs(rep *ui.Report, command string, shards []shardreport.Shard, alongside func(dir string, in *shardInput, row *ui.Row)) []shardInput {
 	inputs := make([]shardInput, 0, len(shards))
 	for _, shard := range shards {
 		in := shardInput{dir: shard.Dir}
