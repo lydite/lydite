@@ -141,6 +141,11 @@ This is why trust and the repository are resolved before the comment: reading th
 both, and refusing a mismatched payload before any request is made is cheaper and safer than
 fetching first and refusing to act on the result.
 
+`review` reads its own payload pointer this way too — the pull request it is about, not the
+comment it replies to — but declares trust and SCM late rather than first; see
+[ADR 0071](../../docs/adr/0071-a-review-reads-its-pull-request-from-the-payload-and-posts-to-the-revision-it-measured.md)
+and "The review flow" below for why the two commands differ.
+
 ## The scan flow: components walked inside a stage, not fanned out by the engine
 
 `scan` is the second command built on Flow, and the first whose whole job is to visit every
@@ -348,3 +353,65 @@ codebase are not things an off-the-shelf pipeline library is designed to give:
 None of the three is a large amount of code once decided on, which is the rest of the argument:
 a dependency is worth taking only when what it buys costs more to build than to keep pinned and
 updated, and here the reverse held.
+
+## The review flow
+
+`reviewflow.New` (`internal/flows/review`) declares `review`'s stages in this order:
+
+| Stage | Conditions |
+|---|---|
+| `resolve-base` | none |
+| `surfaces` | none — the guard bound to `Publish`, see below |
+| `decide` | none |
+| `check-dirty` | none |
+| `init-trust` | `.When(publish).When(posts-directly)` |
+| `init-scm` | `.When(publish).When(posts-directly)` |
+| `load-pull-request` | `.When(publish)` |
+| `compose-status` | `.When(publish)` |
+| `render-status` | `.When(publish).When(renders-only)` |
+| `post-status` | `.When(publish).When(posts-directly)` |
+
+Every stage through `check-dirty` runs unconditionally: `resolve-base`, `surfaces` and `decide`
+compute the comparison and the verdict a plain run reports, whether or not the run publishes
+anything. `init-trust` and `init-scm` are declared late, after the decision, and conditioned on
+`posts-directly` rather than on `publish` alone — a render-only run needs no credential at all,
+and needs to read neither the environment nor an `SCMRepository`. A render-only or plain run
+never reaches those stages and never asks for a credential; the decision and its warnings are
+computed and available to the caller before any credential is asked for. Declaring trust and SCM
+first, the way clearance does, would make a credential-less `--publish` run fail on a missing
+token before it ever produced its warnings — see
+[ADR 0071](../../docs/adr/0071-a-review-reads-its-pull-request-from-the-payload-and-posts-to-the-revision-it-measured.md)
+for the full comparison against clearance's ordering and the rejected alternatives.
+
+One consequence of that ordering: a missing or malformed `GITHUB_REPOSITORY` is reported in
+`internal/trust`'s own words, ahead of a missing token, because `trust.FromEnvironment` checks
+the repository before the token. The resulting error precedence for a direct-posting run is
+repository → token → event. `trust` is frozen and returns untyped errors, so a trust failure is
+passed through as it is rather than mapped back into a typed one the CLI's own wording could
+describe — the only way to tell a missing repository from a malformed one apart would be
+string-matching a frozen message, which is a boundary workaround.
+
+`reviewflow.NewCompare` (`review-compare`) is `resolve-base` → `compare-surfaces` →
+`write-surfaces`: resolve the base, compare every opted-in component against it, and write the
+comparison as a document for a later `review` to read. Its `compare-surfaces` guard is bound to
+`flow.Literal(false)`, not to an input — the job this flow runs in holds no publishing credential
+yet to guard against, by construction, so there is nothing an input could usefully switch.
+
+The verdict itself is decided once, in `reviewdecision.Decide`, as an ordered outcome list the
+`decide` stage returns whole; `compose-status` composes the published `forge.Status` from that
+same `Result.Verdict`, and the CLI only renders rows from the outcomes — see
+[ADR 0072](../../docs/adr/0072-a-reviews-verdict-is-decided-once-in-reviewdecision-and-the-report-renders-it.md).
+Publishing happens inside the flow, before the CLI renders anything: `compose-status` builds the
+status, and `render-status`/`post-status` are the flow's own gated tail, one of the two ways a
+run reaches an audience for a verdict the CLI has not yet turned into rows.
+
+Posting directly and rendering for another step to post are alternatives a caller chooses
+between, never a ladder: a repository that has not adopted the reusable workflows posts directly
+and keeps every property of the status, and neither route is attempted after the other, because a
+verdict published twice under two identities is the mixed record the App identity exists to end.
+The status is the whole record a clearance acts on, and it has to land early — a person can start
+clearing a referral while the test matrix is still running, which is the property
+[ADR 0015](../../docs/adr/0015-clearance-binds-to-a-commit.md) rests on. The verdict also reaches
+the pull request's standing comment, but by the route every other command's results take: the
+report document the run wrote. Composing it again there would be a second derivation of one
+answer, which is exactly what ADR 0072 rules out.

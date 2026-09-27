@@ -300,10 +300,19 @@ derived rather than configured, so a caller cannot render a clearance without re
 referral it resolves. `--status-out <file>` on `review --publish` renders that command's single
 `lydite/referral` document; a document that cannot be written fails the run on either command.
 
+`review` runs on `internal/flows/review`: the pull request it posts to comes from the webhook
+payload, not a live read, and the credential and repository it posts with are declared only for
+a run that publishes directly, after the verdict is decided — see
+[ADR 0071](../../docs/adr/0071-a-review-reads-its-pull-request-from-the-payload-and-posts-to-the-revision-it-measured.md).
+The verdict itself is decided once, in `reviewdecision.Decide`, as the ordered outcome list a
+stage composes the status from and the CLI renders rows from — see
+[ADR 0072](../../docs/adr/0072-a-reviews-verdict-is-decided-once-in-reviewdecision-and-the-report-renders-it.md).
+
 `review --surfaces <path>` reads a comparison `review compare` already made — the raw
 per-component findings, and the base they were measured against — instead of running it
-again, and decides and publishes from that document through the same `publish`/
-`stateFor`/`describe` (`cmd/lydite/status.go`, with `referralStatus` building the document) as a single, ordinary invocation would.
+again, and decides and publishes from that document through the same review flow stages
+(`compose-status`, then `render-status` or `post-status`, in `internal/stages/review` and
+`internal/stages/scm`) as a single, ordinary invocation would.
 See [ci.md](ci.md)'s `referral`/`referral-publish` split: `review compare` is the only
 half of this that runs a component's own code, and it computes no exemption match, no
 declaration and no verdict — the decision is made afterward, in a job that never ran
@@ -323,7 +332,8 @@ Six properties are load-bearing:
   inference is one the inference can be wrong about.
 - **A referral publishes `pending`, never `failure`.** A required check blocks on
   anything but `success`, so this softens nothing; it is the accurate word, and a gate
-  fails where a referral does not. `stateFor` is the single place that mapping lives.
+  fails where a referral does not. The mapping lives in `internal/stages/review`'s
+  `ComposeStatus` (its private `stateFor`).
 - **The status is read before it is written.** Re-running `review` after a clearance
   comment cannot change the answer — a referral re-evaluated is still a referral — so the
   only thing recomputation would buy is telling a referral apart from the isolation gate,

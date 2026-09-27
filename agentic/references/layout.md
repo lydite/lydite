@@ -9,8 +9,8 @@ source/cli/cmd/lydite/            # the lydite CLI (scan, test, review, version,
 source/cli/internal/flow/         # the flow engine: stages, bindings, conditions and policies
                                   #   (see architecture.md)
 source/cli/internal/stages/       # per-concern stage packages a flow definition wires together,
-                                  #   generic (trust, scm) and domain (clearance, scan) alike (see architecture.md)
-source/cli/internal/flows/        # one package per command's flow declaration, e.g. clearance, scan
+                                  #   generic (trust, scm) and domain (clearance, scan, review) alike (see architecture.md)
+source/cli/internal/flows/        # one package per command's flow declaration, e.g. clearance, scan, review
                                   #   (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
