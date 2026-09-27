@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,14 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"lydite/lydite/internal/affected"
 	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
-	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	mutationstages "lydite/lydite/internal/stages/mutation"
 	"lydite/lydite/internal/ui"
 )
 
@@ -79,24 +79,6 @@ func TestTheFoldReadsBackTheScoreARunRendered(t *testing.T) {
 // recorded is not one the row counts at nought seconds.
 func formatScore(killed, denom, components int) string {
 	return fmt.Sprintf("%d of %d mutant(s) killed across %d component(s)", killed, denom, components)
-}
-
-// A component declaring compose services runs its mutants one at a time: eight
-// suites against one database truncate each other's tables, which surfaces as
-// mutants surviving at random and a score that varies run to run.
-func TestAComponentPublishingAPortMutatesSerially(t *testing.T) {
-	if got := workersFor(componentPlan{ports: []int{5432}}, 8); got != 1 {
-		t.Errorf("%d workers for a component publishing a port, want 1", got)
-	}
-	if got := workersFor(componentPlan{}, 8); got != 8 {
-		t.Errorf("%d workers for a component publishing none, want the run's own bound", got)
-	}
-	// The predicate is the scheduler's own, so a component that publishes
-	// nothing holds nothing: a second implementation here would answer
-	// differently the day one of them learned about a port syntax.
-	if len(scheduler.Conflicts([]scheduler.Item{{Name: "a"}, {Name: "b"}})) != 0 {
-		t.Error("two items holding nothing were reported in conflict")
-	}
 }
 
 // The budget multiplies something this run measured, which is what separates
@@ -162,44 +144,6 @@ func TestTheProjectionIsDerivedFromTheOverriddenTimeout(t *testing.T) {
 	line := costProjection(4, 2, budget(5*time.Minute, 30*time.Second))
 	if !strings.Contains(line, "budget 30s each") || !strings.Contains(line, "at most 1m0s") {
 		t.Errorf("--timeout was not projected from: %q", line)
-	}
-}
-
-// The memory bound multiplies the component's own measured peak, never the
-// machine's memory: a bound that moved with the machine would make a mutant
-// killed on a small runner and surviving on a large one.
-func TestTheMemoryBoundIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
-	const big = 4 << 30
-	if got := memoryBudget(big, 0); got != big*memoryFactor {
-		t.Errorf("memoryBudget(%d) = %d, want %d", big, got, big*memoryFactor)
-	}
-	// Four times a small peak is a ceiling a compiler reaches on its own, and
-	// every mutant would be reported as one that allocated without stopping.
-	if got := memoryBudget(40<<20, 0); got != minimumMemory {
-		t.Errorf("the bound for a 40MiB baseline = %d, want the %d floor", got, minimumMemory)
-	}
-	if got := memoryBudget(big, 7<<30); got != 7<<30 {
-		t.Errorf("--memory was not honoured: %d", got)
-	}
-}
-
-// A ceiling the baseline itself already fills is one every mutant reaches
-// whatever its tests do, so the component gates nothing rather than reporting
-// a suite that kills everything. Only an override can produce it: the
-// derivation is four times that same peak.
-func TestABaselineThatWouldNotFitUnderTheBoundGatesNothing(t *testing.T) {
-	const peak = 1 << 30
-	if !memoryFits(peak, memoryBudget(peak, 0)) {
-		t.Error("a derived bound left its own baseline no room")
-	}
-	if memoryFits(peak, memoryBudget(peak, peak)) {
-		t.Error("a bound equal to the baseline's own peak was accepted")
-	}
-	if memoryFits(peak, memoryBudget(peak, peak*memoryHeadroom-1)) {
-		t.Errorf("a bound under %d times the baseline's peak was accepted", memoryHeadroom)
-	}
-	if !memoryFits(peak, memoryBudget(peak, peak*memoryHeadroom)) {
-		t.Errorf("a bound of exactly %d times the baseline's peak was refused", memoryHeadroom)
 	}
 }
 
@@ -287,195 +231,6 @@ func detailSaying(row ui.Row, want string) bool {
 		}
 	}
 	return false
-}
-
-// A component's dir is relative to the scan root and so is git's diff; the
-// generator works in component-relative paths, because that is what a compiler
-// is pointed at.
-func TestAChangedPathIsMappedOntoTheComponentItIsInside(t *testing.T) {
-	for _, c := range []struct{ dir, file, want string }{
-		{".", "cmd/main.go", "cmd/main.go"},
-		{"source/cli", "source/cli/internal/a/a.go", "internal/a/a.go"},
-		{"./source/cli", "source/cli/a.go", "a.go"},
-	} {
-		got, err := componentRelative(c.dir, c.file)
-		if err != nil {
-			t.Fatalf("%s in %s: %v", c.file, c.dir, err)
-		}
-		if got != c.want {
-			t.Errorf("%s in %s = %q, want %q", c.file, c.dir, got, c.want)
-		}
-	}
-	if _, err := componentRelative("web", "source/cli/a.go"); err == nil {
-		t.Error("a path outside the component was mapped into it")
-	}
-}
-
-// A line the coverage report lists with no hits is covered by no test, so a
-// mutant on it survives by construction and would restate what patch coverage
-// already said about the same line.
-func TestOnlyAnExecutedLineIsMutated(t *testing.T) {
-	root := t.TempDir()
-	src := "package a\n\nfunc Less(x, y int) bool {\n\tif x < y {\n\t\treturn true\n\t}\n\treturn false\n}\n"
-	write(t, root, "a.go", src)
-	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
-
-	// Line 4 holds the comparison; the report says it never ran.
-	hits := coverage.LineHits{"a.go": {4: 0, 5: 1}}
-	mutants, err := generate(root, c, hits, map[string][]int{"a.go": {4, 5}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range mutants {
-		if m.Line == 4 {
-			t.Errorf("an uncovered line was mutated: %s", m)
-		}
-	}
-	// Line 5 did run, and it holds a `return true` the catalogue rewrites, so
-	// the assertion above is not passing merely because nothing was generated.
-	if len(mutants) == 0 {
-		t.Fatal("no mutant was generated from the covered line either")
-	}
-}
-
-// A file the diff names and the tree no longer holds — deleted, or renamed —
-// has no source to mutate, and that is not an error about the declaration.
-func TestAChangedFileThatIsGoneIsSkipped(t *testing.T) {
-	root := t.TempDir()
-	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
-	mutants, err := generate(root, c, coverage.LineHits{"gone.go": {3: 1}}, map[string][]int{"gone.go": {3}})
-	if err != nil {
-		t.Fatalf("a deleted file failed the run: %v", err)
-	}
-	if len(mutants) != 0 {
-		t.Errorf("%d mutant(s) from a file that is not there", len(mutants))
-	}
-}
-
-// Present, so ADR 0026's completeness rule holds with no exception and the
-// fold needs no second copy of the opt-out rule. Context and not unmeasured:
-// the amber tag is for a gate that could not run, and spending it on a
-// decision the repository stated teaches a reader to skim past it.
-func TestAComponentThatOptedOutStillTakesARowAndRunsNothing(t *testing.T) {
-	off := false
-	c := component.Component{Name: "app", Dir: ".", Runner: "go-test", Mutation: &off}
-	plan := componentPlan{c: c, log: testLog(t)}
-	row, out := mutateComponent(t.Context(), plan, config.Config{}, nil, nil, mutationOptions{root: t.TempDir()})
-
-	if row.Status != ui.StatusContext {
-		t.Errorf("status is %q, want %q", row.Status, ui.StatusContext)
-	}
-	if row.Label != mutationLabel("app") {
-		t.Errorf("label is %q", row.Label)
-	}
-	if out.ran {
-		t.Error("an opted-out component was run")
-	}
-}
-
-// A component the change touches no source of is refused before anything is
-// prepared, started or run. Half of what bounds a mutant is knowable from the
-// diff alone, so the baseline suite, the compose stack and the setup commands
-// are pure cost there — and on the default branch, where HEAD is its own
-// merge-base, that is every component.
-//
-// Asserted on the refusal itself and not only on the row beside it: a decision
-// that reported the row and carried on would run the whole component anyway,
-// which is the cost this exists to avoid, while every assertion about the row
-// still passed.
-func TestAComponentTheChangeDoesNotTouchIsRefusedBeforeAnythingRuns(t *testing.T) {
-	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
-	plan := componentPlan{c: c, log: testLog(t)}
-	// No changed lines at all, which is what a component outside the diff has.
-	_, row, ok := prepareMutation(plan, config.Config{}, nil, mutationOptions{root: t.TempDir()})
-	if ok {
-		t.Fatal("a component the change touches no source of was prepared to run")
-	}
-	if row.Status != ui.StatusUnmeasured {
-		t.Errorf("status is %q, want unmeasured — nothing was mutated", row.Status)
-	}
-	if !strings.Contains(row.Value, "touches no source") {
-		t.Errorf("value = %q, want it to say why", row.Value)
-	}
-}
-
-// Go needs no worker directory: an overlay names the mutated file wherever it
-// is written. Rust, TypeScript and Python have no such instruction, so their
-// mutants run in a copy of the repository — and one git lists no file in has
-// nothing to copy, which is said out loud rather than reported as a component
-// whose suite killed everything.
-func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
-	goComponent := component.Component{Name: "cli", Dir: ".", Runner: "go-test"}
-	web := component.Component{Name: "web", Dir: ".", Runner: "vitest"}
-	py := component.Component{Name: "py", Dir: ".", Runner: "python-pytest"}
-
-	if needsWorktree([]component.Component{goComponent}) {
-		t.Error("a Go component asked for a worker directory")
-	}
-	if !needsWorktree([]component.Component{goComponent, web}) {
-		t.Error("a TypeScript component did not ask for a worker directory")
-	}
-	if !needsWorktree([]component.Component{goComponent, py}) {
-		t.Error("a Python component did not ask for a worker directory")
-	}
-
-	none := func(context.Context, string) error { return nil }
-	backend, err := backendFor(runner.Go, t.TempDir(), "cli", runner.Invocation{}, runner.Invocation{}, nil, none)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := backend.(mutation.Go); !ok {
-		t.Errorf("Go got %T, want the overlay backend", backend)
-	}
-	backend, err = backendFor(runner.TypeScript, t.TempDir(), "web", runner.Invocation{}, runner.Invocation{}, []string{"web/src/a.ts"}, none)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := backend.(mutation.Tree); !ok {
-		t.Errorf("TypeScript got %T, want the worker-directory backend", backend)
-	}
-	backend, err = backendFor(runner.Python, t.TempDir(), "py", runner.Invocation{}, runner.Invocation{}, []string{"py/a.py"}, none)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := backend.(mutation.Tree); !ok {
-		t.Errorf("Python got %T, want the worker-directory backend", backend)
-	}
-	if _, err := backendFor(runner.Rust, t.TempDir(), "rust", runner.Invocation{}, runner.Invocation{}, nil, none); err == nil {
-		t.Error("a scan root git lists no file under was given a worker directory to copy nothing into")
-	}
-
-	// A component rooted at the scan root is where every path join in the
-	// backend collapses, so it is the case least likely to be noticed and the
-	// one a `.`-rooted repository always takes.
-	backend, err = backendFor(runner.TypeScript, t.TempDir(), ".", runner.Invocation{}, runner.Invocation{}, []string{"src/a.ts"}, none)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tree, ok := backend.(mutation.Tree)
-	if !ok {
-		t.Fatalf("a component at the scan root got %T, want the worker-directory backend", backend)
-	}
-	if tree.Component != "." {
-		t.Errorf("a component declared at %q became %q", ".", tree.Component)
-	}
-}
-
-// Half of what bounds a mutant is knowable from the diff alone, so a component
-// the change does not touch pays for no baseline, no compose stack and no
-// setup command. On the default branch that is every component.
-func TestAnUntouchedComponentRunsNothing(t *testing.T) {
-	c := component.Component{Name: "app", Dir: "cli", Runner: "go-test"}
-	plan := componentPlan{c: c, log: testLog(t)}
-	row, out := mutateComponent(t.Context(), plan, config.Config{}, nil, nil,
-		mutationOptions{root: t.TempDir(), changed: map[string][]int{"web/app.ts": {1}}})
-
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("status is %q, want %q", row.Status, ui.StatusUnmeasured)
-	}
-	if out.ran {
-		t.Error("an untouched component was run")
-	}
 }
 
 // mutationShard writes one shard's mutation report directory, the way a matrix
@@ -1674,41 +1429,6 @@ func TestAffectedInterleavesASkippedComponentInDeclarationOrder(t *testing.T) {
 	}
 }
 
-// --base-sha is the commit it names and nothing else: no fetch and no
-// merge-base, which is what lets a run on the default branch have a range at
-// all. The fixture is two commits deep so the two flags name different
-// commits, and every spelling git resolves names the same one.
-func TestAnExplicitBaseResolvesTheCommitItNames(t *testing.T) {
-	root := twoChangesRepo(t)
-	ctx := context.Background()
-	want := revParse(t, root, "HEAD~1")
-	mergeBase, err := resolveMutationBase(ctx, root, "main", "")
-	if err != nil {
-		t.Fatalf("the merge-base against main did not resolve: %v", err)
-	}
-	if mergeBase == want {
-		t.Fatal("the fixture's merge-base is its own HEAD~1, so nothing here distinguishes the two bases")
-	}
-	for _, c := range []struct {
-		name     string
-		revision string
-	}{
-		{"the full SHA", want},
-		{"an abbreviated SHA", want[:8]},
-		{"a relative ref", "HEAD~1"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := resolveMutationBase(ctx, root, "", c.revision)
-			if err != nil {
-				t.Fatalf("%s did not resolve: %v", c.revision, err)
-			}
-			if got != want {
-				t.Errorf("--base-sha %s resolved %s, want %s", c.revision, got, want)
-			}
-		})
-	}
-}
-
 // The mutants themselves, and not only the commit behind them: pointed at a
 // base explicitly, a run produces exactly what the merge-base run over the
 // same range produces — over a repository whose merge-base is further back,
@@ -1765,19 +1485,6 @@ func TestShallower(t *testing.T) {
 	}
 }
 `
-
-// revParse is what the fixture's own git says a revision is, which is what
-// resolution is checked against rather than against itself.
-func revParse(t *testing.T, root, revision string) string {
-	t.Helper()
-	cmd := exec.Command("git", "rev-parse", "--verify", revision)
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse %s: %v", revision, err)
-	}
-	return strings.TrimSpace(string(out))
-}
 
 // --affected answers about the range the mutants came from. Selection
 // resolving a base of its own would report a component untouched while its own
@@ -2074,13 +1781,25 @@ func TestAComponentThatCouldNotRunFailsUnderNoGateToo(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(inv.CoverageReport), "held"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	plan := componentPlan{c: c, log: testLog(t)}
-	row, out := mutateComponent(t.Context(), plan, config.Config{}, nil, nil,
-		mutationOptions{root: root, changed: map[string][]int{"paths/paths.go": {4}}})
+	ran, err := mutationstages.RunMutants(t.Context(), mutationstages.RunMutantsIn{
+		Shape:     mutationShape{},
+		Lifecycle: &mutationLifecycle{},
+		Dir:       root,
+		Selected:  []component.Component{c},
+		Changed:   map[string][]int{"paths/paths.go": {4}},
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := ui.NewReport("mutation")
+	kept := addMutationRows(rep, mutationstages.SelectAffectedOut{Selected: []component.Component{c}}, ran,
+		mutationReporting{limit: 1, noGate: true})
+	row, _ := rowNamed(documentOf(t, rep), mutationLabel("app"))
 	if row.Status != ui.StatusFail {
 		t.Fatalf("row = %+v, want a failure", row)
 	}
-	if out.ran {
+	if len(kept) != 0 {
 		t.Error("a component that never started is recorded as having run")
 	}
 }
@@ -2225,5 +1944,351 @@ func TestAComponentThatDidNotRunHasNoEntryInMutantsJSON(t *testing.T) {
 	}
 	if _, ok := written.Components["app"]; ok {
 		t.Error("an opted-out component that never ran took an entry in the counts document")
+	}
+}
+
+// mutationLogRel is where a hand-made outcome says its component's log is.
+func mutationLogRel(name string) string { return ".lydite-reports/" + name + "/mutation.log" }
+
+// mutationSurvivor is one surviving mutant on line 3 of a.go.
+func mutationSurvivor() mutation.Result {
+	return mutation.Result{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 9, Operator: mutation.NegateConditional,
+			Original: "<", Mutated: ">="},
+		Outcome: mutation.Survived,
+	}
+}
+
+// mutationCompleted is a component whose mutants ran to s in elapsed, and
+// which the scheduler was handed.
+func mutationCompleted(name string, s mutation.Summary, results []mutation.Result, elapsed time.Duration) mutationstages.ComponentOutcome {
+	return mutationstages.ComponentOutcome{
+		Component: component.Component{Name: name, Dir: name},
+		LogRel:    mutationLogRel(name),
+		Kind:      mutationstages.KindCompleted,
+		Summary:   s,
+		Results:   results,
+		Scoped:    map[string][]int{name + "/a.go": {3}},
+		Elapsed:   elapsed,
+		Scheduled: true,
+	}
+}
+
+// mutationLifecycleFailure is a row a lifecycle helper decided, as the
+// Lifecycle hands it to the stage.
+func mutationLifecycleFailure(name, value, what string) ui.Row {
+	return ui.Row{Status: ui.StatusFail, Label: mutationLabel(name), Value: value,
+		Detail: []string{what, "full output: " + mutationLogRel(name)}, Log: mutationLogRel(name)}
+}
+
+// mutationRemedy is the line a failing row closes its survivors with.
+var mutationRemedy = "write the assertion that fails when the code changes this way, or declare the mutant equivalent with " +
+	annotationMarker + " beside it"
+
+// The whole report a run's outcomes become, in the order a reader and a
+// consumer keying rows by label both depend on: the select row when selection
+// ran, the schedule, one row per component in declaration order with a skipped
+// one interleaved where its author wrote it, the survivors' findings in plan
+// order, and the summary. Built from hand-made outcomes, so every account a
+// run can give reaches the rows without a suite having to produce it.
+func TestAMutationRunsOutcomesRenderAsOneReport(t *testing.T) {
+	api := component.Component{Name: "api", Dir: "api"}
+	docs := component.Component{Name: "docs", Dir: "docs"}
+	web := component.Component{Name: "web", Dir: "web"}
+	worker := component.Component{Name: "worker", Dir: "worker"}
+	webTeardown := mutationLifecycleFailure("web", "teardown failed", "docker compose down failed in web")
+	workerPrepare := mutationLifecycleFailure("worker", "not prepared", "npm ci failed in worker")
+	bTeardown := mutationLifecycleFailure("b", "teardown failed", "make clean failed in b")
+	cSetup := mutationLifecycleFailure("c", "setup failed", "make migrate failed in c")
+	eServices := mutationLifecycleFailure("e", "services not started", "postgres never became healthy")
+	survivor := mutationSurvivor()
+	killedB := mutationCompleted("b", mutation.Summary{Killed: 2}, nil, 8*time.Second)
+
+	type located struct {
+		Row, Path string
+		Line      int
+	}
+	for _, c := range []struct {
+		name         string
+		sel          mutationstages.SelectAffectedOut
+		run          mutationstages.RunMutantsOut
+		how          mutationReporting
+		wantVerdict  ui.Verdict
+		wantRows     []ui.Row
+		wantFindings []located
+		wantKept     []string
+	}{
+		{
+			// --affected: a survivor, a component selection skipped between
+			// two that ran, a teardown taking over a pass, and a worker whose
+			// preparation failed reaching the row through the executor's text.
+			name: "an affected run",
+			sel: mutationstages.SelectAffectedOut{
+				Selected: []component.Component{api, web, worker},
+				Selection: affected.Result{
+					Selected: []component.Component{api, web, worker},
+					Skipped:  []component.Component{docs},
+					Reasons: map[string]affected.Reason{
+						"api":    {Kind: affected.KindDir, Path: "api/a.go"},
+						"web":    {Kind: affected.KindDependency, Via: "api"},
+						"worker": {Kind: affected.KindDir, Path: "worker/src/b.ts"},
+					},
+				},
+				Skipped: []component.Component{docs},
+				Ordered: []component.Component{api, docs, web, worker},
+			},
+			run: mutationstages.RunMutantsOut{
+				Components: []mutationstages.ComponentOutcome{
+					mutationCompleted("api", mutation.Summary{Killed: 2, Survived: 1}, []mutation.Result{survivor}, 12*time.Second),
+					func() mutationstages.ComponentOutcome {
+						o := mutationCompleted("web", mutation.Summary{Killed: 4}, nil, 30*time.Second)
+						o.TeardownErr = lifecycleRowError{webTeardown}
+						return o
+					}(),
+					{
+						Component: worker, LogRel: mutationLogRel("worker"), Kind: mutationstages.KindExecuteFailed,
+						Err:       fmt.Errorf("preparing the worker directory: %w", lifecycleRowError{workerPrepare}),
+						Scheduled: true,
+					},
+				},
+				Schedule: scheduler.Outcome{MaxConcurrent: 2, Started: 3},
+				Suites:   3,
+			},
+			how:         mutationReporting{onlyAffected: true, declared: 4, limit: 4, summary: true},
+			wantVerdict: ui.VerdictFail,
+			wantRows: []ui.Row{
+				{Status: ui.StatusPass, Label: "select", Value: "3 of 4 affected",
+					Detail: []string{"api: api/a.go", "web: depends on api", "worker: worker/src/b.ts"}},
+				{Status: ui.StatusPass, Label: "schedule", Value: "3 component(s), max 2 concurrent"},
+				{Status: ui.StatusFail, Label: "mutation(api)", Value: "1 of 3 mutant(s) survived in 12s",
+					Detail: []string{survivor.Mutant.String(), mutationRemedy, "full output: " + mutationLogRel("api")},
+					Log:    mutationLogRel("api")},
+				{Status: ui.StatusUnmeasured, Label: "mutation(docs)", Value: "not affected"},
+				webTeardown,
+				{Status: ui.StatusUnmeasured, Label: "mutation(worker)",
+					Value: "not measured — preparing the worker directory: npm ci failed in worker; full output: " + mutationLogRel("worker")},
+				// The teardown took web's row and not its counts: its mutants
+				// said what they had to say before the teardown ran.
+				{Status: ui.StatusContext, Label: "mutation", Value: "6 of 7 mutant(s) killed across 2 component(s) in 42s"},
+			},
+			wantFindings: []located{{Row: "mutation(api)", Path: "api/a.go", Line: 3}},
+			wantKept:     []string{"api", "web"},
+		},
+		{
+			// --no-gate on a run responsible for part of the declaration: a
+			// survivor measured and located but not voting, a teardown the
+			// flag does not excuse, and no summary row.
+			name: "a narrowed run under --no-gate",
+			sel:  mutationstages.SelectAffectedOut{Selected: []component.Component{{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}}},
+			run: mutationstages.RunMutantsOut{
+				Components: []mutationstages.ComponentOutcome{
+					mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 5*time.Second),
+					func() mutationstages.ComponentOutcome {
+						o := killedB
+						o.TeardownErr = lifecycleRowError{bTeardown}
+						return o
+					}(),
+				},
+				Schedule: scheduler.Outcome{MaxConcurrent: 2, Started: 2},
+				Suites:   2,
+			},
+			how:         mutationReporting{limit: 4, noGate: true},
+			wantVerdict: ui.VerdictFail,
+			wantRows: []ui.Row{
+				{Status: ui.StatusPass, Label: "schedule", Value: "2 component(s), max 2 concurrent"},
+				{Status: ui.StatusContext, Label: "mutation(a)", Value: "1 of 2 mutant(s) survived in 5s",
+					Detail: []string{survivor.Mutant.String(), mutationRemedy, "full output: " + mutationLogRel("a")},
+					Log:    mutationLogRel("a")},
+				bTeardown,
+			},
+			wantFindings: []located{{Row: "mutation(a)", Path: "a/a.go", Line: 3}},
+			wantKept:     []string{"a", "b"},
+		},
+		{
+			// An interrupt withdraws every failing verdict a scheduled
+			// component reached — a survivor with its claims, and a setup that
+			// failed — and leaves a pass, an unstarted component and one that
+			// could not be planned as they were.
+			name: "an interrupted run",
+			sel: mutationstages.SelectAffectedOut{Selected: []component.Component{
+				{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}, {Name: "c", Dir: "c"}, {Name: "d", Dir: "d"}, {Name: "e", Dir: "e"}}},
+			run: mutationstages.RunMutantsOut{
+				Components: []mutationstages.ComponentOutcome{
+					mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 5*time.Second),
+					killedB,
+					{Component: component.Component{Name: "c", Dir: "c"}, LogRel: mutationLogRel("c"),
+						Kind: mutationstages.KindBlocked, Err: lifecycleRowError{cSetup}, Scheduled: true},
+					{Component: component.Component{Name: "d", Dir: "d"}, LogRel: mutationLogRel("d"),
+						Kind: mutationstages.KindNotRun, Scheduled: true},
+					{Component: component.Component{Name: "e", Dir: "e"}, LogRel: mutationLogRel("e"),
+						Kind: mutationstages.KindBlocked, Err: lifecycleRowError{eServices}},
+				},
+				Schedule:    scheduler.Outcome{MaxConcurrent: 2, Started: 3},
+				Suites:      5,
+				Interrupted: true,
+			},
+			how:         mutationReporting{limit: 2, summary: true},
+			wantVerdict: ui.VerdictFail,
+			wantRows: []ui.Row{
+				{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 3 of 5 component(s)"},
+				{Status: ui.StatusUnmeasured, Label: "mutation(a)", Value: "not completed",
+					Detail: []string{"the run was interrupted before this component finished"}, Log: mutationLogRel("a")},
+				{Status: ui.StatusPass, Label: "mutation(b)", Value: "2 of 2 mutant(s) killed in 8s", Log: mutationLogRel("b")},
+				{Status: ui.StatusUnmeasured, Label: "mutation(c)", Value: "not completed",
+					Detail: []string{"the run was interrupted before this component finished"}, Log: mutationLogRel("c")},
+				{Status: ui.StatusUnmeasured, Label: "mutation(d)", Value: "not run",
+					Detail: []string{"the run ended before this component started"}},
+				eServices,
+				{Status: ui.StatusContext, Label: "mutation", Value: "2 of 2 mutant(s) killed across 1 component(s) in 8s"},
+			},
+			wantKept: []string{"b"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rep := ui.NewReport("mutation")
+			kept := addMutationRows(rep, c.sel, c.run, c.how)
+			doc := documentOf(t, rep)
+
+			if doc.Verdict != c.wantVerdict {
+				t.Errorf("verdict = %q, want %q", doc.Verdict, c.wantVerdict)
+			}
+			if !reflect.DeepEqual(doc.Rows, c.wantRows) {
+				got, _ := json.MarshalIndent(doc.Rows, "", "  ")
+				want, _ := json.MarshalIndent(c.wantRows, "", "  ")
+				t.Errorf("rows are\n%s\nwant\n%s", got, want)
+			}
+			var findings []located
+			for _, f := range doc.Findings {
+				findings = append(findings, located{Row: f.Row, Path: f.Path, Line: f.Line})
+			}
+			if !reflect.DeepEqual(findings, c.wantFindings) {
+				t.Errorf("findings are %+v, want %+v", findings, c.wantFindings)
+			}
+			var names []string
+			for _, o := range kept {
+				names = append(names, o.Component.Name)
+			}
+			if !reflect.DeepEqual(names, c.wantKept) {
+				t.Errorf("the outcomes recorded are %v, want %v", names, c.wantKept)
+			}
+		})
+	}
+}
+
+// Each OutcomeKind is exactly one row, and only a completed component counts
+// toward the summary and the counts. A kind added to the stage with no row of
+// its own here fails this, rather than rendering as whatever the default says.
+func TestEachOutcomeKindIsItsOwnRow(t *testing.T) {
+	app := component.Component{Name: "app", Dir: "app"}
+	logRel := mutationLogRel("app")
+	logged := "full output: " + logRel
+	setup := mutationLifecycleFailure("app", "setup failed", "make migrate failed in app")
+	cases := map[mutationstages.OutcomeKind]struct {
+		outcome mutationstages.ComponentOutcome
+		want    ui.Row
+	}{
+		mutationstages.KindNotRun: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)", Value: "not run",
+				Detail: []string{"the run ended before this component started"}},
+		},
+		mutationstages.KindBlocked: {
+			outcome: mutationstages.ComponentOutcome{Err: lifecycleRowError{setup}},
+			want:    setup,
+		},
+		mutationstages.KindMutationOff: {
+			want: ui.Row{Status: ui.StatusContext, Label: "mutation(app)", Value: "mutation is off for this component",
+				Detail: []string{"`mutation: false` in .lydite/components.yml"}},
+		},
+		mutationstages.KindRawCommand: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — the component declares a raw command, so lydite cannot derive the build-only and plain variants a mutant needs"},
+		},
+		mutationstages.KindInvocationFailed: {
+			outcome: mutationstages.ComponentOutcome{Err: errors.New("go-test needs a package pattern")},
+			want: ui.Row{Status: ui.StatusFail, Label: "mutation(app)", Value: "not runnable",
+				Detail: []string{"go-test needs a package pattern"}},
+		},
+		mutationstages.KindNoBackend: {
+			outcome: mutationstages.ComponentOutcome{Err: errors.New("lydite has no mutation backend for shell yet")},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — lydite has no mutation backend for shell yet"},
+		},
+		mutationstages.KindUntouched: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — this change touches no source this component is written in"},
+		},
+		mutationstages.KindNoCoverageReport: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — the runner's instrumented variant names no coverage report, so there are no executed lines to mutate"},
+		},
+		mutationstages.KindClearReportFailed: {
+			outcome: mutationstages.ComponentOutcome{Err: errors.New("remove cover.out: permission denied")},
+			want: ui.Row{Status: ui.StatusFail, Label: "mutation(app)", Value: "not runnable",
+				Detail: []string{"remove cover.out: permission denied", logged}, Log: logRel},
+		},
+		mutationstages.KindBaselineInterrupted: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — the run was interrupted before this component's baseline suite ran"},
+		},
+		mutationstages.KindBaselineFailed: {
+			outcome: mutationstages.ComponentOutcome{Output: "--- FAIL: TestDepth\nFAIL\n"},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value:  "not measured — the baseline suite did not pass, so nothing can be concluded about what a mutant would change",
+				Detail: []string{"--- FAIL: TestDepth", "FAIL", logged}, Log: logRel},
+		},
+		mutationstages.KindBaselineTooLarge: {
+			outcome: mutationstages.ComponentOutcome{Peak: 3 << 30, Bound: 4 << 30},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value:  "not measured — the baseline suite held 3221225472 byte(s), which leaves no room under the 4294967296 byte memory bound its mutants would run at",
+				Detail: []string{logged}, Log: logRel},
+		},
+		mutationstages.KindMeasureFailed: {
+			outcome: mutationstages.ComponentOutcome{Err: errors.New("no coverage report at app/cover.out")},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — no coverage report at app/cover.out"},
+		},
+		mutationstages.KindGenerateFailed: {
+			outcome: mutationstages.ComponentOutcome{Err: errors.New("a.go: syntax error")},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — a.go: syntax error"},
+		},
+		mutationstages.KindNothingToMutate: {
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value:  "not measured — no line this change touched is both mutable and reported as executed",
+				Detail: []string{logged}, Log: logRel},
+		},
+		// A worker's failed preparation is an executor error wrapping the
+		// row its Lifecycle decided, and the row is the executor's text: the
+		// Lifecycle's row is recovered for a blocked component and nowhere
+		// else.
+		mutationstages.KindExecuteFailed: {
+			outcome: mutationstages.ComponentOutcome{Err: fmt.Errorf("preparing the worker directory: %w",
+				lifecycleRowError{mutationLifecycleFailure("app", "not prepared", "npm ci failed in app")})},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)",
+				Value: "not measured — preparing the worker directory: npm ci failed in app; " + logged},
+		},
+		mutationstages.KindCompleted: {
+			outcome: mutationstages.ComponentOutcome{Summary: mutation.Summary{Killed: 3}, Elapsed: 12 * time.Second},
+			want: ui.Row{Status: ui.StatusPass, Label: "mutation(app)", Value: "3 of 3 mutant(s) killed in 12s",
+				Log: logRel},
+		},
+	}
+	for k := mutationstages.KindNotRun; !strings.HasPrefix(k.String(), "OutcomeKind("); k++ {
+		c, ok := cases[k]
+		if !ok {
+			t.Errorf("%s has no row pinned here", k)
+			continue
+		}
+		t.Run(k.String(), func(t *testing.T) {
+			o := c.outcome
+			o.Component, o.LogRel, o.Kind = app, logRel, k
+			row, out := kindRow(o, false)
+			if !reflect.DeepEqual(row, c.want) {
+				t.Errorf("row = %#v\nwant  %#v", row, c.want)
+			}
+			if out.ran != (k == mutationstages.KindCompleted) {
+				t.Errorf("counted as having run = %v", out.ran)
+			}
+		})
 	}
 }

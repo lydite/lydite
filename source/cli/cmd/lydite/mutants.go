@@ -20,24 +20,6 @@ type mutantCounts = mutation.ComponentCounts
 // reports directory.
 const mutantsName = mutation.CountsFileName
 
-// mutantsFrom builds the document one run hands on: the tree it mutated, and
-// the counts for exactly the components that ran.
-//
-// A run that ran nothing still names its tree. The document says what was
-// measured, and "this tree, and nothing on it" is an answer; a document naming
-// no tree is not one at all.
-func mutantsFrom(tree string, ran map[string]componentMutation) mutantsDoc {
-	doc := mutantsDoc{Tree: tree}
-	if len(ran) == 0 {
-		return doc
-	}
-	doc.Components = make(map[string]mutantCounts, len(ran))
-	for name, r := range ran {
-		doc.Components[name] = mutation.CountsOf(r.summary, r.elapsed)
-	}
-	return doc
-}
-
 // writeMutants saves the document beside the run's report.
 //
 // Unconditionally, exactly as saveDocument writes the report: a measurement
