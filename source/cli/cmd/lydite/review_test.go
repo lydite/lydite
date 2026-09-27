@@ -1969,3 +1969,278 @@ func TestReviewRefersAnAddedDependencyDespiteTheCondition(t *testing.T) {
 		t.Errorf("expected the added-dependency veto, got:\n%s", out)
 	}
 }
+
+// reviewFlowVerdicts is the report's verdict for each verdict reviewdecision
+// decides. The two spell the same words, and the map says so rather than a
+// conversion assuming it.
+var reviewFlowVerdicts = map[reviewdecision.Verdict]ui.Verdict{
+	reviewdecision.VerdictPass:  ui.VerdictPass,
+	reviewdecision.VerdictRefer: ui.VerdictRefer,
+	reviewdecision.VerdictFail:  ui.VerdictFail,
+}
+
+// reviewFlowExitVerdicts is the report's verdict for each exit code a review
+// run returns, which is the verdict of the report the command itself built.
+var reviewFlowExitVerdicts = map[int]ui.Verdict{0: ui.VerdictPass, 1: ui.VerdictFail, 2: ui.VerdictRefer}
+
+// reviewFlowDecide decides a fixture's review the way the command does, and
+// renders its rows into a report of their own.
+func reviewFlowDecide(t *testing.T, dir, base string) (*ui.Report, reviewdecision.Result) {
+	t.Helper()
+	ctx := context.Background()
+	baseSHA, err := reviewdecision.ResolveBase(ctx, dir, base, "")
+	if err != nil {
+		t.Fatalf("ResolveBase: %v", err)
+	}
+	cmd := newReviewCmd()
+	var progress bytes.Buffer
+	cmd.SetErr(&progress)
+	surfaces, err := reviewdecision.Surfaces(ctx, dir, baseSHA, "", false, commandToolchains{cmd}, &progress)
+	if err != nil {
+		t.Fatalf("Surfaces: %v\n%s", err, progress.String())
+	}
+	result, err := reviewdecision.Decide(ctx, reviewdecision.Input{Dir: dir, Base: baseSHA, Surfaces: surfaces})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, result.Outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	return report, result
+}
+
+// The report's verdict and the decision's are one value: the rows are rendered
+// from the outcomes the decision's verdict is folded from, so no fixture's
+// report can say anything the decision did not — and the command's own exit
+// code agrees with both.
+func TestReviewReportVerdictIsTheDecisionsVerdict(t *testing.T) {
+	suppressed := "exemptions:\n  - name: go-source\n    reason: ordinary source edits\n    paths: [\"src/**\"]\n"
+	for _, tc := range []struct {
+		name    string
+		base    map[string]string
+		head    map[string]string
+		message string
+		want    ui.Verdict
+	}{
+		{
+			name: "exempt",
+			base: map[string]string{referral.FileName: "exemptions:\n  - name: readme-only\n    reason: r\n    paths: [\"README.md\"]\n", "README.md": "hello"},
+			head: map[string]string{"README.md": "hello again"},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "nothing declared",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{"README.md": "hello again"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a disqualifier vetoes a match",
+			base: map[string]string{referral.FileName: suppressed, "src/a.go": "package src\n"},
+			head: map[string]string{"src/a.go": "package src\n\nvar x = eval() // #nosec G204\n"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a bundled exemption change",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n", "src/app.go": "package src"},
+			want: ui.VerdictFail,
+		},
+		{
+			name: "an isolated exemption change",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "an additive API change",
+			base: sdkBase(sdkOptIn),
+			head: map[string]string{"sdk/api.go": sdkAPI + "\n// Also runs the thing.\nfunc Also() {}\n"},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "an undeclared API break",
+			base: sdkBase(sdkOptIn),
+			head: map[string]string{"sdk/api.go": "package sdk\n"},
+			want: ui.VerdictFail,
+		},
+		{
+			name:    "a declared API break",
+			base:    sdkBase(sdkOptIn),
+			head:    map[string]string{"sdk/api.go": "package sdk\n"},
+			message: "feat(sdk)!: drop Do",
+			want:    ui.VerdictRefer,
+		},
+		{
+			name: "an API surface nothing could compare",
+			base: func() map[string]string {
+				b := sdkBase(sdkOptIn)
+				b["sdk/api.go"] = "package sdk\n\nfunc Do(n int) error { return \n"
+				return b
+			}(),
+			head: map[string]string{"sdk/api.go": sdkAPI},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a manifest that added nothing",
+			base: map[string]string{
+				referral.FileName: dependencyExemption("go.sum"),
+				"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+			},
+			head: map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "an added dependency",
+			base: map[string]string{
+				referral.FileName: dependencyExemption("go.sum"),
+				"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+			},
+			head: map[string]string{"go.sum": goSum(map[string]string{
+				"github.com/spf13/cobra":         "v1.10.1",
+				"github.com/google/licensecheck": "v0.3.1",
+			})},
+			want: ui.VerdictRefer,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := tc.message
+			if message == "" {
+				message = "head"
+			}
+			dir, base := reviewRepoSaying(t, tc.base, tc.head, message)
+
+			report, result := reviewFlowDecide(t, dir, base)
+			if got := reviewFlowVerdicts[result.Verdict]; report.Verdict() != got {
+				t.Errorf("the report's verdict is %q and the decision's is %q (%q)", report.Verdict(), got, result.Verdict)
+			}
+			if report.Verdict() != tc.want {
+				t.Errorf("verdict = %q, want %q", report.Verdict(), tc.want)
+			}
+
+			out, err := runReview(t, dir, base)
+			code := 0
+			var exit ui.ExitError
+			if errors.As(err, &exit) {
+				code = exit.Code
+			} else if err != nil {
+				t.Fatalf("review: %v\n%s", err, out)
+			}
+			if got, ok := reviewFlowExitVerdicts[code]; !ok || got != reviewFlowVerdicts[result.Verdict] {
+				t.Errorf("the command exited %d and the decision is %q:\n%s", code, result.Verdict, out)
+			}
+		})
+	}
+}
+
+// Each status a decision reaches renders as exactly one row status, and one
+// that votes the same way: a pass as a pass, a referral as a referral, a
+// failure as a failure, and a concern that never votes as one that does not.
+func TestReviewRendersEachDecidedStatusAsOneRowStatus(t *testing.T) {
+	want := map[reviewdecision.Status]ui.Status{
+		reviewdecision.StatusPass:      ui.StatusPass,
+		reviewdecision.StatusRefer:     ui.StatusRefer,
+		reviewdecision.StatusFail:      ui.StatusFail,
+		reviewdecision.StatusNonVoting: ui.StatusUnmeasured,
+	}
+	if len(rowStatus) != len(want) {
+		t.Errorf("rowStatus = %v, want %v", rowStatus, want)
+	}
+	for status, row := range want {
+		if got := rowStatus[status]; got != row {
+			t.Errorf("rowStatus[%q] = %q, want %q", status, got, row)
+		}
+	}
+}
+
+// Showing only the first listCap disqualifications is presentation: the rest
+// become one count carrying their status, and the referral row after it still
+// refers, so the report's verdict is the decision's however much it shows.
+func TestReviewCapsDisqualificationsWithoutMovingTheVerdict(t *testing.T) {
+	var outcomes []reviewdecision.Outcome
+	var dqs []referral.Disqualification
+	for i := range listCap + 2 {
+		dq := referral.Disqualification{Kind: "suppression added", Path: fmt.Sprintf("src/a%d.go", i), Evidence: fmt.Sprintf("src/a%d.go introduces #nosec", i)}
+		dqs = append(dqs, dq)
+		outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindDisqualification, Status: reviewdecision.StatusRefer, Disqualification: dq})
+	}
+	d := referral.Decision{Referred: true, Exemption: "go-source", Disqualifications: dqs}
+	outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindReferral, Status: reviewdecision.StatusRefer, Decision: d, Exemptions: 1})
+
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	rows := report.Rows()
+	if len(rows) != listCap+2 {
+		t.Fatalf("rows = %+v, want %d disqualifications, a count and the referral", rows, listCap)
+	}
+	for i, row := range rows[:listCap] {
+		if row.Status != ui.StatusRefer || row.Label != "suppression added" || row.Value != dqs[i].Evidence {
+			t.Errorf("row %d = %+v, want disqualification %+v", i, row, dqs[i])
+		}
+	}
+	if more := rows[listCap]; more.Status != ui.StatusRefer || more.Label != "more disqualifiers" || more.Value != "2 not shown" {
+		t.Errorf("count row = %+v, want a referring count of the 2 not shown", more)
+	}
+	if last := rows[len(rows)-1]; last.Status != ui.StatusRefer || last.Label != "referral" || last.Value != "go-source matched, then disqualified" {
+		t.Errorf("referral row = %+v, want the vetoed match, referring", last)
+	}
+	if report.Verdict() != ui.VerdictRefer {
+		t.Errorf("verdict = %q, want %q", report.Verdict(), ui.VerdictRefer)
+	}
+}
+
+// A run of disqualifications no longer than listCap renders each one and no
+// count.
+func TestReviewShowsEveryDisqualificationUpToTheCap(t *testing.T) {
+	var outcomes []reviewdecision.Outcome
+	for i := range listCap {
+		outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindDisqualification, Status: reviewdecision.StatusRefer,
+			Disqualification: referral.Disqualification{Kind: "tests removed", Evidence: fmt.Sprintf("t%d deleted", i)}})
+	}
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	if rows := report.Rows(); len(rows) != listCap || rows[len(rows)-1].Label != "tests removed" {
+		t.Errorf("rows = %+v, want exactly the %d disqualifications", rows, listCap)
+	}
+}
+
+// An outcome the report has no rendering for is an error, never a row: a
+// status rendered as nothing in particular would stop voting, and a concern
+// left out would read as one that passed. Nothing is rendered for either.
+func TestReviewRefusesAnOutcomeItCannotRender(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcomes []reviewdecision.Outcome
+		want     string
+	}{
+		{
+			name: "an unknown status",
+			outcomes: []reviewdecision.Outcome{
+				{Kind: reviewdecision.KindReferral, Status: reviewdecision.StatusPass},
+				{Kind: reviewdecision.KindReferral, Status: "maybe"},
+			},
+			want: `status "maybe"`,
+		},
+		{
+			name:     "an unknown kind",
+			outcomes: []reviewdecision.Outcome{{Kind: "mystery", Status: reviewdecision.StatusRefer}},
+			want:     `kind "mystery"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := ui.NewReport("review")
+			err := addOutcomeRows(report, tc.outcomes)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("addOutcomeRows = %v, want an error naming %s", err, tc.want)
+			}
+			if len(report.Rows()) != 0 {
+				t.Errorf("rows = %+v, want nothing rendered before the refusal", report.Rows())
+			}
+		})
+	}
+}

@@ -118,9 +118,9 @@ and keeps every property of the status; the two are alternatives, not a ladder.`
 					Value:  "not included in this verdict",
 				})
 			}
-			renderAPISurfaceRows(report, baseSHA, result.BreakDeclared, surfaces)
-			addDependencyRows(report, result.Dependencies, baseSHA)
-			addDecisionRows(report, decision, len(result.File.Exemptions))
+			if err := addOutcomeRows(report, result.Outcomes); err != nil {
+				return err
+			}
 
 			// Published after the rows are added and from the report's own
 			// verdict, so the status a machine reads and the report a person
@@ -174,65 +174,117 @@ func capped(items []string) []string {
 	return reviewdecision.Capped(items)
 }
 
-// addDecisionRows turns a decision into the report's rows.
+// rowStatus renders each status reviewdecision decides as exactly one row
+// status, so the report's verdict is folded over the same answers the
+// decision's own verdict is.
+var rowStatus = map[reviewdecision.Status]ui.Status{
+	reviewdecision.StatusPass:      ui.StatusPass,
+	reviewdecision.StatusRefer:     ui.StatusRefer,
+	reviewdecision.StatusFail:      ui.StatusFail,
+	reviewdecision.StatusNonVoting: ui.StatusUnmeasured,
+}
+
+// addOutcomeRows renders every outcome reviewdecision.Decide reached, in its
+// own order, and decides nothing: each row's status is the outcome's, and only
+// the words and how much evidence to show are chosen here.
+//
+// An outcome whose status or kind has no rendering here is an error rather
+// than a row: a status rendered as nothing in particular would stop voting,
+// and a concern left out of the report is indistinguishable from one that
+// passed.
+func addOutcomeRows(report *ui.Report, outcomes []reviewdecision.Outcome) error {
+	for _, o := range outcomes {
+		if _, ok := rowStatus[o.Status]; !ok {
+			return fmt.Errorf("review: %s outcome has status %q, which no row renders", o.Kind, o.Status)
+		}
+	}
+	for i := 0; i < len(outcomes); i++ {
+		o := outcomes[i]
+		status := rowStatus[o.Status]
+		switch o.Kind {
+		case reviewdecision.KindAPISurface:
+			report.Add(apiSurfaceRow(o, status))
+		case reviewdecision.KindDependencies:
+			report.Add(dependencyRow(o, status))
+		case reviewdecision.KindBundling:
+			report.Add(bundlingRow(o, status))
+		case reviewdecision.KindDisqualification:
+			// A run of disqualifications is rendered together, because how
+			// many of them to show is decided over the whole run.
+			end := i + 1
+			for end < len(outcomes) && outcomes[end].Kind == reviewdecision.KindDisqualification {
+				end++
+			}
+			addDisqualificationRows(report, outcomes[i:end])
+			i = end - 1
+		case reviewdecision.KindReferral:
+			report.Add(referralRow(o, status))
+		default:
+			return fmt.Errorf("review: outcome kind %q has no row", o.Kind)
+		}
+	}
+	return nil
+}
+
+// bundlingRow is the exemptions file changed alongside other paths: a gate,
+// not a referral, because the author clears it by splitting the change.
+func bundlingRow(o reviewdecision.Outcome, status ui.Status) ui.Row {
+	return ui.Row{
+		Status: status,
+		Label:  "exemption change not isolated",
+		Value:  fmt.Sprintf("%d other path(s) in the same change", len(o.Bundled)),
+		Detail: append(capped(o.Bundled),
+			referral.FileName+" must be the only path a change touches, so its history is the complete record of what may merge unread",
+			"split this into two pull requests"),
+	}
+}
+
+// addDisqualificationRows renders a run of disqualifications, the first
+// listCap of them each on its own row and the rest as a count.
+//
+// The count carries the status of the first disqualification it stands for,
+// and the referral row after it refers whenever any disqualification does, so
+// the rows left out never take their severity with them.
+func addDisqualificationRows(report *ui.Report, run []reviewdecision.Outcome) {
+	shown := run
+	if len(shown) > listCap {
+		shown = shown[:listCap]
+	}
+	for _, o := range shown {
+		report.Add(ui.Row{Status: rowStatus[o.Status], Label: o.Disqualification.Kind, Value: o.Disqualification.Evidence})
+	}
+	if rest := run[len(shown):]; len(rest) > 0 {
+		report.Add(ui.Row{Status: rowStatus[rest[0].Status], Label: "more disqualifiers",
+			Value: fmt.Sprintf("%d not shown", len(rest))})
+	}
+}
+
+// referralRow states the referral.
 //
 // A referral says which of the two ways it got there — nothing covered the
 // change, or something covered it and a disqualifier vetoed the match — since
 // those have completely different remedies, and only one of them is a remedy
 // the author can apply.
-func addDecisionRows(report *ui.Report, d referral.Decision, declared int) {
-	// The one failing row this command has, and the only thing it reports
-	// that the author clears by doing more work rather than by fetching a
-	// human — which is what makes it a gate and not a referral.
-	if len(d.Bundled) > 0 {
-		report.Add(ui.Row{
-			Status: ui.StatusFail,
-			Label:  "exemption change not isolated",
-			Value:  fmt.Sprintf("%d other path(s) in the same change", len(d.Bundled)),
-			Detail: append(capped(d.Bundled),
-				referral.FileName+" must be the only path a change touches, so its history is the complete record of what may merge unread",
-				"split this into two pull requests"),
-		})
-	}
-
-	shown := d.Disqualifications
-	if len(shown) > listCap {
-		shown = shown[:listCap]
-	}
-	for _, dq := range shown {
-		report.Add(ui.Row{Status: ui.StatusRefer, Label: dq.Kind, Value: dq.Evidence})
-	}
-	if rest := len(d.Disqualifications) - len(shown); rest > 0 {
-		report.Add(ui.Row{Status: ui.StatusRefer, Label: "more disqualifiers",
-			Value: fmt.Sprintf("%d not shown", rest)})
-	}
-
+func referralRow(o reviewdecision.Outcome, status ui.Status) ui.Row {
+	d := o.Decision
 	switch {
-	// Empty alone is not enough: the API-surface check can refer a change
-	// from its title or its commit messages with no path in the diff at all
-	// — an empty commit, or a title edited after the last push, which the
-	// `edited` trigger now re-runs on. Reading d.Empty on its own here would
-	// print a passing "no changes" row beside a refer row that just fired,
-	// contradicting the verdict this row states.
-	case d.Empty && !d.Referred:
-		report.Add(ui.Row{
-			Status: ui.StatusPass,
+	case o.Status != reviewdecision.StatusPass:
+		return ui.Row{
+			Status: status,
 			Label:  "referral",
-			Value:  "no changes against the base",
-		})
-	case !d.Referred:
-		report.Add(ui.Row{
-			Status: ui.StatusPass,
-			Label:  "referral",
-			Value:  fmt.Sprintf("exempt: %s", d.Exemption),
-		})
+			Value:  referralReason(d, o.Exemptions),
+			Detail: referralDetail(d, o.Exemptions),
+		}
+	// Only a referral that passed says there was nothing to review: the
+	// API-surface check can refer a change from its title or its commit
+	// messages with no path in the diff at all — an empty commit, or a title
+	// edited after the last push, which the `edited` trigger re-runs on — and
+	// a passing "no changes" row beside the refer row that fired would
+	// contradict the verdict this row states.
+	case d.Empty:
+		return ui.Row{Status: status, Label: "referral", Value: "no changes against the base"}
 	default:
-		report.Add(ui.Row{
-			Status: ui.StatusRefer,
-			Label:  "referral",
-			Value:  referralReason(d, declared),
-			Detail: referralDetail(d, declared),
-		})
+		return ui.Row{Status: status, Label: "referral", Value: fmt.Sprintf("exempt: %s", d.Exemption)}
 	}
 }
 

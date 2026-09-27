@@ -72,6 +72,12 @@ type Result struct {
 	// Dependencies is what the change did to every dependency manifest it
 	// touches, in the order the diff names them.
 	Dependencies []ManifestDelta
+	// Outcomes is every concern the review decided, in the order a reader
+	// meets them (see outcomes). A report renders its rows from these.
+	Outcomes []Outcome
+	// Verdict is folded from Outcomes, and is the review's only verdict: a
+	// report whose rows are rendered from the same outcomes folds to it.
+	Verdict Verdict
 	// Warnings are the lines a caller writes to its diagnostics stream, in the
 	// order they arose. Each is a whole line without its newline. Every one
 	// arises after Title and ScanEvidence were called, so writing them once
@@ -111,11 +117,14 @@ func Decide(ctx context.Context, in Input) (Result, error) {
 	referSurfaces(&decision, where, in.Surfaces)
 	referDependencies(&decision, deltas)
 
+	decided := outcomes(in.Base, where, in.Surfaces, deltas, decision, len(file.Exemptions))
 	return Result{
 		Decision:      decision,
 		File:          file,
 		BreakDeclared: where,
 		Dependencies:  deltas,
+		Outcomes:      decided,
+		Verdict:       fold(decided),
 		Warnings:      warnings,
 	}, nil
 }
