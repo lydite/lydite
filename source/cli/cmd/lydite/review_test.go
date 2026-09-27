@@ -2266,3 +2266,51 @@ func TestReviewPlainRunNeedsNoPlatformEnvironment(t *testing.T) {
 		t.Errorf("the report does not state the exemption:\n%s", out)
 	}
 }
+
+// The decision's warnings reach the run's stderr: an event that cannot be read
+// is named there, so a break declared only in the title nobody read is not
+// dropped without a word.
+func TestReviewWritesTheDecisionsWarnings(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"README.md": "hello again"})
+	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
+
+	out, err := runReview(t, dir, base, "--event", missing)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("review: %v\n%s", err, out)
+	}
+	if want := "warning: could not read the event at " + missing; !strings.Contains(out, want) {
+		t.Errorf("the run does not write the decision's warning %q:\n%s", want, out)
+	}
+}
+
+// A review that completes leaves its report behind as review.json, the
+// document publish folds into the comment: its referral row is the one the
+// terminal report states.
+func TestReviewWritesItsReportDocument(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: "exemptions:\n  - name: readme-only\n    reason: docs\n    paths: [\"README.md\"]\n",
+			"README.md":       "hello",
+		},
+		map[string]string{"README.md": "hello again"})
+
+	if out, err := runReview(t, dir, base); err != nil {
+		t.Fatalf("review: %v\n%s", err, out)
+	}
+	doc, err := readDocument(documentPath(reportsDir(dir), "review"))
+	if err != nil {
+		t.Fatalf("a completed review wrote no review.json: %v", err)
+	}
+	var referralRow *ui.Row
+	for i := range doc.Rows {
+		if doc.Rows[i].Label == "referral" {
+			referralRow = &doc.Rows[i]
+		}
+	}
+	if referralRow == nil || referralRow.Value != "exempt: readme-only" {
+		t.Errorf("review.json rows = %+v, want the referral row stating the exemption", doc.Rows)
+	}
+}
