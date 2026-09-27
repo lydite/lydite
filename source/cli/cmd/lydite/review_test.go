@@ -2244,3 +2244,25 @@ func TestReviewRefusesAnOutcomeItCannotRender(t *testing.T) {
 		})
 	}
 }
+
+// A review that publishes nothing needs nothing from the platform: no token,
+// no repository. Only a run that posts asks for either.
+func TestReviewPlainRunNeedsNoPlatformEnvironment(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: "exemptions:\n  - name: readme-only\n    reason: docs\n    paths: [\"README.md\"]\n",
+			"README.md":       "hello",
+		},
+		map[string]string{"README.md": "hello again"})
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_REPOSITORY", "")
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a plain review with no platform environment failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "exempt: readme-only") {
+		t.Errorf("the report does not state the exemption:\n%s", out)
+	}
+}

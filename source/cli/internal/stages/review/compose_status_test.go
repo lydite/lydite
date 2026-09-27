@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"lydite/lydite/internal/clearance"
@@ -149,5 +150,33 @@ func TestRenderStatusPropagatesAnUnwritablePath(t *testing.T) {
 	}
 	if _, err := RenderStatus(context.Background(), RenderStatusIn{Path: filepath.Join(blocker, "referral.json")}); err == nil {
 		t.Error("RenderStatus beneath a file succeeded")
+	}
+}
+
+func TestStateForKeepsAReferralDistinctFromAFailure(t *testing.T) {
+	if stateFor(reviewdecision.VerdictRefer) == stateFor(reviewdecision.VerdictFail) {
+		t.Fatal("a referral and a gate failure publish the same state, so a person cannot tell them apart")
+	}
+	if got := stateFor(reviewdecision.VerdictRefer); got != clearance.StatePending {
+		t.Fatalf("a referral publishes %q, want pending", got)
+	}
+}
+
+// A pending status renders as a yellow dot, which is what a job still
+// running looks like. The description is the only thing that separates them.
+func TestStatusDescriptionNamesTheWayForward(t *testing.T) {
+	got := describe(referral.Decision{Referred: true}, reviewdecision.VerdictRefer)
+	if !strings.Contains(got, "/lydite clear") {
+		t.Fatalf("description %q does not say what resolves it", got)
+	}
+}
+
+func TestPublishedDescriptionsFitThePlatformsLimit(t *testing.T) {
+	d := referral.Decision{Referred: true, Exemption: "readme-only"}
+	for _, verdict := range []reviewdecision.Verdict{reviewdecision.VerdictRefer, reviewdecision.VerdictFail, reviewdecision.VerdictPass} {
+		got := describe(d, verdict)
+		if n := len([]rune(got)); n == 0 || n > 140 {
+			t.Errorf("%s description is %d characters: %q", verdict, n, got)
+		}
 	}
 }

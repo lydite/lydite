@@ -1,15 +1,11 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 
-	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
-	"lydite/lydite/internal/referral"
-	"lydite/lydite/internal/ui"
 )
 
 // publishTarget is where a verdict is published: which repository, which
@@ -38,7 +34,7 @@ type pullRequestRef struct {
 func resolveTarget(what, eventPath string) (publishTarget, error) {
 	token := firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
 	if token == "" {
-		return publishTarget{}, fmt.Errorf("%s needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)", what)
+		return publishTarget{}, noTokenError(what)
 	}
 	slug := os.Getenv("GITHUB_REPOSITORY")
 	if slug == "" {
@@ -58,6 +54,12 @@ func resolveTarget(what, eventPath string) (publishTarget, error) {
 		SHA:    ref.SHA,
 		Number: ref.Number,
 	}, nil
+}
+
+// noTokenError is a write refused for want of a credential, naming what
+// needed one and where a workflow grants it.
+func noTokenError(what string) error {
+	return fmt.Errorf("%s needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)", what)
 }
 
 // resolvePullRequest reads the revision and the conversation out of the
@@ -81,108 +83,32 @@ func resolvePullRequest(what, eventPath string) (pullRequestRef, error) {
 	}
 	ref, err := forge.LoadPullRequestRef(eventPath)
 	if err != nil {
-		if errors.Is(err, forge.ErrNoEvent) {
-			return pullRequestRef{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
-		}
-		var notAPullRequest *forge.NotAPullRequestError
-		if errors.As(err, &notAPullRequest) {
-			return pullRequestRef{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", notAPullRequest.Path, what)
-		}
-		return pullRequestRef{}, err
+		return pullRequestRef{}, pullRequestError(what, err)
 	}
 	return pullRequestRef{SHA: ref.SHA, Number: ref.Number}, nil
 }
 
-// stateFor maps a run's verdict onto a commit status state.
-//
-// The three are distinct on purpose. A referral is `pending` because it is
-// pending: a person has not answered yet. It blocks a required check exactly
-// as hard as a failure does, so nothing is softened by saying so accurately
-// — and calling a referral a failure is the one word CONTEXT.md rules out,
-// because a gate fails and a referral does not.
-func stateFor(verdict ui.Verdict) clearance.State {
-	switch verdict {
-	case ui.VerdictFail:
-		return clearance.StateFailure
-	case ui.VerdictRefer:
-		return clearance.StatePending
-	default:
-		return clearance.StateSuccess
+// pullRequestError is a failure to load the pull request an event points at,
+// in the wording of what names itself in `what`: no event, and an event from
+// some other trigger, each name the flag or command that needed one. Any
+// other failure is returned as it is.
+func pullRequestError(what string, err error) error {
+	if errors.Is(err, forge.ErrNoEvent) {
+		return fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
 	}
-}
-
-// describe is the one line shown beside the status.
-//
-// A pending status renders as a yellow dot, which is what a job still
-// running looks like. The description is the only thing that distinguishes
-// them, so it names what is being waited for rather than restating the
-// state.
-func describe(d referral.Decision, verdict ui.Verdict) string {
-	switch {
-	case verdict == ui.VerdictFail:
-		return "exemption change not isolated — split it into its own pull request"
-	case verdict == ui.VerdictRefer && d.Exemption != "":
-		return fmt.Sprintf("%s matched, then disqualified — comment /lydite clear", d.Exemption)
-	case verdict == ui.VerdictRefer:
-		return "referred — comment /lydite clear"
-	case d.Empty:
-		return "no changes against the base"
-	default:
-		return "exempt: " + d.Exemption
+	var notAPullRequest *forge.NotAPullRequestError
+	if errors.As(err, &notAPullRequest) {
+		return fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", notAPullRequest.Path, what)
 	}
-}
-
-// referralStatus is the verdict as the document both routes carry, so the
-// status a step posts and the one this process would have posted itself are
-// one derivation rather than two.
-func referralStatus(ref pullRequestRef, d referral.Decision, verdict ui.Verdict) forge.Status {
-	return forge.Status{
-		State:       stateFor(verdict),
-		Context:     clearance.Context,
-		Description: describe(d, verdict),
-		TargetURL:   runURL(),
-		SHA:         ref.SHA,
-		PullRequest: ref.Number,
-	}
-}
-
-// publish records the verdict as the `lydite/referral` commit status: posted
-// here with the job's own token, or rendered at out for a step that posts it
-// under lydite's App identity.
-//
-// The two are alternatives the caller chooses between, not a ladder. A
-// repository that has not adopted the reusable workflows posts directly and
-// keeps every property of the status; neither route is attempted after the
-// other, because a verdict published twice under two identities is the mixed
-// record the App identity exists to end.
-//
-// The status and nothing else. It is the whole record a clearance acts on, and
-// it has to land early — a person can start clearing a referral while the test
-// matrix is still running, which is the property ADR 0015 rests on and the
-// reason this stays a separate step from the standing comment.
-//
-// The verdict also reaches the comment, as one section of it, but by the route
-// every other command's results take: the report document this run wrote.
-// Rendering it here as well would be a second derivation of one answer, and
-// the two would drift.
-func publish(ctx context.Context, out, eventPath string, d referral.Decision, verdict ui.Verdict) error {
-	if out != "" {
-		ref, err := resolvePullRequest(statusOutFlag, eventPath)
-		if err != nil {
-			return err
-		}
-		return forge.WriteStatus(out, referralStatus(ref, d, verdict))
-	}
-	target, err := resolveTarget("--publish", eventPath)
-	if err != nil {
-		return err
-	}
-	return target.Client.PostStatus(ctx, target.Repo,
-		referralStatus(pullRequestRef{SHA: target.SHA, Number: target.Number}, d, verdict))
+	return err
 }
 
 // statusOutFlag names the flag that renders the status instead of posting it.
 const statusOutFlag = "--status-out"
+
+// publishFlag names the flag that publishes the status, and on its own posts
+// it here.
+const publishFlag = "--publish"
 
 // runURL points the status at the job that produced it, so a reader can
 // reach the reasoning behind a one-line description.

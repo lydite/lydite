@@ -210,3 +210,138 @@ func TestReviewStatusOutRefusesWithoutAnEvent(t *testing.T) {
 		t.Error("a refused run wrote a status document")
 	}
 }
+
+// reviewFlowUncoveredRepo is a change no exemption covers, which every
+// publishing run below would refer if it got as far as publishing.
+func reviewFlowUncoveredRepo(t *testing.T) (dir, base string) {
+	t.Helper()
+	return reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"})
+}
+
+// reviewFlowNoReport fails the test when the run left a report behind: a
+// verdict that was not published leaves no review.json and no stdout report,
+// because either would be the only record a reader has and it would say the
+// run finished.
+func reviewFlowNoReport(t *testing.T, dir, out string) {
+	t.Helper()
+	if _, err := os.Stat(documentPath(reportsDir(dir), "review")); err == nil {
+		t.Error("a run that did not publish wrote review.json")
+	}
+	if strings.Contains(out, "referral") {
+		t.Errorf("a run that did not publish wrote its report:\n%s", out)
+	}
+}
+
+// A run that posts holds a credential, and one with none is refused by the
+// flag that needed it, in the words that say where a workflow grants it.
+func TestReviewPublishWithNoTokenNamesTheToken(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	event, _ := headEvent(t, dir, 7)
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	want := "--publish needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q:\n%s", err, want, out)
+	}
+	reviewFlowNoReport(t, dir, out)
+}
+
+// A repository the platform did not name is refused in trust's own words, and
+// nothing is posted: a credential with no repository to scope it to is not one
+// lydite acts on.
+func TestReviewPublishWithNoRepositoryPostsNothing(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	event, _ := headEvent(t, dir, 7)
+	platform := &fakeForge{}
+	platform.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "")
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_REPOSITORY is not set") {
+		t.Fatalf("err = %v, want trust's refusal of a missing GITHUB_REPOSITORY:\n%s", err, out)
+	}
+	if platform.posts != 0 || len(platform.published) != 0 {
+		t.Errorf("a run with no repository posted %d status(es): %+v", platform.posts, platform.published)
+	}
+	reviewFlowNoReport(t, dir, out)
+}
+
+// A rendered status names a revision too, and the render route's refusal names
+// its own flag rather than one the run was never given.
+func TestReviewStatusOutWithNoEventNamesTheStatusOutFlag(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	t.Setenv("GITHUB_EVENT_PATH", "")
+	out := filepath.Join(t.TempDir(), "status.json")
+
+	report, err := runReview(t, dir, base, "--publish", "--status-out", out)
+	want := "--status-out needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q:\n%s", err, want, report)
+	}
+}
+
+// The direct route with everything but the event is refused by --publish, and
+// posts nothing about a revision it could not name.
+func TestReviewPublishWithNoEventNamesThePublishFlag(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	platform := &fakeForge{}
+	platform.start(t)
+	t.Setenv("GITHUB_EVENT_PATH", "")
+
+	out, err := runReview(t, dir, base, "--publish")
+	want := "--publish needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q:\n%s", err, want, out)
+	}
+	if platform.posts != 0 {
+		t.Errorf("a run with no event posted %d status(es)", platform.posts)
+	}
+	reviewFlowNoReport(t, dir, out)
+}
+
+// An event from some other trigger names no pull request, and the refusal says
+// which trigger the flag belongs on.
+func TestReviewStatusOutRefusesAnEventThatNamesNoPullRequest(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	event := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(event, []byte(`{"ref":"refs/heads/main"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "status.json")
+
+	report, err := runReview(t, dir, base, "--publish", "--status-out", out, "--event", event)
+	want := "the event at " + event + " names no pull request: --status-out belongs on a pull_request trigger"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q:\n%s", err, want, report)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("a refused run wrote a status document")
+	}
+}
+
+// A post the platform refused is a failure, not a verdict, and leaves no
+// report behind that would read as though the run had published.
+func TestReviewFailedPostWritesNoReport(t *testing.T) {
+	dir, base := reviewFlowUncoveredRepo(t)
+	event, _ := headEvent(t, dir, 7)
+	platform := &fakeForge{failPost: 1}
+	platform.start(t)
+
+	out, err := runReview(t, dir, base, "--publish", "--event", event)
+	if err == nil {
+		t.Fatalf("a refused post was reported as published:\n%s", out)
+	}
+	var exit ui.ExitError
+	if errors.As(err, &exit) {
+		t.Errorf("a failed post must not answer as a verdict, got exit %d", exit.Code)
+	}
+	if platform.posts != 1 || len(platform.published) != 0 {
+		t.Errorf("posts = %d, published = %+v; want one refused post", platform.posts, platform.published)
+	}
+	reviewFlowNoReport(t, dir, out)
+}

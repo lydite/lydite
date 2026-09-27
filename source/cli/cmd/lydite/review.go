@@ -9,9 +9,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/flow"
+	reviewflow "lydite/lydite/internal/flows/review"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/runner"
+	reviewstages "lydite/lydite/internal/stages/review"
+	scmstages "lydite/lydite/internal/stages/scm"
 	"lydite/lydite/internal/ui"
 )
 
@@ -60,9 +64,6 @@ of posting it, for a step that posts it under lydite's App identity. Posting it
 here is the path for a repository that has not adopted the reusable workflows,
 and keeps every property of the status; the two are alternatives, not a ladder.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-			report := ui.NewReport("review")
-
 			// Refused before anything is measured. A flag that renders what
 			// another flag decides, given on its own, would otherwise leave a
 			// run that named a destination with nothing written to it and
@@ -70,75 +71,24 @@ and keeps every property of the status; the two are alternatives, not a ladder.`
 			if statusOut != "" && !doPublish {
 				return fmt.Errorf("%s renders the status --publish decides: pass both, or neither", statusOutFlag)
 			}
-
-			// The base is always resolved here, never taken from --surfaces's
-			// document: that document crosses from a job that ran the
-			// change's own code — a Rust component's build.rs, a proc-macro
-			// — to this one, which is about to publish with a credential,
-			// and a base claimed equal to HEAD is exactly the kind of thing
-			// that code could forge to make the diff this run reads look
-			// empty. Trusting it would be trusting the code under review to
-			// say what it was compared against.
-			baseSHA, err := reviewdecision.ResolveBase(ctx, dir, base, baseBranch)
-			if err != nil {
-				return err
-			}
-
-			// A document from --surfaces is reconciled against baseSHA above
-			// and must carry a result for every component this tree says
-			// opted in — neither is taken on the document's own word. With no
-			// document, the comparison runs here, guarded exactly when this
-			// invocation will also publish: that is the one combination where
-			// a Rust comparison would run inside the process about to use a
-			// publishing credential.
-			surfaces, err := reviewdecision.Surfaces(ctx, dir, baseSHA, surfacesPath, doPublish, commandToolchains{cmd}, cmd.ErrOrStderr())
-			if err != nil {
-				return err
-			}
-
-			result, err := reviewdecision.Decide(ctx, reviewdecision.Input{
-				Dir:      dir,
-				Base:     baseSHA,
-				Surfaces: surfaces,
-				Title:    func() string { return pullRequestTitle(cmd.ErrOrStderr(), eventPath) },
-				ScanEvidence: func() bool {
-					return dependencyGatesPassed(dir, reports, cmd.ErrOrStderr())
-				},
-			})
-			if err != nil {
-				return err
-			}
-			for _, warning := range result.Warnings {
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warning)
-			}
-			decision := result.Decision
-
-			if referral.Dirty(ctx, dir) {
-				report.Add(ui.Row{
-					Status: ui.StatusUnmeasured,
-					Label:  "uncommitted changes",
-					Value:  "not included in this verdict",
-				})
-			}
-			if err := addOutcomeRows(report, result.Outcomes); err != nil {
-				return err
-			}
-
-			// Published after the rows are added and from the report's own
-			// verdict, so the status a machine reads and the report a person
-			// reads are the same value rather than two derivations of it.
-			if doPublish {
-				if err := publish(ctx, statusOut, eventPath, decision, report.Verdict()); err != nil {
-					return err
-				}
-			}
-
-			saveDocument(dir, report)
-
-			if err := report.Write(cmd.OutOrStdout(), asJSON, ui.ColorEnabled(cmd.OutOrStdout(), noColor)); err != nil {
-				return err
-			}
-			return report.Err()
+			return runReviewFlow(cmd, reviewflow.Params{
+				Dir:              dir,
+				Base:             base,
+				BaseBranch:       baseBranch,
+				SurfacesDocument: surfacesPath,
+				Toolchains:       commandToolchains{cmd},
+				Progress:         cmd.ErrOrStderr(),
+				// Resolved once, here: the title the decision reads and the
+				// pull request a status names come from the same payload.
+				EventPath:     firstNonEmpty(eventPath, os.Getenv("GITHUB_EVENT_PATH")),
+				Reports:       reports,
+				Scan:          commandScanReader{},
+				TargetURL:     runURL(),
+				StatusOut:     statusOut,
+				Publish:       doPublish,
+				PostsDirectly: doPublish && statusOut == "",
+				RendersOnly:   doPublish && statusOut != "",
+			}, asJSON, noColor)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose "+referral.FileName+" applies")
@@ -164,6 +114,88 @@ and keeps every property of the status; the two are alternatives, not a ladder.`
 		"a "+runner.ReportDir+" directory whose scan document supplies the licence and SCA evidence a conditional exemption needs; repeatable")
 	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
+}
+
+// runReviewFlow runs the review flow and renders what it decided.
+//
+// The decision's warnings are written whether or not a later stage failed: a
+// warning raised before a failure is part of what whoever investigates the
+// failure reads. A run that failed writes no rows, no review.json and no
+// report — the status it was asked to publish was not, and a report saying
+// otherwise would be the only record a reader has.
+func runReviewFlow(cmd *cobra.Command, p reviewflow.Params, asJSON, noColor bool) error {
+	// Made first: a report times the run from its own creation.
+	report := ui.NewReport("review")
+	review, err := reviewflow.New()
+	if err != nil {
+		return err
+	}
+	r, err := review.Run(cmd.Context(), p.Inputs())
+	if decided, outErr := flow.Output[reviewstages.DecideOut](r, reviewflow.StageDecide); outErr == nil {
+		for _, warning := range decided.Warnings {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warning)
+		}
+	}
+	if err != nil {
+		return reviewError(err, reviewRoute(p))
+	}
+
+	dirty, err := flow.Output[reviewstages.CheckDirtyOut](r, reviewflow.StageCheckDirty)
+	if err != nil {
+		return err
+	}
+	if dirty.Dirty {
+		report.Add(ui.Row{
+			Status: ui.StatusUnmeasured,
+			Label:  "uncommitted changes",
+			Value:  "not included in this verdict",
+		})
+	}
+	decided, err := flow.Output[reviewstages.DecideOut](r, reviewflow.StageDecide)
+	if err != nil {
+		return err
+	}
+	if err := addOutcomeRows(report, decided.Result.Outcomes); err != nil {
+		return err
+	}
+
+	saveDocument(p.Dir, report)
+
+	if err := report.Write(cmd.OutOrStdout(), asJSON, ui.ColorEnabled(cmd.OutOrStdout(), noColor)); err != nil {
+		return err
+	}
+	return report.Err()
+}
+
+// reviewRoute names the flag a publishing run's failure is reported against:
+// the one that renders the status when it is rendered, and the one that
+// posts it otherwise.
+func reviewRoute(p reviewflow.Params) string {
+	if p.RendersOnly {
+		return statusOutFlag
+	}
+	return publishFlag
+}
+
+// reviewError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it, with a missing credential and a missing
+// or foreign event each named by the flag that needed them.
+//
+// A repository trust refuses is reported in trust's own words. Its errors are
+// untyped, and telling a missing repository from a malformed one apart would
+// mean matching another package's prose.
+func reviewError(err error, flag string) error {
+	if errors.Is(err, scmstages.ErrNoCredential) {
+		return noTokenError(flag)
+	}
+	var failed *flow.StageError
+	if !errors.As(err, &failed) {
+		return err
+	}
+	if failed.Stage == reviewflow.StageLoadPullRequest {
+		return pullRequestError(flag, failed.Err)
+	}
+	return failed.Err
 }
 
 // commandScanReader reads a report directory's scan document the way every
