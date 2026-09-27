@@ -323,6 +323,29 @@ func TestAPushThatNeverLandsFailsTheRecording(t *testing.T) {
 	}
 }
 
+// A write that never landed says why beneath its failing row, in the state
+// branch's own words: "did not land" names the outcome, and the push that was
+// refused is the one thing a reader can act on.
+func TestAPushThatNeverLandsSaysWhyTheWriteFailed(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	rejectPushes(t, root)
+
+	out, _, err := runRecordCmd(t, root, "--json")
+	if err == nil {
+		t.Fatalf("record reported success even though every push was rejected\n%s", out)
+	}
+	row := jsonRows(t, out)["record"]
+	if row.Status != "fail" || len(row.Detail) != 1 {
+		t.Fatalf("record = %+v, want a failure carrying the write's own error", row)
+	}
+	if !strings.Contains(row.Detail[0], "pushing the recording for") {
+		t.Errorf("record detail = %q, want the state branch's own push error", row.Detail[0])
+	}
+}
+
 // A recording carrying no baseline is writing only the ledger, and a failed
 // append is never a failing row: the branch is shared and busy, a push race is
 // routine, and failing a consumer's build over one would erode trust in a gate

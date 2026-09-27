@@ -569,8 +569,8 @@ func TestEveryHistoryReasonSaysWhyNothingWasAppended(t *testing.T) {
 			t.Errorf("historyWhy(%d) = %q, %v; want %q", tc.composed.Reason, got, err, tc.want)
 		}
 	}
-	if _, err := historyWhy(recordstages.ComposeHistoryOut{}); err == nil {
-		t.Error("a history nothing composed was given a reason")
+	if got, err := historyWhy(recordstages.ComposeHistoryOut{}); err == nil || got != "" {
+		t.Errorf("historyWhy(0) = %q, %v; want no reason and an error for a history nothing composed", got, err)
 	}
 }
 
