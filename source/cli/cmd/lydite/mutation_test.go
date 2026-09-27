@@ -1630,6 +1630,50 @@ func TestOnlyAnAffectedComponentIsMutated(t *testing.T) {
 	}
 }
 
+// A component --affected skips is interleaved back into declaration order
+// rather than sorted after the ones that ran, so a component declared between
+// two others sits between them whatever selection did to it.
+func TestAffectedInterleavesASkippedComponentInDeclarationOrder(t *testing.T) {
+	decl := "components:\n" +
+		"  - name: before\n    dir: before\n    runner: go-test\n" +
+		"  - name: app\n    dir: app\n    runner: go-test\n    args: [\"./...\"]\n" +
+		"  - name: after\n    dir: after\n    runner: go-test\n"
+	root := goModuleRepoWith(t, decl, "app",
+		map[string]string{"before/.keep": "", "after/.keep": ""},
+		deeper, killsItsMutants)
+
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main", "--affected")
+	if err != nil {
+		t.Fatalf("an affected run failed: %v\n%+v", err, doc.Rows)
+	}
+
+	var order []string
+	for _, r := range doc.Rows {
+		switch r.Label {
+		case mutationLabel("before"), mutationLabel("app"), mutationLabel("after"):
+			order = append(order, r.Label)
+		}
+	}
+	want := []string{mutationLabel("before"), mutationLabel("app"), mutationLabel("after")}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("component rows are %v, want declaration order %v", order, want)
+	}
+
+	for _, name := range []string{"before", "after"} {
+		r, ok := rowNamed(doc, mutationLabel(name))
+		if !ok {
+			t.Fatalf("the skipped component %s took no row", name)
+		}
+		if r.Status != ui.StatusUnmeasured || r.Value != "not affected" {
+			t.Errorf("%s = %+v, want unmeasured/not affected", name, r)
+		}
+	}
+	app, ok := rowNamed(doc, mutationLabel("app"))
+	if !ok || app.Status != ui.StatusPass {
+		t.Fatalf("app = %+v, want the component the change touched to have run", app)
+	}
+}
+
 // --base-sha is the commit it names and nothing else: no fetch and no
 // merge-base, which is what lets a run on the default branch have a range at
 // all. The fixture is two commits deep so the two flags name different
@@ -2130,5 +2174,56 @@ func TestAComponentDeclaringNoSuiteIsNotScheduledForMutation(t *testing.T) {
 	}
 	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, noSuiteReason) {
 		t.Errorf("mutation(scripts) = %+v, want unmeasured, naming that it declares no suite", row)
+	}
+}
+
+// A run writes its counts to mutants.json beside its report, and a
+// .gitignore that keeps the whole reports directory out of what a later run
+// measures — the same directory `lydite mutation` reads its own diff over.
+func TestARunWritesMutantsJSONAndIgnoresItsOwnReports(t *testing.T) {
+	root := goModuleRepo(t, deeper, killsItsMutants)
+	doc, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main")
+	if err != nil {
+		t.Fatalf("a suite that kills every mutant failed: %v\n%+v", err, doc.Rows)
+	}
+
+	gitignore, err := os.ReadFile(filepath.Join(reportsDir(root), ".gitignore"))
+	if err != nil {
+		t.Fatalf("no .gitignore was written beside the reports: %v", err)
+	}
+	if string(gitignore) != "*\n" {
+		t.Errorf(".gitignore = %q, want the whole directory ignored", gitignore)
+	}
+
+	written, err := readMutants(reportsDir(root))
+	if err != nil {
+		t.Fatalf("mutants.json was not written or would not read back: %v", err)
+	}
+	if written.Tree == "" {
+		t.Error("the counts document names no tree")
+	}
+	counts, ok := written.Components["app"]
+	if !ok {
+		t.Fatal("the component that ran took no entry in the counts document")
+	}
+	if counts.Killed == 0 || counts.ElapsedSeconds == 0 {
+		t.Errorf("counts = %+v, want a killed count and an elapsed time from the run", counts)
+	}
+}
+
+// A component nothing measured leaves no entry in the counts document at
+// all — never a zeroed one, which mutants.json's own contract reads
+// permanently as a suite that killed everything.
+func TestAComponentThatDidNotRunHasNoEntryInMutantsJSON(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n    mutation: false\n")
+	if _, _, err := runMutationCmd(t, "--dir", root, "--base-branch", "main"); err != nil {
+		t.Fatal("an opted-out component failed the run")
+	}
+	written, err := readMutants(reportsDir(root))
+	if err != nil {
+		t.Fatalf("mutants.json was not written: %v", err)
+	}
+	if _, ok := written.Components["app"]; ok {
+		t.Error("an opted-out component that never ran took an entry in the counts document")
 	}
 }

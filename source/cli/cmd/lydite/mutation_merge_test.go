@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/ui"
 )
@@ -63,6 +65,30 @@ func writeComponentLog(t *testing.T, dir, name string, lines ...string) {
 func mutationRowOf(name string) ui.Row {
 	return ui.Row{Status: ui.StatusPass, Label: mutationLabel(name),
 		Value: "1 of 1 mutant(s) killed in 1s"}
+}
+
+// mutationShardWithFindings writes one shard's report directory carrying both
+// its rows and the findings its own survivors made, the way a real run leaves
+// them beside each other in one document.
+func mutationShardWithFindings(t *testing.T, findings []finding.Finding, rows ...ui.Row) string {
+	t.Helper()
+	dir := t.TempDir()
+	rep := ui.NewReport("mutation")
+	rep.AddFindings(findings...)
+	for _, r := range rows {
+		rep.Add(r)
+	}
+	f, err := os.Create(filepath.Join(dir, documentName("mutation"))) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rep.WriteJSON(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // foldedShardsRow folds the given shard directories and returns the row that
@@ -272,5 +298,39 @@ func TestTheMutationFoldReportsANoSuiteComponentFromItsDeclaration(t *testing.T)
 	}
 	if got, _ := rowNamed(doc, mutationLabel("a")); got.Status != killed.Status || got.Value != killed.Value {
 		t.Errorf("mutation(a) = %+v, want the shard's row folded unchanged", got)
+	}
+}
+
+// readShards adds every shard's findings as they arrive, in --reports order —
+// never re-sorted by declaration order or by component name. The declaration
+// here (mergeRepo) names "a" before "b", and this passes --reports with "b"'s
+// shard first, so a fold that reordered findings to match the declaration
+// would report "a" first instead.
+func TestFindingsCrossShardsInReportsOrderNotDeclarationOrder(t *testing.T) {
+	root := mergeRepo(t)
+	bSurvivor := finding.Finding{Gate: "mutation", Component: "b", Row: mutationLabel("b"),
+		Path: "modb/b.go", Line: 3, Message: "b survived",
+		Site: string(mutation.NegateConditional) + "\x1f<\x1f>="}
+	aSurvivor := finding.Finding{Gate: "mutation", Component: "a", Row: mutationLabel("a"),
+		Path: "moda/a.go", Line: 5, Message: "a survived",
+		Site: string(mutation.NegateConditional) + "\x1f<\x1f>="}
+
+	shardB := mutationShardWithFindings(t, []finding.Finding{bSurvivor},
+		ui.Row{Status: ui.StatusFail, Label: mutationLabel("b"), Value: "1 of 2 mutant(s) survived in 3s",
+			Detail: []string{bSurvivor.Message}})
+	shardA := mutationShardWithFindings(t, []finding.Finding{aSurvivor},
+		ui.Row{Status: ui.StatusFail, Label: mutationLabel("a"), Value: "1 of 2 mutant(s) survived in 3s",
+			Detail: []string{aSurvivor.Message}})
+
+	doc, err := runMutationMerge(t, root, shardB, shardA)
+	if err == nil {
+		t.Error("a survivor did not fail the fold")
+	}
+	if len(doc.Findings) != 2 {
+		t.Fatalf("findings = %+v, want exactly the two survivors", doc.Findings)
+	}
+	if doc.Findings[0].Component != "b" || doc.Findings[1].Component != "a" {
+		t.Errorf("findings are in component order %q, %q; want the --reports order (b's shard first)",
+			doc.Findings[0].Component, doc.Findings[1].Component)
 	}
 }
