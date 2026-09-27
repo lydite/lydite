@@ -145,23 +145,41 @@ func TestALicenceCountIsSeededOnlyWhereAPolicyGates(t *testing.T) {
 	}
 }
 
-// A root-scoped claim is recorded even when the gate that makes them is
-// switched off, rather than panicking on a map the configuration said would
-// never be needed.
+// A root-scoped claim is recorded even when every root-scoped gate is switched
+// off, rather than panicking on a map the configuration said would never be
+// needed.
 //
 // Semgrep off means scan runs it over nothing, so this is the shape no run
 // produces — which is exactly why the map has to be created on demand: a count
 // arriving for a gate the configuration did not expect must be recorded, and a
 // write to a nil map is a crash in the one job holding a token that can push.
+// Gitleaks is off too, so nothing has seeded the map before the claim arrives.
 func TestARootScopedClaimIsRecordedWithItsGateSwitchedOff(t *testing.T) {
 	cfg := config.Default()
 	cfg.Semgrep.Enabled = false
+	cfg.Secrets.Enabled = false
 	_, root := recordFindingCounts(t.TempDir(), component.File{}, cfg, []finding.Finding{{
 		Gate: semgrep.Gate, Path: "svc/lib.go", Line: 2, Message: "tainted input",
 		Site: "rule\x1fn + 1",
 	}}, true)
 	if got := root[semgrep.Gate]; got != 1 {
 		t.Errorf("semgrep = %d, want the claim recorded rather than dropped or panicked on", got)
+	}
+}
+
+// A root-scoped claim is counted beside the noughts the enabled root-scoped
+// gates seeded, never in place of them: a gitleaks claim leaves semgrep's clean
+// run recorded as 0 rather than as a gate that never ran.
+func TestARootScopedClaimKeepsTheOtherGatesSeededNought(t *testing.T) {
+	_, root := recordFindingCounts(t.TempDir(), component.File{}, config.Default(), []finding.Finding{{
+		Gate: secrets.Gate, Path: "cli/config.yml", Line: 3,
+		Message: "Detected a Generic API Key. Rotate this credential",
+		Site:    "generic-api-key\x1faws_key: ",
+	}}, true)
+
+	want := map[string]int{semgrep.Gate: 0, secrets.Gate: 1}
+	if !reflect.DeepEqual(root, want) {
+		t.Errorf("root = %v, want %v", root, want)
 	}
 }
 

@@ -1,9 +1,10 @@
 package recordstages
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
@@ -123,10 +124,9 @@ func ComposeHistory(ctx context.Context, in ComposeHistoryIn) (ComposeHistoryOut
 		// branch it fetched and never carry an earlier attempt's.
 		rec := entry
 		// No scope is no scan, and a recording that measured no bucket has
-		// nothing to diff against what the branch holds open.
-		if len(scope) > 0 {
-			rec.FindingEvents = findingEvents(scope, in.Found, open)
-		}
+		// nothing to diff against what the branch holds open: findingEvents
+		// diffs no bucket outside scope, so it answers nil for an empty one.
+		rec.FindingEvents = findingEvents(scope, in.Found, open)
 		if gap, ok := gapBefore(ctx, in.Dir, branch, head, previous, hasPrevious); ok {
 			return []ledger.Record{gap, rec}, nil
 		}
@@ -215,18 +215,16 @@ func findingEvents(scope map[ledger.FindingBucket]bool, found []finding.Finding,
 			}
 		}
 	}
-	sort.Slice(events, func(i, j int) bool {
-		a, b := events[i], events[j]
-		if a.Gate != b.Gate {
-			return a.Gate < b.Gate
-		}
-		if a.Component != b.Component {
-			return a.Component < b.Component
-		}
-		if a.Transition != b.Transition {
-			return a.Transition < b.Transition
-		}
-		return a.Fingerprint < b.Fingerprint
+	// No two events share all four keys — a bucket's appearances come from one
+	// map keyed by fingerprint and its resolutions from another — so the order
+	// is total.
+	slices.SortFunc(events, func(a, b ledger.FindingEvent) int {
+		return cmp.Or(
+			cmp.Compare(a.Gate, b.Gate),
+			cmp.Compare(a.Component, b.Component),
+			cmp.Compare(a.Transition, b.Transition),
+			cmp.Compare(a.Fingerprint, b.Fingerprint),
+		)
 	})
 	return events
 }

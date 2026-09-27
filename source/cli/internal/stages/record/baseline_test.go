@@ -278,8 +278,8 @@ func TestTheZeroVerdictIsNoVerdict(t *testing.T) {
 func TestMissingFromRecordNamesADeclaredComponentTheFoldLacks(t *testing.T) {
 	decl := component.File{Components: []component.Component{recordMeasured("svc")}}
 	full := Measurements{Components: map[string]Measurement{"svc": {Entry: recordEntry(2, 4)}}}
-	if gap, blocked := MissingFromRecord(decl, full); blocked {
-		t.Errorf("a complete fold was blocked by %q", gap)
+	if gap, blocked := MissingFromRecord(decl, full); blocked || gap != "" {
+		t.Errorf("MissingFromRecord of a complete fold = (%q, %v), want no gap named and nothing blocked", gap, blocked)
 	}
 	empty := Measurements{Components: map[string]Measurement{}}
 	gap, blocked := MissingFromRecord(decl, empty)
