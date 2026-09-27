@@ -36,6 +36,24 @@ func TestLoadConfigWithNoFileIsTheDefaults(t *testing.T) {
 		t.Errorf("LoadConfig with no file: SemgrepEnabled = %v, SecretsEnabled = %v; want both on, as the defaults are",
 			out.SemgrepEnabled, out.SecretsEnabled)
 	}
+	if out.SemgrepConfig != def.Semgrep.Config {
+		t.Errorf("LoadConfig with no file: SemgrepConfig = %q, want the default %q", out.SemgrepConfig, def.Semgrep.Config)
+	}
+}
+
+// SemgrepConfig is the flat restatement semgrep's stage binds Config from, so
+// it must follow semgrep.config exactly, default or overridden.
+func TestLoadConfigStatesSemgrepConfigFromItsOwnKey(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, config.FileName, "semgrep:\n  config: p/security-audit\n")
+	out, err := LoadConfig(context.Background(), LoadConfigIn{Dir: dir})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if out.SemgrepConfig != "p/security-audit" || out.Config.Semgrep.Config != "p/security-audit" {
+		t.Errorf("SemgrepConfig = %q, Config.Semgrep.Config = %q; want %q",
+			out.SemgrepConfig, out.Config.Semgrep.Config, "p/security-audit")
+	}
 }
 
 // The flat switches are what a flow's conditions read, so each must follow

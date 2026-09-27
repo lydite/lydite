@@ -1,6 +1,10 @@
-// Package scanstages holds the stages `lydite scan` is built from: reading the
-// configuration and the component declaration, resolving the diff base a
-// finding is anchored against, and reading the lines the change touched.
+// Package scanstages holds the stages `lydite scan` is built from: reading
+// the configuration and the component declaration, resolving the diff base a
+// finding is anchored against and the lines the change touched, provisioning
+// each scanned component's language toolchain, warning about source no
+// declared component covers, planning and running each component's language
+// checks and licence gate, and running the two root-scoped scanners, Semgrep
+// and gitleaks.
 //
 // Every stage is a plain function of its own In. Nothing here reads the
 // process environment: whatever a stage needs from it, such as whether a
@@ -21,16 +25,18 @@ type LoadConfigIn struct {
 	Dir string
 }
 
-// LoadConfigOut is the configuration in force, and the switches a flow's
-// conditions read off it.
+// LoadConfigOut is the configuration in force, and the switches and values a
+// flow's conditions and bindings read off it.
 //
 // SemgrepEnabled and SecretsEnabled restate two fields of Config as top-level
-// bools, because a flow condition binds only a top-level bool field of an Out
-// and cannot reach into Config for them.
+// bools, and SemgrepConfig restates one as a top-level string, because a flow
+// condition or binding reaches only a top-level field of an Out and cannot
+// reach into Config for them.
 type LoadConfigOut struct {
 	Config         config.Config
 	SemgrepEnabled bool
 	SecretsEnabled bool
+	SemgrepConfig  string
 }
 
 // LoadConfig reads .lydite/config.yml from the scan root, merged onto the
@@ -45,6 +51,7 @@ func LoadConfig(_ context.Context, in LoadConfigIn) (LoadConfigOut, error) {
 		Config:         cfg,
 		SemgrepEnabled: cfg.Semgrep.Enabled,
 		SecretsEnabled: cfg.Secrets.Enabled,
+		SemgrepConfig:  cfg.Semgrep.Config,
 	}, nil
 }
 

@@ -25,8 +25,9 @@ type Toolchains interface {
 
 // Environment composes a component's declared environment onto its
 // provisioned toolchain, and reports what a declaration alone contributed —
-// the two questions run-checks needs answered to compose a check's
-// environment and to warn about it without ever printing a value.
+// the two questions plan-components and run-checks each need answered, to
+// compose a check's environment and to warn about it without ever printing a
+// value.
 type Environment interface {
 	// Compose is a component's checks environment: the toolchain's own
 	// PATH and variables, with the component's declared ones layered on.
