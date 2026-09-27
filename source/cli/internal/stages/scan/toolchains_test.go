@@ -336,6 +336,52 @@ func TestWarnUnscannedIsSilentAboutARawCommandComponent(t *testing.T) {
 	}
 }
 
+// A repository whose every component declares a raw command and no lang has
+// no source in a language lydite knows by construction, so git tracking no
+// recognised source at all — orphan.ErrNoFiles — is that repository's
+// ordinary state, not something the "could not check" warning should fire on.
+func TestWarnUnscannedIsSilentWhenNoComponentDeclaresALanguageAndGitTracksNoSource(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, component.FileName,
+		"components:\n  - name: legacy\n    dir: legacy\n    command: [\"make\", \"check\"]\n")
+	write(t, dir, "legacy/Makefile", "check:\n\techo ok\n")
+	gitInit(t, dir)
+
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warning, out := warnUnscanned(t, dir, file, config.Default())
+	if len(out.Gaps) != 0 {
+		t.Fatalf("gaps = %+v, want none: git tracks no recognised source", out.Gaps)
+	}
+	if len(warning) != 0 {
+		t.Errorf("warning = %q, want silence: no component declares a language for ErrNoFiles to be worth reporting", warning)
+	}
+}
+
+// A component that does declare a language is a claim WarnUnscanned should
+// be able to check — so when git tracks no source to check it against, that
+// is worth saying, unlike the raw-command repository above.
+func TestWarnUnscannedWarnsWhenADeclaredLanguageCannotBeChecked(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, component.FileName, "components:\n  - name: legacy\n    dir: legacy\n    lang: go\n")
+	write(t, dir, "legacy/Makefile", "check:\n\techo ok\n")
+	gitInit(t, dir)
+
+	file, err := component.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warning, out := warnUnscanned(t, dir, file, config.Default())
+	if len(out.Gaps) != 0 {
+		t.Fatalf("gaps = %+v, want none: WarnUnscanned reports nothing to a caller on this path", out.Gaps)
+	}
+	if !strings.Contains(string(warning), "could not check") {
+		t.Errorf("warning = %q, want the could-not-check warning: a declared language went unchecked", warning)
+	}
+}
+
 // The .js family is the extension of build output, configuration and tooling
 // glue in every ecosystem, so a stray one is not an unscanned codebase.
 func TestWarnUnscannedIgnoresAStrayJavaScriptFile(t *testing.T) {
