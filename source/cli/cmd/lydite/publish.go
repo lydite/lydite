@@ -1,37 +1,18 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
-	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/flow"
+	publishflow "lydite/lydite/internal/flows/publish"
 	"lydite/lydite/internal/runner"
+	publishstages "lydite/lydite/internal/stages/publish"
 	"lydite/lydite/internal/ui"
 )
-
-// concerns is the order sections appear in, and what each command is called
-// where a reader sees it.
-//
-// Declared rather than derived from what the run happens to have produced, so
-// two pull requests never present the same four concerns in a different order.
-// A document naming a command that is not here still renders — under its own
-// name, after these — because dropping it would hide a result.
-var concerns = []struct {
-	command string
-	title   string
-}{
-	{"review", "referral"},
-	{"scan", "scan"},
-	{"test", "test"},
-	{"mutation", "mutation"},
-}
 
 // newPublishCmd renders the standing pull-request comment from the documents
 // one or more runs wrote.
@@ -64,8 +45,22 @@ func newPublishCmd() *cobra.Command {
 			if len(reports) == 0 {
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
-			comment := buildComment(reports, base, expect...)
-			return writeComment(cmd.OutOrStdout(), out, comment.Render())
+			render, err := publishflow.New()
+			if err != nil {
+				return err
+			}
+			_, err = render.Run(cmd.Context(), publishflow.Params{
+				Dirs:          reports,
+				Expect:        expect,
+				Base:          base,
+				Version:       version,
+				ReadDocuments: readDocuments,
+				ReadLog:       readLog,
+				TailLines:     tailLines,
+				Out:           out,
+				Stdout:        cmd.OutOrStdout(),
+			}.Inputs())
+			return publishError(err)
 		},
 	}
 	cmd.Flags().StringSliceVar(&reports, "reports", nil,
@@ -77,463 +72,45 @@ func newPublishCmd() *cobra.Command {
 	return cmd
 }
 
-// buildComment folds every named directory into one comment.
+// publishError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it.
+func publishError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
+	}
+	return err
+}
+
+// buildComment is the comment the publish flow renders from dirs, run exactly
+// as the command runs it with the rendered body discarded.
 //
-// A directory that is absent, unreadable, or holds no document is rendered as
-// an unmeasured section naming what was missing — never omitted. A section
-// that quietly disappears is indistinguishable from a concern that passed,
-// which is the wardnet#957 failure: a pull request read green while the gate
-// that would have failed it had never run.
-//
-// Naming a directory is not enough to catch that failure on its own. A job
-// that dies before it uploads leaves no artifact, so the directory it would
-// have been downloaded into never exists and the caller's glob never names it
-// — the concern reaches this function as nothing at all rather than as
-// something that could not be read. expect is what closes that: a command
-// named there and found in no directory renders as unmeasured in its declared
-// place, exactly as an unreadable directory does. A command not named there is
-// considered only if a document for it arrives, which is what lets a run that
-// legitimately skips a concern say nothing about it.
+// Every error it can see means the flow is miswired rather than that a
+// directory could not be read — an unreadable directory is a section of the
+// comment, not a failure — so it panics rather than return an empty comment a
+// caller would read as one that rendered nothing.
 func buildComment(dirs []string, base string, expect ...string) ui.Comment {
-	found := map[string][]section{}
-	var missing []string
-	for _, dir := range dirs {
-		docs, err := readDocuments(dir)
-		if err != nil {
-			missing = append(missing, fmt.Sprintf("`%s` — %s", dir, reason(err)))
-			continue
-		}
-		if len(docs) == 0 {
-			missing = append(missing, fmt.Sprintf("`%s` — holds no report document", dir))
-			continue
-		}
-		for _, doc := range docs {
-			found[doc.Command] = append(found[doc.Command], section{dir: dir, doc: doc})
-		}
+	render, err := publishflow.New()
+	if err != nil {
+		panic(err)
 	}
-
-	expected := map[string]bool{}
-	for _, command := range expect {
-		if command = strings.TrimSpace(command); command != "" {
-			expected[command] = true
-		}
+	r, err := render.Run(context.Background(), publishflow.Params{
+		Dirs:          dirs,
+		Expect:        expect,
+		Base:          base,
+		Version:       version,
+		ReadDocuments: readDocuments,
+		ReadLog:       readLog,
+		TailLines:     tailLines,
+		Out:           "-",
+		Stdout:        io.Discard,
+	}.Inputs())
+	if err != nil {
+		panic(err)
 	}
-
-	comment := ui.Comment{Standing: true, Version: version, Base: shortSHA(base)}
-	for _, concern := range concerns {
-		for _, s := range found[concern.command] {
-			comment.Sections = append(comment.Sections, s.render(concern.title))
-		}
-		if len(found[concern.command]) == 0 && expected[concern.command] {
-			comment.Sections = append(comment.Sections, absentConcern(concern.command, concern.title))
-		}
-		delete(found, concern.command)
-		delete(expected, concern.command)
+	built, err := flow.Output[publishstages.BuildOut](r, publishflow.StageBuildComment)
+	if err != nil {
+		panic(err)
 	}
-	for _, command := range sortedKeys(found) {
-		for _, s := range found[command] {
-			comment.Sections = append(comment.Sections, s.render(command))
-		}
-		delete(expected, command)
-	}
-	// A command expected under a name this binary does not declare renders
-	// after the declared concerns, under its own name — the rule a document
-	// naming an undeclared command already follows.
-	for _, command := range sortedNames(expected) {
-		comment.Sections = append(comment.Sections, absentConcern(command, command))
-	}
-	if len(missing) > 0 {
-		comment.Sections = append(comment.Sections, ui.CommentSection{
-			Status:  ui.StatusUnmeasured,
-			Title:   "missing reports",
-			Summary: fmt.Sprintf("%d input(s) produced nothing to read", len(missing)),
-			Items:   missing,
-		})
-	}
-	comment.Verdict = verdictOf(comment.Sections)
-	comment.Headline = headline(comment.Sections, comment.Verdict)
-	return comment
-}
-
-// absentConcern is the section a concern gets when the run expected it and no
-// directory the comment was rendered from holds its document.
-//
-// Unmeasured, and titled as the concern itself rather than folded into the
-// missing-reports section, because what a reader has to be told is which
-// concern reached no verdict — the directory it would have been in is the
-// caller's bookkeeping and may never have existed to be named.
-func absentConcern(command, title string) ui.CommentSection {
-	return ui.CommentSection{
-		Status:  ui.StatusUnmeasured,
-		Title:   title,
-		Summary: "nothing reported",
-		Items: []string{fmt.Sprintf(
-			"the run expected a `%s` report and none of its inputs holds one", command)},
-	}
-}
-
-// section is one document, and where it was read from — which is what a row's
-// log has to be resolved against.
-type section struct {
-	dir string
-	doc ui.Document
-}
-
-// render turns one document into one collapsible section.
-//
-// The mapping is deliberately generic: a row's label is what was checked and
-// its value is what that answered, whichever command produced it. So a
-// referral's rows, a scan's and a suite's all render through one path, and a
-// command lydite grows later needs nothing here. It is also why `review` has
-// no comment-rendering code of its own any more.
-func (s section) render(title string) ui.CommentSection {
-	out := ui.CommentSection{Status: worst(s.doc.Rows), Title: title, Summary: counts(s.doc.Rows)}
-	byRow := map[string][]finding.Finding{}
-	for _, f := range s.doc.Findings {
-		byRow[f.Row] = append(byRow[f.Row], f)
-	}
-	for _, row := range s.doc.Rows {
-		out.Rows = append(out.Rows, ui.CommentRow{Status: row.Status, Check: row.Label, Result: row.Value})
-	}
-	// Only a row the reader has to act on. A clean run has a log per check
-	// and pasting all of them would bury the verdict under the thing that
-	// went right; the row still names its log, and the artifact still holds
-	// it.
-	//
-	// A referral is one of those rows, and the one whose detail is least
-	// replaceable: its value says what the verdict is and its detail says
-	// what about this change produced it — which paths no exemption covers,
-	// or which disqualifier fired, and what the reader can do about it. A
-	// section carrying `referral … no exemptions declared` and nothing else
-	// reads as a misconfiguration rather than as the answer it is. The
-	// terminal has said this all along; the comment is where the person whose
-	// change it is actually reads it.
-	var quoted int
-	for _, row := range s.doc.Rows {
-		if row.Status != ui.StatusFail && row.Status != ui.StatusRefer {
-			continue
-		}
-		quoted++
-		if quoted > detailCap {
-			continue
-		}
-		out.Details = append(out.Details, ui.CommentDetail{
-			Title: row.Label,
-			Lines: detailFor(s.dir, row, byRow[row.Label]),
-			Log:   row.Log,
-		})
-	}
-	if rest := quoted - detailCap; rest > 0 {
-		out.Items = append(out.Items,
-			fmt.Sprintf("%d further result(s) are in the run's artifact rather than here", rest))
-	}
-	return out
-}
-
-// detailFor is what a failing row says in the comment, once the claims that
-// have a line of their own have been taken out of it.
-//
-// A finding that reaches the change is a thread on the line it is about, and
-// repeating it here would be the same claim in two places — one of which a
-// reader cannot resolve and neither of which says which is the real one. So
-// the comment keeps the claims that reach the change nowhere, and counts the
-// rest rather than listing them: a reader has to be told the section is not
-// the whole story, or a failing row with every claim on a line reads as a row
-// with nothing under it.
-//
-// The narrowing is unconditional. It does not ask whether threads are being
-// posted, because a developer running `lydite publish` locally has to read
-// exactly the comment a reviewer sees — the parity property ADR 0023 exists
-// for, and one that a comment rendered differently depending on a hosting
-// platform would lose.
-//
-// A row with no findings at all quotes what it always did. It is what every
-// gate that emits none still has, and what the row's own author chose to put
-// next to the verdict.
-//
-// The cost is that a row's asides — "3 did not compile" — leave the comment
-// with the rest of the Detail, because a row renders one or the other. They
-// are still on the terminal and in the log the row names.
-func detailFor(dir string, row ui.Row, found []finding.Finding) []string {
-	if len(found) == 0 {
-		return failureLines(dir, row)
-	}
-	var lines []string
-	var located, over int
-	for _, f := range found {
-		if f.Anchor != finding.AnchorNowhere {
-			located++
-			continue
-		}
-		if len(lines) == tailLines {
-			over++
-			continue
-		}
-		lines = append(lines, claimLine(f))
-	}
-	// Bounded the way a quoted log already is. Every scanner emits findings,
-	// so one row over a repository with standing debt lists hundreds; a
-	// comment over the platform's 65,536-byte limit is refused outright, and a
-	// section that vanishes reads as a concern that passed.
-	if over > 0 {
-		lines = append(lines, fmt.Sprintf("%d more finding(s) in this row. The run's log holds all of them.", over))
-	}
-	if located > 0 {
-		lines = append(lines, fmt.Sprintf(
-			"%d finding(s) reach a line of this change, and are threads on those lines rather than rows here.", located))
-	}
-	return lines
-}
-
-// claimLine is one unanchored claim, as the comment shows it.
-//
-// The rule is carried when the gate has one. It is what a reader acts on for
-// a scanner's finding — which rule fired, not only that something did — and
-// it is the one part of the prose a row used to render that no other surface
-// carries: a scanner's claims reach the change nowhere, so they are always
-// here rather than on a line.
-// A claim with no line is shown as the file alone. A dependency advisory whose
-// manifest line cannot be found carries line zero deliberately — the lookup
-// refuses to guess rather than pointing at code the author cannot act on — and
-// `go.mod:0` would put back exactly the invented reference that refusal
-// avoids.
-func claimLine(f finding.Finding) string {
-	at := f.Path
-	if f.Line > 0 {
-		at = fmt.Sprintf("%s:%d", f.Path, f.Line)
-	}
-	if f.Rule == "" {
-		return at + " " + clipClaim(f.Message)
-	}
-	return at + " " + f.Rule + " " + clipClaim(f.Message)
-}
-
-// claimRunes bounds one claim's message.
-//
-// A tool's diagnostic is a scanned repository's own text and nothing bounds it
-// at that end — semgrep's messages run to paragraphs. It is the rule
-// threads.claimText follows for the same content on the other surface, and the
-// reason is the same: a comment a platform refuses is no surface at all.
-const claimRunes = 300
-
-// clipClaim bounds a message, stated as a clamp so a message at exactly the
-// cap and one under it take the same path.
-func clipClaim(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	runes := []rune(s)
-	if len(runes) > claimRunes {
-		return string(runes[:claimRunes]) + "…"
-	}
-	return s
-}
-
-// detailCap is how many rows get their output quoted in one section.
-//
-// A hosting platform refuses a comment over a size limit — GitHub's is 65536
-// bytes — and a refused comment is no surface at all, which is the outcome
-// this whole feature exists to prevent. Forty lines each is generous for the
-// handful of failures a change usually has and ruinous for a repository where
-// twenty components fail at once, so the tail is capped and the remainder is
-// counted. Every failing row is still in the table, and its log is still in
-// the artifact.
-const detailCap = 5
-
-// failureLines is what a failing row shows: the detail it already carries, or the
-// tail of its log when it carries none.
-//
-// Detail first, because it is the reason the row's author chose to put next to
-// the verdict — Biome's findings reach a reader no other way, and clippy,
-// cargo-audit and cargo-deny render the same claim-plus-Finding.Detail prose so
-// their row never has to quote the raw JSON their one run now produces. The log
-// is the fallback for every check that only streams its findings, where the row
-// holds a status and the output holds the reason.
-func failureLines(dir string, row ui.Row) []string {
-	if len(row.Detail) > 0 {
-		return row.Detail
-	}
-	if row.Log == "" {
-		return nil
-	}
-	return readLog(dir, row.Log)
-}
-
-// worst is the section's status: the state the reader has to act on.
-//
-// A failure outranks a referral, which is the report's own precedence asked of
-// one concern, so a section's mark and the run's verdict cannot disagree about
-// which concern is the problem.
-//
-// Unmeasured is the section's status only when nothing in it was decided at
-// all — no row passed, failed, referred or was declined. It is deliberately
-// not promoted by a single unmeasured row among decided ones, because that
-// state is ordinary and expected: `--affected` reports every component it did
-// not select as unmeasured, and `review` reports a dirty working tree the
-// same way. A rule that promoted on any of them would mark a normal run as
-// ungated and put "reported nothing" in the headline of a run that measured
-// everything it was asked to.
-//
-// What that rule must not cost is a concern that went ungated reading as one
-// that passed. It does not: a partly measured section says so in the counts on
-// its own summary line, which is visible without opening it, and a concern
-// whose report never arrived has no decided row at all and so lands here as
-// unmeasured.
-//
-// StatusDeclined is promoted the same way StatusPass is — out of
-// StatusUnmeasured and no further — because a section made entirely of
-// declined rows is a decision stated on purpose, not a gap. A real
-// StatusFail or StatusRefer elsewhere in the same section still outranks it,
-// exactly as either outranks StatusPass.
-func worst(rows []ui.Row) ui.Status {
-	status := ui.StatusUnmeasured
-	for _, row := range rows {
-		switch row.Status {
-		case ui.StatusFail:
-			return ui.StatusFail
-		case ui.StatusRefer:
-			status = ui.StatusRefer
-		case ui.StatusPass:
-			if status == ui.StatusUnmeasured {
-				status = ui.StatusPass
-			}
-		case ui.StatusDeclined:
-			if status == ui.StatusUnmeasured {
-				status = ui.StatusDeclined
-			}
-		}
-	}
-	return status
-}
-
-// counts is the one line visible while a section is shut.
-//
-// Every state is named, including the ones that vote on nothing. Omitting those
-// looked reasonable — a reader scanning shut sections is deciding which to open
-// — and it hides the case the distinction exists for: a run that measured
-// coverage without gating it renders every coverage row as context, so a
-// summary that counted only the voting rows would describe that run and a
-// fully gated one identically. Naming them costs three words and keeps the
-// numbers adding up to the rows behind them.
-func counts(rows []ui.Row) string {
-	tally := map[ui.Status]int{}
-	for _, row := range rows {
-		tally[row.Status]++
-	}
-	var parts []string
-	for _, s := range []struct {
-		status ui.Status
-		word   string
-	}{
-		{ui.StatusFail, "failed"},
-		{ui.StatusRefer, "referred"},
-		{ui.StatusDeclined, "declined"},
-		{ui.StatusUnmeasured, "unmeasured"},
-		{ui.StatusPass, "passed"},
-		{ui.StatusNew, "new"},
-		{ui.StatusContext, "not gated"},
-		{ui.StatusDropped, "dropped"},
-	} {
-		if tally[s.status] > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", tally[s.status], s.word))
-		}
-	}
-	if len(parts) == 0 {
-		return "nothing reported"
-	}
-	return strings.Join(parts, ", ")
-}
-
-// verdictOf is the comment's badge, from the sections rather than from any one
-// document.
-//
-// It repeats ui.Report.Verdict's precedence over a different collection
-// because that is the same question asked of a whole run: a comment covering a
-// failed suite and a passing scan says failed.
-func verdictOf(sections []ui.CommentSection) ui.Verdict {
-	verdict := ui.VerdictPass
-	for _, s := range sections {
-		switch s.Status {
-		case ui.StatusFail:
-			return ui.VerdictFail
-		case ui.StatusRefer:
-			verdict = ui.VerdictRefer
-		}
-	}
-	return verdict
-}
-
-// headline is the one sentence under the badge.
-//
-// It names the concern the reader has to act on rather than restating the
-// badge, which is directly above it and already says the word. An unmeasured
-// section is called out even when nothing failed: a run that gated less than
-// it was asked to must not read as a clean one.
-//
-// A declined section is not collected here at all. "No verdict came from
-// mutation" is the wardnet#957 sentence for a report that never arrived; a
-// concern the repository chose not to run has nothing missing to report, so
-// it falls through to "every check passed" alongside the sections that
-// genuinely did.
-func headline(sections []ui.CommentSection, verdict ui.Verdict) string {
-	var failed, referred, unmeasured []string
-	for _, s := range sections {
-		switch s.Status {
-		case ui.StatusFail:
-			failed = append(failed, s.Title)
-		case ui.StatusRefer:
-			referred = append(referred, s.Title)
-		case ui.StatusUnmeasured:
-			unmeasured = append(unmeasured, s.Title)
-		}
-	}
-	switch {
-	case len(failed) > 0:
-		return strings.Join(failed, " and ") + " did not pass"
-	case len(referred) > 0:
-		return strings.Join(referred, " and ") + " needs a human — comment `/lydite clear` to resolve"
-	case len(unmeasured) > 0 && verdict == ui.VerdictPass:
-		return "everything that ran passed, but no verdict came from " + strings.Join(unmeasured, " or ")
-	default:
-		return "every check passed"
-	}
-}
-
-// reason turns a directory that could not be read into something a reader can
-// act on, rather than a Go error string with a path repeated in it.
-func reason(err error) string {
-	if errors.Is(err, os.ErrNotExist) {
-		return "no such directory, so nothing from it is in this comment"
-	}
-	return err.Error()
-}
-
-func sortedNames(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedKeys(m map[string][]section) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// writeComment puts the comment where the caller asked for it.
-func writeComment(stdout io.Writer, out, body string) error {
-	if out == "-" {
-		_, err := io.WriteString(stdout, body)
-		return err
-	}
-	if dir := filepath.Dir(out); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(out, []byte(body), 0o600)
+	return built.Comment
 }

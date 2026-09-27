@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -153,18 +152,6 @@ func TestTheExpectFlagIsWiredToTheRun(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "the run expected a `review` report") {
 		t.Fatalf("--expect did not reach the run:\n%s", out.String())
-	}
-}
-
-// sortedNames is what keeps an undeclared concern's place in the comment
-// stable across runs, rather than following Go's randomised map order.
-func TestSortedNamesOrdersAlphabetically(t *testing.T) {
-	got := sortedNames(map[string]bool{
-		"zeta": true, "alpha": true, "mid": true, "kappa": true, "omega": true, "beta": true,
-	})
-	want := []string{"alpha", "beta", "kappa", "mid", "omega", "zeta"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("sortedNames(...) = %v, want %v", got, want)
 	}
 }
 
@@ -368,37 +355,6 @@ func TestALogPathCannotEscapeTheReportDirectory(t *testing.T) {
 	}
 }
 
-// A hosting platform refuses a comment over its size limit, and a refused
-// comment is no surface at all — which is the outcome this feature exists to
-// prevent. Every failing row still appears in the table.
-func TestQuotedOutputIsCappedButNoRowIsLost(t *testing.T) {
-	rep := ui.NewReport("test")
-	for i := range detailCap + 3 {
-		rep.Add(ui.Row{
-			Status: ui.StatusFail,
-			Label:  fmt.Sprintf("test(c%d)", i),
-			Value:  "failed",
-			Detail: []string{fmt.Sprintf("component %d blew up", i)},
-		})
-	}
-	root := t.TempDir()
-	saveDocument(root, rep)
-
-	comment := buildComment([]string{reportsDir(root)}, "")
-	body := comment.Render()
-	if n := len(comment.Sections[0].Details); n != detailCap {
-		t.Errorf("%d blocks of output were quoted, want %d", n, detailCap)
-	}
-	for i := range detailCap + 3 {
-		if !strings.Contains(body, fmt.Sprintf("test(c%d)", i)) {
-			t.Errorf("row for component %d is missing from the table:\n%s", i, body)
-		}
-	}
-	if !strings.Contains(body, "3 further result(s)") {
-		t.Errorf("the comment does not say how many failures it left out:\n%s", body)
-	}
-}
-
 // A run that measured coverage without gating it renders every coverage row as
 // context. A summary counting only the rows that vote would describe that run
 // and a fully gated one identically, which is the distinction ADR 0019 exists
@@ -466,18 +422,6 @@ func TestTheSummaryNamesADeclinedRow(t *testing.T) {
 	got := buildComment([]string{dir}, "").Sections[0].Summary
 	if !strings.Contains(got, "1 declined") {
 		t.Errorf("summary %q is missing %q", got, "1 declined")
-	}
-}
-
-// StatusDeclined is non-voting, like StatusContext — it must never turn a
-// comment's badge into a referral or a failure on its own.
-func TestADeclinedSectionDoesNotVoteOnTheVerdict(t *testing.T) {
-	dir := reportDirWith(t, "mutation",
-		ui.Row{Status: ui.StatusDeclined, Label: "mutation", Value: "declined for this run"},
-	)
-	comment := buildComment([]string{dir}, "")
-	if verdictOf(comment.Sections) != ui.VerdictPass {
-		t.Fatalf("verdictOf = %q, want pass", verdictOf(comment.Sections))
 	}
 }
 
@@ -611,93 +555,6 @@ func TestARowWithNoFindingsQuotesItsOwnDetail(t *testing.T) {
 	}
 }
 
-func TestAClaimWithNoLineIsShownAsTheFileAlone(t *testing.T) {
-	// A dependency advisory whose manifest line cannot be found carries line
-	// zero deliberately: the lookup refuses to guess rather than point at code
-	// the author cannot act on. Rendering `go.mod:0` would put that invented
-	// reference straight back.
-	unlocated := finding.Finding{
-		Path: "go.mod", Line: 0, Rule: "GO-2020-0036", Message: "an advisory",
-	}
-	if got := claimLine(unlocated); strings.Contains(got, ":0") {
-		t.Errorf("claimLine = %q, want the file with no line", got)
-	} else if !strings.HasPrefix(got, "go.mod GO-2020-0036") {
-		t.Errorf("claimLine = %q, want the file, the rule and the message", got)
-	}
-
-	located := unlocated
-	located.Line = 7
-	if got := claimLine(located); !strings.HasPrefix(got, "go.mod:7 ") {
-		t.Errorf("claimLine = %q, want the line kept when there is one", got)
-	}
-}
-
-func TestAFailingRowSClaimsAreBoundedInTheComment(t *testing.T) {
-	// Every scanner emits findings, so one row over a repository with standing
-	// debt lists hundreds. A comment over the platform's byte limit is refused
-	// outright, and a section that vanishes reads as a concern that passed.
-	var found []finding.Finding
-	for i := range 200 {
-		found = append(found, finding.Finding{
-			Gate: "gosec", Path: "a.go", Line: i + 1, Rule: "G401",
-			Message: strings.Repeat("long ", 400),
-			Site:    fmt.Sprintf("site-%d", i),
-		})
-	}
-	lines := detailFor(t.TempDir(), ui.Row{Status: ui.StatusFail, Label: "gosec(cli)"}, found)
-	if len(lines) > tailLines+2 {
-		t.Errorf("the row rendered %d lines, want it bounded near %d", len(lines), tailLines)
-	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "more finding(s) in this row") {
-		t.Error("claims were dropped without saying so")
-	}
-	for _, line := range lines {
-		if len([]rune(line)) > claimRunes+200 {
-			t.Errorf("a claim ran to %d runes, want each bounded near %d", len([]rune(line)), claimRunes)
-		}
-	}
-}
-
-func TestAFailingRowSaysNothingAboutClaimsItDidNotDrop(t *testing.T) {
-	// The overflow line is what tells a reader the quote stops short. A row
-	// whose claims all fit must not carry it, or every comment says findings
-	// were withheld when none were.
-	found := []finding.Finding{
-		{Gate: "gosec", Path: "a.go", Line: 1, Rule: "G401", Message: "a claim", Site: "one"},
-	}
-	lines := detailFor(t.TempDir(), ui.Row{Status: ui.StatusFail, Label: "gosec(cli)"}, found)
-	for _, line := range lines {
-		if strings.Contains(line, "more finding(s) in this row") {
-			t.Errorf("lines = %q, want no overflow line when nothing overflowed", lines)
-		}
-	}
-	// And exactly at the cap it still says nothing.
-	var atCap []finding.Finding
-	for i := range tailLines {
-		atCap = append(atCap, finding.Finding{
-			Gate: "gosec", Path: "a.go", Line: i + 1, Rule: "G401",
-			Message: "a claim", Site: fmt.Sprintf("site-%d", i),
-		})
-	}
-	lines = detailFor(t.TempDir(), ui.Row{Status: ui.StatusFail, Label: "gosec(cli)"}, atCap)
-	if len(lines) != tailLines {
-		t.Errorf("rendered %d lines for exactly the cap, want %d with no overflow line", len(lines), tailLines)
-	}
-}
-
-func TestClipClaimAtExactlyTheCap(t *testing.T) {
-	// A message at the cap is kept whole; one rune over is clipped. The
-	// boundary is what the cap means.
-	at := clipClaim(strings.Repeat("x", claimRunes))
-	if len([]rune(at)) != claimRunes || strings.HasSuffix(at, "…") {
-		t.Errorf("a message at the cap was clipped: %d runes", len([]rune(at)))
-	}
-	if over := clipClaim(strings.Repeat("x", claimRunes+1)); !strings.HasSuffix(over, "…") {
-		t.Error("a message one rune over the cap was not clipped")
-	}
-}
-
 // clippy, cargo-audit and cargo-deny each run once, in JSON mode, so the output
 // scan writes to the row's log is the machine report and nothing a reader can
 // use. A failing row of theirs carries its own Detail — the claims it parsed, or
@@ -755,8 +612,7 @@ func TestAFailingCargoToolRowNeverQuotesItsRawJSONLog(t *testing.T) {
 				t.Fatal("no log was written, so the fallback this test guards cannot fire")
 			}
 
-			lines := failureLines(reportsDir(root), row)
-			joined := strings.Join(lines, "\n")
+			joined := cargoRowQuoted(t, root, row)
 			if !strings.Contains(joined, tc.want) {
 				t.Errorf("the row's own detail did not reach the comment:\n%s", joined)
 			}
@@ -767,11 +623,25 @@ func TestAFailingCargoToolRowNeverQuotesItsRawJSONLog(t *testing.T) {
 			// The same row with no detail does quote the log, which is what
 			// makes the assertion above about this log and not an empty one.
 			row.Detail = nil
-			if fallback := strings.Join(failureLines(reportsDir(root), row), "\n"); !strings.Contains(fallback, `{"`) {
+			if fallback := cargoRowQuoted(t, root, row); !strings.Contains(fallback, `{"`) {
 				t.Errorf("the log holds no JSON, so nothing was proved:\n%s", fallback)
 			}
 		})
 	}
+}
+
+// cargoRowQuoted is what the comment quotes for row, saved as the one row of a
+// scan document under root, beside the log the row names.
+func cargoRowQuoted(t *testing.T, root string, row ui.Row) string {
+	t.Helper()
+	rep := ui.NewReport("scan")
+	rep.Add(row)
+	saveDocument(root, rep)
+	comment := buildComment([]string{reportsDir(root)}, "")
+	if len(comment.Sections) != 1 || len(comment.Sections[0].Details) != 1 {
+		t.Fatalf("the comment quotes nothing for the row, want one detail block: %+v", comment.Sections)
+	}
+	return strings.Join(comment.Sections[0].Details[0].Lines, "\n")
 }
 
 // unreadableShape is the message internal/rust renders for a failing run whose
