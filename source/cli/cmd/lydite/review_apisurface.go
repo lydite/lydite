@@ -12,7 +12,6 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/finding"
-	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
@@ -118,25 +117,17 @@ func locate(findings []finding.Finding, dir string) []string {
 	return out
 }
 
-// pullRequestTitle reads the title out of the webhook payload, and is empty
-// wherever there is no payload to read.
-//
-// No flag is required and no environment is: a local review has no pull
-// request, and the commits carry the declaration there. A payload that exists
-// and cannot be read is warned about rather than fatal, for the same reason —
-// the title can only add a referral, so failing the run over an unreadable
-// one would turn an additive source into a blocker.
+// pullRequestTitle is reviewdecision.PullRequestTitle over the payload --event
+// names, or GITHUB_EVENT_PATH where it names none, with its warnings written
+// to warn as they are returned. Neither is required: a local review has no
+// pull request, and the commits carry the declaration there.
 func pullRequestTitle(warn io.Writer, eventPath string) string {
 	if eventPath == "" {
 		eventPath = os.Getenv("GITHUB_EVENT_PATH")
 	}
-	if eventPath == "" {
-		return ""
+	title, warnings := reviewdecision.PullRequestTitle(eventPath)
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintln(warn, warning)
 	}
-	event, err := forge.LoadPullRequestEvent(eventPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(warn, "warning: could not read the event at %s (%v) — a break declared only in the pull request title is not seen\n", eventPath, err)
-		return ""
-	}
-	return event.PullRequest.Title
+	return title
 }

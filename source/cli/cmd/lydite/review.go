@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -162,6 +164,26 @@ and keeps every property of the status; the two are alternatives, not a ladder.`
 		"a "+runner.ReportDir+" directory whose scan document supplies the licence and SCA evidence a conditional exemption needs; repeatable")
 	cmd.AddCommand(newReviewCompareCmd())
 	return cmd
+}
+
+// commandScanReader reads a report directory's scan document the way every
+// other command reading a report does, and hands reviewdecision its rows in
+// reviewdecision's own terms.
+type commandScanReader struct{}
+
+func (commandScanReader) ReadScan(reports string) ([]reviewdecision.GateRow, error) {
+	doc, err := readDocument(documentPath(reports, "scan"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %w", reviewdecision.ErrNoScanDocument, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]reviewdecision.GateRow, 0, len(doc.Rows))
+	for _, row := range doc.Rows {
+		rows = append(rows, reviewdecision.GateRow{Label: row.Label, Passed: row.Status == ui.StatusPass})
+	}
+	return rows, nil
 }
 
 // listCap bounds every enumeration in the report, by the cap the decision's
