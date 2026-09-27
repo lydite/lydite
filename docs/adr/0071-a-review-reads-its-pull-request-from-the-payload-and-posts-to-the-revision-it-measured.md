@@ -42,10 +42,12 @@ buy no safety, since the credential is used for one write at the end.
 
 ## Consequences
 
-- Two stderr lines differ from the pre-Flow command, both only in a misconfigured job: with both
-  `GITHUB_TOKEN` and `GITHUB_REPOSITORY` missing, the repository is named rather than the token,
-  because `trust.FromEnvironment` checks the repository first; and a malformed `GITHUB_REPOSITORY`
-  is described in `internal/trust`'s words. Every other credential or payload failure keeps its
-  exact text, mapped back in the CLI.
+- A missing or malformed `GITHUB_REPOSITORY` is reported in `internal/trust`'s own words, and is
+  reported ahead of a missing token, because `trust.FromEnvironment` checks the repository first.
+  That differs from the pre-Flow command's wording, and only in a misconfigured job. `trust`
+  returns untyped errors, so restoring the old wording would mean matching its message text, which
+  couples the CLI to another package's prose. A missing token (`scmstages.ErrNoCredential`) and a
+  missing or non-pull-request event keep their exact texts, mapped back in the CLI from typed
+  errors.
 - Nothing below the CLI reads `GITHUB_EVENT_PATH`. The CLI resolves the path once; the stage that
   loads the pull request and the domain function that reads its title both take it as an input.
