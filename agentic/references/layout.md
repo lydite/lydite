@@ -12,6 +12,9 @@ source/cli/internal/stages/       # per-concern stage packages a flow definition
                                   #   generic (trust, scm) and domain (clearance, scan, review) alike (see architecture.md)
 source/cli/internal/flows/        # one package per command's flow declaration, e.g. clearance, scan, review
                                   #   (see architecture.md)
+source/cli/internal/stages/publish/ # gather-reports, build-comment, write-comment: lydite
+                                  #   publish's three stages (see architecture.md and surface.md)
+source/cli/internal/flows/publish/ # the publish flow declaration (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
 source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own

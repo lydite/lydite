@@ -488,3 +488,26 @@ clearing a referral while the test matrix is still running, which is the propert
 the pull request's standing comment, but by the route every other command's results take: the
 report document the run wrote. Composing it again there would be a second derivation of one
 answer, which is exactly what ADR 0072 rules out.
+
+## The publish flow
+
+`internal/flows/publish` (`publishflow`) and `internal/stages/publish` (`publishstages`) put
+`lydite publish` on the same scaffold as `clearance`, and it is the case that shows the scaffold
+costs nothing extra where a command has no platform, no credential, and no branching to speak of:
+three stages, `gather-reports` → `build-comment` → `write-comment`, none conditioned on another's
+output, every stage keeping the default `FailFlow`. `GatherReports` reads every named report
+directory into its documents, or the reason it held none (`ReportDir.Missing`) — an unreadable or
+empty directory is content the stage reports, never a `*StageError`. `BuildComment` folds what
+`GatherReports` read into one rendered `ui.Comment`; `WriteComment` puts that comment on stdout or
+in a file. Only `write-comment` can fail the flow at all.
+
+Reading is a stage exactly like writing is: `GatherReports` is `LoadComment`'s counterpart for a
+command with no platform to read from, and the "Source"/"Sink" framing the migration was proposed
+in names nothing `internal/flow` actually distinguishes — see
+[ADR 0074](../../docs/adr/0074-publish-runs-as-a-flow-of-ordinary-stages.md). What `GatherReports`
+reads with (`ReadDocuments`) and what `BuildComment` reads a failing row's log with (`ReadLog`)
+are both injected as `In` fields rather than imported — the functions stay defined in
+`cmd/lydite/reports.go`, where other commands already call them, and the CLI passes them in as
+flow inputs the same way `review` hands a stage `reviewdecision.Toolchains`. Which rows' logs get
+read is an assembly decision `BuildComment` makes from each row's status and from `detailCap`, so
+the reader is a field on `BuildIn` rather than something `GatherReports` resolves ahead of it.
