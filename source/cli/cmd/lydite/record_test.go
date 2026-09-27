@@ -6,229 +6,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
-	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
-	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
+	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/ui"
 )
-
-// recordedFindingEvents is the finding events the record this commit appends
-// carries, diffed against a ledger already holding prior.
-//
-// The ledger is a directory of its own rather than the state branch, because
-// what is under test is the diff against whatever the fetched branch holds,
-// and the closure historyRecords returns is handed exactly that directory.
-// Every prior record is filed an hour before this commit, which is what makes
-// it history rather than this commit's own events read back.
-func recordedFindingEvents(t *testing.T, folded measurementsDoc, perComponent map[string]map[string]int,
-	root map[string]int, found []finding.Finding, crashed []finding.Crash, prior ...[]ledger.FindingEvent) []ledger.FindingEvent {
-	t.Helper()
-	repo := gitRepo(t, map[string]string{"README.md": "a repository\n"})
-	commitAll(t, repo, "the commit being recorded")
-	head, err := gitstate.DescribeCommit(context.Background(), repo, "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	store := t.TempDir()
-	for i, events := range prior {
-		rec := ledger.Record{
-			Kind:          ledger.KindEntry,
-			At:            head.At.Add(-time.Duration(len(prior)-i) * time.Hour),
-			Commit:        "prior" + string(rune('a'+i)),
-			Branch:        "main",
-			FindingEvents: events,
-		}
-		if _, _, err := ledger.Append(store, []ledger.Record{rec}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	records, why := historyRecords(context.Background(), repo, "main", folded, perComponent, root, found, crashed, nil)
-	if records == nil {
-		t.Fatalf("no record to append: %s", why)
-	}
-	recs, err := records(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, rec := range recs {
-		if rec.Kind == ledger.KindEntry {
-			return rec.FindingEvents
-		}
-	}
-	t.Fatalf("no entry among %+v", recs)
-	return nil
-}
-
-func gosecClaim(path, site string) finding.Finding {
-	return finding.Finding{Gate: "gosec", Component: "cli", Path: path, Rule: "G101", Site: site}
-}
-
-// A branch with no finding history has nothing open, so every claim this scan
-// makes is one that appeared here — carrying the path and rule a history view
-// renders without a second lookup.
-func TestEveryFindingOfAFirstRecordingAppears(t *testing.T) {
-	a := gosecClaim("a.go", "first")
-	leak := finding.Finding{Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key", Site: "token"}
-
-	got := recordedFindingEvents(t, measurementsDoc{},
-		map[string]map[string]int{"cli": {"gosec": 1}}, map[string]int{"gitleaks": 1},
-		[]finding.Finding{a, leak}, nil)
-
-	want := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: leak.Fingerprint(), Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key"},
-		{Transition: ledger.FindingAppeared, Fingerprint: a.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("events = %+v, want %+v", got, want)
-	}
-}
-
-// A claim the branch held open and this scan of the same bucket no longer
-// makes has resolved; a claim both hold has not changed, and costs the record
-// nothing — growth follows churn, not the size of the open set.
-func TestAFindingThatIsGoneResolvesAndOneThatStaysWritesNothing(t *testing.T) {
-	stays, goes := gosecClaim("a.go", "stays"), gosecClaim("a.go", "goes")
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: stays.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-		{Transition: ledger.FindingAppeared, Fingerprint: goes.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-	}
-
-	got := recordedFindingEvents(t, measurementsDoc{},
-		map[string]map[string]int{"cli": {"gosec": 1}}, nil,
-		[]finding.Finding{stays}, nil, prior)
-
-	want := []ledger.FindingEvent{
-		{Transition: ledger.FindingResolved, Fingerprint: goes.Fingerprint(), Gate: "gosec", Component: "cli"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("events = %+v, want only the resolution of the claim that is gone", got)
-	}
-}
-
-// A scan identical to what the branch holds open is a record with no finding
-// events at all.
-func TestAnUnchangedScanWritesNoFindingEvents(t *testing.T) {
-	a := gosecClaim("a.go", "stays")
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: a.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-	}
-
-	got := recordedFindingEvents(t, measurementsDoc{},
-		map[string]map[string]int{"cli": {"gosec": 1}}, nil,
-		[]finding.Finding{a}, nil, prior)
-
-	if len(got) != 0 {
-		t.Errorf("events = %+v, want none: nothing appeared and nothing resolved", got)
-	}
-}
-
-// A bucket this recording did not measure — a gate switched off, a component
-// not scanned, a root-scoped gate that did not run — keeps what it held open.
-// Its findings' absence from this scan is the gate not looking, and a
-// resolution recorded there would close a finding nothing looked for.
-func TestABucketThisRecordingDidNotMeasureResolvesNothing(t *testing.T) {
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: "v1:0000000000000001", Gate: "staticcheck", Component: "cli", Path: "a.go"},
-		{Transition: ledger.FindingAppeared, Fingerprint: "v1:0000000000000002", Gate: "gosec", Component: "web", Path: "b.go"},
-		{Transition: ledger.FindingAppeared, Fingerprint: "v1:0000000000000003", Gate: "semgrep", Path: "c.go"},
-	}
-
-	got := recordedFindingEvents(t, measurementsDoc{},
-		map[string]map[string]int{"cli": {"gosec": 0}}, map[string]int{"gitleaks": 0},
-		nil, nil, prior)
-
-	if len(got) != 0 {
-		t.Errorf("events = %+v, want none: every open finding sits in a bucket this recording did not measure", got)
-	}
-}
-
-// No scan document read is no gate measured, so a recording carrying other
-// scalars carries no finding events — not a resolution of every finding the
-// branch held open.
-func TestARecordingWithNoScanWritesNoFindingEvents(t *testing.T) {
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: "v1:0000000000000001", Gate: "gosec", Component: "cli", Path: "a.go"},
-	}
-	decl := component.File{Components: []component.Component{
-		{Name: "cli", Dir: "cli", Runner: "go-test"},
-	}}
-	perComponent, root := findingCounts(t.TempDir(), decl, config.Default(), nil, false)
-
-	got := recordedFindingEvents(t,
-		measurementsDoc{Tests: map[string]junit.Counts{"cli": {Total: 3}}},
-		perComponent, root, nil, nil, prior)
-
-	if got != nil {
-		t.Errorf("events = %+v, want none: nothing was scanned", got)
-	}
-}
-
-// A bucket the scan names as crashed is not measured, however findingCounts
-// counts it: a scanner that crashed made no claim, so it counts 0 like a clean
-// one, and reading that as measured would record every finding it held open as
-// resolved and then as appeared again on the next clean run. Its open set
-// carries over untouched — nothing resolves there, and a partial claim it did
-// make does not appear — while a bucket beside it that finished is diffed as
-// ever.
-func TestACrashedBucketKeepsWhatItHeldOpen(t *testing.T) {
-	held := gosecClaim("a.go", "held")
-	fixed := finding.Finding{Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1", Site: "GO-1\x1fm"}
-	leak := finding.Finding{Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key", Site: "held"}
-	partial := finding.Finding{Gate: "gitleaks", Path: "c.env", Rule: "generic-api-key", Site: "partial"}
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: held.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-		{Transition: ledger.FindingAppeared, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1"},
-		{Transition: ledger.FindingAppeared, Fingerprint: leak.Fingerprint(), Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key"},
-	}
-
-	// Through the document, so the crash reaches the recording the way a scan
-	// job's does: written beside the findings, read back by readReports.
-	dir := t.TempDir()
-	scan := ui.NewReport("scan")
-	scan.AddFindings(partial)
-	scan.AddCrashed(finding.Crash{Gate: "gosec", Component: "cli"}, finding.Crash{Gate: "gitleaks"})
-	f, err := os.Create(filepath.Join(dir, documentName("scan"))) // #nosec G304 -- a temp directory this test owns
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := scan.WriteJSON(f); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	read := readReports(ui.NewReport("record"), []string{dir})
-
-	decl := component.File{Components: []component.Component{
-		{Name: "cli", Dir: "cli", Runner: "go-test"},
-	}}
-	perComponent, root := findingCounts(t.TempDir(), decl, config.Default(), read.found, read.scanned)
-	if n, ok := perComponent["cli"]["gosec"]; !ok || n != 0 {
-		t.Fatalf("gosec(cli) counts %d (keyed %v), want the 0 a crashed scanner still records", n, ok)
-	}
-
-	got := recordedFindingEvents(t, measurementsDoc{}, perComponent, root, read.found, read.crashed, prior)
-
-	want := []ledger.FindingEvent{
-		{Transition: ledger.FindingResolved, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("events = %+v, want only the finished bucket's resolution — nothing from a crashed one", got)
-	}
-}
 
 // recordCmdFixture is one repository a recording runs over, and the report
 // directories it is handed.
@@ -700,4 +490,94 @@ record passed in 0.0s
   ]
 }
 `, "")
+}
+
+// The reader folds the documents its reads returned, and never reads a
+// directory a second time: what was folded is what each directory's row said
+// it held. A directory it never read is refused rather than folded as an empty
+// document.
+func TestTheReportReaderFoldsWhatItReadRatherThanReadingAgain(t *testing.T) {
+	root := t.TempDir()
+	dir := reportsDir(root)
+	if err := writeMeasurements(root, measurementsDoc{
+		Tree:       "deadbeef",
+		Components: map[string]componentMeasurement{"svc": {Entry: producing(1, 2, "go 1.26")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMutants(root, mutantsDoc{Tree: "deadbeef", Components: map[string]mutantCounts{
+		"svc": {Killed: 1, TimedOut: 2, OutOfMemory: 3, Survived: 4, Unviable: 5, Acknowledged: 6, ElapsedSeconds: 7.5},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := newRecordReports()
+	if _, err := reader.ReadMeasurements(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadMutants(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{measurementsName, mutantsName} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	measured, err := reader.FoldMeasurements([]string{dir})
+	if err != nil {
+		t.Fatalf("folding what was read: %v", err)
+	}
+	if measured.Tree != "deadbeef" || measured.Components["svc"].Covered != 1 || measured.Snapshot.Coverage["svc"].Covered != 1 {
+		t.Errorf("folded measurements = %+v, want svc's one covered line on deadbeef, in the snapshot too", measured)
+	}
+	mutated, err := reader.FoldMutants([]string{dir})
+	if err != nil {
+		t.Fatalf("folding what was read: %v", err)
+	}
+	want := recordstages.MutantCounts{Killed: 1, TimedOut: 2, OutOfMemory: 3, Survived: 4, Unviable: 5, Acknowledged: 6, ElapsedSeconds: 7.5}
+	if mutated.Tree != "deadbeef" || mutated.Components["svc"] != want {
+		t.Errorf("folded mutants = %+v, want %+v on deadbeef", mutated, want)
+	}
+
+	unread := t.TempDir()
+	if _, err := reader.FoldMeasurements([]string{unread}); err == nil {
+		t.Error("a directory the reader never read was folded")
+	}
+	if _, err := reader.FoldMutants([]string{unread}); err == nil {
+		t.Error("a directory the reader never read was folded")
+	}
+}
+
+// Each reason a recording appends no history reads as its own, and a history
+// nothing composed is an error rather than a row claiming an append.
+func TestEveryHistoryReasonSaysWhyNothingWasAppended(t *testing.T) {
+	for _, tc := range []struct {
+		composed recordstages.ComposeHistoryOut
+		want     string
+	}{
+		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryToAppend}, ""},
+		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryNoBranch},
+			"this checkout names no branch, so pass " + gitstate.BranchFlag +
+				" — history is per branch, and one filed under the wrong branch is worse than none"},
+		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryNoScalar}, "no component produced a scalar"},
+		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryUndescribed, Err: errors.New("no HEAD")},
+			"this commit could not be described: no HEAD"},
+	} {
+		got, err := historyWhy(tc.composed)
+		if err != nil || got != tc.want {
+			t.Errorf("historyWhy(%d) = %q, %v; want %q", tc.composed.Reason, got, err, tc.want)
+		}
+	}
+	if _, err := historyWhy(recordstages.ComposeHistoryOut{}); err == nil {
+		t.Error("a history nothing composed was given a reason")
+	}
+}
+
+// A baseline nothing decided is an error rather than a row: read as a
+// recording, it would say a baseline landed that no stage decided to land.
+func TestABaselineWithNoVerdictRendersNoRow(t *testing.T) {
+	if row, err := baselineRow(recordstages.DecideBaselineOut{}, "deadbeef"); err == nil {
+		t.Errorf("a baseline with no verdict rendered %+v", row)
+	}
 }
