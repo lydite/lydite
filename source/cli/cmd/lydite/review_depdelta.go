@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"io"
-
 	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/ui"
 )
@@ -24,19 +21,4 @@ func dependencyRow(o reviewdecision.Outcome, status ui.Status) ui.Row {
 		Label:  gateDependencies + "(" + o.Manifest.Path + ")",
 		Value:  "no package added against " + shortSHA(o.Base),
 	}
-}
-
-// dependencyGatesPassed is reviewdecision.ScanEvidence over the scan documents
-// this command reads, with its warnings written to warn as they are returned.
-func dependencyGatesPassed(dir string, dirs []string, warn io.Writer) bool {
-	passed, warnings := reviewdecision.ScanEvidence(dir, dirs, commandScanReader{})
-	for _, warning := range warnings {
-		_, _ = fmt.Fprintln(warn, warning)
-	}
-	return passed
-}
-
-// splitGateLabel is reviewdecision.SplitGateLabel.
-func splitGateLabel(label string) (gate, component string, ok bool) {
-	return reviewdecision.SplitGateLabel(label)
 }

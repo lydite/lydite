@@ -691,32 +691,6 @@ func TestReviewErrorsOnAMalformedConfigFile(t *testing.T) {
 	}
 }
 
-// A payload that cannot be read is warned about and treated as no title,
-// never fatal — the title can only add a referral, so failing the whole run
-// over an unreadable one would turn an additive source into a blocker.
-func TestPullRequestTitleWarnsOnAMalformedEvent(t *testing.T) {
-	var warn bytes.Buffer
-	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
-	if got := pullRequestTitle(&warn, missing); got != "" {
-		t.Errorf("pullRequestTitle(missing) = %q, want empty", got)
-	}
-	if !strings.Contains(warn.String(), "warning:") {
-		t.Errorf("a missing event file must be warned about, got %q", warn.String())
-	}
-
-	warn.Reset()
-	malformed := filepath.Join(t.TempDir(), "event.json")
-	if err := os.WriteFile(malformed, []byte("not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := pullRequestTitle(&warn, malformed); got != "" {
-		t.Errorf("pullRequestTitle(malformed) = %q, want empty", got)
-	}
-	if !strings.Contains(warn.String(), "warning:") {
-		t.Errorf("a malformed event file must be warned about, got %q", warn.String())
-	}
-}
-
 // A Rust crate whose public API the gate compares, the declaration that opts
 // it in, and the config that keeps provisioning out of the run: the comparison
 // is the stub below, so nothing here needs a rustup channel and none is
@@ -1850,73 +1824,6 @@ func TestReviewRefersAVersionBumpWithADeclaredGoComponentMissingItsAdvisoryRow(t
 	out, err := runReview(t, dir, base, "--reports", reports)
 	if err == nil {
 		t.Fatalf("a declared Go component with a passing licence row and no advisory row must not satisfy the condition:\n%s", out)
-	}
-}
-
-// A components.yml that will not parse is review's to refuse elsewhere, but
-// dependencyGatesPassed must fail its own half closed rather than let a load
-// error read as evidence.
-func TestDependencyGatesPassedFailsClosedOnAnUnreadableComponentsFile(t *testing.T) {
-	dir, _ := reviewRepo(t,
-		map[string]string{"README.md": "hello"},
-		map[string]string{
-			component.FileName: "components:\n  - name: cli\n    dir: .\n    runner: go-test\n    not_a_real_key: true\n",
-			"README.md":        "hello",
-		},
-	)
-	var warn bytes.Buffer
-	if dependencyGatesPassed(dir, []string{cleanScan(t)}, &warn) {
-		t.Fatal("an unreadable components.yml must fail the condition, not satisfy it")
-	}
-	if warn.Len() == 0 {
-		t.Error("a load that failed should warn, not fail silently")
-	}
-}
-
-// Two report directories naming one gate keep the worse of the two answers,
-// whichever order they are given in: a pass a later job's failure overturns
-// must not be forgotten because it was seen first.
-func TestDependencyGatesPassedKeepsTheWorseOfTwoReportsForOneGate(t *testing.T) {
-	dir, _ := reviewRepo(t,
-		map[string]string{"README.md": "hello"},
-		map[string]string{component.FileName: cliComponent, "README.md": "hello again"},
-	)
-	passing := scanReports(t, map[string]ui.Status{
-		"gosec(cli)":       ui.StatusPass,
-		"govulncheck(cli)": ui.StatusPass,
-		"licence(cli)":     ui.StatusPass,
-	})
-	failing := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusFail})
-
-	var warn bytes.Buffer
-	if dependencyGatesPassed(dir, []string{passing, failing}, &warn) {
-		t.Error("a passing report followed by a failing one for the same gate must not satisfy the condition")
-	}
-}
-
-// A label with no component at all — no "(" at all, or one opening at the
-// very first character, which names an empty gate rather than a missing
-// component — carries nothing this attributes, and is told apart from a
-// well-formed "gate(component)" label.
-func TestSplitGateLabel(t *testing.T) {
-	cases := []struct {
-		label           string
-		gate, component string
-		ok              bool
-	}{
-		{"licence(cli)", "licence", "cli", true},
-		{"cargo clippy(api)", "cargo clippy", "api", true},
-		{"scan", "", "", false},
-		{"(cli)", "", "", false},
-		{"licence()", "", "", false},
-		{"licence(cli", "", "", false},
-	}
-	for _, tc := range cases {
-		gate, component, ok := splitGateLabel(tc.label)
-		if gate != tc.gate || component != tc.component || ok != tc.ok {
-			t.Errorf("splitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
-				tc.label, gate, component, ok, tc.gate, tc.component, tc.ok)
-		}
 	}
 }
 

@@ -228,9 +228,9 @@ func TestSplitGateLabel(t *testing.T) {
 		{"licence()", "", "", false},
 		{"licence(cli", "", "", false},
 	} {
-		gate, component, ok := SplitGateLabel(tc.label)
+		gate, component, ok := splitGateLabel(tc.label)
 		if gate != tc.gate || component != tc.component || ok != tc.ok {
-			t.Errorf("SplitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
+			t.Errorf("splitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
 				tc.label, gate, component, ok, tc.gate, tc.component, tc.ok)
 		}
 	}

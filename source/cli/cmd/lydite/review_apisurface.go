@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"path"
 
 	"github.com/spf13/cobra"
@@ -117,17 +115,3 @@ func locate(findings []finding.Finding, dir string) []string {
 	return out
 }
 
-// pullRequestTitle is reviewdecision.PullRequestTitle over the payload --event
-// names, or GITHUB_EVENT_PATH where it names none, with its warnings written
-// to warn as they are returned. Neither is required: a local review has no
-// pull request, and the commits carry the declaration there.
-func pullRequestTitle(warn io.Writer, eventPath string) string {
-	if eventPath == "" {
-		eventPath = os.Getenv("GITHUB_EVENT_PATH")
-	}
-	title, warnings := reviewdecision.PullRequestTitle(eventPath)
-	for _, warning := range warnings {
-		_, _ = fmt.Fprintln(warn, warning)
-	}
-	return title
-}

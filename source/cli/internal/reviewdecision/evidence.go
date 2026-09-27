@@ -112,7 +112,7 @@ func ScanEvidence(dir string, reports []string, reader ScanReader) (bool, []stri
 		}
 		read = true
 		for _, row := range rows {
-			gate, name, ok := SplitGateLabel(row.Label)
+			gate, name, ok := splitGateLabel(row.Label)
 			if !ok {
 				continue
 			}
@@ -168,14 +168,14 @@ func ScanEvidence(dir string, reports []string, reader ScanReader) (bool, []stri
 	return true, warnings
 }
 
-// SplitGateLabel takes a row label apart into the gate and the component it
+// splitGateLabel takes a row label apart into the gate and the component it
 // ran for — `licence(cli)` is the licence gate over the component named cli.
 //
 // A row that carries no component, like the scan's own summary, is not one
 // this attributes: a gate with no component behind it answers for nothing in
 // particular, and folding it under an empty name would invent a component the
 // declaration never had.
-func SplitGateLabel(label string) (gate, component string, ok bool) {
+func splitGateLabel(label string) (gate, component string, ok bool) {
 	open := strings.LastIndex(label, "(")
 	if open <= 0 || !strings.HasSuffix(label, ")") {
 		return "", "", false
