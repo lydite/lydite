@@ -280,9 +280,9 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			// mutants said nothing about the suite — its row is `unmeasured`
 			// and its denominator nought, and counting it is what makes a
 			// folded run report the component count an unsharded one does.
-			n, of := s.summary().Score()
+			n, of := s.Summary().Score()
 			killed, total, covered = killed+n, total+of, covered+1
-			if d, ok := s.elapsed(); ok {
+			if d, ok := s.Elapsed(); ok {
 				elapsed += d
 				timed++
 			}
