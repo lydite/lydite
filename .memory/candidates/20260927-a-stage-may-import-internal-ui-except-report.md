@@ -6,6 +6,7 @@ saw:
   - source/cli/internal/stages/clearance/reply.go
   - source/cli/internal/ui/report.go
   - source/cli/internal/ui/comment.go
+  - source/cli/internal/stages/publish/build.go
 targets: a-stage-is-a-function-of-its-own-in-and-imports-nothing-above-it
 verdict: still-true
 ---
@@ -35,6 +36,7 @@ not flagged as a violation.
 -> 0 hits, so `internal/ui` cannot create an import cycle with a stage or flow package.
 
 So: a stage returning `ui.Comment`/`ui.Document`/`ui.Status`/`ui.Row` is not a layering
-violation. Only `ui.Report` (and cobra, and a CLI options struct) is CLI-only. A future
-`internal/stages/publish` package building `ui.Comment` from `ui.Document` inputs is
-consistent with the rule as written and with existing precedent.
+violation. Only `ui.Report` (and cobra, and a CLI options struct) is CLI-only.
+`internal/stages/publish` (`build.go:10`, `gather.go:19`, `write.go:9`) is the second
+precedent: it builds a `ui.Comment` from `ui.Document` inputs and references `ui.Report`
+nowhere.
