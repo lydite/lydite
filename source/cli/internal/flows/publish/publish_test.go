@@ -60,10 +60,11 @@ func TestARunWritesTheRenderedCommentToStdout(t *testing.T) {
 
 	docs, _ := oneDocument("reports")
 	built, err := publishstages.BuildComment(context.Background(), publishstages.BuildIn{
-		Gathered: []publishstages.ReportDir{{Dir: "reports", Documents: docs}},
-		Base:     params.Base,
-		Version:  params.Version,
-		ReadLog:  noLog,
+		Gathered:  []publishstages.ReportDir{{Dir: "reports", Documents: docs}},
+		Base:      params.Base,
+		Version:   params.Version,
+		ReadLog:   noLog,
+		TailLines: params.TailLines,
 	})
 	if err != nil {
 		t.Fatalf("BuildComment: %v", err)

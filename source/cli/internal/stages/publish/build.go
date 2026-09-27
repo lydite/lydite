@@ -46,8 +46,9 @@ type BuildIn struct {
 	// ReadLog reads a failing row's log when the row carries no detail of
 	// its own.
 	ReadLog ReadLog
-	// TailLines bounds how many unanchored claims one row quotes — the
-	// same bound ReadLog cuts a log at.
+	// TailLines bounds how many unanchored claims one row quotes. The CLI
+	// fills it from the same number its own ReadLog cuts a log at, so the
+	// two bounds agree without either one deriving from the other.
 	TailLines int
 }
 

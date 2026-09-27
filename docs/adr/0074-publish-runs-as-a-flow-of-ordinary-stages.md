@@ -49,10 +49,13 @@ shows. So `ReadLog` is a field on `BuildIn`, read where the row that needs it is
 and `BuildComment` stays a function of nothing but its own `In` — the reader is data threaded in,
 not the stage reaching for something outside it.
 
-`TailLines` is the bound the injected `ReadLog` cuts a log at, and `detailFor` bounds unanchored
-claims at the same number. A private copy of that number in `publishstages` could drift from the
-reader's the moment either one changes, so it is an input instead — a `TailLines int` field on
-`BuildIn` that the CLI fills from `cmd/lydite`'s `tailLines` constant, one source of truth.
+`ReadLog` cuts a log itself, through `cmd/lydite`'s own `tail()` reading its `tailLines` constant
+directly; `BuildIn.TailLines` bounds something else — how many unanchored claims `detailFor`
+lists for one row. The two bounds are equal only because the CLI fills `TailLines` from that same
+`tailLines` constant when it builds `BuildIn`, not because one derives from the other. A private
+copy of the number in `publishstages` could still drift from the reader's the moment either one
+changes on its own, so `TailLines` is an input rather than a constant of its own — one source of
+truth for the number, read into two places.
 
 ## The `buildComment` shim runs the flow, not a stage around it
 
