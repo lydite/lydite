@@ -192,6 +192,57 @@ zero result in its place would render as a check that ran and found nothing — 
 [the gate-that-could-not-run rule](../../agentic/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
 states for a gate that could not run at all.
 
+## `record`: one condition, a deferred write, and a boundary type over another command's document
+
+`lydite test record` is built this way too. `recordstages`
+(`internal/stages/record`) holds `LoadDeclaration`, `ReadReports`, `FoldMeasurements`, `BindTree`,
+`CountFindings`, `BindMutants`, `ComposeHistory`, `DecideBaseline` and `WriteState`; `recordflow`
+(`internal/flows/record`) wires them in that order; `cmd/lydite/record.go` builds `recordflow.Params`,
+runs the flow, and renders every row from `flow.Result`.
+
+`load-declaration`, `read-reports`, `fold-measurements` and `bind-tree` run unconditionally, each
+`FailFlow` by default: a declaration that cannot be read, a set of report directories holding no
+measurements document, or a checkout whose tree cannot be resolved leaves nothing a recording
+could be filed against. `bind-tree` is the exception among the four — a mismatch between the tree
+that is checked out and the tree the measurements describe is its *answer*, `Bound == false`,
+never its error. Every stage after it — `count-findings`, `bind-mutants`, `compose-history`,
+`decide-baseline`, `write-state` — declares exactly one condition, `.When(bound)` reading
+`bind-tree`'s own `Bound` field, and no stage declares any other. [The ordering
+subtlety](#the-ordering-subtlety) does not apply to this flow: that rule matters
+only when a condition reads a stage that itself ran conditionally, because a skipped stage's
+output is `flow.ErrUnavailable` and reading it unguarded stops the run. `bind-tree` has no
+condition of its own and fails the run outright on its own error, so every stage reaching for its
+output is guaranteed to find it there — there is no guard-precedence chain to build, because there
+is only the one guarded stage upstream of every reader.
+
+`compose-history` answers with a `gitstate.Records` function rather than the records themselves,
+carried across the stage boundary as an ordinary `Out` field (`ComposeHistoryOut.Records`) that
+`write-state` receives as part of its own `In` and hands, unevaluated, to `gitstate.Write`. Nothing
+else calls it. `gitstate.Write`'s retry loop re-fetches the state branch on each of its three
+attempts, so whether this commit follows the branch's last-recorded one — and which findings
+newly appeared or resolved since then — has to be answered against the branch as that attempt
+just fetched it, not against a value computed once before the first attempt. See
+[ADR 0069](../../docs/adr/0069-a-recordings-history-is-a-deferred-closure-and-its-inputs-cross-a-boundary-type.md)
+for the decision and its rejected alternatives.
+
+`write-state` is wired `.OnError(flow.RecordAndContinue)`, the one non-default policy in this
+flow: a write that never lands is worth knowing about, but it must not undo the verdict
+`decide-baseline` and `compose-history` already reached about what was being landed. `record.go`
+reads it back through `res.Errors()` rather than unwrapping a returned error the way it does for
+a `FailFlow` stage — `Result.Errors()` is where a `RecordAndContinue` stage's failure surfaces, one
+`*flow.StageError` per stage that failed under that policy, while the flow itself still ran to
+completion and returned no error of its own.
+
+`recordstages.ReportReader` is this flow's boundary onto documents it does not own: the
+measurements document (`lydite test`'s `measurementsDoc`), the mutant-counts document
+(`lydite mutation`'s `mutantsDoc`, read and folded by `readMutants`/`foldMutants`) and the scan
+document (`lydite scan`'s reporting) are each read and folded by the code that already owns that
+logic, in `cmd/lydite`. `ReportReader` is a five-method interface — `ReadMeasurements`, `ReadScan`,
+`ReadMutants`, `FoldMeasurements`, `FoldMutants` — typed entirely in `recordstages`' own boundary
+types (`Measurements`, `Scan`, `Mutants`, each holding only the fields a stage reads), and
+`record.go`'s adapter is the only thing that converts one command's document into another's stage
+input. No `package main` type reaches `internal/stages/record`.
+
 ## Package layout
 
 - **`internal/flow`** — the engine: `Builder`, `Binding`, `Policy`, `Flow`, `Result`. Knows

@@ -214,7 +214,7 @@ partition walk rather than each reading the branch's history separately. See
 [ADR 0058](../../docs/adr/0058-a-findings-detail-reaches-the-ledger-as-transitions.md).
 
 **A bucket the scan crashed on is excluded from the diff, not diffed as empty.**
-`cmd/lydite/record.go`'s `findingScope` reads the buckets a recording measured off the same
+`internal/stages/record`'s `findingScope` reads the buckets a recording measured off the same
 counts `Component.Findings`/`RootFindings` already hold, then drops every `(gate, component)`
 `scan.json`'s `Crashed` names — see [findings.md](findings.md) for `finding.Crash` and
 [scanning.md](scanning.md) for how each wrapper decides `executil.Result.Crashed`. Without the
