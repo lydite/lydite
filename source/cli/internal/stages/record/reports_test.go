@@ -259,3 +259,136 @@ func TestFoldMeasurementsPassesTheFoldsErrorThroughUnchanged(t *testing.T) {
 		t.Errorf("err = %v, want the fold's own error", err)
 	}
 }
+
+// A directory holding measurements and no counts is what every `lydite test`
+// shard uploads: it yields its measurements, and the counts' absence is kept
+// as an absence rather than a document that failed to read.
+func TestMeasurementsWithNoCountsBesideThemRecordAsTheyAlwaysDid(t *testing.T) {
+	reader := &recordReader{t: t, measurements: map[string]recordRead[Measurements]{
+		"dir": {value: Measurements{Tree: "deadbeef"}},
+	}}
+
+	read, err := ReadReports(context.Background(), ReadReportsIn{Reader: reader, Reports: []string{"dir"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+
+	if len(read.Measured) != 1 || len(read.Mutated) != 0 {
+		t.Fatalf("read = %d measurements, %d counts; want the measurements alone", len(read.Measured), len(read.Mutated))
+	}
+	if err := read.Directories[0].MutantsErr; !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("MutantsErr = %v, want the absence of counts this job never writes", err)
+	}
+}
+
+// A directory holding a scan and no measurements is the expected shape of the
+// scan job: it yields its claims, and the measurements' absence is kept as an
+// absence.
+func TestADirectoryHoldingOnlyAScanIsNotReportedAsUnmeasured(t *testing.T) {
+	reader := &recordReader{t: t, scans: map[string]recordRead[Scan]{
+		"dir": {value: Scan{Findings: []finding.Finding{recordGosecClaim("svc/lib.go", "sha1.New()")}}},
+	}}
+
+	read, err := ReadReports(context.Background(), ReadReportsIn{Reader: reader, Reports: []string{"dir"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+
+	if len(read.Measured) != 0 || len(read.Found) != 1 || !read.Scanned {
+		t.Fatalf("read = %d measurements, %d findings, scanned %v; want the scan alone",
+			len(read.Measured), len(read.Found), read.Scanned)
+	}
+	if err := read.Directories[0].MeasurementsErr; !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("MeasurementsErr = %v, want the absence of measurements this job never writes", err)
+	}
+}
+
+// A report directory holding neither document yields nothing, and still
+// carries why.
+func TestAReportDirectoryHoldingNeitherDocumentStillSaysWhy(t *testing.T) {
+	read, err := ReadReports(context.Background(), ReadReportsIn{Reader: &recordReader{t: t}, Reports: []string{"dir"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+
+	if len(read.Measured) != 0 || read.Scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want nothing from an empty directory", len(read.Measured), read.Scanned)
+	}
+	if read.Directories[0].MeasurementsErr == nil {
+		t.Error("a directory that yielded nothing carries no reason")
+	}
+}
+
+// A directory holding measurements and no scan is no scan, and the scan's
+// absence is kept as an absence rather than a document that failed to read.
+func TestAReportDirectoryWithNoScanDocumentSaysNothingAboutOne(t *testing.T) {
+	reader := &recordReader{t: t, measurements: map[string]recordRead[Measurements]{
+		"dir": {value: Measurements{Tree: "deadbeef"}},
+	}}
+
+	read, err := ReadReports(context.Background(), ReadReportsIn{Reader: reader, Reports: []string{"dir"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+
+	if len(read.Measured) != 1 || read.Scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want the measurements alone", len(read.Measured), read.Scanned)
+	}
+	if err := read.Directories[0].ScanErr; !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ScanErr = %v, want the absence of a scan document that was never written", err)
+	}
+}
+
+// A document that is there and will not parse is kept as its own error, and
+// never read as one that was never written.
+//
+// The two are opposite answers. An absent document is the shape of a job that
+// writes the other one, and says nothing a reader must act on; a document that
+// cannot be read is a measurement or a set of counts this recording was meant
+// to hold and silently does not.
+func TestADocumentThatWillNotParseIsReportedRatherThanReadAsAbsent(t *testing.T) {
+	unparseable := func(name string) error {
+		return errors.New(name + ": invalid character 'n' looking for beginning of object key string")
+	}
+
+	// Measurements beside a scan that will not parse: the directory still
+	// yields its components, and the scan's reason is kept beside them.
+	reader := &recordReader{t: t,
+		measurements: map[string]recordRead[Measurements]{"dir": {value: Measurements{Tree: "deadbeef"}}},
+		scans:        map[string]recordRead[Scan]{"dir": {err: unparseable("scan.json")}},
+	}
+	read, err := ReadReports(context.Background(), ReadReportsIn{Reader: reader, Reports: []string{"dir"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+	if read.Scanned {
+		t.Error("a scan document that could not be read was counted as a scan that ran")
+	}
+	if len(read.Measured) != 1 {
+		t.Fatalf("read = %d measurements, want the measurements still folded", len(read.Measured))
+	}
+	if err := read.Directories[0].ScanErr; err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ScanErr = %v, want the parse failure rather than an absence", err)
+	}
+
+	// And neither document readable: nothing is yielded, and both reasons are
+	// kept.
+	reader = &recordReader{t: t,
+		measurements: map[string]recordRead[Measurements]{"both": {err: unparseable("measurements.json")}},
+		scans:        map[string]recordRead[Scan]{"both": {err: unparseable("scan.json")}},
+	}
+	read, err = ReadReports(context.Background(), ReadReportsIn{Reader: reader, Reports: []string{"both"}})
+	if err != nil {
+		t.Fatalf("ReadReports: %v", err)
+	}
+	if len(read.Measured) != 0 || read.Scanned {
+		t.Fatalf("read = %d measurements, scanned %v; want nothing from two unreadable documents",
+			len(read.Measured), read.Scanned)
+	}
+	d := read.Directories[0]
+	for name, err := range map[string]error{"measurements": d.MeasurementsErr, "scan": d.ScanErr} {
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s error = %v, want the parse failure rather than an absence", name, err)
+		}
+	}
+}
