@@ -19,7 +19,7 @@ rule: `for _, c := range file.Components { ... }` iterates zero times and the ch
 silently passes whenever there is no `components.yml` at all — which is every test
 fixture in `cmd/lydite`'s own test suite that does not explicitly declare one (e.g.
 `review_test.go`'s `bumpRepo`/`goSum`-based fixtures). This produced a real fail-open bug
-in `cmd/lydite/review_depdelta.go`'s `dependencyGatesPassed` during development: the first
+in the dependency-evidence check (`internal/reviewdecision/evidence.go`'s `ScanEvidence`) during development: the first
 fix iterated only `file.Components` and every existing test (none of which declare
 `components.yml`) still passed, masking that a *real* repository's declared-but-silent
 component (a language switched off in `.lydite/config.yml`, producing zero rows) would

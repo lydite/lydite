@@ -8,6 +8,7 @@ saw:
   - source/cli/internal/stages/clearance/fingerprint.go
   - source/cli/cmd/lydite/review.go
   - source/cli/cmd/lydite/review_compare.go
+  - source/cli/internal/flows/review/review.go
   - agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md
 ---
 
@@ -38,8 +39,9 @@ snapshot taken at exec time, so a same-user descendant can still read the creden
 **So the comparison is refused in-process whenever a credential is held.**
 `reviewdecision.CompareSurfaces(..., guardCredential, ...)` reports every opted-in component
 whose comparison runs the tree's own code (`untrustedBuild`) as `Uncomputable` when
-`guardCredential` is true. `review` passes `doPublish` (`cmd/lydite/review.go`); `review compare`
-passes `false` because it never publishes (`cmd/lydite/review_compare.go`); the clearance
+`guardCredential` is true. `review`'s flow binds it to its `Publish` input, which `cmd/lydite/review.go` sets from
+`--publish` (`internal/flows/review`); `review compare`'s flow binds `flow.Literal(false)` because
+it never publishes (`internal/flows/review`'s `NewCompare`); the clearance
 Fingerprint stage passes `true` unconditionally (`internal/stages/clearance/fingerprint.go`,
 `clearedDecision`), because a clearance run always holds a token.
 

@@ -7,6 +7,7 @@ saw:
   - source/cli/internal/stages/scm/scm.go
   - source/cli/cmd/lydite/review.go
   - source/cli/cmd/lydite/review_compare.go
+  - source/cli/internal/flows/review/review.go
   - source/cli/cmd/lydite/clearance.go
   - source/cli/cmd/lydite/mergequeue.go
   - agentic/rules/guard-an-in-process-comparison-by-whether-a-credential-exists-not-by-a-flag.md
@@ -24,10 +25,13 @@ opted-in component whose comparison runs the tree's own code (`untrustedBuild`: 
 `agentic/rules/give-untrusted-build-scripts-no-inherited-environment.md`.
 
 **Who guards when.**
-- `review` passes `doPublish` (`cmd/lydite/review.go`): a render-only `review` holds no
-  credential and may compare in-process.
-- `review compare --write-surfaces` passes `false` — it never publishes
-  (`cmd/lydite/review_compare.go`).
+- `review`'s flow binds the guard to its `Publish` input (`internal/flows/review`), which
+  `cmd/lydite/review.go` sets from `--publish`. The comparison runs in the `surfaces` stage,
+  before any credential stage. A render-only `review` (`--publish --status-out`) holds no
+  credential and is still guarded, because `Publish` is true on that route too; only a plain,
+  non-publishing `review` compares in-process.
+- `review compare --write-surfaces` binds `flow.Literal(false)` — it never publishes
+  (`internal/flows/review`'s `NewCompare`).
 - The clearance Fingerprint stage passes `true` **unconditionally**
   (`clearedDecision` in `internal/stages/clearance/fingerprint.go`), not conditioned on
   `--status-out`. Every clearance run holds a credential regardless of route: the flow's
