@@ -24,6 +24,7 @@ import (
 	"lydite/lydite/internal/fixture"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	teststages "lydite/lydite/internal/stages/test"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
@@ -363,8 +364,7 @@ func TestAComponentWhoseInstallResolvedNoRootIsUnmeasured(t *testing.T) {
 			root := fixtureRepo(t, "components: []\n")
 			write(t, root, "web/package.json", `{"name":"web"}`)
 			rep := ui.NewReport("test")
-			runComponents(context.Background(), root, []component.Component{tc.c}, nil, nil,
-				config.Default(), nil, 1, false, false, rep)
+			runSuites(context.Background(), root, []component.Component{tc.c}, config.Default(), 1, rep)
 
 			note := rowByLabel(t, rep, "install(web)")
 			if note.Status != ui.StatusUnmeasured || note.Value != "not installed" {
@@ -426,8 +426,7 @@ func TestACommandComponentSharesOneInstallWithItsRunnerSibling(t *testing.T) {
 			runs := recordingStub(t, "pnpm")
 
 			rep := ui.NewReport("test")
-			runComponents(context.Background(), root, tc.components, nil, nil,
-				config.Default(), nil, 2, false, false, rep)
+			runSuites(context.Background(), root, tc.components, config.Default(), 2, rep)
 
 			if got := stubRuns(t, runs); got != 1 {
 				t.Errorf("pnpm ran %d times, want one install for the root every component resolves", got)
@@ -459,8 +458,7 @@ func TestACommandComponentWithNoPackageJSONInstallsNothing(t *testing.T) {
 
 	mod := component.Component{Name: "mod", Dir: "mod", Command: []string{"sh", "-c", "exit 0"}}
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, []component.Component{mod}, nil, nil,
-		config.Default(), nil, 1, false, false, rep)
+	runSuites(context.Background(), root, []component.Component{mod}, config.Default(), 1, rep)
 
 	if got := stubRuns(t, runs); got != 0 {
 		t.Errorf("pnpm ran %d time(s), want no install: mod holds no package.json, so it is not one of the workspace's packages", got)
@@ -518,8 +516,7 @@ func TestAnOverrideTakesAContextRowNamingWhereItRuns(t *testing.T) {
 			cfg.TypeScript.Install = tc.install
 
 			rep := ui.NewReport("test")
-			runComponents(context.Background(), root, []component.Component{nodeComponent()}, nil, nil,
-				cfg, nil, 1, false, false, rep)
+			runSuites(context.Background(), root, []component.Component{nodeComponent()}, cfg, 1, rep)
 
 			install := rowByLabel(t, rep, "install(web)")
 			if install.Status != ui.StatusContext {
@@ -672,7 +669,7 @@ func TestRowsAreInDeclarationOrder(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	runComponents(context.Background(), root, declared, nil, nil, config.Default(), nil, 3, false, false, rep)
+	runSuites(context.Background(), root, declared, config.Default(), 3, rep)
 
 	var got []string
 	for _, r := range rep.Rows() {
@@ -727,7 +724,7 @@ func TestComponentsNotReachedAreReportedUnmeasured(t *testing.T) {
 	cancel()
 
 	rep := ui.NewReport("test")
-	runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
+	runSuites(ctx, root, declared, config.Default(), 2, rep)
 
 	seen := 0
 	for _, r := range rep.Rows() {
@@ -778,6 +775,22 @@ func TestScheduleRowNamesTheContendedPorts(t *testing.T) {
 	if !strings.Contains(detail, "go/api and rust serialised on port 5432") {
 		t.Errorf("detail = %q, want the contended pair named", detail)
 	}
+}
+
+// runSuites runs declared through the run stage the way `lydite test
+// --no-coverage` does, with this command's own logs and no flaky gate, and adds
+// the section it produces to rep.
+func runSuites(ctx context.Context, root string, declared []component.Component, cfg config.Config, limit int, rep *ui.Report) []measurement {
+	// The run stage reports every failure through its rows and returns no
+	// error of its own.
+	out, _ := teststages.Run(ctx, teststages.RunIn{
+		Dir: root, Decl: component.File{Components: declared}, Own: declared, Selected: declared,
+		Config: cfg, Concurrency: limit, Logs: componentLogs,
+	})
+	for _, r := range out.Rows {
+		rep.Add(r)
+	}
+	return out.Measurements
 }
 
 func rowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
@@ -955,7 +968,7 @@ func TestAKilledSuiteIsNotReportedAsAFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 1, false, false, rep)
+		runSuites(ctx, root, declared, config.Default(), 1, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -1005,7 +1018,7 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runComponents(ctx, root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
+		runSuites(ctx, root, declared, config.Default(), 2, rep)
 	}()
 	waitForFile(t, started)
 	cancel()
@@ -1017,6 +1030,77 @@ func TestAPlanningFailureSurvivesAnInterrupt(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(row.Detail, " "), "ghost") {
 		t.Errorf("detail = %v, want the undeclared service still named", row.Detail)
+	}
+}
+
+// An interrupt during the suites still renders the report and writes its
+// document. The run's own rows say what was cut short — a failing schedule row,
+// the unfinished component not completed — and the flow stopping before the
+// gates after the run must not discard them in favour of a bare error.
+func TestAnInterruptedRunStillRendersItsReport(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	write(t, root, "mod/slow_test.go",
+		"package fixture\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(30 * time.Second) }\n")
+	// setup runs only once the scheduler has admitted the component, so the
+	// marker is the signal that a suite is genuinely under way.
+	started := filepath.Join(root, "started")
+	write(t, root, component.FileName, fmt.Sprintf(`components:
+  - name: slow
+    dir: mod
+    runner: go-test
+    setup: ["touch %s"]
+`, started))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := newRootCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"test", "--dir", root, "--no-color", "--json"})
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+	waitForFile(t, started)
+	cancel()
+	err := <-done
+
+	var exit ui.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("err = %v, want the report's own exit 1\nstdout: %s\nstderr: %s", err, out.String(), errOut.String())
+	}
+	if schedule := jsonRowByLabel(t, out.String(), "schedule"); schedule.Status != "fail" ||
+		!strings.HasPrefix(schedule.Value, "interrupted after") {
+		t.Errorf("schedule = %+v, want a failure saying the run was interrupted", schedule)
+	}
+	if row := jsonRowByLabel(t, out.String(), "test(slow)"); row.Status != "unmeasured" || row.Value != "not completed" {
+		t.Errorf("test(slow) = %+v, want the killed suite not completed", row)
+	}
+	if _, err := os.Stat(filepath.Join(reportsDir(root), documentName("test"))); err != nil {
+		t.Errorf("the report document was not written: %v", err)
+	}
+}
+
+// A run cut short before any suite ran has no rows saying so, and a report
+// holding only the declaration's gates would read as a pass. It is an error.
+func TestARunCancelledBeforeItsSuitesIsAnError(t *testing.T) {
+	root := fixtureRepo(t, `components:
+  - name: fixture
+    dir: mod
+    runner: go-test
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"test", "--dir", root, "--no-color"})
+	err := cmd.ExecuteContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled\n%s", err, out.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want no report", out.String())
 	}
 }
 
@@ -1376,7 +1460,7 @@ func TestAComponentDeclaringNoSuiteTakesNoLock(t *testing.T) {
 	}
 
 	rep := ui.NewReport("test")
-	ms := runComponents(context.Background(), root, declared, nil, nil, config.Default(), nil, 2, false, false, rep)
+	ms := runSuites(context.Background(), root, declared, config.Default(), 2, rep)
 
 	schedule := rowByLabel(t, rep, "schedule")
 	if !strings.HasPrefix(schedule.Value, "1 component(s)") || strings.Contains(schedule.Value, "serialised") {
@@ -1466,8 +1550,9 @@ func TestASelectionOfOnlyNoSuiteComponentsTakesNoComposedRows(t *testing.T) {
 	own := []component.Component{{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell}}
 	file := component.File{Components: own}
 	rep := ui.NewReport("test")
-	addTestCoverageRows(context.Background(), newRootCmd(), rep, t.TempDir(), file, own, nil, config.Default(),
-		coverageOptions{Instrument: true})
+	addCoverageSection(t, newRootCmd(), rep, teststages.CoverageIn{
+		Dir: t.TempDir(), Decl: file, Own: own, Config: config.Default(), Instrument: true,
+	})
 	var labels []string
 	for _, r := range rep.Rows() {
 		labels = append(labels, r.Label)

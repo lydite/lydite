@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -11,7 +10,6 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
-	testmeasure "lydite/lydite/internal/test/measure"
 )
 
 // measurementsName is the file a run writes what it measured to, inside the
@@ -316,9 +314,4 @@ func (e componentMeasurement) patchPartOf(name string) (patchPart, bool) {
 		base = e.Base.LineCount
 	}
 	return patchPart{Name: name, Hit: e.Patch.Hit, Total: e.Patch.Total, Base: base}, true
-}
-
-// testCounts is testmeasure.TestCounts.
-func testCounts(w io.Writer, ms []measurement) map[string]junit.Counts {
-	return testmeasure.TestCounts(w, ms)
 }

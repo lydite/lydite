@@ -15,6 +15,8 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
+	teststages "lydite/lydite/internal/stages/test"
+	testmeasure "lydite/lydite/internal/test/measure"
 	"lydite/lydite/internal/ui"
 )
 
@@ -100,12 +102,12 @@ func TestAFailingRowNamesTheFunctionsToActOn(t *testing.T) {
 func TestARowSaysHowManyFunctionsWereExcluded(t *testing.T) {
 	t.Parallel()
 	clean := scored("api", 1, 41.5)
-	if got := crapValue(clean.CRAP); strings.Contains(got, "excluded") {
+	if got := testmeasure.CRAPValue(clean.CRAP); strings.Contains(got, "excluded") {
 		t.Errorf("crap(api) = %q, want no clause when nothing was excluded", got)
 	}
 	declared := scored("api", 1, 41.5)
 	declared.CRAP.Excluded = 2
-	if got := crapValue(declared.CRAP); !strings.Contains(got, "2 excluded") {
+	if got := testmeasure.CRAPValue(declared.CRAP); !strings.Contains(got, "2 excluded") {
 		t.Errorf("crap(api) = %q, want the two declarations counted", got)
 	}
 }
@@ -159,8 +161,11 @@ func TestAnUngatedRunStillReportsWhatItScored(t *testing.T) {
 	decl := component.File{Components: []component.Component{
 		{Name: "api", Dir: "api", Runner: runner.GoTest},
 	}}
-	addCoverageRows(context.Background(), newTestCmd(), rep, t.TempDir(), decl, decl.Components,
-		[]measurement{scored("api", 3, 41.5)}, config.Default(), coverageOptions{Instrument: true})
+	addCoverageSection(t, newTestCmd(), rep, teststages.CoverageIn{
+		Dir: t.TempDir(), Decl: decl, Own: decl.Components,
+		Measurements: []measurement{scored("api", 3, 41.5)}, Config: config.Default(),
+		Instrument: true,
+	})
 	rows := rowsOf(rep)
 	got, ok := rows["crap(api)"]
 	if !ok {
@@ -249,7 +254,7 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 	t.Parallel()
 	docs := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
 		"the component declares a raw command, which has no instrumented variant")
-	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), docs}, nil, nil)
+	row, ok := testmeasure.CRAPSummaryOf([]measurement{scored("api", 3, 41.0), scored("sdk", 2, 156.3), docs}, nil, nil)
 	if !ok {
 		t.Fatal("no summary row over a repository with two scored components")
 	}
@@ -273,14 +278,14 @@ func TestTheSummaryCountsWhatCouldBeScored(t *testing.T) {
 
 	// A repository lydite can score nothing of gets no row at all: that is a
 	// property of the metric, not a gap this run left.
-	if _, ok := crapSummaryOf([]measurement{docs}, nil, nil); ok {
+	if _, ok := testmeasure.CRAPSummaryOf([]measurement{docs}, nil, nil); ok {
 		t.Error("a repository with no component CRAP applies to got a summary row")
 	}
 	// One it could score and did not is amber, for the reason a floor that
 	// cleared nothing is: a gate that examined nothing must not read as one
 	// that did.
 	failed := unmeasuredComponent(component.Component{Name: "api", Dir: "api", Runner: runner.GoTest}, "the suite failed")
-	if row, ok := crapSummaryOf([]measurement{failed}, nil, nil); !ok || row.Status != ui.StatusUnmeasured {
+	if row, ok := testmeasure.CRAPSummaryOf([]measurement{failed}, nil, nil); !ok || row.Status != ui.StatusUnmeasured {
 		t.Errorf("crap = %+v (ok=%v), want an amber row", row, ok)
 	}
 }
@@ -322,7 +327,7 @@ func TestOnlyAnUnselectedComponentCarriesItsScoreForward(t *testing.T) {
 	record["unscorable"] = entry(9, 10)
 	anchor["unscorable"] = gitstate.CRAPEntry{Above: 3, Worst: 70}
 
-	got := crapRecord([]measurement{scored("api", 1, 33), unselected, failed, uncovered, unscorable}, record, carried, anchor)
+	got := testmeasure.CRAPRecord([]measurement{scored("api", 1, 33), unselected, failed, uncovered, unscorable}, record, carried, anchor)
 	if _, ok := got["unscorable"]; ok {
 		t.Error("a component that ran and could not be scored recorded the baseline's score")
 	}
@@ -351,7 +356,7 @@ func TestAScoreThatCouldNotBeTakenCarriesItsReason(t *testing.T) {
 	m := measured("svc", runner.Go, 9, 10)
 	m.Hits = coverage.LineHits{"svc/lib.go": {1: 1, 2: 1, 3: 1}}
 
-	rep, why := score(root, m)
+	rep, why := testmeasure.Score(root, m)
 	if rep.Measured() {
 		t.Errorf("report = %+v, want nothing scored", rep)
 	}
@@ -380,7 +385,7 @@ func TestTheFigureOverTheRepositoryDoesNotDependOnSharding(t *testing.T) {
 	ms := []measurement{scored("api", 3, 41.5), unselected}
 	carried := map[string]bool{"sdk": true}
 
-	row, ok := crapSummaryOf(ms, carried, anchor)
+	row, ok := testmeasure.CRAPSummaryOf(ms, carried, anchor)
 	if !ok {
 		t.Fatal("no summary row over a run that carried one of its two components")
 	}
@@ -629,7 +634,7 @@ func TestRustAndTypeScriptComponentsAreScoredAndGated(t *testing.T) {
 			write(t, root, c.file, c.src)
 			m := measured(c.name, c.lang, 0, 12)
 			m.Hits = untested(c.file, 12)
-			m.CRAP, m.CRAPWhy = score(root, m)
+			m.CRAP, m.CRAPWhy = testmeasure.Score(root, m)
 			if !m.Scored() {
 				t.Fatalf("score(%s) = (%+v, %q), want a report", c.file, m.CRAP, m.CRAPWhy)
 			}
@@ -678,7 +683,7 @@ pub fn tangled(a: i64, b: i64) -> i64 {
 `)
 	m := measured("svc", runner.Rust, 0, 8)
 	m.Hits = untested("svc/src/lib.rs", 8)
-	m.CRAP, m.CRAPWhy = score(root, m)
+	m.CRAP, m.CRAPWhy = testmeasure.Score(root, m)
 	if m.Scored() {
 		t.Fatalf("score = %+v, want nothing scored — every function is declared", m.CRAP)
 	}
@@ -699,7 +704,7 @@ func TestATypeScriptComponentWithNoFunctionToScoreIsNotAPass(t *testing.T) {
 	write(t, root, "web/src/a.ts", "export const answer = 42;\n")
 	m := measured("web", runner.TypeScript, 0, 1)
 	m.Hits = untested("web/src/a.ts", 1)
-	m.CRAP, m.CRAPWhy = score(root, m)
+	m.CRAP, m.CRAPWhy = testmeasure.Score(root, m)
 	if m.Scored() || !strings.Contains(m.CRAPWhy, "no function to score") {
 		t.Fatalf("score = (%+v, %q), want the report to say it describes no function", m.CRAP, m.CRAPWhy)
 	}
@@ -723,21 +728,21 @@ func TestASkippedFileIsNamedRatherThanSilentlyDropped(t *testing.T) {
 		"web/src/plain.ts":   {1: 1, 2: 1, 3: 1},
 		"web/src/widget.jsx": {1: 1, 2: 1, 3: 1},
 	}
-	m.CRAP, m.CRAPWhy = score(root, m)
+	m.CRAP, m.CRAPWhy = testmeasure.Score(root, m)
 	if !m.Scored() {
 		t.Fatalf("score = (%+v, %q), want the .ts file scored", m.CRAP, m.CRAPWhy)
 	}
-	value := crapValue(m.CRAP)
+	value := testmeasure.CRAPValue(m.CRAP)
 	if !strings.Contains(value, "1 file(s) not walked") {
 		t.Errorf("crapValue = %q, want it to name the skipped .jsx file", value)
 	}
-	if clean := crapValue(crap.Report{Scored: 1}); strings.Contains(clean, "not walked") {
+	if clean := testmeasure.CRAPValue(crap.Report{Scored: 1}); strings.Contains(clean, "not walked") {
 		t.Errorf("crapValue = %q, want no clause when nothing was skipped", clean)
 	}
 
 	all := measured("web", runner.TypeScript, 0, 3)
 	all.Hits = coverage.LineHits{"web/src/widget.jsx": {1: 1, 2: 1, 3: 1}}
-	all.CRAP, all.CRAPWhy = score(root, all)
+	all.CRAP, all.CRAPWhy = testmeasure.Score(root, all)
 	if all.Scored() || !strings.Contains(all.CRAPWhy, "could not be walked") {
 		t.Fatalf("score = (%+v, %q), want it to say every file could not be walked", all.CRAP, all.CRAPWhy)
 	}
@@ -758,7 +763,7 @@ func TestTheSummaryDenominatorSpansEveryScoredLanguage(t *testing.T) {
 	docs := unmeasurableComponent(component.Component{Name: "docs", Dir: "docs", Command: []string{"make"}},
 		"the component declares a raw command, which has no instrumented variant")
 
-	row, ok := crapSummaryOf([]measurement{scored("api", 3, 41.0), rust, web, docs}, nil, nil)
+	row, ok := testmeasure.CRAPSummaryOf([]measurement{scored("api", 3, 41.0), rust, web, docs}, nil, nil)
 	if !ok {
 		t.Fatal("no summary row over a repository with three scored components")
 	}
@@ -785,8 +790,11 @@ func TestADeclarationCoveringNoFunctionIsNamedOnTheCommandsStderr(t *testing.T) 
 	cmd := newTestCmd()
 	var errOut strings.Builder
 	cmd.SetErr(&errOut)
-	addCoverageRows(context.Background(), cmd, ui.NewReport("test"), t.TempDir(), decl, decl.Components,
-		[]measurement{m}, config.Default(), coverageOptions{Instrument: true})
+	addCoverageSection(t, cmd, ui.NewReport("test"), teststages.CoverageIn{
+		Dir: t.TempDir(), Decl: decl, Own: decl.Components,
+		Measurements: []measurement{m}, Config: config.Default(),
+		Instrument: true,
+	})
 
 	got := errOut.String()
 	if !strings.Contains(got, "api/lib.go:12") {

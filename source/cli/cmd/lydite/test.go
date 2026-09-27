@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -21,10 +22,11 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/compose"
 	"lydite/lydite/internal/config"
-	"lydite/lydite/internal/gitdiff"
-	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/flow"
+	testflow "lydite/lydite/internal/flows/test"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
+	teststages "lydite/lydite/internal/stages/test"
 	testrun "lydite/lydite/internal/test/run"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
@@ -90,175 +92,36 @@ the component's to declare.`,
 				// workflow believing it gates.
 				return errors.New("--no-coverage measures nothing for --gate-coverage to gate; pass one")
 			}
-			cfg, err := config.Load(dir)
+			tests, err := testflow.New()
 			if err != nil {
 				return err
 			}
-			file, err := component.Load(dir)
-			if err != nil {
+			r, err := tests.Run(ctx, testflow.Params{
+				Dir:          dir,
+				Components:   components,
+				BaseBranch:   baseBranch,
+				Affected:     onlyAffected,
+				GateFlaky:    gateFlaky,
+				GateCoverage: gateCoverage,
+				Concurrency:  limit,
+				Stream:       stream,
+				Instrument:   !noCoverage,
+				Logs:         componentLogs,
+				Stderr:       cmd.ErrOrStderr(),
+			}.Inputs())
+			if err != nil && !interrupted(err, r) {
+				return testError(err)
+			}
+			if err := addTestRows(cmd, rep, dir, r); err != nil {
 				return err
 			}
-			// Before selection and before anything runs, because the gate
-			// asks whether the declaration is complete and that question
-			// does not depend on which components this invocation chose —
-			// or on there being any. A repository that declares none is
-			// exactly the one whose every source file is orphaned, and a
-			// gate it never saw would be the failure it exists to catch.
-			rep.Add(orphanRow(ctx, dir, file))
-
-			// Before selection: a watch pattern that fires for nothing is a
-			// component that stops running when its input changes, and the
-			// question is about the declaration rather than about what this
-			// invocation chose.
-			rep.Add(watchRow(ctx, dir, file))
-
-			// The responsibility set: what this run reports on, and the
-			// whole of it. `--component` says what this job is responsible
-			// for and `--affected` says which of those need running, so the
-			// two compose rather than competing — a shard runs
-			// `--affected --component <slice>` and reports one row per
-			// component in the slice, whether or not selection ran it.
-			//
-			// A run reports nothing at all about a component outside this
-			// set. Under a matrix that is what keeps every declared component
-			// appearing exactly once across the shards, which is the property
-			// `lydite test merge` decides completeness from.
-			own, err := file.Select(components)
-			if err != nil {
-				return err
+			// A run cut short after its suites reports what they did through
+			// the schedule row, which fails. One that reports nothing failing
+			// was cut short after that row was written, and rendering it would
+			// have the gates it never reached read as a green run.
+			if err != nil && rep.Err() == nil {
+				return testError(err)
 			}
-			// Narrowed by --component, which is what makes a repository-wide
-			// figure unanswerable here: coverage(repo) and patch(repo) sum
-			// every component, and a shard holding two of four would publish
-			// its own two under a label about the repository. `lydite test
-			// merge` emits them once, from every shard's measurements.
-			narrowed := len(components) > 0
-			selected := own
-			// Before any suite runs. `lydite test` is the command that invokes
-			// `go test`, `cargo llvm-cov` and `npx vitest`, so it is the one
-			// that has to make their toolchains present — a runner with no
-			// Node answers `npx: not found` rather than provisioning one, and
-			// a runner whose ambient Go is fine still needs GOTOOLCHAIN
-			// pinned, which is the whole reason internal/toolchain touches Go
-			// at all.
-			//
-			// It is resolved here rather than inherited from a `lydite scan`
-			// earlier in the same job: the result is a value handed to each
-			// component's own commands, not a change to this process.
-			envs, err := ensureToolchains(ctx, cmd, dir, cfg, componentUnits(own))
-			if err != nil {
-				return err
-			}
-			// Empty unless selection ran: with no skipped components the
-			// declaration order of the selected set is already the order of
-			// the whole set.
-			var skipped map[string]ui.Row
-			var ordered []component.Component
-			// Nothing to select from is not the same as a change that
-			// selected nothing, and selection must not be asked which it is.
-			// Running it would render a select row claiming the diff was
-			// empty beside a row saying no components are declared — two rows
-			// contradicting each other — and would pay a git fetch to do it,
-			// which on a shallow or fork checkout turns a report that renders
-			// into a hard error before any row is written.
-			if onlyAffected && len(file.Components) > 0 {
-				var res affected.Result
-				res, err = selectAffected(ctx, dir, file, baseBranch)
-				if err != nil {
-					return err
-				}
-				// Selection is computed over the whole declaration and
-				// intersected with this run's responsibility set afterwards,
-				// so the `select` row says the same thing in every shard.
-				// Computing it over the slice would give each shard its own
-				// counts and reasons, and the fold has no way to tell that
-				// from shards that saw different trees.
-				selected = intersect(res.Selected, own)
-				rep.Add(selectRow(res, len(file.Components)))
-				// The same label shape a suite row takes, so every component
-				// produces exactly one test(<name>) row whether it ran or
-				// not. A bare name would collide with a gate row for a
-				// component called "watch", "select", "orphans" or
-				// "schedule" — nothing forbids those — and a consumer keying
-				// rows by label silently loses the gate.
-				//
-				// They are handed to runComponents rather than added here so
-				// the rows interleave into declaration order. Added here they
-				// would all precede the suites, and a declaration of a, b, c
-				// with only b affected would document b last.
-				//
-				// Scoped to the responsibility set, so `test(a): not
-				// affected` is emitted by the one shard that owns a.
-				//
-				// A component declaring no suite takes the row its declaration
-				// gives it whether or not selection reached it, so the row
-				// reads the same here as in a fold, where no shard ran it.
-				skipped = make(map[string]ui.Row, len(res.Skipped))
-				for _, c := range intersect(res.Skipped, own) {
-					if declaresNoSuite(c) {
-						skipped[c.Name] = noSuiteTestRow("test", c.Name)
-						continue
-					}
-					skipped[c.Name] = ui.Row{Status: ui.StatusUnmeasured, Label: testLabel(c.Name), Value: "not affected"}
-				}
-				ordered = own
-			}
-			// Resolved once for the run rather than once per component: the
-			// merge-base and the paths the change touched are facts about the
-			// change, and asking git for them per component pays the same walk
-			// again for every one of them.
-			gate := testrun.NewFlakyGate(ctx, dir, baseBranch, gateFlaky)
-			cov := coverageOptions{
-				Instrument:  !noCoverage,
-				Gate:        gateCoverage,
-				BaseBranch:  baseBranch,
-				Concurrency: limit,
-				Selected:    onlyAffected,
-				Narrowed:    narrowed,
-			}
-			if len(selected) == 0 {
-				// Nothing ran, so nothing interleaves: the skipped rows are
-				// the whole set, still in declaration order.
-				for _, c := range own {
-					if r, ok := skipped[c.Name]; ok {
-						rep.Add(r)
-					}
-				}
-				// A row per component whether or not anything ran, for the
-				// reason the coverage rows below take one: a component whose
-				// suite never ran examined none of its new tests, and a
-				// section that disappears reads as a concern that passed.
-				addFlakyRows(rep, gate, own)
-				// The gate still reports, because a caller that asked for it
-				// has to be able to tell this from a run where the flag was
-				// dropped. On the default branch this is also the run that
-				// records: a tree matching its base selects nothing and is
-				// still the tree whose coverage the next change gates
-				// against.
-				if len(file.Components) > 0 {
-					addTestCoverageRows(ctx, cmd, rep, dir, file, own, nil, cfg, cov)
-				}
-				// Only when the declaration is genuinely empty. A run that
-				// selected nothing has components declared and has already
-				// said so through its own select row, and repeating the
-				// sentence here would have the report contradict itself
-				// about the one thing it exists to state.
-				if len(file.Components) == 0 {
-					// Through the report rather than around it: --json
-					// promises stdout carries a document and nothing else,
-					// and a bare sentence printed here is unparseable output.
-					rep.Add(ui.Row{
-						Status: ui.StatusUnmeasured,
-						Label:  "test",
-						Value:  "no components declared in " + component.FileName,
-					})
-				}
-				return renderReport(cmd, rep, dir, asJSON, noColor)
-			}
-
-			ms := runComponentsGated(ctx, dir, selected, ordered, skipped, cfg, envs, limit, stream, cov.Instrument, rep, gate)
-			addFlakyRows(rep, gate, own)
-			addTestCoverageRows(ctx, cmd, rep, dir, file, own, ms, cfg, cov)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -340,40 +203,112 @@ func noSuiteCoverageRows(rep *ui.Report, name string, floor float64) {
 	}
 }
 
-// withSuites is the components that declare a suite, in the order given.
-func withSuites(cs []component.Component) []component.Component {
-	out := make([]component.Component, 0, len(cs))
-	for _, c := range cs {
-		if !declaresNoSuite(c) {
-			out = append(out, c)
-		}
+// testError is a run's failure as this command reports it: the stage's own
+// error, never the flow's framing of it. A configuration that will not load or
+// a component nobody declared reads the same whichever stage found it.
+func testError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
 	}
-	return out
+	return err
 }
 
-// addTestCoverageRows is addCoverageRows over the components that declare a
-// suite, followed by the declaration's rows for each that declares none.
+// interrupted reports whether err is the flow stopping for a cancelled context
+// once the run stage had finished, rather than a stage failing.
 //
-// A component declaring no suite is kept out of the measured set rather than
-// handed to it as unmeasurable: a measurement with no language renders its
-// complexity row as a raw command's, naming a command this component does not
-// declare. It contributes to no composed figure either way — nothing could
-// ever measure it, so it sits on neither side of any comparison.
+// The suites are the part of a run that takes long enough to be interrupted,
+// and the run stage turns an interruption into rows of its own — a failing
+// schedule row, and each unfinished component not completed — so the report
+// those rows belong to is still the answer to give. A cancellation any stage
+// returned as its own error is that stage failing, and one before the run
+// stage finished has no suite's rows to report.
+func interrupted(err error, r *flow.Result) bool {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return false
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return r.Status(testflow.StageRun) == flow.StatusSucceeded
+}
+
+// addTestRows adds every section of the run to rep, in the order the flow ran
+// the stages that produced them: the declaration's gates, selection, the
+// suites, the flaky gate, and coverage.
 //
-// Its rows follow only a run that instruments, for the reason a suite's do: a
-// run under --no-coverage emits no coverage row for any component.
-func addTestCoverageRows(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir string, file component.File, own []component.Component, ms []measurement, cfg config.Config, cov coverageOptions) {
-	if suites := withSuites(own); len(suites) > 0 {
-		addCoverageRows(ctx, cmd, rep, dir, file, suites, ms, cfg, cov)
+// A stage after the run that an interruption stopped the flow before adds
+// nothing: the schedule row already says the run was cut short.
+func addTestRows(cmd *cobra.Command, rep *ui.Report, root string, r *flow.Result) error {
+	declared, err := flow.Output[teststages.DeclarationOut](r, testflow.StageDeclaration)
+	if err != nil {
+		return err
 	}
-	if !cov.Instrument {
-		return
+	selected, err := flow.Output[teststages.SelectAffectedOut](r, testflow.StageSelectAffected)
+	if err != nil {
+		return err
 	}
-	for _, c := range own {
-		if declaresNoSuite(c) {
-			noSuiteCoverageRows(rep, c.Name, cfg.Coverage.Floor)
+	ran, err := flow.Output[teststages.RunOut](r, testflow.StageRun)
+	if err != nil {
+		return err
+	}
+	flaky, err := reachedOutput[teststages.FlakyGateOut](r, testflow.StageFlakyGate)
+	if err != nil {
+		return err
+	}
+	measured, err := reachedOutput[teststages.CoverageOut](r, testflow.StageCoverage)
+	if err != nil {
+		return err
+	}
+	for _, rows := range [][]ui.Row{declared.Rows, selected.Rows, ran.Rows, flaky.Rows} {
+		for _, row := range rows {
+			rep.Add(row)
 		}
 	}
+	rep.AddFindings(flaky.Findings...)
+	addCoverage(cmd, rep, root, measured)
+	return nil
+}
+
+// reachedOutput is flow.Output for a stage the flow may have stopped before,
+// which is T's zero value. A stage that was reached and has no output is still
+// the error flow.Output makes it.
+func reachedOutput[T any](r *flow.Result, stage string) (T, error) {
+	if r.Status(stage) == flow.StatusNotReached {
+		var zero T
+		return zero, nil
+	}
+	return flow.Output[T](r, stage)
+}
+
+// addCoverage adds the coverage section to rep: every coverage, patch, CRAP and
+// floor row, then the record row once the candidate the run proposes is saved,
+// then the rows of each component declaring no suite.
+func addCoverage(cmd *cobra.Command, rep *ui.Report, root string, out teststages.CoverageOut) {
+	for _, row := range out.Rows {
+		rep.Add(row)
+	}
+	// `record` and not `baseline`: the two are different events in one run —
+	// the baseline read this change is gated against, and the entry this
+	// change leaves for the next one. Sharing a label would put two rows under
+	// it, which is what a consumer keying rows by label cannot survive.
+	if c := out.Candidate; c != nil {
+		rep.Add(candidateRow(cmd, root, candidateDoc(*c), c.Value))
+	}
+	for _, row := range out.NoSuiteRows {
+		rep.Add(row)
+	}
+}
+
+// candidateDoc is the document a candidate is saved as. One that establishes
+// nothing names only its tree, why, and the test counts, which a run whose
+// every suite failed still has and a history most wants.
+func candidateDoc(c teststages.Candidate) measurementsDoc {
+	if c.Reason != "" {
+		return measurementsDoc{Tree: c.Tree, Reason: c.Reason, Tests: c.Tests}
+	}
+	return measurementsFrom(c.Tree, c.Record, c.Measured, c.Carried, c.Scores, c.GatedAgainst, c.Gated, c.Parts, c.Tests)
 }
 
 // defaultConcurrency is how many components run at once when nothing says
@@ -437,26 +372,26 @@ type componentPlan struct {
 	ready bool
 }
 
-// runComponents plans every selected component, runs them under the scheduler
-// and adds their rows in declaration order. It is runComponentsGated with no
-// flaky gate.
-func runComponents(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report) []measurement {
-	return runComponentsGated(ctx, root, selected, ordered, skipped, cfg, envs, limit, stream, instrument, rep, nil)
-}
-
-// runComponentsGated plans every selected component through this command's
-// logs, runs them with testrun.RunComponents, and adds the rows it returns to
-// rep in the order it returns them. Every log is closed once the run is over.
-func runComponentsGated(ctx context.Context, root string, selected, ordered []component.Component, skipped map[string]ui.Row, cfg config.Config, envs toolchain.Envs, limit int, stream, instrument bool, rep *ui.Report, gate *testrun.FlakyGate) []measurement {
-	plans, logs := openPlans(ctx, root, selected, "test", stream)
-	for _, p := range plans {
-		defer logs[p.C.Name].Close()
+// componentLogs is the teststages.Logs this command runs with: each component
+// writes to its own componentLog under root, mirrored to stderr when stream is
+// set.
+//
+// closeAll closes them in the reverse of the order they were opened. Closing a
+// streamed log flushes the unterminated line its mirror still holds, so that
+// order is the order those last lines reach the terminal.
+func componentLogs(root, kind string, stream bool) (testrun.Opener, func()) {
+	var opened []*componentLog
+	open := func(c component.Component, width int, runs bool) testrun.Output {
+		log := logFor(root, kind, stream, c, width, runs)
+		opened = append(opened, log)
+		return logOutput(log)
 	}
-	rows, measured := testrun.RunComponents(ctx, root, plans, ordered, skipped, cfg, envs, limit, instrument, gate)
-	for _, row := range rows {
-		rep.Add(row)
+	closeAll := func() {
+		for _, log := range slices.Backward(opened) {
+			log.Close()
+		}
 	}
-	return measured
+	return open, closeAll
 }
 
 // itemFor is testrun.ItemFor.
@@ -476,20 +411,25 @@ func planComponents(ctx context.Context, root string, selected []component.Compo
 // openPlans is testrun.PlanComponents with an opener that gives each component
 // a componentLog, and the logs it opened, by component name — the one key a
 // declaration guarantees unique.
-//
-// A component declaring no suite gets a log that writes nowhere: an empty file
-// under its name would read as the output of a run that never happened.
 func openPlans(ctx context.Context, root string, selected []component.Component, kind string, stream bool) ([]testrun.Plan, map[string]*componentLog) {
 	logs := make(map[string]*componentLog, len(selected))
 	plans := testrun.PlanComponents(ctx, root, selected, kind, func(c component.Component, width int, runs bool) testrun.Output {
-		log := &componentLog{out: io.Discard, name: c.Name, width: width}
-		if runs {
-			log = openLog(root, c.Name, kind+".log", stream, width)
-		}
+		log := logFor(root, kind, stream, c, width, runs)
 		logs[c.Name] = log
 		return logOutput(log)
 	})
 	return plans, logs
+}
+
+// logFor is the componentLog one component writes to under kind.
+//
+// A component declaring no suite gets a log that writes nowhere: an empty file
+// under its name would read as the output of a run that never happened.
+func logFor(root, kind string, stream bool, c component.Component, width int, runs bool) *componentLog {
+	if !runs {
+		return &componentLog{out: io.Discard, name: c.Name, width: width}
+	}
+	return openLog(root, c.Name, kind+".log", stream, width)
 }
 
 // runPlan is p as the engine plans one.
@@ -790,16 +730,6 @@ func invocation(c component.Component, variant runner.Variant) (runner.Invocatio
 // flakyLabel is testrun.FlakyLabel.
 func flakyLabel(name string) string { return testrun.FlakyLabel(name) }
 
-// addFlakyRows adds the flaky gate's rows for own to rep, in the order the gate
-// returns them, and every finding its disagreements made.
-func addFlakyRows(rep *ui.Report, gate *testrun.FlakyGate, own []component.Component) {
-	rows, found := gate.Report(own)
-	for _, row := range rows {
-		rep.Add(row)
-	}
-	rep.AddFindings(found...)
-}
-
 // childEnv is testrun.ChildEnv.
 func childEnv(tc *toolchain.Env, c component.Component, inv runner.Invocation) []string {
 	return testrun.ChildEnv(tc, c, inv)
@@ -832,28 +762,6 @@ func renderReport(cmd *cobra.Command, rep *ui.Report, root string, asJSON, noCol
 	return rep.Err()
 }
 
-// selectAffected narrows the run to the components the change against the
-// merge-base could have broken.
-//
-// An unresolvable merge-base is an error rather than a fallback, in either
-// direction. Falling back to nothing is the failure selection exists to avoid;
-// falling back to everything is safe but makes the optimisation stop happening
-// with no symptom other than a slow job, which is how a shallow checkout goes
-// unnoticed for months. `lydite scan --diff-base auto` refuses for the same
-// reason, and a shallow checkout is a fixable misconfiguration.
-func selectAffected(ctx context.Context, dir string, file component.File, baseBranch string) (affected.Result, error) {
-	base, err := gitstate.ResolveBaseSHA(ctx, dir, baseBranch)
-	if err != nil {
-		// The base branch is resolved inside, so an undiscoverable one
-		// already arrives here as an error naming --base-branch. What is
-		// left to say is the other cause, which produces the same
-		// merge-base failure from a branch that resolved perfectly.
-		return affected.Result{}, fmt.Errorf("--affected needs the merge-base with the base branch, and it could not be resolved: %w"+
-			"\n       a shallow checkout is the usual cause — fetch with depth 0", err)
-	}
-	return affectedFrom(ctx, dir, file, base)
-}
-
 // affectedFrom is testrun.AffectedFrom.
 func affectedFrom(ctx context.Context, dir string, file component.File, base string) (affected.Result, error) {
 	return testrun.AffectedFrom(ctx, dir, file, base)
@@ -861,62 +769,6 @@ func affectedFrom(ctx context.Context, dir string, file component.File, base str
 
 // selectRow is testrun.SelectRow.
 func selectRow(res affected.Result, declared int) ui.Row { return testrun.SelectRow(res, declared) }
-
-// watchRow gates every declared watch pattern against the tree.
-//
-// A pattern covering no file is a component that will not run when its input
-// changes — silently, permanently, and green every time. It fails where an
-// unused exclude only warns, because an exclude covering nothing leaves the
-// orphan gate stricter than declared while this leaves a suite unrun.
-//
-// Outside a git repository it reports unmeasured and passes, the same shape
-// orphanRow takes: a gate that could not run must be visibly distinct from one
-// that passed, and turning `lydite test` in an exported tarball into a hard
-// failure would be the gate firing on ordinary work.
-func watchRow(ctx context.Context, dir string, file component.File) ui.Row {
-	const label = "watch"
-	declared := 0
-	for _, c := range file.Components {
-		declared += len(c.Watch)
-	}
-	if declared == 0 {
-		return ui.Row{Status: ui.StatusPass, Label: label, Value: "none declared"}
-	}
-	files, err := gitdiff.Tracked(ctx, dir)
-	if errors.Is(err, gitdiff.ErrNoRepository) {
-		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no git repository"}
-	}
-	if err != nil {
-		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not checked", Detail: []string{err.Error()}}
-	}
-	// A scan root git lists nothing for — one that is itself ignored, a
-	// vendored checkout, a --dir pointed at build output — sits inside a work
-	// tree and exits zero. Every pattern would read as covering no file, and
-	// the gate would fail a declaration that is correct while claiming the
-	// author had written a typo. The same case orphanRow reports through
-	// ErrNoFiles.
-	if len(files) == 0 {
-		return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "no files found"}
-	}
-	unmatched := affected.UnmatchedWatch(file, files)
-	if len(unmatched) == 0 {
-		return ui.Row{Status: ui.StatusPass, Label: label, Value: fmt.Sprintf("%d pattern(s) match", declared)}
-	}
-	detail := make([]string, 0, len(unmatched)+1)
-	for _, u := range unmatched {
-		detail = append(detail, fmt.Sprintf("%s: %q covers no file", u.Component, u.Pattern))
-	}
-	// The rule rather than a guess at what was meant, the same stance the
-	// unused-exclude warning takes: a pattern whose file was deleted has no
-	// better spelling at all.
-	detail = append(detail, "patterns are anchored, so a subtree is spelled \"dir/**\"; correct or remove each pattern in "+component.FileName)
-	return ui.Row{
-		Status: ui.StatusFail,
-		Label:  label,
-		Value:  fmt.Sprintf("%d of %d pattern(s) cover no file", len(unmatched), declared),
-		Detail: detail,
-	}
-}
 
 // intersect is testrun.Intersect.
 func intersect(cs []component.Component, own []component.Component) []component.Component {
