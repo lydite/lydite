@@ -14,6 +14,10 @@ source/cli/internal/flows/        # one package per command's flow declaration, 
                                   #   (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
+source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own
+                                  #   run and by test merge folding a matrix of shards (see architecture.md)
+source/cli/internal/test/run/     # the scheduler, execution engine, flaky-gate engine and
+                                  #   toolchain provisioning lydite test's Run stage composes (see architecture.md)
 source/cli/internal/reviewdecision/ # the referral decision review, clearance and clearance queue
                                   #   all recompute (see referral-and-clearance.md)
 source/cli/internal/ui/           # the output grammar every command renders through, plus --json

@@ -6,7 +6,7 @@ says why it is that way and what breaks if it changes.
 
 | Package | Read |
 |---|---|
-| `flow`, `stages/*`, `flows/*`, `trust` | [`architecture.md`](../../../agentic/references/architecture.md) |
+| `flow`, `stages/*`, `flows/*`, `trust`, `test/measure`, `test/run` | [`architecture.md`](../../../agentic/references/architecture.md) |
 | `component`, `runner`, `nodedeps`, `cargotool` | [`components.md`](../../../agentic/references/components.md) |
 | `compose`, `scheduler` | [`services-and-scheduling.md`](../../../agentic/references/services-and-scheduling.md) |
 | `orphan`, `affected`, `pathmatch`, `gitdiff` | [`orphan-and-affected.md`](../../../agentic/references/orphan-and-affected.md) |

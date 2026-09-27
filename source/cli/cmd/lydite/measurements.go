@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -315,34 +314,4 @@ func (e componentMeasurement) patchPartOf(name string) (patchPart, bool) {
 		base = e.Base.LineCount
 	}
 	return patchPart{Name: name, Hit: e.Patch.Hit, Total: e.Patch.Total, Base: base}, true
-}
-
-// testCounts is what each component's suite reported, for the components a run
-// actually ran one for.
-//
-// Every component in ms, whether or not it produced a measurement: a suite
-// that failed has counts and no measurement, which is exactly the pair this
-// map exists to carry past a document keyed on what would be recorded.
-func testCounts(w io.Writer, ms []measurement) map[string]junit.Counts {
-	var out map[string]junit.Counts
-	for _, m := range ms {
-		if m.Tests == nil {
-			// A report that was asked for and did not arrive is named, never
-			// skipped in silence: a component contributing no counts is
-			// indistinguishable in a history from one that ran no tests, and
-			// the commonest cause is a repository whose own runner
-			// configuration sent the report somewhere lydite does not look.
-			// Stderr, because stdout carries the report and, under --json, a
-			// document a warning would make unparseable.
-			if m.TestsWhy != "" {
-				_, _ = fmt.Fprintf(w, "warning: %s contributed no test counts: %s\n", m.Name, m.TestsWhy)
-			}
-			continue
-		}
-		if out == nil {
-			out = map[string]junit.Counts{}
-		}
-		out[m.Name] = *m.Tests
-	}
-	return out
 }

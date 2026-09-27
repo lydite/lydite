@@ -167,6 +167,103 @@ both without renaming either on the way in. The naming is stated once, in each s
 own doc comment, rather than left for a reader to infer from the fact that two packages share a
 directory prefix.
 
+## Test
+
+`test` is the second command built this way, migrated by #270 onto seven stages in
+`internal/stages/test` (package `teststages`), wired in order by `internal/flows/test` (package
+`testflow`): `Declaration`, `Toolchains`, `SelectAffected`, `PrepareFlakyGate`, `Run`,
+`FlakyGate`, `Coverage`. None is conditioned — each already handles having nothing to do
+internally (selection when nothing was asked for, `Run` when nothing was selected, `Coverage`
+when nothing is declared or instrumented), because a flow-level condition would leave that
+stage's outputs unavailable to every stage declared after it.
+
+Two packages sit underneath the stages, split by what they own rather than by report section:
+
+- **`internal/test/measure`** turns one run of a component's instrumented suite into the
+  coverage and CRAP figures every gate reads, and renders the rows those gates report. It
+  executes no suite and writes no file — it is a function of the measurements and baselines it
+  is handed — because `lydite test`'s own run and `lydite test merge` folding a matrix of
+  shards' documents both need the identical answer, and two copies that agreed today would come
+  apart the day one learned about a case the other had not.
+- **`internal/test/run`** is the engine: planning each selected component, scheduling them under
+  the port and directory locks they declare, preparing, starting services, running and tearing
+  down each one, and the flaky gate that reruns the tests a change introduced from inside that
+  same run. It owns no log — every function that writes a component's output takes an
+  `Output{W, Rel}` — so the CLI's own log-opening decisions (a file, a mirror to the terminal, or
+  nothing) stay the CLI's.
+
+### `componentPlan`, `componentLog`, `measurementsDoc` and `componentMeasurement` stay in `cmd/lydite`
+
+These four types are test/coverage logic by every other measure, and were left out of the move
+anyway: `cmd/lydite/mutants.go`, `merge.go` and `record.go` — owned by other sessions in the same
+milestone, and out of reach of this one — reach into their *unexported fields and methods*
+directly (`p.c`, `p.log`, `folded.snapshot()`, `e.asMeasurement(c)`), and no alias or rename
+survives a type changing package: a field selector or a method call on a value of that type
+breaks the moment the type is no longer the one declared where the caller's own compiler unit
+sees it. This is the decision the rest of the migration is arranged around, and it generalises: a
+future stage extraction should check, symbol by symbol, whether the calling file reaches a
+*field or method* on a type (the type has to stay where it is) or merely *calls a function*
+(safe to move behind a same-signature wrapper the CLI keeps).
+
+### `measurements.json` stays a `cmd/lydite` document
+
+`cmd/lydite` still builds and writes `measurements.json` through the pre-existing
+`measurementsFrom`/`writeMeasurements`, fed by a `teststages.Candidate` the `Coverage` stage
+returns — not a document type duplicated into `internal/test/measure` or anywhere else. The
+symbol-table analysis that preceded the move found duplicating the schema into the new package
+was also possible, guarded by a golden-fixture test asserting the two never drift — but writing
+the one document from the one place that already writes it needs no duplicate, and no drift
+guard, at all.
+
+### The flaky gate is fused inside `Run`, split only at the report boundary ([ADR 0062](../../docs/adr/0062-flaky-gate-is-its-own-stage-kept-in-lockstep-with-run-components.md))
+
+`Run` and `FlakyGate` are separate stages, matching the one-stage-per-report-section shape every
+other stage in this flow holds to — but the flaky re-examination itself still happens fused
+inside each component's own run in `internal/test/run`, exactly as it did before the migration:
+`Run` hands the same `*testrun.FlakyGate` pointer it ran with back unchanged as its own output,
+and `FlakyGate` calls that pointer's `Report` method afterward to produce its rows. A future
+change that reorders these two stages, or changes what either writes to a shared output stream,
+must re-verify the invariant this split depends on rather than assume it holds because the tests
+pass: the two stages' rows, findings and measurements, concatenated, must equal what one fused
+pass over the same fixture would have produced. `internal/stages/test/flaky_test.go` is that
+check today, run over the fused sequence and the two-stage sequence side by side.
+
+### Two behavioral divergences from the pre-migration engine
+
+- **`Coverage`'s output findings do not reach the report.** `CoverageOut.Findings` carries the
+  patch findings and gated-CRAP findings `gatedRows` produces, and `addCoverage` in `cmd/lydite`
+  does not call `rep.AddFindings` on them — the same gap the pre-migration `addCoverageRows` had.
+  The drop predates this migration; #285 tracks it as a separate change, since fixing it here
+  would add findings to some reports that #270's own byte-diff verification depends on being
+  identical to the pre-migration binary's.
+- **A genuine mid-run interrupt (`SIGINT`/`SIGTERM`, a CI job timeout) omits the flaky-gate and
+  coverage sections from the report**, rather than rendering them the way the fused
+  pre-migration engine effectively did — every one of its own checks was already a no-op against
+  an already-cancelled context, so it rendered sections whose content said nothing. The run
+  still fails correctly: the schedule row already reports the run as cut short, and nothing
+  downstream of that renders as passing. Closing this fully would mean either duplicating the
+  flow's own wiring inside the CLI so it can render partial output for a stage that never ran, or
+  changing `internal/flow`'s cancellation semantics so a stage that never started can still
+  contribute a row — both a larger change than this migration's own scope.
+
+### Open seams for a future `record.go`/`reports.go` consolidation
+
+The symbol-table analysis found no category-3 duplication among symbols this migration owns, but
+did find small private copies needed because the logic being moved calls a helper declared in a
+file this migration does not own:
+
+- `unmeasurableByDeclaration` in `internal/test/measure` mirrors `record.go`'s function of the
+  same name, guarded by a test asserting the two answer identically across every runner,
+  argument and command shape a component can declare.
+- `ignoreReports` in `internal/test/run` mirrors `reports.go`'s, guarded by a test asserting the
+  two are byte-identical.
+- `shortSHA` has small private copies in `internal/test/run` and `internal/stages/clearance`
+  alike, with no guard — the precedent the clearance pilot already set, followed rather than
+  revisited here.
+
+A future consolidation of `record.go` and `reports.go` into a shared package would retire all
+three; until then, each is a seam a change to either side's copy has to notice and carry across.
+
 ## Why hand-rolled, over a pipeline library
 
 See [ADR 0059](../../docs/adr/0059-a-flow-is-a-hand-rolled-engine-of-typed-bindings-not-a-pipeline-library-or-a-shared-context.md)
