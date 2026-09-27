@@ -1,17 +1,23 @@
 ---
-about: the licence dispatch switch in cmd/lydite/scan.go has no default case
+about: the scan's licence dispatch (licenceGateFor) names every scanned language and refuses the rest; a scanned language with no dependency set gets an explicit not-gated verdict that renders as an unmeasured row, never an absent one
 saw:
-  - source/cli/cmd/lydite/scan.go:200-207
+  - source/cli/internal/stages/scan/licences.go
+  - source/cli/cmd/lydite/scan.go
+  - docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md
 ---
 
-The per-language `switch` that dispatches to a licence check after a component's other checks
-(`scan.go:200-207`) has no `default` case. A language that passes `scannedLang` but has no case
-in this switch produces no licence row at all — not an `unmeasured` row, an absent one, which
-reads in the published document exactly like a gate that ran and found nothing. This is a
-present defect, not hypothetical: it is harmless only because `scannedLang`'s enumeration and
-this switch's case list happen to name the same three languages today. Surfaced while writing
-ADR 0056 (`docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md`),
-which requires the switch's default become a panic (per
-`agentic/rules/refuse-an-unhandled-grammar-rather-than-fall-through.md`) and an explicit
-`unmeasured` case be added for any scanned language with no dependency set, as part of a future
-implementing slice — not fixed by that ADR itself.
+The per-language licence dispatch is `licenceGateFor` in `internal/stages/scan/licences.go`. It
+names Go (`goLicence`), Rust (`rustLicence`), TypeScript (`typescriptLicence`) and Shell
+(`noLicenceGate`), and its `default` returns an error ("is planned for scanning and has no licence
+gate"). `gateLicences` calls it for every `Scan` plan entry before creating the merge-base
+worktree, so an unhandled language stops the scan before anything is read or checked out, rather
+than producing no licence row — the fall-through ADR 0056 required be closed, per
+`agentic/rules/refuse-an-unhandled-grammar-rather-than-fall-through.md`.
+
+A scanned language with no dependency set is handled explicitly, not by omission: `noLicenceGate`
+returns the zero `LicenceVerdict`, whose `Gated` is false, and `recordLicence` (`cmd/lydite/scan.go`)
+renders `!v.Gated` as an `unmeasured` `licence(<name>)` row ("<lang> declares no dependency set to
+read licences from"). A new scanned language therefore needs a `licenceGateFor` case of its own —
+either a real gate or `noLicenceGate` — and gets a refusal, not silence, if it has neither.
+`recordComponents` in the same file likewise refuses a plan `Disposition` it has no rows for
+rather than rendering nothing.

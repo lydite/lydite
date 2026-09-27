@@ -1,16 +1,19 @@
 ---
-about: source/cli/cmd/lydite/scan.go
-saw: feature/shell-is-scanned branch, adding shell.enabled (off by default)
+about: a language that ships switched off (shell) needs explicit unmeasured rows when disabled, because the Disabled disposition renders nothing for an opt-out language; offByDefaultRows is the one place that distinction lives
+saw:
+  - source/cli/internal/stages/scan/plan.go
+  - source/cli/cmd/lydite/scan.go
+  - source/cli/internal/scanlang/scanlang.go
 ---
 
-`cmd/lydite/scan.go`'s ordinary path for a disabled language (`!langEnabled(lang, cfg)`) emits
-no rows at all for a component declaring that language — correct for Go/Rust/TypeScript,
-which are on unless a repository opts out, so silence reads as the opt-out the repository made.
-For a language that ships off-by-default (shell, gated by `shell.enabled`), that same silence
-would read exactly like a clean scan of a repository that never mentioned shell at all — the
-failure `.claude/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md` forbids.
-The fix lives in `offByDefaultRows(name, lang runner.Lang) []ui.Row`: it returns nil for every
-language except the one(s) that are off by default, and for those returns explicit `unmeasured`
-scan/licence/findings rows naming the config key that would turn the language on. Any future
-off-by-default language addition needs its own branch in that function, not just a
-`langEnabled`/dispatch case.
+`PlanComponents` (`internal/stages/scan/plan.go`) marks a component `Disabled` when its language is
+scanned but `scanlang.Enabled(lang, cfg)` is false; the `Disabled` doc comment leaves "whether that
+is worth a row" to the caller. `recordComponents` (`cmd/lydite/scan.go`) renders a `Disabled` entry
+through `offByDefaultRows(name, lang)`, which returns nil for every language except `runner.Shell`.
+Silence is correct for Go/Rust/TypeScript, which are on unless a repository opts out, so it reads
+as the opt-out the repository made. For shell, gated by `shell.enabled` and off by default, that
+same silence would read exactly like a clean scan of a repository that never mentioned shell — the
+failure `.claude/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md` forbids — so
+`offByDefaultRows` returns explicit `unmeasured` `scan`/`licence`/`findings` rows naming the config
+key that would turn the language on. Any future off-by-default language needs its own branch in
+`offByDefaultRows`, not just a `scanlang.Enabled` key or a dispatch case.
