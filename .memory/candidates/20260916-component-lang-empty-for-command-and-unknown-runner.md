@@ -1,27 +1,31 @@
 ---
-about: Component.Lang() returns "" both for an unknown/unset runner and for a command-invoked component, so a validation checking "this component declares no language" must call Lang() rather than assume Runner is always set
+about: Component.Lang() returns "" for an unknown runner, a command-invoked component and a lang-only component alike, so a validation checking "this component declares no language" must call Lang() rather than assume Runner is set; the scan path reads ScanLang() instead
 saw:
   - source/cli/internal/component/component.go
+  - source/cli/internal/stages/scan/plan.go
+  - source/cli/internal/stages/scan/toolchains.go
+  - source/cli/cmd/lydite/record.go
+  - source/cli/internal/orphan/orphan.go
+  - docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md
 ---
 
-`Component.Lang()` (`component.go`) looks up `c.Runner` via `runner.Lookup` and returns `""` on a
-miss. A component invoked with `command:` instead of `runner:` never sets `Runner` at all
-(`validateInvocation` requires exactly one of the two), so `Lang()` answers `""` for it too — the
-same empty answer as an unrecognised runner name, even though the two are different shapes
-(one has no runner because it opted out of the derived variants entirely; the other is a typo
-or an unsupported runner).
+`Component.Lang()` (`internal/component/component.go`) looks up `c.Runner` via `runner.Lookup`
+and returns `""` on a miss. A component with no `runner:` never sets `Runner` at all, so `Lang()`
+answers `""` for a `command:`-invoked component and for a `lang:`-only one too — the same empty
+answer as an unrecognised runner name, even though those are different shapes. `validateInvocation`
+requires at least one of `runner`, `command` or `lang`, refuses `runner` beside `command` and
+`runner` beside `lang`, and refuses an unknown runner name — so after validation a component with
+`Runner == ""` is a command component, a lang-only component, or a command component that also
+declares `lang:`.
 
-`validateAPISurface` checks `c.Lang()` in a `switch`, with `case runner.Go, runner.Rust: return
-nil` and every other answer — an unsupported language, an unset runner, or `command:` — falling
-to the same `default` error. It does this deliberately without relying on `validateInvocation`
-having already run first in the same validation loop: a `command:`-invoked component setting
-`api_surface` is rejected by the same `default` branch, with the same error, as a `vitest`
-component would be, because both report `Lang() == ""` or a language the switch does not name.
+`validateAPISurface` switches on `c.Lang()` with `case runner.Go, runner.Rust, runner.TypeScript:
+return nil` and every other answer — an unsupported language, an unset runner, `command:` or a
+declared `lang:` — falling to the same `default` error. It does not rely on `validateInvocation`
+having run first in the same validation loop.
 
-ADR 0056 (`docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md`,
-built in lydite/lydite#252) decided the opposite of what this note originally recommended for a
-declared-language field: a declared `lang:` (`Component.DeclaredLang`) does NOT reach `Lang()` or
-its readers, because they assume a non-empty answer came from a runner. The shipped
-`Component.ScanLang()` is the separate accessor, read only by the scan path
-(`cmd/lydite/scan.go`, `record.go`, `internal/orphan`). `Lang()` itself is unchanged and this
-note's description of its current behaviour still holds.
+ADR 0056 decided a declared `lang:` (`Component.DeclaredLang`) does NOT reach `Lang()` or its
+readers, because they assume a non-empty answer came from a runner. `Component.ScanLang()` is the
+separate accessor (the runner's language when a runner is set, `DeclaredLang` otherwise), read only
+by the scan side: `PlanComponents` (`internal/stages/scan/plan.go`), `scanUnits` and
+`anyLanguageDeclared` (`internal/stages/scan/toolchains.go`), `findingCounts`
+(`cmd/lydite/record.go`) and `internal/orphan/orphan.go`.

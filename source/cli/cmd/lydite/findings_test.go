@@ -9,7 +9,6 @@ import (
 
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/crap"
-	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/mutation"
@@ -387,48 +386,6 @@ func TestAnInterruptLeavesAComponentThatAlreadyPassed(t *testing.T) {
 	}
 	if !results[0].ran {
 		t.Error("a component that passed had its outcome discarded")
-	}
-}
-
-// A scanner runs inside its component and reports paths relative to there,
-// while every other producer names a file from the scan root. One file named
-// from two roots is two claims, and only one of them can be anchored.
-func TestAScannersClaimIsRebasedOntoTheScanRoot(t *testing.T) {
-	t.Parallel()
-	got := labelled([]executil.Result{{
-		Name: "biome",
-		Findings: []finding.Finding{
-			{Gate: "biome", Path: "src/app.ts", Line: 12, Site: "lint/security/noGlobalEval\x1feval(x)"},
-		},
-	}}, "web", "apps/web")
-
-	if len(got) != 1 || len(got[0].Findings) != 1 {
-		t.Fatalf("the claim did not survive labelling: %+v", got)
-	}
-	f := got[0].Findings[0]
-	if f.Path != "apps/web/src/app.ts" {
-		t.Errorf("path is %q, want it rebased onto the scan root", f.Path)
-	}
-	if f.Component != "web" {
-		t.Errorf("component is %q, want web", f.Component)
-	}
-}
-
-// Labelling copies rather than writing through the caller's slice, so a result
-// handed to it is not altered underneath whoever still holds it.
-func TestLabellingDoesNotAlterTheResultItWasGiven(t *testing.T) {
-	t.Parallel()
-	original := []executil.Result{{
-		Name:     "biome",
-		Findings: []finding.Finding{{Gate: "biome", Path: "src/app.ts", Line: 12}},
-	}}
-	_ = labelled(original, "web", "apps/web")
-
-	if got := original[0].Findings[0].Path; got != "src/app.ts" {
-		t.Errorf("the caller's own finding was rewritten to %q", got)
-	}
-	if original[0].Name != "biome" {
-		t.Errorf("the caller's own result was renamed to %q", original[0].Name)
 	}
 }
 

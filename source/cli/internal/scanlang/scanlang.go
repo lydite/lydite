@@ -10,7 +10,10 @@
 // package that only needs the answer does not pull in the checks themselves.
 package scanlang
 
-import "lydite/lydite/internal/runner"
+import (
+	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/runner"
+)
 
 // Scanned reports whether lydite has checks for a language at all, which is a
 // property of lydite rather than of the repository — a language switched off in
@@ -28,4 +31,20 @@ func Scanned(l runner.Lang) bool {
 	default:
 		return false
 	}
+}
+
+// Enabled reports whether .lydite/config.yml leaves one language's checks
+// switched on.
+func Enabled(l runner.Lang, cfg config.Config) bool {
+	switch l {
+	case runner.Rust:
+		return cfg.Rust.Enabled
+	case runner.TypeScript:
+		return cfg.TypeScript.Enabled
+	case runner.Go:
+		return cfg.Go.Enabled
+	case runner.Shell:
+		return cfg.Shell.Enabled
+	}
+	return false
 }

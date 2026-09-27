@@ -18,7 +18,7 @@ same `internal/gitstate.BaseSHA` the coverage gate already uses, so a PR's scan 
 agree on what "this change" means. `lydite/actions` passes `auto` on every `pull_request`
 event, and nothing on a push.
 
-Two deliberate choices in `cmd/lydite/scan.go`'s `resolveDiffBase`:
+Two deliberate choices in `internal/stages/scan/diffbase.go`'s `ResolveDiffBase`:
 
 - **A token short-circuits it entirely** — `semgrep ci` already scopes itself to the diff, so
   resolving a merge-base would cost a `git fetch` nothing reads, and would newly demand a
@@ -41,8 +41,8 @@ count from 82 to 124 and surfaced two pre-existing findings in a test file the c
 
 `internal/semgrep.Check` takes a writer and, before Semgrep runs, writes one warning line naming the
 file and every default pattern that consequently no longer applies. `cmd/lydite/scan.go` passes
-`cmd.ErrOrStderr()`, the same stream `warnUnscanned` uses: stdout carries the report, and under
-`--json` a sentence there would make the document unparseable.
+`cmd.ErrOrStderr()`, the same stream `internal/stages/scan/toolchains.go`'s `WarnUnscanned` uses:
+stdout carries the report, and under `--json` a sentence there would make the document unparseable.
 
 It is informational and never gates. A repository's own configuration of its own scan is legitimate
 influence — ADR 0020 says so of a declared `GOFLAGS` and a nested `biome.json` alike — so lydite

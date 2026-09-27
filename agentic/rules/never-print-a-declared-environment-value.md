@@ -11,7 +11,7 @@ component; the value is in `.lydite/components.yml`, in the repository, under re
 
 ## Applies to
 
-`cmd/lydite/scan.go`'s `warnDeclaredEnv`/`declaredEnvNames`, and any future code that reports on a
+`internal/stages/scan/checks.go`'s `warnDeclaredEnv`/`declaredEnvNames`, and any future code that reports on a
 component's declared or composed environment.
 
 ## Example

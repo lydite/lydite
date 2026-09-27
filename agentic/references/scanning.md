@@ -118,7 +118,7 @@ repositories on a shared `~/.cache/lydite`. A repository may say how its own cod
 not say where lydite's scanners come from.
 
 **The composed environment is named on stderr, per component, before its checks run.**
-`warnDeclaredEnv` in `cmd/lydite/scan.go` prints every variable name a component's declared
+`warnDeclaredEnv` in `internal/stages/scan/checks.go` prints every variable name a component's declared
 `env:` contributed to `Check`'s composed environment — never a value — in the same shape the
 `.semgrepignore` warning already has (see [Semgrep](semgrep.md)): one line, on
 `cmd.ErrOrStderr()`, before the tool runs, gating nothing. A declared `PATH` is named as the
@@ -271,9 +271,9 @@ See [ADR 0038](../../docs/adr/0038-a-licence-policy-gates-the-licences-a-change-
 why a count, a version-keyed pair, and a stored `test record` baseline were all rejected in favour
 of this shape.
 
-**All three languages run it.** `recordGoLicence`, `recordRustLicence` and
-`recordTypeScriptLicence` in `cmd/lydite/scan.go` each add a `licence(<component>)` row, gating
-pass or fail against the merge-base. TypeScript's own source is `internal/typescript/licence.go`'s
+**All three languages run it.** `goLicence`, `rustLicence` and `typescriptLicence` in
+`internal/stages/scan/licences.go` each compute the comparison a `licence(<component>)` row
+renders, gating pass or fail against the merge-base. TypeScript's own source is `internal/typescript/licence.go`'s
 `LicenceSet` (see [ADR 0042](../../docs/adr/0042-a-typescript-components-licences-are-read-from-its-lockfile.md)):
 npm's `package-lock.json` states every dependency's licence outright and is read directly, no
 install ever run to produce it; yarn and pnpm state no licence in their lockfile at all, so their
@@ -382,7 +382,7 @@ throwaway-worktree shape `measureBaseTree` uses for CRAP: check the merge-base o
 licence read there, remove the worktree — cheap here because a licence set costs one manifest read
 and one tool invocation, no suite, no compose service, no instrumented build. Unlike
 `measureBaseTree`, the checkout is **one worktree for the whole scan**, not one per component:
-`newLicenceBaseTree` in `cmd/lydite/scan.go` opens it lazily, the first time any component's
+`newLicenceBaseTree` in `internal/stages/scan/licences.go` opens it lazily, the first time any component's
 licence gate asks for a set, and every Go, Rust and TypeScript component's base read shares it — a
 repository with N components pays one checkout of the merge-base commit, not N of the identical
 commit. A worktree that will not check out, a module download that will not resolve, or a

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,12 +13,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"lydite/lydite/internal/cargotool"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
-	"lydite/lydite/internal/fixture"
+	"lydite/lydite/internal/flow"
+	scanflow "lydite/lydite/internal/flows/scan"
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/orphan"
@@ -28,105 +27,11 @@ import (
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/shell"
+	scanstages "lydite/lydite/internal/stages/scan"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
 )
-
-// The "auto" path needs an origin to resolve against, so it is left to the
-// integration surface; what is pinned here is that nothing reaches git as the
-// caller wrote it.
-//
-// A SEMGREP_APP_TOKEN does not short-circuit this. The base has a second
-// reader — a finding's anchor, which decides whether a claim becomes a review
-// thread — and a token says only that `semgrep ci` scopes itself.
-func TestResolveDiffBase(t *testing.T) {
-	repo := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		if r := executil.RunQuiet(context.Background(), repo, "git", args...); !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
-		}
-	}
-	run("init", "-b", "main", ".")
-	run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "one")
-	head := strings.TrimSpace(executil.RunQuiet(context.Background(), repo, "git", "rev-parse", "HEAD").Output)
-
-	t.Run("unset means scan everything", func(t *testing.T) {
-		got, err := resolveDiffBase(context.Background(), repo, "", "")
-		if err != nil || got != "" {
-			t.Errorf("resolveDiffBase(\"\") = %q, %v, want \"\", nil", got, err)
-		}
-	})
-
-	t.Run("a ref resolves to the commit it names", func(t *testing.T) {
-		got, err := resolveDiffBase(context.Background(), repo, "main", "")
-		if err != nil {
-			t.Fatalf("resolveDiffBase(\"main\") returned %v", err)
-		}
-		if got != head {
-			t.Errorf("resolveDiffBase(\"main\") = %q, want the SHA %q — a tool must be given the commit, not the caller's string", got, head)
-		}
-	})
-
-	t.Run("a token does not take the base away — the anchor reads it too", func(t *testing.T) {
-		t.Setenv(semgrep.AppTokenEnv, "tok")
-		got, err := resolveDiffBase(context.Background(), repo, "main", "")
-		if err != nil || got != head {
-			t.Errorf("resolveDiffBase(\"main\") = %q, %v, want the SHA", got, err)
-		}
-	})
-
-	// The anchor hands this base to `git diff <base>..HEAD`, where a value
-	// beginning with `-` is a position git parses as an option:
-	// `--diff-base --output=/tmp/x` would make git write the diff to a path of
-	// the caller's choosing.
-	t.Run("an option-shaped base is refused rather than handed to git", func(t *testing.T) {
-		for _, base := range []string{"--output=/tmp/pwned", "-x", "--upload-pack=touch /tmp/pwned"} {
-			got, err := resolveDiffBase(context.Background(), repo, base, "")
-			if err == nil {
-				t.Errorf("resolveDiffBase(%q) = %q, want an error", base, got)
-			}
-			// No base alongside the error. A caller that reads the value
-			// before the error must scan everything rather than diff against
-			// a string git refused.
-			if got != "" {
-				t.Errorf("resolveDiffBase(%q) = %q beside its error, want no base", base, got)
-			}
-		}
-	})
-
-	t.Run("a ref that names no commit is refused", func(t *testing.T) {
-		got, err := resolveDiffBase(context.Background(), repo, "no/such/ref", "")
-		if err == nil {
-			t.Error("resolveDiffBase accepted a ref that names no commit")
-		}
-		if got != "" {
-			t.Errorf("resolveDiffBase = %q beside its error, want no base", got)
-		}
-	})
-}
-
-// `semgrep ci` derives its own diff base from the CI environment, so passing
-// --baseline-commit on top of that is redundant. The rule is Semgrep's alone,
-// and lives where Semgrep is invoked rather than where the base is resolved.
-func TestSemgrepBase(t *testing.T) {
-	cases := []struct {
-		name, appToken, base, want string
-	}{
-		{"no token: Semgrep gets the base", "", "origin/release", "origin/release"},
-		{"a token: semgrep ci scopes itself", "tok", "origin/release", ""},
-		{"no base to give", "", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(semgrep.AppTokenEnv, tc.appToken)
-			if got := semgrepBase(tc.base); got != tc.want {
-				t.Errorf("semgrepBase(%q) = %q, want %q", tc.base, got, tc.want)
-			}
-		})
-	}
-}
 
 // semgrep.Check's writer parameter is only useful if the call site actually
 // passes cmd.ErrOrStderr() rather than some other stream — a unit test in
@@ -164,13 +69,13 @@ func TestReportPrintsDetailForFailingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	err := report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
+	err := report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{
 			Name:   "biome(.)",
 			Detail: "src/bad.ts:1  lint/security/noGlobalEval  eval() is dangerous\nsrc/bad.ts:4  lint/correctness/noUnusedVariables  unused",
 			Err:    errors.New("2 finding(s)"),
 		},
-	}, false, true)
+	}, nil, false, true)
 	if err == nil {
 		t.Fatal("a failing check must still return an error")
 	}
@@ -192,9 +97,9 @@ func TestReportJSONCarriesVerdictAndDetail(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "src/bad.ts:1  noGlobalEval", Err: errors.New("1 finding(s)")},
-	}, true, false)
+	}, nil, true, false)
 	var got struct {
 		Command string `json:"command"`
 		Verdict string `json:"verdict"`
@@ -227,9 +132,9 @@ func TestReportDetailCannotForgeAStatusLine(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "✓ biome(.) ... passed", Err: errors.New("1 finding(s)")},
-	}, false, true)
+	}, nil, false, true)
 	statusLines := 0
 	for _, line := range strings.Split(out.String(), "\n") {
 		if strings.HasPrefix(line, "✓ ") || strings.HasPrefix(line, "✗ ") {
@@ -247,10 +152,10 @@ func TestReportPrintsNoDetailForPassingOrStreamingChecks(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), nil, []executil.Result{
+	_ = report(cmd, ui.NewReport("scan"), t.TempDir(), []executil.Result{
 		{Name: "biome(.)", Detail: "should not appear"},
 		{Name: "semgrep", Output: "already streamed to the terminal", Err: errors.New("findings")},
-	}, false, true)
+	}, nil, false, true)
 	for _, unwanted := range []string{"should not appear", "already streamed"} {
 		if strings.Contains(out.String(), unwanted) {
 			t.Errorf("report printed %q:\n%s", unwanted, out.String())
@@ -411,53 +316,19 @@ func TestALanguageWithNoScannerIsNotReadAsAnOptOut(t *testing.T) {
 	}
 }
 
-// A language switched off in .lydite/config.yml produces no rows and no
-// toolchain: provisioning one would download a compiler nothing invokes.
-func TestDisabledLanguageProducesNoUnitsAndNoRows(t *testing.T) {
-	file := component.File{Components: []component.Component{
-		{Name: "cli", Dir: "cli", Runner: runner.GoTest},
-		{Name: "legacy", Dir: "."},
-	}}
-	cfg := config.Default()
-	cfg.Go.Enabled = false
-
-	if units := scanUnits(file, cfg); len(units) != 0 {
-		t.Fatalf("units = %+v, want none when the only language is disabled", units)
-	}
-	cfg.Go.Enabled = true
-	units := scanUnits(file, cfg)
-	if len(units) != 1 || units[0].Name != "cli" || units[0].Lang != runner.Go {
-		t.Fatalf("units = %+v, want just the Go component", units)
-	}
-}
-
 // A declared lang: is the language a component is scanned as, and never the
 // one its suite runs in. A command component stating `lang: go` is provisioned
-// Go for its checks and nothing for its suite, which a runner never derived; a
-// `lang: shell` component is a scan unit only where shell is switched on, and
-// names a language no toolchain exists for, so neither side provisions
-// anything.
-func TestADeclaredLangReachesTheScanUnitsAndNotTheTestUnits(t *testing.T) {
+// nothing for its suite, which a runner never derived; a `lang: shell`
+// component names a language no toolchain exists for, so it is provisioned
+// nothing on either side.
+func TestADeclaredLangReachesNoTestUnit(t *testing.T) {
 	file := component.File{Components: []component.Component{
 		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
 		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
 	}}
 
-	units := scanUnits(file, config.Default())
-	if len(units) != 1 || units[0].Name != "tool" || units[0].Lang != runner.Go {
-		t.Fatalf("scan units = %+v, want just tool, as Go, with shell off by default", units)
-	}
-	enabled := config.Default()
-	enabled.Shell.Enabled = true
-	units = scanUnits(file, enabled)
-	if len(units) != 2 || units[1].Name != "scripts" || units[1].Lang != runner.Shell {
-		t.Fatalf("scan units = %+v, want tool and scripts, as shell, with shell switched on", units)
-	}
 	if got := componentUnits(file.Components); len(got) != 0 {
 		t.Fatalf("test units = %+v, want none: neither component has a runner to imply a suite's language", got)
-	}
-	if !anyLanguageDeclared(file) {
-		t.Error("anyLanguageDeclared = false, want a declared lang: to count")
 	}
 
 	reqs, err := toolchain.Requirements(t.TempDir(),
@@ -625,16 +496,6 @@ func scanRows(t *testing.T, dir string) map[string]struct{ status, value string 
 	return rows
 }
 
-// The name and never the directory: unique names are enforced and unique
-// directories are not, and a scan row and a test row about one component have
-// to carry the same token.
-func TestLabelledNamesTheComponent(t *testing.T) {
-	got := labelled([]executil.Result{{Name: "gosec"}, {Name: "govulncheck"}}, "api", "services/api")
-	if len(got) != 2 || got[0].Name != "gosec(api)" || got[1].Name != "govulncheck(api)" {
-		t.Fatalf("labelled = %+v, want each result named for the component", got)
-	}
-}
-
 func writeLydite(t *testing.T, root, name, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))
@@ -646,212 +507,12 @@ func writeLydite(t *testing.T, root, name, contents string) {
 	}
 }
 
-// The hole the orphan gate cannot close. A component rooted at `.` covers
-// every path in the repository, so a Go component at the root leaves a
-// TypeScript directory beside it orphaning nothing while no TypeScript check
-// ever runs — and the orphan gate belongs to `lydite test`, which a consumer
-// can run scan without. Silence there would be a scan that narrowed itself.
-func TestScanWarnsAboutALanguageNoComponentDeclares(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "main.go", "package main\n")
-	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
-
-	if len(got) != 1 || got[0].Lang != runner.TypeScript {
-		t.Fatalf("gaps = %+v, want TypeScript alone — Go is declared and covers main.go", got)
-	}
-	if !strings.Contains(w.String(), component.FileName) {
-		t.Errorf("warning = %q, want it to name the file that fixes it", w.String())
-	}
-}
-
-// A language switched off is an answer, not an oversight: the repository said
-// it wants no check over that code, and warning about it would be lydite
-// arguing with a decision it was told about.
-func TestScanIsSilentAboutADisabledLanguage(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
-	gitInit(t, dir)
-
-	cfg := config.Default()
-	cfg.TypeScript.Enabled = false
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, cfg); len(got) != 0 {
-		t.Fatalf("found = %v, want nothing when the language is switched off", got)
-	}
-}
-
-// Outside a git repository there is no file list and therefore no question to
-// answer, which is the shape the orphan gate already has for the same case.
-func TestScanSaysNothingOutsideAGitRepository(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("found = %v, want nothing outside a repository", got)
-	}
-	if w.Len() != 0 {
-		t.Errorf("warning = %q, want silence", w.String())
-	}
-}
-
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	for _, args := range [][]string{{"init", "-b", "main", "."}, {"add", "-A"}} {
 		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
 			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
 		}
-	}
-}
-
-// The wardnet shape. Two Go modules, one declared: the language is covered, so
-// a check keyed on languages alone says nothing while the second module is
-// scanned by no one. Detection used to find both, so this is exactly the
-// silent narrowing the declaration must not introduce.
-func TestScanWarnsAboutAModuleNoComponentCovers(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: wctl\n    dir: wctl\n    runner: go-test\n")
-	writeLydite(t, dir, "wctl/go.mod", "module wctl\n\ngo 1.26\n")
-	writeLydite(t, dir, "wctl/main.go", "package main\n")
-	writeLydite(t, dir, "sdk/wardnet-go/go.mod", "module sdk\n\ngo 1.26\n")
-	writeLydite(t, dir, "sdk/wardnet-go/client.go", "package sdk\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
-
-	if len(got) != 1 || got[0].Lang != runner.Go {
-		t.Fatalf("gaps = %+v, want the undeclared Go module reported", got)
-	}
-	if !slices.Equal(got[0].Files, []string{"sdk/wardnet-go/client.go"}) {
-		t.Fatalf("files = %v, want only the module no component covers", got[0].Files)
-	}
-	if !strings.Contains(w.String(), "sdk/wardnet-go/client.go") {
-		t.Errorf("warning = %q, want it to name an example file", w.String())
-	}
-}
-
-// An exclude is the repository's reviewable statement that a path is claimed
-// by no component, which is the same statement this warning asks for. It does
-// not narrow what gets scanned — nothing scans these files either way.
-func TestAnExcludeSilencesTheUnscannedWarning(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n"+
-			"excludes: [\"vendor-fixtures/**\"]\n")
-	writeLydite(t, dir, "main.go", "package main\n")
-	writeLydite(t, dir, "vendor-fixtures/src/lib.rs", "pub fn x() {}\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want none when the path is excluded", got)
-	}
-}
-
-// Containment is not enough for Go, and this is the case that proves it. A
-// nested go.mod starts a separate module that the enclosing module's package
-// graph excludes, so `./...` at the root never compiles it and neither gosec
-// nor govulncheck sees it — while a component rooted at `.` contains every
-// path in the repository. Verified against the tools before it was encoded:
-// the same G306 in both modules is reported once.
-func TestScanWarnsAboutANestedModuleUnderARootComponent(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
-	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
-	writeLydite(t, dir, "sdk/go.mod", "module sdk\n\ngo 1.26\n")
-	writeLydite(t, dir, "sdk/client.go", "package sdk\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
-
-	if len(got) != 1 || !slices.Equal(got[0].Files, []string{"sdk/client.go"}) {
-		t.Fatalf("gaps = %+v, want only the nested module's file — main.go is in the component's own module", got)
-	}
-}
-
-// The same shape with one module: everything is in the component's module, so
-// there is nothing to say. Without this the rule above could report every Go
-// file in a perfectly ordinary repository.
-func TestOneModuleUnderARootComponentIsSilent(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
-	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
-	writeLydite(t, dir, "internal/svc/svc.go", "package svc\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want silence in a single-module repository", got)
-	}
-}
-
-// A go.mod under testdata/ is a fixture, not a project — the go command
-// ignores those directories when resolving packages, so the enclosing module
-// does not scan them and neither does anything else. Treating one as a module
-// boundary would warn about an ordinary Go repository layout on every run.
-func TestATestdataModuleIsNotAModuleBoundary(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: root\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "go.mod", "module root\n\ngo 1.26\n")
-	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
-	writeLydite(t, dir, "testdata/broken/go.mod", "module broken\n\ngo 1.26\n")
-	writeLydite(t, dir, "testdata/broken/x.go", "package broken\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want silence: a testdata module is a fixture", got)
 	}
 }
 
@@ -885,64 +546,6 @@ func TestAScanThatRanNothingSaysSo(t *testing.T) {
 	}
 	if len(doc.Rows) != 1 || doc.Rows[0].Status != string(ui.StatusUnmeasured) || doc.Rows[0].Label != "scan" {
 		t.Fatalf("rows = %+v, want one unmeasured scan row rather than an empty document", doc.Rows)
-	}
-}
-
-// A component declaring a raw command has a component declared for it, and
-// scan already reports it unmeasured with the reason. Warning as well would
-// tell its author to declare what they have declared, and the only way to
-// silence it would be an exclude that also drops those files from the orphan
-// gate.
-func TestARawCommandComponentsSourceIsNotWarnedAbout(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: legacy\n    dir: legacy\n    command: [\"make\", \"check\"]\n")
-	writeLydite(t, dir, "legacy/main.go", "package main\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want none: scan already reports scan(legacy) unmeasured", got)
-	}
-}
-
-// The .js family is the extension of build output, configuration and tooling
-// glue in every ecosystem: a Go repository with a docs/theme.js is an ordinary
-// Go repository, not one with unscanned TypeScript in it. The orphan gate is
-// silent about that file — a component rooted at `.` claims it — so warning
-// would fire on ordinary work with an exclude as the only way to stop it.
-func TestAStrayJavaScriptFileIsNotAnUnscannedCodebase(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
-	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
-	writeLydite(t, dir, "main.go", "package main\n\nfunc main() {}\n")
-	writeLydite(t, dir, "docs/theme.js", "module.exports = {};\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want silence for a stray .js", got)
-	}
-
-	// A .ts beside it is a different claim, and still reported.
-	writeLydite(t, dir, "web/app.ts", "export const x = 1;\n")
-	gitInit(t, dir)
-	file, err = component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := warnUnscanned(context.Background(), &w, dir, file, config.Default())
-	if len(got) != 1 || !slices.Equal(got[0].Files, []string{"web/app.ts"}) {
-		t.Fatalf("gaps = %+v, want the .ts alone", got)
 	}
 }
 
@@ -1126,28 +729,6 @@ func TestTwoComponentsOverOneDirectoryWithDifferentEnvironmentsBothRun(t *testin
 	}
 }
 
-// A Go component declared at a subdirectory of a single-module repository is
-// scanned exactly as it should be — `gosec ./...` run there is inside that
-// module — so asking whether its directory *held* a go.mod would report its
-// own files as scanned by nobody, naming a component already declared.
-func TestAComponentInsideASingleModuleRepositoryIsNotAGap(t *testing.T) {
-	dir := t.TempDir()
-	writeLydite(t, dir, component.FileName,
-		"components:\n  - name: api\n    dir: services/api\n    runner: go-test\n")
-	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
-	writeLydite(t, dir, "services/api/main.go", "package main\n\nfunc main() {}\n")
-	gitInit(t, dir)
-
-	var w bytes.Buffer
-	file, err := component.Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := warnUnscanned(context.Background(), &w, dir, file, config.Default()); len(got) != 0 {
-		t.Fatalf("gaps = %+v, want none: the component's files are in the module gosec runs over", got)
-	}
-}
-
 // lydite's own declaration must leave nothing scanned by nobody.
 //
 // This replaces internal/config's TestPinDirectoriesAreExcluded, which failed
@@ -1220,14 +801,17 @@ func TestARunOfOnlyUnmeasuredRowsIsNotAPass(t *testing.T) {
 
 // A check's located claims reach the document naming the row that made them,
 // which is what lets the standing comment tell the claims it keeps from the
-// ones a thread carries.
+// ones a thread carries — and they reach it exactly as the stage that ran the
+// check labelled and anchored them. Anchoring them again here, against lines
+// the report was never given, would move every claim on a line of the change
+// into the standing comment.
 func TestACheckSFindingsReachTheDocumentNamingTheirRow(t *testing.T) {
 	rep := ui.NewReport("scan")
-	record(rep, t.TempDir(), nil, []executil.Result{{
-		Name: "biome(cli)", Err: errors.New("failed"),
-		Findings: []finding.Finding{{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3,
-			Message: "a finding", Site: "one", Anchor: finding.AnchorLine}},
-	}})
+	claim := finding.Finding{Gate: "biome", Component: "cli", Path: "a.ts", Line: 3,
+		Message: "a finding", Site: "one", Anchor: finding.AnchorLine, Row: "biome(cli)"}
+	record(rep, t.TempDir(), []executil.Result{{
+		Name: "biome(cli)", Err: errors.New("failed"), Findings: []finding.Finding{claim},
+	}}, []finding.Finding{claim})
 	found := rep.Findings()
 	if len(found) != 1 {
 		t.Fatalf("the check's claim did not reach the document: %+v", found)
@@ -1235,71 +819,11 @@ func TestACheckSFindingsReachTheDocumentNamingTheirRow(t *testing.T) {
 	if found[0].Row != "biome(cli)" {
 		t.Errorf("the claim does not name the row that made it: %q", found[0].Row)
 	}
+	if found[0].Anchor != finding.AnchorLine {
+		t.Errorf("the claim was anchored again: %q, want the stage's %q", found[0].Anchor, finding.AnchorLine)
+	}
 	if rows := rep.Rows(); len(rows) != 1 || rows[0].Label != "biome(cli)" {
 		t.Errorf("the row went missing with it: %+v", rows)
-	}
-}
-
-// A component's checks report paths relative to the component, and every
-// other producer names a file from the scan root: one file named from two
-// roots is two claims, and only one of them can be anchored.
-func TestAComponentSFindingsAreRebasedOntoTheScanRoot(t *testing.T) {
-	got := labelled([]executil.Result{{
-		Name:     "biome",
-		Findings: []finding.Finding{{Gate: "biome", Path: "src/a.ts", Line: 3}},
-	}}, "web", "source/web")
-	if got[0].Findings[0].Path != "source/web/src/a.ts" {
-		t.Errorf("the path was not rebased: %q", got[0].Findings[0].Path)
-	}
-	if got[0].Findings[0].Component != "web" {
-		t.Errorf("the claim does not name its component: %q", got[0].Findings[0].Component)
-	}
-}
-
-// A scanner's claim on a line the change touched is a review thread on that
-// line. Without an anchor every claim lydite makes about a repository's
-// security lands in the standing comment, whatever the change did.
-func TestAScanSClaimOnAChangedLineIsAnchoredToIt(t *testing.T) {
-	rep := ui.NewReport("scan")
-	changed := map[string][]int{"source/cli/a.go": {3, 4}}
-	record(rep, t.TempDir(), changed, labelled([]executil.Result{{
-		Name: "gosec", Err: errors.New("failed"),
-		Findings: []finding.Finding{
-			{Gate: "gosec", Path: "a.go", Line: 3, Message: "on a changed line", Site: "one"},
-			{Gate: "gosec", Path: "a.go", Line: 40, Message: "elsewhere in a changed file", Site: "two"},
-			{Gate: "gosec", Path: "b.go", Line: 1, Message: "in a file the change never touched", Site: "three"},
-		},
-	}}, "cli", "source/cli"))
-
-	got := map[string]finding.Anchor{}
-	for _, f := range rep.Findings() {
-		got[f.Message] = f.Anchor
-	}
-	want := map[string]finding.Anchor{
-		"on a changed line":                  finding.AnchorLine,
-		"elsewhere in a changed file":        finding.AnchorFile,
-		"in a file the change never touched": finding.AnchorNowhere,
-	}
-	for message, wantAnchor := range want {
-		if got[message] != wantAnchor {
-			t.Errorf("%q anchored %q, want %q", message, got[message], wantAnchor)
-		}
-	}
-}
-
-// A scan with no --diff-base reaches no change at all, so every claim it makes
-// belongs in the standing comment rather than on a line of somebody's pull
-// request. It is the shape `lydite-baseline.yml` runs on main.
-func TestAScanOverAWholeRepositoryAnchorsNothing(t *testing.T) {
-	rep := ui.NewReport("scan")
-	record(rep, t.TempDir(), nil, []executil.Result{{
-		Name: "gosec(cli)", Err: errors.New("failed"),
-		Findings: []finding.Finding{{Gate: "gosec", Path: "a.go", Line: 3, Message: "a claim", Site: "one"}},
-	}})
-	for _, f := range rep.Findings() {
-		if f.Anchor != finding.AnchorNowhere {
-			t.Errorf("anchor = %q, want the claim unanchorable", f.Anchor)
-		}
 	}
 }
 
@@ -1494,514 +1018,6 @@ func TestFindingCountsReadTheLanguageAComponentIsScannedAs(t *testing.T) {
 	}
 }
 
-// licenceConfig is a configuration stating a policy the way a repository does:
-// permissive enough to pass the probe's dually licensed module and to reject both of its
-// copyleft ones.
-func licenceConfig() config.Config {
-	cfg := config.Default()
-	cfg.Licence.Policy.Allow = []string{"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT"}
-	return cfg
-}
-
-// goProbeFiles is the captured Go probe module, as the files one commit is made
-// of, rooted at prefix. Its dependency set covers strong copyleft, weak
-// copyleft and a module carrying two licence files.
-func goProbeFiles(t *testing.T, prefix string) map[string]string {
-	t.Helper()
-	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "goprobe"))
-	entries, err := os.ReadDir(tree)
-	if err != nil {
-		t.Fatalf("reading the probe: %v", err)
-	}
-	out := map[string]string{}
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(tree, e.Name()))
-		if err != nil {
-			t.Fatalf("reading the probe: %v", err)
-		}
-		out[path.Join(prefix, e.Name())] = string(data)
-	}
-	return out
-}
-
-// The base a Go component is compared against is the set its own build
-// compiles at the merge-base, read in the checked-out tree rather than from a
-// stored figure: an entry written by a lydite that computed no licences reads
-// back as the empty set, and the delta on the day of the upgrade is then the
-// absolute set.
-func TestTheGoLicenceBaseReadsTheModuleAtTheMergeBase(t *testing.T) {
-	files := goProbeFiles(t, "api")
-	root, baseSHA := licenceBaseRepo(t, files, files)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := goLicenceBase(context.Background(), tree, "api", nil, licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
-	if base.State() != licence.Measured {
-		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
-	}
-	want := []string{"github.com/hashicorp/go-version", "github.com/juju/errors"}
-	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, want) {
-		t.Fatalf("base set = %v, want %v — the probe's copyleft modules, read under the stated policy", got, want)
-	}
-}
-
-// The gate's whole shape for a Go component: a module the merge-base did not
-// carry is a set every pair of which the change introduced, the row fails, and
-// each claim is anchored to what the change touched — without which every claim
-// reaches the review surface at no anchor at all.
-func TestTheGoLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/README.md": "the component this change adds a module to\n"},
-		goProbeFiles(t, "api"))
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	c := component.Component{Name: "api", Dir: "api"}
-	// Line 7 of the probe's manifest is the require naming github.com/juju/errors.
-	changed := map[string][]int{"api/go.mod": {7}}
-	recordGoLicence(context.Background(), &rep, tree, c, filepath.Join(root, "api"), nil, licenceConfig(), changed)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
-		t.Fatalf("rows = %+v, want one failing licence row", rows)
-	}
-	if rows[0].Label != "licence(api)" || !strings.Contains(rows[0].Value, "introduced") {
-		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
-	}
-	found := rep.Findings()
-	if len(found) != 2 {
-		t.Fatalf("claims = %+v, want one per introduced pair", found)
-	}
-	var anchors []finding.Anchor
-	for _, f := range found {
-		if f.Path != "api/go.mod" {
-			t.Errorf("claim located at %q, want the component's manifest from the scan root", f.Path)
-		}
-		anchors = append(anchors, f.Anchor)
-	}
-	if !slices.Contains(anchors, finding.AnchorLine) {
-		t.Fatalf("anchors = %v, want the claim on the line the change touched anchored to it", anchors)
-	}
-	if slices.Contains(anchors, finding.AnchorNowhere) {
-		t.Fatalf("anchors = %v, want every claim in a file the change touched anchored to it at least", anchors)
-	}
-}
-
-// A component whose own dependencies could not be enumerated has had nothing
-// decided about it, and a red row would ask its author to answer for a claim
-// the gate never made.
-func TestTheGoLicenceRowIsUnmeasuredWhereTheDependenciesCouldNotBeRead(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/README.md": "no module here\n"},
-		map[string]string{"api/README.md": "no module here either\n"})
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	recordGoLicence(context.Background(), &rep, tree, component.Component{Name: "api", Dir: "api"},
-		filepath.Join(root, "api"), nil, licenceConfig(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
-		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
-	}
-	if len(rep.Findings()) != 0 {
-		t.Fatalf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
-	}
-}
-
-// A Rust component governed by neither document has had no licence check run at
-// all, and the row says which document is missing rather than rendering the
-// green of a check that ran and found nothing.
-func TestTheRustLicenceRowNamesTheDocumentThatDecidedNothing(t *testing.T) {
-	var rep ui.Report
-	dir := t.TempDir()
-	recordRustLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
-		component.Component{Name: "svc", Dir: "."}, dir, executil.Env{}, config.Default(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
-		t.Fatalf("rows = %+v, want one context licence row", rows)
-	}
-	if !strings.Contains(rows[0].Value, config.FileName) || !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
-		t.Fatalf("value = %q, want both files an edit could go in named", rows[0].Value)
-	}
-}
-
-// cargo-deny not being reachable is a gate that could not run, which is amber
-// and names what failed — never the pass of a component whose crates nothing
-// read.
-func TestTheRustLicenceRowIsUnmeasuredWhereCargoDenyCouldNotRun(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"svc/Cargo.lock": "version = 4\n"},
-		map[string]string{"svc/Cargo.lock": "version = 4\n"})
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-	// A cache directory that cannot even be named, so nothing is installed and
-	// nothing on the machine is run.
-	t.Setenv("HOME", "")
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	var rep ui.Report
-	recordRustLicence(context.Background(), &rep, tree, component.Component{Name: "svc", Dir: "svc"},
-		filepath.Join(root, "svc"), executil.Env{}, licenceConfig(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
-		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
-	}
-	if len(rows[0].Detail) == 0 {
-		t.Fatalf("row = %+v, want the reason the component could not be read", rows[0])
-	}
-}
-
-// denyProbeLock is the captured Rust probe's lockfile, as the one file a
-// component's licence gate locates its claims in.
-func denyProbeLock(t *testing.T) string {
-	t.Helper()
-	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "denyprobe"))
-	data, err := os.ReadFile(filepath.Join(tree, "Cargo.lock"))
-	if err != nil {
-		t.Fatalf("reading the probe's lockfile: %v", err)
-	}
-	return string(data)
-}
-
-// cargoDenyStub puts a captured cargo-deny run in the version-keyed tool cache,
-// so the gate runs a real invocation against a real stream with nothing
-// installed and nothing fetched. capture names the stream and the file holding
-// the status it exited with.
-func cargoDenyStub(t *testing.T, capture string) {
-	t.Helper()
-	home := t.TempDir()
-	// Both, because os.UserCacheDir reads XDG_CACHE_HOME on Linux and
-	// $HOME/Library/Caches on macOS.
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-	pin, err := os.ReadFile(filepath.Join("..", "..", "internal", "rust", "cargo-deny-pin", "Cargo.toml"))
-	if err != nil {
-		t.Fatalf("reading the pin: %v", err)
-	}
-	bin, err := (cargotool.Tool{Name: "cargo-deny", Version: cargotool.MustPinnedVersion(pin, "cargo-deny")}).Binary()
-	if err != nil {
-		t.Fatalf("locating the cached binary: %v", err)
-	}
-	dir := filepath.Dir(bin)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("creating the cache directory: %v", err)
-	}
-	stream, err := os.ReadFile(filepath.Join("..", "..", "internal", "licence", "testdata", capture))
-	if err != nil {
-		t.Fatalf("reading fixture: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "stream"), stream, 0o600); err != nil {
-		t.Fatalf("writing the stream: %v", err)
-	}
-	status, err := os.ReadFile(filepath.Join("..", "..", "internal", "licence", "testdata",
-		strings.TrimSuffix(capture, filepath.Ext(capture))+".exit"))
-	if err != nil {
-		t.Fatalf("reading the fixture's exit status: %v", err)
-	}
-	// cargo-deny writes its NDJSON to stderr, and exits non-zero on a check it
-	// failed — both of which the gate reads.
-	script := "#!/bin/sh\ncat \"$(dirname \"$0\")/stream\" >&2\nexit " + strings.TrimSpace(string(status)) + "\n"
-	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { // #nosec G306 -- a stub the test is about to execute
-		t.Fatalf("writing the stub: %v", err)
-	}
-}
-
-// The gate's whole shape for a Rust component: a lockfile the merge-base did
-// not carry is a set every crate of which the change introduced, the row fails
-// and names the document that decided it, and each claim is anchored to what
-// the change touched — without which every claim reaches the review surface at
-// no anchor at all.
-func TestTheRustLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"svc/README.md": "the component this change adds a lockfile to\n"},
-		map[string]string{"svc/Cargo.lock": denyProbeLock(t)})
-	cargoDenyStub(t, "deny-licenses-rejected.ndjson")
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	// Line 12 of the probe's lockfile is the stanza naming cbindgen, the crate
-	// the captured run rejected.
-	changed := map[string][]int{"svc/Cargo.lock": {12}}
-	recordRustLicence(context.Background(), &rep, tree, component.Component{Name: "svc", Dir: "svc"},
-		filepath.Join(root, "svc"), executil.Env{}, licenceConfig(), changed)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
-		t.Fatalf("rows = %+v, want one failing licence row", rows)
-	}
-	if rows[0].Label != "licence(svc)" || !strings.Contains(rows[0].Value, "introduced") {
-		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
-	}
-	if !strings.Contains(rows[0].Value, config.FileName) {
-		t.Errorf("value = %q, want the document that decided the licences named on it", rows[0].Value)
-	}
-	found := rep.Findings()
-	if len(found) != 1 {
-		t.Fatalf("claims = %+v, want one per introduced pair", found)
-	}
-	if found[0].Path != "svc/Cargo.lock" {
-		t.Errorf("claim located at %q, want the component's lockfile from the scan root", found[0].Path)
-	}
-	if found[0].Anchor != finding.AnchorLine {
-		t.Errorf("anchor = %q, want %q — the claim is on the line the change touched", found[0].Anchor, finding.AnchorLine)
-	}
-}
-
-// A component's own deny.toml is evaluated whole and absolutely, so a failing
-// row counts every crate it rejected rather than what this change introduced —
-// and a passing one still reads as the pass it is, never as a count of nothing.
-func TestARustComponentsOwnPolicyCountsEveryCrateItRejected(t *testing.T) {
-	cases := []struct {
-		name    string
-		capture string
-		status  ui.Status
-		says    string
-	}{
-		{"rejected", "deny-licenses-rejected.ndjson", ui.StatusFail, "1 non-conforming licence(s)"},
-		{"allowed", "deny-licenses-allowed.ndjson", ui.StatusPass, "passed"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			dir := fixture.Tree(t, filepath.Join("..", "..", "internal", "licence", "testdata", "denyprobe"))
-			// A configuration of the component's own, which is what makes the
-			// component rather than lydite the document that decided.
-			writeLydite(t, dir, rust.DenyConfigFile, "[licenses]\nallow = [\"MIT\"]\n")
-			cargoDenyStub(t, c.capture)
-
-			var rep ui.Report
-			recordRustLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
-				component.Component{Name: "svc", Dir: "."}, dir, executil.Env{}, config.Default(), nil)
-
-			rows := rep.Rows()
-			if len(rows) != 1 || rows[0].Status != c.status {
-				t.Fatalf("rows = %+v, want one %q licence row", rows, c.status)
-			}
-			if !strings.Contains(rows[0].Value, c.says) {
-				t.Errorf("value = %q, want %q in it", rows[0].Value, c.says)
-			}
-			if strings.Contains(rows[0].Value, "merge-base") {
-				t.Errorf("value = %q, want no delta against a base: the component's own policy carries none", rows[0].Value)
-			}
-			if !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
-				t.Errorf("value = %q, want the document that decided named on it", rows[0].Value)
-			}
-		})
-	}
-}
-
-// tsProbeFiles is a captured TypeScript probe tree, as the files one commit is
-// made of, rooted at prefix.
-func tsProbeFiles(t *testing.T, probe, prefix string) map[string]string {
-	t.Helper()
-	tree := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", probe))
-	entries, err := os.ReadDir(tree)
-	if err != nil {
-		t.Fatalf("reading the probe: %v", err)
-	}
-	out := map[string]string{}
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(tree, e.Name()))
-		if err != nil {
-			t.Fatalf("reading the probe: %v", err)
-		}
-		out[path.Join(prefix, e.Name())] = string(data)
-	}
-	return out
-}
-
-// The gate's whole shape for a TypeScript component: a lockfile the merge-base
-// did not carry is a set every dependency of which the change introduced, the
-// row fails, and each claim is anchored to what the change touched — without
-// which every claim reaches the review surface at no anchor at all.
-func TestTheTypeScriptLicenceGateFailsAndAnchorsTheClaimsTheChangeIntroduced(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
-		tsProbeFiles(t, "npmprobe", "web"))
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	// Line 10 of the probe's manifest is the dependency naming lightningcss,
-	// which the stated policy rejects under MPL-2.0.
-	changed := map[string][]int{"web/package.json": {10}}
-	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
-		filepath.Join(root, "web"), licenceConfig(), changed)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
-		t.Fatalf("rows = %+v, want one failing licence row", rows)
-	}
-	if rows[0].Label != "licence(web)" || !strings.Contains(rows[0].Value, "introduced") {
-		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
-	}
-	found := rep.Findings()
-	// lightningcss, the two sharp-libvips builds and the entry stating no
-	// licence at all: every dependency of the probe the allow-list rejects.
-	if len(found) != 4 {
-		t.Fatalf("claims = %+v, want one per introduced pair", found)
-	}
-	var direct, transitive int
-	for _, f := range found {
-		if f.Path != "web/package.json" {
-			t.Errorf("claim located at %q, want the component's manifest from the scan root", f.Path)
-		}
-		if f.Line > 0 {
-			direct++
-			if f.Anchor != finding.AnchorLine {
-				t.Errorf("%q anchored %q, want %q — it is on the manifest line the change touched", f.Message, f.Anchor, finding.AnchorLine)
-			}
-			continue
-		}
-		transitive++
-		// A package the manifest names on no line reaches the change nowhere,
-		// however much of that manifest the change edited: an anchor here would
-		// put a transitive dependency's claim on a line whose edit does nothing
-		// about it.
-		if f.Anchor != finding.AnchorNowhere {
-			t.Errorf("%q anchored %q, want %q — it is reached only transitively", f.Message, f.Anchor, finding.AnchorNowhere)
-		}
-	}
-	if direct != 1 || transitive != 3 {
-		t.Fatalf("claims = %d direct and %d transitive, want lightningcss located and the other three not", direct, transitive)
-	}
-}
-
-// A dependency the merge-base already carried is not this change's to answer
-// for, however many of them the allow-list rejects: the row passes and makes no
-// claim at all.
-func TestTheTypeScriptLicenceGatePassesWhereTheBaseCarriedTheSameLockfile(t *testing.T) {
-	files := tsProbeFiles(t, "npmprobe", "web")
-	root, baseSHA := licenceBaseRepo(t, files, files)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
-		filepath.Join(root, "web"), licenceConfig(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
-		t.Fatalf("rows = %+v, want one passing licence row", rows)
-	}
-	if len(rep.Findings()) != 0 {
-		t.Fatalf("claims = %+v, want none: the base carried every pair", rep.Findings())
-	}
-}
-
-// yarn states no dependency licence in its lockfile and scan runs no install to
-// produce one, so a component with no installed tree beside it has had nothing
-// decided about it. Amber naming what was missing, never the green of a gate
-// whose dependencies nothing read.
-func TestTheTypeScriptLicenceRowIsUnmeasuredWhereNoLicenceSourceExists(t *testing.T) {
-	files := tsProbeFiles(t, "yarnprobe", "web")
-	root, baseSHA := licenceBaseRepo(t, files, files)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
-		filepath.Join(root, "web"), licenceConfig(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
-		t.Fatalf("rows = %+v, want one unmeasured licence row", rows)
-	}
-	if len(rows[0].Detail) == 0 {
-		t.Fatalf("row = %+v, want the reason the component could not be read", rows[0])
-	}
-	if len(rep.Findings()) != 0 {
-		t.Fatalf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
-	}
-}
-
-// A repository that stated no policy gets the row that names the file an edit
-// would go in — not the amber of a manager whose licences could not be read,
-// which is an answer to a question nobody asked here.
-func TestTheTypeScriptLicenceRowIsNotConfiguredWithoutAPolicy(t *testing.T) {
-	dir := fixture.Tree(t, filepath.Join("..", "..", "internal", "typescript", "testdata", "yarnprobe"))
-
-	var rep ui.Report
-	recordTypeScriptLicence(context.Background(), &rep, newLicenceBaseTree(dir, ""),
-		component.Component{Name: "web", Dir: "."}, dir, config.Default(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
-		t.Fatalf("rows = %+v, want one context licence row", rows)
-	}
-	if !strings.Contains(rows[0].Value, config.FileName) {
-		t.Fatalf("value = %q, want the file a policy is stated in named on it", rows[0].Value)
-	}
-}
-
-// The base a TypeScript component is compared against is the set its own
-// lockfile resolved at the merge-base, read in the checked-out tree rather than
-// from a stored figure: an entry written by a lydite that computed no licences
-// reads back as the empty set, and the delta on the day of the upgrade is then
-// the absolute set.
-func TestTheTypeScriptLicenceBaseReadsTheLockfileAtTheMergeBase(t *testing.T) {
-	files := tsProbeFiles(t, "npmprobe", "web")
-	root, baseSHA := licenceBaseRepo(t, files, files)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
-	if base.State() != licence.Measured {
-		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
-	}
-	want := []string{"@img/sharp-libvips-darwin-arm64", "@img/sharp-libvips-linux-x64", "lightningcss", "unlicensed-probe"}
-	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, want) {
-		t.Fatalf("base set = %v, want %v — the probe's rejected dependencies, read under the stated policy", got, want)
-	}
-}
-
-// What has to be at the base for the component to have been there is its
-// manifest, and not the one lockfile that states licences.
-//
-// A yarn component declares no package-lock.json in any tree, so gating on one
-// would make every base read as a component the change adds — a measured empty
-// set, against which every dependency the repository already shipped is
-// introduced, and a red row on a change that touched none of them.
-func TestTheTypeScriptLicenceBaseIsTheManifestAndNotTheNpmLockfile(t *testing.T) {
-	files := tsProbeFiles(t, "yarnprobe", "web")
-	// An installed tree, the only licence source a yarn component has, and one
-	// both sides of the comparison carry.
-	files["web/node_modules/lightningcss/package.json"] = `{"name":"lightningcss","version":"1.33.0","license":"MPL-2.0"}`
-	root, baseSHA := licenceBaseRepo(t, files, files)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	var rep ui.Report
-	recordTypeScriptLicence(context.Background(), &rep, tree, component.Component{Name: "web", Dir: "web"},
-		filepath.Join(root, "web"), licenceConfig(), nil)
-
-	rows := rep.Rows()
-	if len(rows) != 1 || rows[0].Status != ui.StatusPass {
-		t.Fatalf("rows = %+v, want one passing licence row: the base carried the same installed tree", rows)
-	}
-}
-
-// A component with no manifest at the merge-base is one this change adds, which
-// is a measured empty set and never an unmeasured base: nothing failed, there
-// was nothing there.
-func TestTheTypeScriptLicenceBaseIsEmptyWhereTheComponentWasNotThere(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"web/README.md": "the component this change adds a manifest to\n"},
-		tsProbeFiles(t, "npmprobe", "web"))
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := typescriptLicenceBase(context.Background(), tree, "web", licence.NewPolicy(licenceConfig().Licence.Policy.Allow))
-	if base.State() != licence.Measured || base.Set().Len() != 0 {
-		t.Fatalf("base = %q holding %d, want a measured empty set for a component the base did not carry", base.State(), base.Set().Len())
-	}
-}
-
 // Which document decided a Rust component's licences cannot be read off the
 // verdict, and a reader told only that nothing was gated has no way to find the
 // file an edit would go in.
@@ -2072,479 +1088,214 @@ func TestTheLicenceDetailNamesEveryPairTheVerdictIsAbout(t *testing.T) {
 	}
 }
 
-// The reason a base could not be built reaches the caller, and the tree inside
-// it never does: a directory answered beside a reason would be read as the
-// checkout that did not happen, and every component measured against it.
-func TestABaseWorktreeThatWouldNotCheckOutAnswersNoTree(t *testing.T) {
-	root, _ := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\n"})
-	tree := newLicenceBaseTree(root, strings.Repeat("0123456789", 4))
-	defer tree.close(context.Background())
+// A component whose own dependencies could not be enumerated has had nothing
+// decided about it, and a red row would ask its author to answer for a claim
+// the gate never made. The row says why in its detail and carries no claim, in
+// every language with a gate — Rust's included, whose row names no policy
+// document because none was read.
+func TestALicenceRowIsUnmeasuredWhereTheDependenciesCouldNotBeRead(t *testing.T) {
+	for _, lang := range []runner.Lang{runner.Go, runner.Rust, runner.TypeScript} {
+		t.Run(string(lang), func(t *testing.T) {
+			rep := ui.NewReport("scan")
+			recordLicence(rep, "api", lang, scanstages.LicenceVerdict{
+				Gated:        true,
+				Err:          errors.New("the dependency graph would not load"),
+				PolicySource: rust.PolicyFromLydite,
+				Crashes:      []finding.Crash{{Gate: licence.Gate, Component: "api"}},
+			})
 
-	dir, reason := tree.open(context.Background())
-	if reason == "" {
-		t.Fatal("a merge-base that does not exist checked out")
-	}
-	if dir != "" {
-		t.Fatalf("dir = %q, want none beside a reason", dir)
-	}
-	// Decided once: the second component asks the same question and is answered
-	// from what the first attempt recorded.
-	if again, sameReason := tree.open(context.Background()); again != "" || sameReason != reason {
-		t.Fatalf("second open = %q/%q, want the first attempt's answer", again, sameReason)
-	}
-}
-
-// The checkout succeeding answers the scan root inside the worktree, which is
-// what every component's base is located under.
-func TestABaseWorktreeAnswersTheScanRootInsideIt(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\n"})
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	dir, reason := tree.open(context.Background())
-	if reason != "" {
-		t.Fatalf("checking out the merge-base: %s", reason)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "api", depsManifest)); err != nil {
-		t.Fatalf("the base tree holds no manifest at %s: %v", dir, err)
-	}
-}
-
-// A worktree with nowhere to be created answers no tree either, and names the
-// step that failed rather than the checkout that was never reached: a directory
-// answered beside a reason is read as the checkout that did not happen, and
-// every component is measured against it.
-func TestABaseWorktreeWithNoTemporaryDirectoryAnswersNoTree(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\n"})
-	// A file where the temporary directory belongs, so nothing can be created
-	// under it.
-	blocked := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", blocked)
-
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	dir, reason := tree.open(context.Background())
-	if reason == "" {
-		t.Fatal("a worktree with nowhere to live was created")
-	}
-	if dir != "" {
-		t.Fatalf("dir = %q, want none beside a reason", dir)
-	}
-	if !strings.Contains(reason, "no temporary directory") {
-		t.Errorf("reason = %q, want the step that failed", reason)
-	}
-	if strings.Contains(reason, shortSHA(baseSHA)) {
-		t.Errorf("reason = %q, want it distinct from a merge-base that would not check out", reason)
-	}
-}
-
-// A worktree that cannot be created is a base nothing can be measured against,
-// and it says so rather than falling through to a measured empty set that fails
-// every component over dependencies it already shipped.
-func TestABaseWorktreeThatCannotBeCreatedIsUnmeasured(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\n"})
-	// A file where the temporary directory belongs, so nothing can be created
-	// under it.
-	blocked := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", blocked)
-
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	if base.State() != licence.Unmeasured {
-		t.Fatalf("base state = %q, want unmeasured", base.State())
-	}
-	if !strings.Contains(base.Reason(), "temporary directory") {
-		t.Errorf("reason = %q, want the step that failed", base.Reason())
-	}
-}
-
-// licenceBaseRepo is a repository with two commits: the tree the merge-base
-// holds, then the tree the change made of it. It answers the repository root
-// and the merge-base SHA.
-func licenceBaseRepo(t *testing.T, base, head map[string]string) (string, string) {
-	t.Helper()
-	root := t.TempDir()
-	git := func(args ...string) string {
-		t.Helper()
-		r := executil.RunQuiet(context.Background(), root, "git", args...)
-		if !r.Ok() {
-			t.Fatalf("git %v: %v\n%s", args, r.Err, r.Stderr)
-		}
-		return strings.TrimSpace(r.Output)
-	}
-	git("init", "-b", "main", ".")
-	commit := func(files map[string]string) string {
-		for name, body := range files {
-			writeLydite(t, root, name, body)
-		}
-		git("add", "-A")
-		// --allow-empty, because a change that alters no manifest is a tree the
-		// gate has to answer for too: it is the case that must pass.
-		git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "tree")
-		return git("rev-parse", "HEAD")
-	}
-	baseSHA := commit(base)
-	commit(head)
-	return root, baseSHA
-}
-
-// readDeps stands in for a language's own reader: a manifest whose lines are
-// `<package> <licence>`, so what a tree's non-conforming set is can be stated
-// rather than measured by a toolchain. What is under test is which tree the
-// reader was pointed at, which is the same question whatever reads it.
-func readDeps(dir string) (licence.Set, error) {
-	body, err := os.ReadFile(filepath.Join(dir, depsManifest))
-	if err != nil {
-		return licence.Set{}, err
-	}
-	var set licence.Set
-	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		set.Add(licence.Dependency{Package: fields[0], Licence: fields[1]})
-	}
-	return set, nil
-}
-
-// depsManifest is the file readDeps reads, and the file whose absence at the
-// base means the component was not there.
-const depsManifest = "deps"
-
-// worktrees is how many working trees the repository has registered, which is
-// one — its own — until a base is checked out.
-func worktrees(t *testing.T, root string) int {
-	t.Helper()
-	r := executil.RunQuiet(context.Background(), root, "git", "worktree", "list", "--porcelain")
-	if !r.Ok() {
-		t.Fatalf("git worktree list: %v\n%s", r.Err, r.Stderr)
-	}
-	return strings.Count(r.Output, "worktree ")
-}
-
-// permissivePolicy is a stated policy, which is all Compare asks of one: the
-// language reader has already rejected what the set carries.
-func permissivePolicy() licence.Policy { return licence.NewPolicy([]string{"MIT"}) }
-
-// packagesOf names what a verdict is about, in the order the comparison put
-// them.
-func packagesOf(pairs []licence.Dependency) []string {
-	out := make([]string, 0, len(pairs))
-	for _, d := range pairs {
-		out = append(out, d.Package)
-	}
-	return out
-}
-
-// The whole of what the gate is: the set at the merge-base, not the set at the
-// head. A base pointed at the wrong tree reads as no manifest at all, which is
-// a measured empty set — and every dependency the repository already shipped
-// then reads as one this change introduced.
-func TestTheLicenceGateFailsOnThePairTheChangeIntroduced(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"})
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	if base.State() != licence.Measured {
-		t.Fatalf("base state = %q (%s), want it measured at the merge-base", base.State(), base.Reason())
-	}
-	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, []string{"golden"}) {
-		t.Fatalf("base set = %v, want the one pair the merge-base carried", got)
-	}
-
-	current, err := readDeps(filepath.Join(root, "api"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := licence.Compare(permissivePolicy(), current, base)
-	if got.Verdict != licence.VerdictFail {
-		t.Fatalf("verdict = %q, want fail — the change added a pair the merge-base did not carry", got.Verdict)
-	}
-	if names := packagesOf(got.Pairs); !slices.Equal(names, []string{"copyleft"}) {
-		t.Fatalf("introduced = %v, want copyleft alone — golden was grandfathered", names)
-	}
-}
-
-// The other half of the same gate. A pair already at the merge-base is one the
-// change did not introduce, however non-conforming it is.
-func TestTheLicenceGatePassesAChangeThatIntroducesNoPair(t *testing.T) {
-	deps := map[string]string{"api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"}
-	root, baseSHA := licenceBaseRepo(t, deps, deps)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	current, err := readDeps(filepath.Join(root, "api"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := licence.Compare(permissivePolicy(), current, base)
-	if got.Verdict != licence.VerdictPass {
-		t.Fatalf("verdict = %q (%s), want pass — both pairs were already at the merge-base", got.Verdict, got.Reason)
-	}
-}
-
-// A component this change adds has no manifest at the base, which is a measured
-// empty set and not an unmeasured base: nothing failed, there was nothing
-// there. Reporting `unmeasured` would take the gate off the one change that
-// brings a whole dependency set with it.
-func TestAComponentAbsentFromTheMergeBaseMeasuresAnEmptySet(t *testing.T) {
-	root, baseSHA := licenceBaseRepo(t,
-		map[string]string{"web/app.ts": "export const x = 1;\n"},
-		map[string]string{"api/" + depsManifest: "copyleft GPL-3.0-only\n"})
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	if base.State() != licence.Measured {
-		t.Fatalf("base state = %q (%s), want it measured: the component was not there", base.State(), base.Reason())
-	}
-	if got := base.Set().Len(); got != 0 {
-		t.Fatalf("base holds %d pair(s), want none", got)
-	}
-	current, err := readDeps(filepath.Join(root, "api"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := licence.Compare(permissivePolicy(), current, base); got.Verdict != licence.VerdictFail {
-		t.Fatalf("verdict = %q, want fail — every pair a new component carries is one the change introduces", got.Verdict)
-	}
-}
-
-// A worktree holds the whole repository and the scan root may sit below it. A
-// base located from the worktree root instead finds no manifest, calls that an
-// empty set, and every dependency the component already had reads as new.
-func TestTheLicenceBaseLocatesAComponentThroughTheScanRootPrefix(t *testing.T) {
-	repo, baseSHA := licenceBaseRepo(t,
-		map[string]string{"source/api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"source/api/" + depsManifest: "golden MIT\ncopyleft GPL-3.0-only\n"})
-	root := filepath.Join(repo, "source")
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	if base.State() != licence.Measured {
-		t.Fatalf("base state = %q (%s), want it measured under the scan root's prefix", base.State(), base.Reason())
-	}
-	if got := packagesOf(base.Set().Dependencies()); !slices.Equal(got, []string{"golden"}) {
-		t.Fatalf("base set = %v, want the pair the merge-base carried below source/", got)
-	}
-}
-
-// One commit, one checkout. A worktree per component extracts the identical
-// merge-base once per declaration, and nothing in a passing report says it
-// happened.
-func TestOneWorktreeServesEveryComponentsLicenceBase(t *testing.T) {
-	deps := map[string]string{
-		"api/" + depsManifest: "golden MIT\n",
-		"web/" + depsManifest: "silver MIT\n",
-	}
-	root, baseSHA := licenceBaseRepo(t, deps, deps)
-	tree := newLicenceBaseTree(root, baseSHA)
-	defer tree.close(context.Background())
-
-	if got := worktrees(t, root); got != 1 {
-		t.Fatalf("worktrees = %d before any component asked for a base, want the repository's own alone", got)
-	}
-	for _, dir := range []string{"api", "web"} {
-		if base := tree.set(context.Background(), dir, depsManifest, readDeps); base.State() != licence.Measured {
-			t.Fatalf("%s base state = %q (%s), want it measured", dir, base.State(), base.Reason())
-		}
-	}
-	if got := worktrees(t, root); got != 2 {
-		t.Fatalf("worktrees = %d, want one shared base beside the repository's own", got)
-	}
-
-	tree.close(context.Background())
-	if got := worktrees(t, root); got != 1 {
-		t.Fatalf("worktrees = %d after the scan, want the base removed — a registered worktree pointing at nothing trips every later `git worktree add`", got)
-	}
-}
-
-// A scan whose components ask for no base pays for no checkout: no diff base at
-// all is the shape `lydite scan` on `main` has, and it gates nothing.
-func TestARunWithNoDiffBaseChecksOutNoWorktree(t *testing.T) {
-	root, _ := licenceBaseRepo(t,
-		map[string]string{"api/" + depsManifest: "golden MIT\n"},
-		map[string]string{"api/" + depsManifest: "golden MIT\n"})
-	tree := newLicenceBaseTree(root, "")
-	defer tree.close(context.Background())
-
-	base := tree.set(context.Background(), "api", depsManifest, readDeps)
-	if base.State() != licence.NoBase {
-		t.Fatalf("base state = %q, want no base: the run was given no diff base", base.State())
-	}
-	if got := worktrees(t, root); got != 1 {
-		t.Fatalf("worktrees = %d, want no base checked out for a run that compares against nothing", got)
-	}
-}
-
-// A base that could not be built gates nothing and says so — on every
-// component's row, with the same reason, because the checkout it names was
-// attempted once. Falling through to a measured empty set would fail each of
-// them over dependencies nobody in the change chose.
-func TestABaseThatWillNotCheckOutIsUnmeasuredForEveryComponent(t *testing.T) {
-	deps := map[string]string{
-		"api/" + depsManifest: "golden MIT\n",
-		"web/" + depsManifest: "silver MIT\n",
-	}
-	root, _ := licenceBaseRepo(t, deps, deps)
-	tree := newLicenceBaseTree(root, strings.Repeat("0123456789", 4))
-	defer tree.close(context.Background())
-
-	var reasons []string
-	for _, dir := range []string{"api", "web"} {
-		base := tree.set(context.Background(), dir, depsManifest, readDeps)
-		if base.State() != licence.Unmeasured {
-			t.Fatalf("%s base state = %q, want unmeasured: the merge-base would not check out", dir, base.State())
-		}
-		if base.Reason() == "" {
-			t.Fatalf("%s base names no reason, want the step that failed", dir)
-		}
-		reasons = append(reasons, base.Reason())
-	}
-	if reasons[0] != reasons[1] {
-		t.Fatalf("reasons = %q, want one answer decided once for the whole scan", reasons)
-	}
-	if got := worktrees(t, root); got != 1 {
-		t.Fatalf("worktrees = %d, want no registered base after a checkout that failed", got)
-	}
-}
-
-// The names reported are the ones the child actually reads, so the two cases
-// where the composition disagrees with the declaration are pinned here: a
-// declared PATH is folded into lydite's own entry rather than set, and a key
-// the resolved toolchain also sets is cancelled by composing last. A component
-// that composed nothing says nothing at all — a warning for every component is
-// a warning nobody reads.
-func TestDeclaredEnvNamesWhatWasComposed(t *testing.T) {
-	cases := []struct {
-		name     string
-		c        component.Component
-		composed []string
-		want     []string
-	}{
-		{
-			name:     "no declaration at all",
-			c:        component.Component{Name: "cli"},
-			composed: []string{"PATH=/usr/bin"},
-		},
-		{
-			name:     "an empty declaration is no declaration",
-			c:        component.Component{Name: "cli", Env: map[string]string{}},
-			composed: []string{"PATH=/usr/bin"},
-		},
-		{
-			name:     "a declared variable is named",
-			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": "true", "CGO_ENABLED": "0"}},
-			composed: []string{"CGO_ENABLED=0", "SQLX_OFFLINE=true"},
-			want:     []string{"CGO_ENABLED", "SQLX_OFFLINE"},
-		},
-		{
-			name:     "an empty value is still a declaration",
-			c:        component.Component{Name: "cli", Env: map[string]string{"SQLX_OFFLINE": ""}},
-			composed: []string{"SQLX_OFFLINE="},
-			want:     []string{"SQLX_OFFLINE"},
-		},
-		{
-			name:     "a declared PATH is the extension it is",
-			c:        component.Component{Name: "cli", Env: map[string]string{"PATH": "ci-bin"}},
-			composed: []string{"PATH=/usr/bin" + string(os.PathListSeparator) + "ci-bin"},
-			want:     []string{"PATH (appended after lydite's own)"},
-		},
-		{
-			name:     "a key the toolchain composes last never reached the check",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto"}},
-			composed: []string{"GOTOOLCHAIN=auto", "GOTOOLCHAIN=local"},
-			want:     []string{"GOTOOLCHAIN (overridden by the resolved toolchain)"},
-		},
-		{
-			name:     "a known steering variable is marked",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOVULNDB": "https://db.example"}},
-			composed: []string{"GOVULNDB=https://db.example"},
-			want:     []string{"GOVULNDB (steers a check)"},
-		},
-		{
-			name:     "an ordinary variable that merely resembles a steering name is not marked",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAG": "not-a-steering-name"}},
-			composed: []string{"GOFLAG=not-a-steering-name"},
-			want:     []string{"GOFLAG"},
-		},
-		{
-			name:     "a steering variable the toolchain overrides carries both marks",
-			c:        component.Component{Name: "cli", Env: map[string]string{"GOFLAGS": "-tags x"}},
-			composed: []string{"GOFLAGS=-tags x", "GOFLAGS=-tags y"},
-			want:     []string{"GOFLAGS (steers a check, overridden by the resolved toolchain)"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := declaredEnvNames(tc.c, tc.composed); !slices.Equal(got, tc.want) {
-				t.Errorf("declaredEnvNames = %q, want %q", got, tc.want)
+			rows := rep.Rows()
+			if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured || rows[0].Label != "licence(api)" {
+				t.Fatalf("rows = %+v, want one unmeasured licence(api) row", rows)
 			}
-			var buf bytes.Buffer
-			warnDeclaredEnv(&buf, tc.c, tc.composed)
-			if (buf.Len() == 0) != (len(tc.want) == 0) {
-				t.Errorf("warnDeclaredEnv wrote %q for %d composed name(s)", buf.String(), len(tc.want))
+			if rows[0].Value != "the component's dependencies could not be read" {
+				t.Errorf("value = %q, want the row to say the dependencies could not be read", rows[0].Value)
+			}
+			if !slices.Equal(rows[0].Detail, []string{"the dependency graph would not load"}) {
+				t.Errorf("detail = %q, want the reason the component could not be read", rows[0].Detail)
+			}
+			if len(rep.Findings()) != 0 {
+				t.Errorf("claims = %+v, want none from a gate that decided nothing", rep.Findings())
+			}
+			if got := rep.Crashed(); !slices.Equal(got, []finding.Crash{{Gate: licence.Gate, Component: "api"}}) {
+				t.Errorf("crashed = %+v, want the licence bucket named crashed", got)
 			}
 		})
 	}
 }
 
-// The composition the warning describes is childEnv's, so it is childEnv that
-// produces the environment here rather than a hand-written slice: a reordering
-// that let a declared GOTOOLCHAIN win would otherwise still be reported as
-// cancelled.
-func TestDeclaredEnvReadsTheEnvironmentChildEnvComposed(t *testing.T) {
-	c := component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto", "SQLX_OFFLINE": "true", "PATH": "ci-bin"}}
-	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
-	got := declaredEnvNames(c, childEnv(tc, c, runner.Invocation{}))
-	want := []string{"GOTOOLCHAIN (overridden by the resolved toolchain)", "SQLX_OFFLINE", "PATH (appended after lydite's own)"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("declaredEnvNames = %q, want %q", got, want)
+// A Rust component governed by neither document has had no licence check run at
+// all, and the row says which document is missing rather than rendering the
+// green of a check that ran and found nothing.
+func TestTheRustLicenceRowNamesTheDocumentThatDecidedNothing(t *testing.T) {
+	rep := ui.NewReport("scan")
+	recordLicence(rep, "svc", runner.Rust, scanstages.LicenceVerdict{
+		Gated:        true,
+		PolicySource: rust.PolicyFromNone,
+		Comparison:   licence.Comparison{Verdict: licence.VerdictNotConfigured},
+	})
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
+		t.Fatalf("rows = %+v, want one context licence row", rows)
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) || !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
+		t.Fatalf("value = %q, want both files an edit could go in named", rows[0].Value)
 	}
 }
 
-// Names, never values. A declared value is arbitrary text the repository
-// controls, and this line goes to a CI log that is world-readable on a public
-// repository — so the value of a variable, and the directories of a declared
-// PATH, must never appear however the names are assembled.
-func TestDeclaredEnvValuesNeverReachTheWarning(t *testing.T) {
-	const secret = "ghp_examplesecretvaluenobodyshouldsee"
-	c := component.Component{Name: "cli", Env: map[string]string{
-		"NPM_TOKEN":    secret,
-		"DATABASE_URL": "postgres://user:" + secret + "@db/app",
-		"PATH":         "/opt/" + secret + "/bin",
-	}}
-	var buf bytes.Buffer
-	warnDeclaredEnv(&buf, c, childEnv(&toolchain.Env{}, c, runner.Invocation{}))
-	if strings.Contains(buf.String(), secret) {
-		t.Fatalf("a declared value reached the warning:\n%s", buf.String())
+// Under lydite's own policy a Rust row fails on what the change introduced
+// against the merge-base, names the document that decided the licences, and
+// carries the claims the verdict is about exactly as the gate located them.
+func TestTheRustLicenceRowUnderLyditesPolicyNamesWhatTheChangeIntroduced(t *testing.T) {
+	claim := finding.Finding{Gate: licence.Gate, Component: "svc", Path: "svc/Cargo.lock", Line: 12,
+		Row: "licence(svc)", Anchor: finding.AnchorLine}
+	rep := ui.NewReport("scan")
+	recordLicence(rep, "svc", runner.Rust, scanstages.LicenceVerdict{
+		Gated:        true,
+		PolicySource: rust.PolicyFromLydite,
+		Comparison: licence.Comparison{Verdict: licence.VerdictFail,
+			Pairs: []licence.Dependency{{Package: "cbindgen", Version: "0.26.0", Licence: "MPL-2.0"}}},
+		Findings: []finding.Finding{claim},
+	})
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusFail {
+		t.Fatalf("rows = %+v, want one failing licence row", rows)
 	}
-	for _, want := range []string{"NPM_TOKEN", "DATABASE_URL", "PATH (appended after lydite's own)"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("warning is missing %q:\n%s", want, buf.String())
-		}
+	if rows[0].Label != "licence(svc)" || !strings.Contains(rows[0].Value, "introduced") {
+		t.Fatalf("row = %+v, want the component's licence row naming what the change introduced", rows[0])
+	}
+	if !strings.Contains(rows[0].Value, config.FileName) {
+		t.Errorf("value = %q, want the document that decided the licences named on it", rows[0].Value)
+	}
+	if found := rep.Findings(); len(found) != 1 || found[0].Path != "svc/Cargo.lock" || found[0].Anchor != finding.AnchorLine {
+		t.Errorf("claims = %+v, want the one claim as the gate located and anchored it", found)
+	}
+}
+
+// A component's own deny.toml is evaluated whole and absolutely, so a failing
+// row counts every crate it rejected rather than what this change introduced —
+// and a passing one still reads as the pass it is, never as a count of nothing.
+func TestARustComponentsOwnPolicyCountsEveryCrateItRejected(t *testing.T) {
+	cases := []struct {
+		name       string
+		comparison licence.Comparison
+		status     ui.Status
+		says       string
+	}{
+		{"rejected", licence.Comparison{Verdict: licence.VerdictFail,
+			Pairs: []licence.Dependency{{Package: "cbindgen", Version: "0.26.0", Licence: "MPL-2.0"}}},
+			ui.StatusFail, "1 non-conforming licence(s)"},
+		{"allowed", licence.Comparison{Verdict: licence.VerdictPass}, ui.StatusPass, "passed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rep := ui.NewReport("scan")
+			recordLicence(rep, "svc", runner.Rust, scanstages.LicenceVerdict{
+				Gated: true, PolicySource: rust.PolicyFromConsumer, Comparison: c.comparison,
+			})
+
+			rows := rep.Rows()
+			if len(rows) != 1 || rows[0].Status != c.status {
+				t.Fatalf("rows = %+v, want one %q licence row", rows, c.status)
+			}
+			if !strings.Contains(rows[0].Value, c.says) {
+				t.Errorf("value = %q, want %q in it", rows[0].Value, c.says)
+			}
+			if strings.Contains(rows[0].Value, "merge-base") {
+				t.Errorf("value = %q, want no delta against a base: the component's own policy carries none", rows[0].Value)
+			}
+			if !strings.Contains(rows[0].Value, rust.DenyConfigFile) {
+				t.Errorf("value = %q, want the document that decided named on it", rows[0].Value)
+			}
+		})
+	}
+}
+
+// Only a Rust row names a policy document, because only Rust has more than one
+// to be decided by. A Go or TypeScript row is the comparison's own rendering,
+// with the claims a failing verdict is about beneath it in the order the gate
+// gave them.
+func TestAGoOrTypeScriptLicenceRowIsTheComparisonsOwn(t *testing.T) {
+	comparison := licence.Comparison{Verdict: licence.VerdictFail, Pairs: []licence.Dependency{
+		{Package: "copyleft", Version: "v1.0.0", Licence: "GPL-3.0-only"},
+		{Package: "weak", Version: "v2.0.0", Licence: "MPL-2.0"},
+	}}
+	claims := []finding.Finding{
+		{Gate: licence.Gate, Component: "api", Path: "api/go.mod", Line: 7, Row: "licence(api)", Message: "copyleft", Site: "copyleft"},
+		{Gate: licence.Gate, Component: "api", Path: "api/go.mod", Line: 9, Row: "licence(api)", Message: "weak", Site: "weak"},
+	}
+	for _, lang := range []runner.Lang{runner.Go, runner.TypeScript} {
+		t.Run(string(lang), func(t *testing.T) {
+			rep := ui.NewReport("scan")
+			recordLicence(rep, "api", lang, scanstages.LicenceVerdict{
+				Gated: true, Comparison: comparison, Findings: claims,
+			})
+
+			want := licenceRow("licence(api)", comparison)
+			rows := rep.Rows()
+			if len(rows) != 1 || rows[0].Status != want.Status || rows[0].Value != want.Value || !slices.Equal(rows[0].Detail, want.Detail) {
+				t.Fatalf("rows = %+v, want the comparison's own row %+v", rows, want)
+			}
+			var messages []string
+			for _, f := range rep.Findings() {
+				messages = append(messages, f.Message)
+			}
+			if !slices.Equal(messages, []string{"copyleft", "weak"}) {
+				t.Errorf("claims = %v, want both, in the order the gate gave them", messages)
+			}
+		})
+	}
+}
+
+// Shell declares no dependency set, so a scanned shell component's licence gate
+// has nothing to read — and says so in a row of its own, because a licence row
+// absent from a scanned component reads as a gate that ran and found nothing.
+func TestAShellComponentsLicenceRowSaysThereIsNothingToRead(t *testing.T) {
+	rep := ui.NewReport("scan")
+	recordLicence(rep, "scripts", runner.Shell, scanstages.LicenceVerdict{})
+
+	rows := rep.Rows()
+	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured || rows[0].Label != "licence(scripts)" {
+		t.Fatalf("rows = %+v, want one unmeasured licence(scripts) row", rows)
+	}
+	if want := "not measured — shell declares no dependency set to read licences from"; rows[0].Value != want {
+		t.Errorf("value = %q, want %q", rows[0].Value, want)
+	}
+	if len(rep.Findings()) != 0 || len(rep.Crashed()) != 0 {
+		t.Errorf("claims = %+v, crashed = %+v, want neither from a gate that does not exist", rep.Findings(), rep.Crashed())
+	}
+}
+
+// The composition the warning describes is childEnv's, so it is childEnv's
+// environment the scan hands its stages, and the declaration they name is
+// split exactly as childEnv splits it: a reordering that let a declared
+// GOTOOLCHAIN win would otherwise still be reported as cancelled.
+func TestDeclaredEnvReadsTheEnvironmentChildEnvComposed(t *testing.T) {
+	c := component.Component{Name: "cli", Env: map[string]string{"GOTOOLCHAIN": "auto", "SQLX_OFFLINE": "true", "PATH": "ci-bin"}}
+	tc := &toolchain.Env{Vars: []string{"GOTOOLCHAIN=local"}}
+	var environment scanEnvironment
+
+	composed := environment.Compose(tc, c)
+	if want := childEnv(tc, c, runner.Invocation{}); !slices.Equal(composed, want) {
+		t.Fatalf("composed = %q, want childEnv's %q", composed, want)
+	}
+	effective := map[string]string{}
+	for _, kv := range composed {
+		k, v, _ := strings.Cut(kv, "=")
+		effective[k] = v
+	}
+	if effective["GOTOOLCHAIN"] != "local" || effective["SQLX_OFFLINE"] != "true" {
+		t.Fatalf("composed = %q, want the resolved toolchain's GOTOOLCHAIN to win and the declared SQLX_OFFLINE to reach the check", composed)
+	}
+
+	dirs, vars := environment.Declared(c)
+	if !slices.Equal(dirs, []string{"ci-bin"}) {
+		t.Errorf("declared PATH = %q, want the directory it extends the path with", dirs)
+	}
+	if want := []string{"GOTOOLCHAIN=auto", "SQLX_OFFLINE=true"}; !slices.Equal(vars, want) {
+		t.Errorf("declared variables = %q, want %q", vars, want)
 	}
 }
 
@@ -2577,45 +1328,351 @@ func TestScanWarnsAboutADeclaredEnvironmentOnItsStderr(t *testing.T) {
 	}
 }
 
-// A crash is named by the gate its findings carry and the component they are
-// bucketed under — never by the row's label, which is prose — and only for a
-// result that says it crashed: a failing one that parsed is what found
-// something.
-func TestCrashesOfNamesTheBareGateAndTheComponent(t *testing.T) {
-	results := []executil.Result{
-		{Name: "gosec", Crashed: true, Err: errors.New("did not compile")},
-		{Name: "govulncheck", Err: errors.New("exit status 3")},
+// scanRan is a run whose plan, checks and licence verdicts are exactly the ones
+// given, for reading back through recordComponents without running a check.
+// Each of the three stages is skipped where skip names it, so its output is
+// unavailable to anything that reads it.
+func scanRan(t *testing.T, plan []scanstages.Planned, checks []scanstages.Checked, licences []scanstages.LicenceVerdict, skip ...string) *flow.Result {
+	t.Helper()
+	f, err := flow.New(scanflow.Name).
+		Stage(scanflow.StagePlanComponents, returns(scanstages.PlanComponentsOut{Plan: plan})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StagePlanComponents))).
+		Stage(scanflow.StageRunChecks, returns(scanstages.RunChecksOut{Checks: checks})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StageRunChecks))).
+		Stage(scanflow.StageGateLicences, returns(scanstages.GateLicencesOut{Licences: licences})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StageGateLicences))).
+		Build()
+	if err != nil {
+		t.Fatalf("building the run: %v", err)
 	}
-	got := crashesOf(results, "api")
-	want := []finding.Crash{{Gate: "gosec", Component: "api"}}
-	if !slices.Equal(got, want) {
-		t.Errorf("crashes = %+v, want %+v", got, want)
+	r, err := f.Run(context.Background(), flow.Inputs{})
+	if err != nil {
+		t.Fatalf("running: %v", err)
 	}
-	if root := crashesOf([]executil.Result{{Name: "gitleaks", Crashed: true}}, ""); !slices.Equal(root, []finding.Crash{{Gate: "gitleaks"}}) {
-		t.Errorf("root crashes = %+v, want gitleaks naming no component", root)
+	return r
+}
+
+// Each component's rows, crashes and claims land where it is declared, and a
+// scanned component's checks and licence verdict are read at its own index in
+// the plan. A slot the plan does not mark Scan is never read, whatever it
+// holds: reading one would render a verdict under a component nothing
+// scanned.
+func TestEachComponentIsRecordedWhereItIsDeclared(t *testing.T) {
+	plan := []scanstages.Planned{
+		{Component: component.Component{Name: "a"}, Lang: runner.Go, Disposition: scanstages.Scan},
+		{Component: component.Component{Name: "legacy"}, Disposition: scanstages.Unscanned},
+		{Component: component.Component{Name: "scripts"}, Lang: runner.Shell, Disposition: scanstages.Disabled},
+		{Component: component.Component{Name: "a-again"}, Lang: runner.Go, Disposition: scanstages.Duplicate, DuplicateOf: "a"},
+		{Component: component.Component{Name: "b"}, Lang: runner.Go, Disposition: scanstages.Scan},
+	}
+	stray := scanstages.Checked{
+		Results: []executil.Result{{Name: "gosec(stray)"}},
+		Crashes: []finding.Crash{{Gate: "gosec", Component: "stray"}},
+	}
+	strayLicence := scanstages.LicenceVerdict{Gated: true, Crashes: []finding.Crash{{Gate: licence.Gate, Component: "stray"}}}
+	checks := []scanstages.Checked{
+		{
+			Results:  []executil.Result{{Name: "gosec(a)"}},
+			Findings: []finding.Finding{{Gate: "gosec", Component: "a", Path: "a/main.go", Line: 6, Message: "m", Row: "gosec(a)"}},
+			Crashes:  []finding.Crash{{Gate: "govulncheck", Component: "a"}},
+		},
+		stray, stray, stray,
+		{
+			Results: []executil.Result{{Name: "gosec(b)"}},
+			Crashes: []finding.Crash{{Gate: "gosec", Component: "b"}},
+		},
+	}
+	licences := []scanstages.LicenceVerdict{
+		{
+			Gated: true,
+			Comparison: licence.Comparison{Verdict: licence.VerdictFail,
+				Pairs: []licence.Dependency{{Package: "x", Version: "1.0.0", Licence: "GPL-3.0"}}},
+			Findings: []finding.Finding{{Gate: licence.Gate, Component: "a", Path: "a/go.mod", Line: 3, Message: "m", Row: "licence(a)"}},
+		},
+		strayLicence, strayLicence, strayLicence,
+		{
+			Gated:      true,
+			Comparison: licence.Comparison{Verdict: licence.VerdictContext},
+			Crashes:    []finding.Crash{{Gate: licence.Gate, Component: "b"}},
+		},
+	}
+
+	rep := ui.NewReport("scan")
+	if err := recordComponents(rep, t.TempDir(), scanRan(t, plan, checks, licences)); err != nil {
+		t.Fatalf("recordComponents: %v", err)
+	}
+
+	var rows []string
+	for _, r := range rep.Rows() {
+		rows = append(rows, string(r.Status)+" "+r.Label)
+	}
+	wantRows := []string{
+		"pass gosec(a)",
+		"fail licence(a)",
+		"unmeasured scan(legacy)",
+		"unmeasured licence(legacy)",
+		"unmeasured findings(legacy)",
+		"unmeasured scan(scripts)",
+		"unmeasured licence(scripts)",
+		"unmeasured findings(scripts)",
+		"unmeasured scan(a-again)",
+		"pass gosec(b)",
+		"context licence(b)",
+	}
+	if !slices.Equal(rows, wantRows) {
+		t.Errorf("rows:\n%s\nwant:\n%s", strings.Join(rows, "\n"), strings.Join(wantRows, "\n"))
+	}
+
+	var crashes []string
+	for _, c := range rep.Crashed() {
+		crashes = append(crashes, c.Gate+" "+c.Component)
+	}
+	wantCrashes := []string{"govulncheck a", "gosec b", "licence b"}
+	if !slices.Equal(crashes, wantCrashes) {
+		t.Errorf("crashes = %q, want %q", crashes, wantCrashes)
+	}
+
+	var found []string
+	for _, f := range rep.Findings() {
+		found = append(found, f.Gate+" "+f.Component+" "+f.Path)
+	}
+	wantFound := []string{"gosec a a/main.go", "licence a a/go.mod"}
+	if !slices.Equal(found, wantFound) {
+		t.Errorf("findings = %q, want %q", found, wantFound)
 	}
 }
 
-// The licence gate claims only the pairs a failing verdict is about, so every
-// verdict that gates nothing — and a set that could not be read — reports no
-// pair whatever conforms, and is named crashed rather than read as clean.
-func TestLicenceCrashedOnlyWhereTheGateClaimedNothingItCouldStandBehind(t *testing.T) {
+// A disposition the report has no rows for is refused rather than rendered as
+// nothing: a component the report is silent about reads exactly like one that
+// was scanned and found clean.
+func TestADispositionTheReportHasNoRowsForIsRefused(t *testing.T) {
+	plan := []scanstages.Planned{{Component: component.Component{Name: "odd"}, Lang: runner.Go, Disposition: "sideways"}}
+	rep := ui.NewReport("scan")
+	err := recordComponents(rep, t.TempDir(), scanRan(t, plan, make([]scanstages.Checked, 1), make([]scanstages.LicenceVerdict, 1)))
+	if err == nil {
+		t.Fatal("a disposition with no rows was recorded as nothing")
+	}
+	if !strings.Contains(err.Error(), "odd") || !strings.Contains(err.Error(), "sideways") {
+		t.Errorf("error = %q, want it to name the component and its disposition", err)
+	}
+	if len(rep.Rows()) != 0 {
+		t.Errorf("rows = %+v, want none from a refused plan", rep.Rows())
+	}
+}
+
+// The report is built from the plan, the checks and the licence verdicts
+// together, so a run missing any one of them is refused rather than rendered
+// from the other two.
+func TestAComponentsReportNeedsEveryStageItReads(t *testing.T) {
+	for _, stage := range []string{scanflow.StagePlanComponents, scanflow.StageRunChecks, scanflow.StageGateLicences} {
+		t.Run(stage, func(t *testing.T) {
+			plan := []scanstages.Planned{{Component: component.Component{Name: "legacy"}, Disposition: scanstages.Unscanned}}
+			rep := ui.NewReport("scan")
+			err := recordComponents(rep, t.TempDir(), scanRan(t, plan, make([]scanstages.Checked, 1), make([]scanstages.LicenceVerdict, 1), stage))
+			if !errors.Is(err, flow.ErrUnavailable) {
+				t.Fatalf("err = %v, want the unavailable %s output named", err, stage)
+			}
+			if !strings.Contains(err.Error(), stage) {
+				t.Errorf("err = %v, want it to name %s", err, stage)
+			}
+			if len(rep.Rows()) != 0 {
+				t.Errorf("rows = %+v, want none from a run missing %s", rep.Rows(), stage)
+			}
+		})
+	}
+}
+
+// rootRan is a run whose Semgrep and gitleaks stages answer exactly the outputs
+// given, each running only where its switch says so and failing with its own
+// error where one is given.
+func rootRan(t *testing.T, semgrepOn bool, sg scanstages.SemgrepOut, sgErr error, secretsOn bool, sec scanstages.SecretsOut, secErr error) *flow.Result {
+	t.Helper()
+	f, err := flow.New(scanflow.Name).
+		Stage(scanflow.StageSemgrep, func(context.Context, struct{}) (scanstages.SemgrepOut, error) { return sg, sgErr }).
+		When(flow.Literal(semgrepOn)).
+		OnError(flow.RecordAndContinue).
+		Stage(scanflow.StageSecrets, func(context.Context, struct{}) (scanstages.SecretsOut, error) { return sec, secErr }).
+		When(flow.Literal(secretsOn)).
+		OnError(flow.RecordAndContinue).
+		Build()
+	if err != nil {
+		t.Fatalf("building the run: %v", err)
+	}
+	r, err := f.Run(context.Background(), flow.Inputs{})
+	if err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	return r
+}
+
+// The root-scoped gates contribute Semgrep's answer and then gitleaks's, each
+// only where it ran: a skipped gate adds nothing, because a zero result in its
+// place would render as a check that ran.
+func TestTheRootScopedGatesContributeOnlyWhereTheyRan(t *testing.T) {
+	sg := scanstages.SemgrepOut{
+		Result:   executil.Result{Name: "semgrep"},
+		Findings: []finding.Finding{{Gate: "semgrep", Path: "a.go", Line: 1, Message: "m", Row: "semgrep"}},
+		Crashes:  []finding.Crash{{Gate: "semgrep"}},
+	}
+	sec := scanstages.SecretsOut{
+		Result:   executil.Result{Name: "gitleaks"},
+		Findings: []finding.Finding{{Gate: "gitleaks", Path: "b.yml", Line: 2, Message: "m", Row: "gitleaks"}},
+		Crashes:  []finding.Crash{{Gate: "gitleaks"}},
+	}
 	cases := []struct {
-		c    licence.Comparison
-		err  error
-		want bool
+		name               string
+		semgrepOn, secrets bool
+		want               []string
 	}{
-		{licence.Comparison{Verdict: licence.VerdictPass}, nil, false},
-		{licence.Comparison{Verdict: licence.VerdictFail}, nil, false},
-		{licence.Comparison{Verdict: licence.VerdictUnmeasured}, nil, true},
-		{licence.Comparison{Verdict: licence.VerdictContext}, nil, true},
-		{licence.Comparison{}, errors.New("go list failed"), true},
+		{"both", true, true, []string{"semgrep", "gitleaks"}},
+		{"semgrep only", true, false, []string{"semgrep"}},
+		{"gitleaks only", false, true, []string{"gitleaks"}},
+		{"neither", false, false, nil},
 	}
 	for _, tc := range cases {
-		rep := ui.NewReport("scan")
-		licenceCrashed(rep, "api", tc.c, tc.err)
-		if got := len(rep.Crashed()) == 1; got != tc.want {
-			t.Errorf("verdict %q, err %v: crashed %v, want %v", tc.c.Verdict, tc.err, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := rootScanned(rootRan(t, tc.semgrepOn, sg, nil, tc.secrets, sec, nil))
+			if err != nil {
+				t.Fatalf("rootScanned: %v", err)
+			}
+			var results, found, crashes []string
+			for _, r := range root.results {
+				results = append(results, r.Name)
+			}
+			for _, f := range root.findings {
+				found = append(found, f.Gate)
+			}
+			for _, c := range root.crashes {
+				crashes = append(crashes, c.Gate)
+			}
+			for what, got := range map[string][]string{"results": results, "findings": found, "crashes": crashes} {
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("%s = %q, want %q", what, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A root-scoped gate that ran and has no output to read is refused rather
+// than read as a gate that ran and found nothing.
+func TestARootScopedGateWithNoOutputIsRefused(t *testing.T) {
+	failed := errors.New("the stage failed")
+	cases := map[string]*flow.Result{
+		scanflow.StageSemgrep: rootRan(t, true, scanstages.SemgrepOut{}, failed, true, scanstages.SecretsOut{}, nil),
+		scanflow.StageSecrets: rootRan(t, true, scanstages.SemgrepOut{}, nil, true, scanstages.SecretsOut{}, failed),
+	}
+	for stage, r := range cases {
+		t.Run(stage, func(t *testing.T) {
+			_, err := rootScanned(r)
+			if !errors.Is(err, flow.ErrUnavailable) || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("err = %v, want the unavailable %s output named", err, stage)
+			}
+		})
+	}
+}
+
+// A run's failure is reported as the stage's own error, not the flow's framing
+// of it, so what the command prints does not depend on which stage raised it;
+// an error no stage raised passes through as it is.
+func TestAFailedStageIsReportedAsItsOwnError(t *testing.T) {
+	own := errors.New("no components declared")
+	if got := scanError(&flow.StageError{Flow: scanflow.Name, Stage: scanflow.StageLoadComponents, Err: own}); got != own {
+		t.Errorf("scanError(stage error) = %v, want the stage's own error", got)
+	}
+	other := context.Canceled
+	if got := scanError(other); got != other {
+		t.Errorf("scanError(%v) = %v, want it unchanged", other, got)
+	}
+}
+
+// A root-scoped gate that could not run names its bucket crashed in the
+// document, naming no component — the bucket its claims already sit in. PATH
+// is stripped so neither semgrep nor pipx is found and Semgrep never installs.
+func TestARootScopedGateThatCouldNotRunIsNamedCrashed(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	err := cmd.ExecuteContext(context.Background())
+	var exitErr ui.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("err = %v, want the failing verdict of a Semgrep that did not install", err)
+	}
+
+	doc, err := ui.ReadDocument(&out)
+	if err != nil {
+		t.Fatalf("reading the document: %v", err)
+	}
+	want := []finding.Crash{{Gate: "semgrep"}}
+	if !slices.Equal(doc.Crashed, want) {
+		t.Fatalf("crashed = %+v, want %+v", doc.Crashed, want)
+	}
+}
+
+// Semgrep is handed the diff base as --baseline-commit only when no Semgrep
+// token is set. A token runs `semgrep ci`, which scopes itself to the diff;
+// without one, a base the scan was given and Semgrep was not makes every
+// pre-existing finding in the tree a claim against the change.
+func TestSemgrepIsHandedTheDiffBaseOnlyWithoutAnAppToken(t *testing.T) {
+	for _, token := range []string{"", "a-token"} {
+		t.Run("token="+token, func(t *testing.T) {
+			t.Setenv(semgrep.AppTokenEnv, token)
+			bin := t.TempDir()
+			argsFile := filepath.Join(bin, "semgrep-args")
+			// semgrep answers a version that is never the pinned one, so the
+			// pipx install is what makes it available; both are fakes, and
+			// semgrep records its arguments and writes an empty report.
+			writeLydite(t, bin, "pipx", "#!/bin/sh\nexit 0\n")
+			writeLydite(t, bin, "semgrep", "#!/bin/sh\n"+
+				"[ \"$1\" = --version ] && { echo 0.0.0; exit 0; }\n"+
+				"printf '%s\\n' \"$@\" > '"+argsFile+"'\n"+
+				"for a in \"$@\"; do case \"$a\" in --json-output=*) printf '{\"results\":[],\"errors\":[]}' > \"${a#--json-output=}\";; esac; done\n"+
+				"exit 0\n")
+			for _, name := range []string{"pipx", "semgrep"} {
+				if err := os.Chmod(filepath.Join(bin, name), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			dir := t.TempDir()
+			writeLydite(t, dir, component.FileName,
+				"components:\n  - name: legacy\n    dir: .\n    command: [\"true\"]\n")
+			writeLydite(t, dir, config.FileName, "secrets:\n  enabled: false\n")
+			gitIn(t, dir, "init", "--quiet", "-b", "main")
+			gitIn(t, dir, "add", "-A")
+			gitIn(t, dir, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+			head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+
+			cmd := newScanCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"--dir", dir, "--json", "--diff-base", head})
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+
+			data, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatalf("semgrep never ran: %v", err)
+			}
+			args := strings.Split(strings.TrimSpace(string(data)), "\n")
+			i := slices.Index(args, "--baseline-commit")
+			switch {
+			case token == "" && (i < 0 || i+1 >= len(args) || args[i+1] != head):
+				t.Errorf("semgrep args = %q, want --baseline-commit %s", args, head)
+			case token != "" && i >= 0:
+				t.Errorf("semgrep args = %q, want no --baseline-commit under `semgrep ci`", args)
+			}
+		})
 	}
 }
