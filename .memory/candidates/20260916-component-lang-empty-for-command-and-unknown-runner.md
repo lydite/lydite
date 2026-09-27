@@ -4,7 +4,7 @@ saw:
   - source/cli/internal/component/component.go
   - source/cli/internal/stages/scan/plan.go
   - source/cli/internal/stages/scan/toolchains.go
-  - source/cli/cmd/lydite/record.go
+  - source/cli/internal/stages/record/findings.go
   - source/cli/internal/orphan/orphan.go
   - docs/adr/0056-a-component-states-its-language-only-where-no-runner-implies-one.md
 ---
@@ -27,5 +27,5 @@ ADR 0056 decided a declared `lang:` (`Component.DeclaredLang`) does NOT reach `L
 readers, because they assume a non-empty answer came from a runner. `Component.ScanLang()` is the
 separate accessor (the runner's language when a runner is set, `DeclaredLang` otherwise), read only
 by the scan side: `PlanComponents` (`internal/stages/scan/plan.go`), `scanUnits` and
-`anyLanguageDeclared` (`internal/stages/scan/toolchains.go`), `findingCounts`
-(`cmd/lydite/record.go`) and `internal/orphan/orphan.go`.
+`anyLanguageDeclared` (`internal/stages/scan/toolchains.go`), `FindingCounts`
+(`internal/stages/record/findings.go`) and `internal/orphan/orphan.go`.

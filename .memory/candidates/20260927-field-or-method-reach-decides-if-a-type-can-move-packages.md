@@ -5,7 +5,7 @@ saw:
   - source/cli/cmd/lydite/mutation.go
   - source/cli/cmd/lydite/merge.go
   - source/cli/cmd/lydite/record.go
-  - source/cli/agentic/references/architecture.md
+  - agentic/references/architecture.md
 targets: null
 verdict: null
 ---
@@ -19,7 +19,9 @@ edit.
 `componentPlan`, `componentLog`, `measurementsDoc` and `componentMeasurement` all stayed in
 `cmd/lydite` for exactly this reason — `mutation.go` reaches `p.c`/`p.log`/`.ready`/`.row`/
 `.ports`, `merge.go` calls `.asMeasurement(c)`/`.patchPartOf(...)`, `record.go` calls
-`.snapshot()` — while `measurement`/`patchPart` (also coverage/CRAP types) became real type
+`.snapshot()` (still true after `record`'s own Flow migration: the call now sits in
+`cmd/lydite/record.go`'s `recordedMeasurements`, inside the `recordReports` adapter that converts
+the document into `recordstages.Measurements`) — while `measurement`/`patchPart` (also coverage/CRAP types) became real type
 aliases over `internal/test/measure`'s exported structs, because task 1's analysis confirmed no
 unowned file called an unexported method on either, only exported fields and the type name
 itself.

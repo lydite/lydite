@@ -16,6 +16,9 @@ saw:
   - source/cli/cmd/lydite/mergequeue.go
   - agentic/references/surface.md
   - agentic/references/architecture.md
+  - source/cli/internal/stages/record/record.go
+  - source/cli/internal/flows/record/record.go
+  - docs/adr/0069-a-recordings-history-is-a-deferred-closure-and-its-inputs-cross-a-boundary-type.md
 ---
 
 Synthesized while answering "what constrains splitting the remaining cmd/lydite migrations into
@@ -75,9 +78,11 @@ stream should not default to wrapping `publish` in a Flow — only the pieces of
 actually read/write the platform live (review's own comparison, threads' posting) are
 candidates.
 
-**`internal/ledger` writes (the fifth stream, `record.go`) look comparatively isolated**: a
-grep for the same toolchain helpers (`ensureToolchains|childEnv(|componentUnits(`) across
-`cmd/lydite/*.go` does not list `record.go`, and `internal/ledger` itself is read/write git-blob
-state (`agentic/references/quality-history.md`), not a platform call — it does not obviously
-need `SCMRepository` or the toolchain seam. Worth confirming when that stream is scoped, since
-it is the one most decoupled from the other four's seams found here.
+**`internal/ledger` writes (the fifth stream, `record`) were isolated, as predicted — confirmed
+by its landed migration.** `lydite test record` now runs as `internal/flows/record` over stages in
+`internal/stages/record`, and neither those stages, that flow, nor `cmd/lydite/record.go` imports
+`internal/forge` or `internal/test/run`, or calls `ensureToolchains`/`childEnv(`/
+`componentUnits(`: the stages read and write git-blob state (`internal/gitstate`,
+`internal/ledger`) only. The one seam it did need is its own — another command's report document
+reaching a stage without importing `package main` — resolved by a stage-owned `ReportReader`
+interface and boundary types (ADR 0069), not by any of the shared seams above.

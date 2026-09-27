@@ -6,14 +6,15 @@ description: ledger.BranchState replays a branch's finding transitions in the re
 anchors:
   - path: source/cli/internal/ledger/ledger.go
     blob: 3276b69cc0751a85e055763142bf05acbcf644c6
-  - path: source/cli/cmd/lydite/record.go
-    blob: ebdc162be991acddf6e42ea8a6dd4f05cc400ee2
+  - path: source/cli/internal/stages/record/history.go
+    blob: e3d49b04c9dcba55acdcfb3a1f2914b48bedae6b
 confidence: verified
 ---
 
 `ledger.BranchState` is the one implementation of the finding-events replay — an
 earlier, near-duplicate `OpenFindings` was removed after a PR review caught the two
-copies drifting apart, since the write path (`historyRecords`) called only
+copies drifting apart, since the write path (now `ComposeHistory`'s records closure in
+`internal/stages/record/history.go`) called only
 `BranchState` while its tests still exercised the untested duplicate. `BranchState`
 collects every `KindEntry` record for a branch across `lookbackMonths` (12) months of
 partitions, then sorts by the record's own `At` field (`sort.SliceStable`) before
@@ -25,9 +26,10 @@ The `before` parameter is exclusive for the finding-events replay: a record whos
 equals `before` is excluded from it (though *included*, at `<=`, for the separate
 "newest previous record" answer `BranchState` also returns, matching `Latest`'s own
 "at or before" semantics — the two reductions deliberately keep different boundary
-rules over the same collected records). This is what lets `cmd/lydite/record.go`'s
-`historyRecords` pass the new commit's own `head.At` as `before` without ever reading
-that commit's own not-yet-appended events back as history.
+rules over the same collected records). This is what lets `internal/stages/record/history.go`'s
+`ComposeHistory` (inside the `gitstate.Records` closure it returns) pass the new commit's own
+`head.At` as `before` without ever reading that commit's own not-yet-appended events back as
+history.
 
 The 12-month bound means a fingerprint that has been open longer than that with no
 transition recorded in the window re-reports as `FindingAppeared` on the next recording
