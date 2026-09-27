@@ -218,6 +218,25 @@ func TestAComponentWhoseMutantsRanReportsWhatBecameOfThem(t *testing.T) {
 	}
 }
 
+// A caller's own Diagnostics writer is used exactly as given, never silently
+// swapped out for another one: the defaulting to io.Discard only fills a nil
+// Diagnostics, so a declaration that matched no mutant must still reach a
+// writer the caller supplied.
+func TestADiagnosticsWriterTheCallerGaveIsNeverReplaced(t *testing.T) {
+	f := newWebFixture(t)
+	writeFile(t, f.root, "web/src/a.ts", webSource+
+		"// [lydite:exclude_from_mutation][nothing on this line is ever mutated]\n")
+	var buf bytes.Buffer
+	in := f.in(f.shape(t, lcovExecuting, "true", "true"), f.lifecycle(t))
+	in.Diagnostics = &buf
+	if _, err := RunMutants(t.Context(), in); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "covers no mutant") {
+		t.Errorf("diagnostics = %q, want the unmatched declaration named on it", buf.String())
+	}
+}
+
 // A suite that notices the change kills the mutant.
 func TestASuiteThatFailsKillsTheMutant(t *testing.T) {
 	f := newWebFixture(t)
@@ -747,5 +766,34 @@ func TestEveryOutcomeKindIsNamed(t *testing.T) {
 	}
 	if got := OutcomeKind(0).String(); got != "OutcomeKind(0)" {
 		t.Errorf("the zero kind is %q, want it named as no kind", got)
+	}
+}
+
+// Each kind's name is pinned exactly, not merely present: a fold or a log
+// line quotes this string verbatim, so a kind silently renamed to empty would
+// still be unique among the others and pass a check that only asked for that.
+func TestEachOutcomeKindsNameIsPinned(t *testing.T) {
+	for kind, want := range map[OutcomeKind]string{
+		KindNotRun:              "not-run",
+		KindBlocked:             "blocked",
+		KindMutationOff:         "mutation-off",
+		KindRawCommand:          "raw-command",
+		KindInvocationFailed:    "invocation-failed",
+		KindNoBackend:           "no-backend",
+		KindUntouched:           "untouched",
+		KindNoCoverageReport:    "no-coverage-report",
+		KindClearReportFailed:   "clear-report-failed",
+		KindBaselineInterrupted: "baseline-interrupted",
+		KindBaselineFailed:      "baseline-failed",
+		KindBaselineTooLarge:    "baseline-too-large",
+		KindMeasureFailed:       "measure-failed",
+		KindGenerateFailed:      "generate-failed",
+		KindNothingToMutate:     "nothing-to-mutate",
+		KindExecuteFailed:       "execute-failed",
+		KindCompleted:           "completed",
+	} {
+		if got := kind.String(); got != want {
+			t.Errorf("kind %d is named %q, want %q", int(kind), got, want)
+		}
 	}
 }

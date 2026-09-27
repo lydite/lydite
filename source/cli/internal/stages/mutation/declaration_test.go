@@ -173,14 +173,20 @@ func TestAnExplicitBaseResolvesTheCommitItNames(t *testing.T) {
 // and reports a pass.
 func TestAnUnresolvableExplicitBaseIsAnErrorNamingTheFix(t *testing.T) {
 	root := twoChangesRepo(t)
-	_, err := ResolveBase(t.Context(), ResolveBaseIn{Dir: root, BaseSHA: "HEAD~99"})
+	base, err := resolveMutationBase(t.Context(), root, "", "HEAD~99")
 	if err == nil {
 		t.Fatal("a base no commit answers to was accepted")
+	}
+	if base != "" {
+		t.Errorf("an unresolvable base resolved %q alongside its error", base)
 	}
 	for _, want := range []string{"--base-sha", "HEAD~99", "depth 0"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the run failed with %q, want it to say %q", err, want)
 		}
+	}
+	if _, err := ResolveBase(t.Context(), ResolveBaseIn{Dir: root, BaseSHA: "HEAD~99"}); err == nil {
+		t.Fatal("a base no commit answers to was accepted through the stage")
 	}
 }
 
@@ -188,14 +194,20 @@ func TestAnUnresolvableExplicitBaseIsAnErrorNamingTheFix(t *testing.T) {
 // the git error alone.
 func TestAnUnresolvableMergeBaseIsAnErrorNamingTheFix(t *testing.T) {
 	root := twoChangesRepo(t)
-	_, err := ResolveBase(t.Context(), ResolveBaseIn{Dir: root, BaseBranch: "no-such-branch"})
+	base, err := resolveMutationBase(t.Context(), root, "no-such-branch", "")
 	if err == nil {
 		t.Fatal("a branch the remote does not hold resolved a merge-base")
+	}
+	if base != "" {
+		t.Errorf("an unresolvable merge-base resolved %q alongside its error", base)
 	}
 	for _, want := range []string{"merge-base", "depth 0"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the run failed with %q, want it to say %q", err, want)
 		}
+	}
+	if _, err := ResolveBase(t.Context(), ResolveBaseIn{Dir: root, BaseBranch: "no-such-branch"}); err == nil {
+		t.Fatal("a branch the remote does not hold resolved a merge-base through the stage")
 	}
 }
 

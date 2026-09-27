@@ -189,8 +189,5 @@ func FoldCounts(docs []CountsDocument) (CountsDocument, error) {
 // shortSHA truncates a tree hash to what an error needs to name a disagreement
 // without printing the whole thing.
 func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
+	return sha[:min(len(sha), 12)]
 }

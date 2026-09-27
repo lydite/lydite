@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1861,6 +1862,24 @@ func TestARunWritesMutantsJSONAndIgnoresItsOwnReports(t *testing.T) {
 	}
 	if counts.Killed == 0 || counts.ElapsedSeconds == 0 {
 		t.Errorf("counts = %+v, want a killed count and an elapsed time from the run", counts)
+	}
+}
+
+// recordMutants ignores its own reports directory itself, rather than relying
+// on some other step in the same run to have already done it: a caller that
+// records without ever saving a document — the record flow is the only thing
+// this test drives — must still leave a .lydite-reports a `git add -A` will
+// not offer up.
+func TestRecordMutantsIgnoresItsOwnReportsWithNoOtherWriter(t *testing.T) {
+	root := mutationRepo(t, "components:\n  - name: app\n    dir: app\n    runner: go-test\n")
+	cmd := newRootCmd()
+	var errOut bytes.Buffer
+	cmd.SetErr(&errOut)
+	if err := recordMutants(context.Background(), cmd, root, nil); err != nil {
+		t.Fatalf("recordMutants failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(reportsDir(root), ".gitignore")); err != nil {
+		t.Errorf("recordMutants did not ignore its own reports directory: %v", err)
 	}
 }
 
