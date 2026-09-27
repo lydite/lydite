@@ -32,3 +32,12 @@ declared args to override it. This leaves the declaration untouched, which matte
 changing `args:` is not free: the go-test producer string folds in scope args only (see
 `.claude/rules/fold-only-denominator-moving-args-into-a-producer.md`), so `-timeout` would not move
 the baseline, but it is a repository-wide declaration change for a local-machine problem.
+
+Caveat: a measured local run under that load is not a substitute for CI's. On the record-flow
+branch the local run (load ~90 on 8 cores) reported 7 of 95 survivors, all in
+`internal/stages/record`; CI's run of the same tree found two more in `cmd/lydite/record.go` that
+the local run had counted killed. A mutant whose suite runs past the per-mutant timeout counts as
+killed (`internal/mutation/executor_test.go`'s `TestASuiteThatHangsTimesOutAndCountsAsKilled`),
+and a `./cmd/lydite` mutant under heavy load is the likeliest to — so a contended local run
+over-reports kills in exactly the slowest package. Inferred from the two runs' difference, not
+reproduced mutant by mutant.
