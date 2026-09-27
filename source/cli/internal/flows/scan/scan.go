@@ -42,8 +42,11 @@ const (
 	// moment they arise, so they interleave with a check's own streamed
 	// output in the order the two arise.
 	InputDiagnostics = "Diagnostics"
-	// InputSemgrepAppToken reports whether SEMGREP_APP_TOKEN is set.
-	InputSemgrepAppToken = "SemgrepAppToken"
+	// InputSemgrepCI reports whether SEMGREP_APP_TOKEN is set, which runs
+	// Semgrep as `semgrep ci`. Named for that mode rather than for the
+	// variable: gosec's G101 matches the identifier, so a constant whose name
+	// says token is reported as a hardcoded credential whatever it holds.
+	InputSemgrepCI = "SemgrepAppToken"
 )
 
 // The names of the flow's stages, in the order they run.
@@ -79,13 +82,13 @@ type Params struct {
 // Inputs are p as the flow is run with them.
 func (p Params) Inputs() flow.Inputs {
 	return flow.Inputs{
-		InputDir:             p.Dir,
-		InputDiffBase:        p.DiffBase,
-		InputBaseBranch:      p.BaseBranch,
-		InputToolchains:      p.Toolchains,
-		InputEnvironment:     p.Environment,
-		InputDiagnostics:     p.Diagnostics,
-		InputSemgrepAppToken: p.SemgrepAppToken,
+		InputDir:         p.Dir,
+		InputDiffBase:    p.DiffBase,
+		InputBaseBranch:  p.BaseBranch,
+		InputToolchains:  p.Toolchains,
+		InputEnvironment: p.Environment,
+		InputDiagnostics: p.Diagnostics,
+		InputSemgrepCI:   p.SemgrepAppToken,
 	}
 }
 
@@ -161,7 +164,7 @@ func New() (*flow.Flow, error) {
 		When(flow.FromStage(StageLoadConfig, "SemgrepEnabled")).
 		With("Dir", flow.FromInput(InputDir)).
 		With("BaseSHA", baseSHA).
-		With("SemgrepAppToken", flow.FromInput(InputSemgrepAppToken)).
+		With("SemgrepAppToken", flow.FromInput(InputSemgrepCI)).
 		With("Config", flow.FromStage(StageLoadConfig, "SemgrepConfig")).
 		With("Changed", changed).
 		With("Diagnostics", flow.FromInput(InputDiagnostics)).

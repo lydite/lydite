@@ -17,12 +17,15 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/flow"
+	scanflow "lydite/lydite/internal/flows/scan"
 	"lydite/lydite/internal/golang"
 	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/orphan"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
+	"lydite/lydite/internal/semgrep"
 	"lydite/lydite/internal/shell"
 	scanstages "lydite/lydite/internal/stages/scan"
 	"lydite/lydite/internal/toolchain"
@@ -1322,5 +1325,354 @@ func TestScanWarnsAboutADeclaredEnvironmentOnItsStderr(t *testing.T) {
 	}
 	if strings.Contains(errOut.String()+out.String(), "secretvalue") {
 		t.Fatalf("a declared value reached the scan's output:\nstderr: %s\nstdout: %s", errOut.String(), out.String())
+	}
+}
+
+// scanRan is a run whose plan, checks and licence verdicts are exactly the ones
+// given, for reading back through recordComponents without running a check.
+// Each of the three stages is skipped where skip names it, so its output is
+// unavailable to anything that reads it.
+func scanRan(t *testing.T, plan []scanstages.Planned, checks []scanstages.Checked, licences []scanstages.LicenceVerdict, skip ...string) *flow.Result {
+	t.Helper()
+	f, err := flow.New(scanflow.Name).
+		Stage(scanflow.StagePlanComponents, returns(scanstages.PlanComponentsOut{Plan: plan})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StagePlanComponents))).
+		Stage(scanflow.StageRunChecks, returns(scanstages.RunChecksOut{Checks: checks})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StageRunChecks))).
+		Stage(scanflow.StageGateLicences, returns(scanstages.GateLicencesOut{Licences: licences})).
+		When(flow.Literal(!slices.Contains(skip, scanflow.StageGateLicences))).
+		Build()
+	if err != nil {
+		t.Fatalf("building the run: %v", err)
+	}
+	r, err := f.Run(context.Background(), flow.Inputs{})
+	if err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	return r
+}
+
+// Each component's rows, crashes and claims land where it is declared, and a
+// scanned component's checks and licence verdict are read at its own index in
+// the plan. A slot the plan does not mark Scan is never read, whatever it
+// holds: reading one would render a verdict under a component nothing
+// scanned.
+func TestEachComponentIsRecordedWhereItIsDeclared(t *testing.T) {
+	plan := []scanstages.Planned{
+		{Component: component.Component{Name: "a"}, Lang: runner.Go, Disposition: scanstages.Scan},
+		{Component: component.Component{Name: "legacy"}, Disposition: scanstages.Unscanned},
+		{Component: component.Component{Name: "scripts"}, Lang: runner.Shell, Disposition: scanstages.Disabled},
+		{Component: component.Component{Name: "a-again"}, Lang: runner.Go, Disposition: scanstages.Duplicate, DuplicateOf: "a"},
+		{Component: component.Component{Name: "b"}, Lang: runner.Go, Disposition: scanstages.Scan},
+	}
+	stray := scanstages.Checked{
+		Results: []executil.Result{{Name: "gosec(stray)"}},
+		Crashes: []finding.Crash{{Gate: "gosec", Component: "stray"}},
+	}
+	strayLicence := scanstages.LicenceVerdict{Gated: true, Crashes: []finding.Crash{{Gate: licence.Gate, Component: "stray"}}}
+	checks := []scanstages.Checked{
+		{
+			Results:  []executil.Result{{Name: "gosec(a)"}},
+			Findings: []finding.Finding{{Gate: "gosec", Component: "a", Path: "a/main.go", Line: 6, Message: "m", Row: "gosec(a)"}},
+			Crashes:  []finding.Crash{{Gate: "govulncheck", Component: "a"}},
+		},
+		stray, stray, stray,
+		{
+			Results: []executil.Result{{Name: "gosec(b)"}},
+			Crashes: []finding.Crash{{Gate: "gosec", Component: "b"}},
+		},
+	}
+	licences := []scanstages.LicenceVerdict{
+		{
+			Gated: true,
+			Comparison: licence.Comparison{Verdict: licence.VerdictFail,
+				Pairs: []licence.Dependency{{Package: "x", Version: "1.0.0", Licence: "GPL-3.0"}}},
+			Findings: []finding.Finding{{Gate: licence.Gate, Component: "a", Path: "a/go.mod", Line: 3, Message: "m", Row: "licence(a)"}},
+		},
+		strayLicence, strayLicence, strayLicence,
+		{
+			Gated:      true,
+			Comparison: licence.Comparison{Verdict: licence.VerdictContext},
+			Crashes:    []finding.Crash{{Gate: licence.Gate, Component: "b"}},
+		},
+	}
+
+	rep := ui.NewReport("scan")
+	if err := recordComponents(rep, t.TempDir(), scanRan(t, plan, checks, licences)); err != nil {
+		t.Fatalf("recordComponents: %v", err)
+	}
+
+	var rows []string
+	for _, r := range rep.Rows() {
+		rows = append(rows, string(r.Status)+" "+r.Label)
+	}
+	wantRows := []string{
+		"pass gosec(a)",
+		"fail licence(a)",
+		"unmeasured scan(legacy)",
+		"unmeasured licence(legacy)",
+		"unmeasured findings(legacy)",
+		"unmeasured scan(scripts)",
+		"unmeasured licence(scripts)",
+		"unmeasured findings(scripts)",
+		"unmeasured scan(a-again)",
+		"pass gosec(b)",
+		"context licence(b)",
+	}
+	if !slices.Equal(rows, wantRows) {
+		t.Errorf("rows:\n%s\nwant:\n%s", strings.Join(rows, "\n"), strings.Join(wantRows, "\n"))
+	}
+
+	var crashes []string
+	for _, c := range rep.Crashed() {
+		crashes = append(crashes, c.Gate+" "+c.Component)
+	}
+	wantCrashes := []string{"govulncheck a", "gosec b", "licence b"}
+	if !slices.Equal(crashes, wantCrashes) {
+		t.Errorf("crashes = %q, want %q", crashes, wantCrashes)
+	}
+
+	var found []string
+	for _, f := range rep.Findings() {
+		found = append(found, f.Gate+" "+f.Component+" "+f.Path)
+	}
+	wantFound := []string{"gosec a a/main.go", "licence a a/go.mod"}
+	if !slices.Equal(found, wantFound) {
+		t.Errorf("findings = %q, want %q", found, wantFound)
+	}
+}
+
+// A disposition the report has no rows for is refused rather than rendered as
+// nothing: a component the report is silent about reads exactly like one that
+// was scanned and found clean.
+func TestADispositionTheReportHasNoRowsForIsRefused(t *testing.T) {
+	plan := []scanstages.Planned{{Component: component.Component{Name: "odd"}, Lang: runner.Go, Disposition: "sideways"}}
+	rep := ui.NewReport("scan")
+	err := recordComponents(rep, t.TempDir(), scanRan(t, plan, make([]scanstages.Checked, 1), make([]scanstages.LicenceVerdict, 1)))
+	if err == nil {
+		t.Fatal("a disposition with no rows was recorded as nothing")
+	}
+	if !strings.Contains(err.Error(), "odd") || !strings.Contains(err.Error(), "sideways") {
+		t.Errorf("error = %q, want it to name the component and its disposition", err)
+	}
+	if len(rep.Rows()) != 0 {
+		t.Errorf("rows = %+v, want none from a refused plan", rep.Rows())
+	}
+}
+
+// The report is built from the plan, the checks and the licence verdicts
+// together, so a run missing any one of them is refused rather than rendered
+// from the other two.
+func TestAComponentsReportNeedsEveryStageItReads(t *testing.T) {
+	for _, stage := range []string{scanflow.StagePlanComponents, scanflow.StageRunChecks, scanflow.StageGateLicences} {
+		t.Run(stage, func(t *testing.T) {
+			plan := []scanstages.Planned{{Component: component.Component{Name: "legacy"}, Disposition: scanstages.Unscanned}}
+			rep := ui.NewReport("scan")
+			err := recordComponents(rep, t.TempDir(), scanRan(t, plan, make([]scanstages.Checked, 1), make([]scanstages.LicenceVerdict, 1), stage))
+			if !errors.Is(err, flow.ErrUnavailable) {
+				t.Fatalf("err = %v, want the unavailable %s output named", err, stage)
+			}
+			if !strings.Contains(err.Error(), stage) {
+				t.Errorf("err = %v, want it to name %s", err, stage)
+			}
+			if len(rep.Rows()) != 0 {
+				t.Errorf("rows = %+v, want none from a run missing %s", rep.Rows(), stage)
+			}
+		})
+	}
+}
+
+// rootRan is a run whose Semgrep and gitleaks stages answer exactly the outputs
+// given, each running only where its switch says so and failing with its own
+// error where one is given.
+func rootRan(t *testing.T, semgrepOn bool, sg scanstages.SemgrepOut, sgErr error, secretsOn bool, sec scanstages.SecretsOut, secErr error) *flow.Result {
+	t.Helper()
+	f, err := flow.New(scanflow.Name).
+		Stage(scanflow.StageSemgrep, func(context.Context, struct{}) (scanstages.SemgrepOut, error) { return sg, sgErr }).
+		When(flow.Literal(semgrepOn)).
+		OnError(flow.RecordAndContinue).
+		Stage(scanflow.StageSecrets, func(context.Context, struct{}) (scanstages.SecretsOut, error) { return sec, secErr }).
+		When(flow.Literal(secretsOn)).
+		OnError(flow.RecordAndContinue).
+		Build()
+	if err != nil {
+		t.Fatalf("building the run: %v", err)
+	}
+	r, err := f.Run(context.Background(), flow.Inputs{})
+	if err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	return r
+}
+
+// The root-scoped gates contribute Semgrep's answer and then gitleaks's, each
+// only where it ran: a skipped gate adds nothing, because a zero result in its
+// place would render as a check that ran.
+func TestTheRootScopedGatesContributeOnlyWhereTheyRan(t *testing.T) {
+	sg := scanstages.SemgrepOut{
+		Result:   executil.Result{Name: "semgrep"},
+		Findings: []finding.Finding{{Gate: "semgrep", Path: "a.go", Line: 1, Message: "m", Row: "semgrep"}},
+		Crashes:  []finding.Crash{{Gate: "semgrep"}},
+	}
+	sec := scanstages.SecretsOut{
+		Result:   executil.Result{Name: "gitleaks"},
+		Findings: []finding.Finding{{Gate: "gitleaks", Path: "b.yml", Line: 2, Message: "m", Row: "gitleaks"}},
+		Crashes:  []finding.Crash{{Gate: "gitleaks"}},
+	}
+	cases := []struct {
+		name               string
+		semgrepOn, secrets bool
+		want               []string
+	}{
+		{"both", true, true, []string{"semgrep", "gitleaks"}},
+		{"semgrep only", true, false, []string{"semgrep"}},
+		{"gitleaks only", false, true, []string{"gitleaks"}},
+		{"neither", false, false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := rootScanned(rootRan(t, tc.semgrepOn, sg, nil, tc.secrets, sec, nil))
+			if err != nil {
+				t.Fatalf("rootScanned: %v", err)
+			}
+			var results, found, crashes []string
+			for _, r := range root.results {
+				results = append(results, r.Name)
+			}
+			for _, f := range root.findings {
+				found = append(found, f.Gate)
+			}
+			for _, c := range root.crashes {
+				crashes = append(crashes, c.Gate)
+			}
+			for what, got := range map[string][]string{"results": results, "findings": found, "crashes": crashes} {
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("%s = %q, want %q", what, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A root-scoped gate that ran and has no output to read is refused rather
+// than read as a gate that ran and found nothing.
+func TestARootScopedGateWithNoOutputIsRefused(t *testing.T) {
+	failed := errors.New("the stage failed")
+	cases := map[string]*flow.Result{
+		scanflow.StageSemgrep: rootRan(t, true, scanstages.SemgrepOut{}, failed, true, scanstages.SecretsOut{}, nil),
+		scanflow.StageSecrets: rootRan(t, true, scanstages.SemgrepOut{}, nil, true, scanstages.SecretsOut{}, failed),
+	}
+	for stage, r := range cases {
+		t.Run(stage, func(t *testing.T) {
+			_, err := rootScanned(r)
+			if !errors.Is(err, flow.ErrUnavailable) || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("err = %v, want the unavailable %s output named", err, stage)
+			}
+		})
+	}
+}
+
+// A run's failure is reported as the stage's own error, not the flow's framing
+// of it, so what the command prints does not depend on which stage raised it;
+// an error no stage raised passes through as it is.
+func TestAFailedStageIsReportedAsItsOwnError(t *testing.T) {
+	own := errors.New("no components declared")
+	if got := scanError(&flow.StageError{Flow: scanflow.Name, Stage: scanflow.StageLoadComponents, Err: own}); got != own {
+		t.Errorf("scanError(stage error) = %v, want the stage's own error", got)
+	}
+	other := context.Canceled
+	if got := scanError(other); got != other {
+		t.Errorf("scanError(%v) = %v, want it unchanged", other, got)
+	}
+}
+
+// A root-scoped gate that could not run names its bucket crashed in the
+// document, naming no component — the bucket its claims already sit in. PATH
+// is stripped so neither semgrep nor pipx is found and Semgrep never installs.
+func TestARootScopedGateThatCouldNotRunIsNamedCrashed(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	dir := t.TempDir()
+	writeLydite(t, dir, component.FileName,
+		"components:\n  - name: cli\n    dir: .\n    runner: go-test\n")
+	writeLydite(t, dir, config.FileName, "go:\n  enabled: false\nsecrets:\n  enabled: false\n")
+	writeLydite(t, dir, "go.mod", "module x\n\ngo 1.26\n")
+
+	var out bytes.Buffer
+	cmd := newScanCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--dir", dir, "--json"})
+	err := cmd.ExecuteContext(context.Background())
+	var exitErr ui.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("err = %v, want the failing verdict of a Semgrep that did not install", err)
+	}
+
+	doc, err := ui.ReadDocument(&out)
+	if err != nil {
+		t.Fatalf("reading the document: %v", err)
+	}
+	want := []finding.Crash{{Gate: "semgrep"}}
+	if !slices.Equal(doc.Crashed, want) {
+		t.Fatalf("crashed = %+v, want %+v", doc.Crashed, want)
+	}
+}
+
+// Semgrep is handed the diff base as --baseline-commit only when no Semgrep
+// token is set. A token runs `semgrep ci`, which scopes itself to the diff;
+// without one, a base the scan was given and Semgrep was not makes every
+// pre-existing finding in the tree a claim against the change.
+func TestSemgrepIsHandedTheDiffBaseOnlyWithoutAnAppToken(t *testing.T) {
+	for _, token := range []string{"", "a-token"} {
+		t.Run("token="+token, func(t *testing.T) {
+			t.Setenv(semgrep.AppTokenEnv, token)
+			bin := t.TempDir()
+			argsFile := filepath.Join(bin, "semgrep-args")
+			// semgrep answers a version that is never the pinned one, so the
+			// pipx install is what makes it available; both are fakes, and
+			// semgrep records its arguments and writes an empty report.
+			writeLydite(t, bin, "pipx", "#!/bin/sh\nexit 0\n")
+			writeLydite(t, bin, "semgrep", "#!/bin/sh\n"+
+				"[ \"$1\" = --version ] && { echo 0.0.0; exit 0; }\n"+
+				"printf '%s\\n' \"$@\" > '"+argsFile+"'\n"+
+				"for a in \"$@\"; do case \"$a\" in --json-output=*) printf '{\"results\":[],\"errors\":[]}' > \"${a#--json-output=}\";; esac; done\n"+
+				"exit 0\n")
+			for _, name := range []string{"pipx", "semgrep"} {
+				if err := os.Chmod(filepath.Join(bin, name), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			dir := t.TempDir()
+			writeLydite(t, dir, component.FileName,
+				"components:\n  - name: legacy\n    dir: .\n    command: [\"true\"]\n")
+			writeLydite(t, dir, config.FileName, "secrets:\n  enabled: false\n")
+			gitIn(t, dir, "init", "--quiet", "-b", "main")
+			gitIn(t, dir, "add", "-A")
+			gitIn(t, dir, "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "--quiet", "-m", "base")
+			head := strings.TrimSpace(executil.RunQuiet(context.Background(), dir, "git", "rev-parse", "HEAD").Output)
+
+			cmd := newScanCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"--dir", dir, "--json", "--diff-base", head})
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+
+			data, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatalf("semgrep never ran: %v", err)
+			}
+			args := strings.Split(strings.TrimSpace(string(data)), "\n")
+			i := slices.Index(args, "--baseline-commit")
+			switch {
+			case token == "" && (i < 0 || i+1 >= len(args) || args[i+1] != head):
+				t.Errorf("semgrep args = %q, want --baseline-commit %s", args, head)
+			case token != "" && i >= 0:
+				t.Errorf("semgrep args = %q, want no --baseline-commit under `semgrep ci`", args)
+			}
+		})
 	}
 }
