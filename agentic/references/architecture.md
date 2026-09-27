@@ -228,14 +228,14 @@ pass: the two stages' rows, findings and measurements, concatenated, must equal 
 pass over the same fixture would have produced. `internal/stages/test/flaky_test.go` is that
 check today, run over the fused sequence and the two-stage sequence side by side.
 
-### Two accepted divergences, not bugs to fix here
+### Two behavioral divergences from the pre-migration engine
 
-- **`Coverage`'s output findings never reach the report.** `CoverageOut.Findings` carries the
-  patch findings and gated-CRAP findings `gatedRows` produces, and the stage that renders them
-  (`addCoverage` in `cmd/lydite`) does not call `rep.AddFindings` on them — matching what the
-  pre-migration `addCoverageRows` already did. This predates the migration, and dropping a
-  finding a gate computed but never surfaces is a real bug; it is tracked and fixed separately
-  from #270, not silently carried forward as correct.
+- **`Coverage`'s output findings do not reach the report.** `CoverageOut.Findings` carries the
+  patch findings and gated-CRAP findings `gatedRows` produces, and `addCoverage` in `cmd/lydite`
+  does not call `rep.AddFindings` on them — the same gap the pre-migration `addCoverageRows` had.
+  The drop predates this migration; #285 tracks it as a separate change, since fixing it here
+  would add findings to some reports that #270's own byte-diff verification depends on being
+  identical to the pre-migration binary's.
 - **A genuine mid-run interrupt (`SIGINT`/`SIGTERM`, a CI job timeout) omits the flaky-gate and
   coverage sections from the report**, rather than rendering them the way the fused
   pre-migration engine effectively did — every one of its own checks was already a no-op against

@@ -66,9 +66,10 @@ ADR 0009's later work."):
   word does not appear anywhere in lydite's own design for the dashboard.
 - The React dashboard (`source/web/`, still empty) is built with Vite and embedded into the
   lydite binary via `go:embed`, so `lydite report` (no such command exists yet;
-  `source/cli/cmd/lydite/reports.go` exists but is unrelated — check before assuming) generates
-  either a self-contained offline HTML (`vite-plugin-singlefile`, ~900KB, bounded window inlined)
-  or the same bundle served as a static hosted asset that fetches JSON live.
+  `source/cli/cmd/lydite/reports.go` exists as a different, unrelated file of the same rough
+  name) generates either a self-contained offline HTML (`vite-plugin-singlefile`, ~900KB,
+  bounded window inlined) or the same bundle served as a static hosted asset that fetches JSON
+  live.
   - "Publishing stays out of the CLI": deploy credentials never enter the CLI process; hosting
     happens through a separate flow, not `lydite` itself deploying anything.
 - Hosted mode: a public static bundle with **no data baked in**. A viewer authenticates via a
