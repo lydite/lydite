@@ -1,9 +1,12 @@
-// Package mutationstages holds the stages `lydite mutation` runs: loading the
-// declaration, provisioning each component's toolchain, resolving the base the
-// mutants come from, selecting what the change could have broken, scoping the
-// change, running every selected component's mutants, and recording what
-// became of them. Named apart from internal/mutation so a flow definition can
-// import both without renaming either.
+// Package mutationstages holds the stages `lydite mutation` and `lydite
+// mutation merge` run: loading the declaration, provisioning each component's
+// toolchain, resolving the base the mutants come from, selecting what the
+// change could have broken, scoping the change, running every selected
+// component's mutants, and recording what became of them — and, for the
+// merge, loading the declaration a complete run covers, reading the counts
+// each shard wrote beside its report, folding them, and finding what each
+// component's log says the run projected. Named apart from internal/mutation
+// so a flow definition can import both without renaming either.
 //
 // Every stage is a plain function of its own In. What a stage learns about a
 // component it returns as data — an OutcomeKind and the facts that outcome

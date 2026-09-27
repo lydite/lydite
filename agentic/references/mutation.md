@@ -8,6 +8,20 @@ produces. A mutant is one deliberate change to one line, and the suite is asked 
 fails. `lydite mutation` is that question, per component, over the lines this change touched. See
 [ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md).
 
+**Both commands run as Flow flows.** `cmd/lydite/mutation.go` and `cmd/lydite/mutation_merge.go`
+parse flags, build a flow's `Params`, run it and render the result into rows; the stages
+themselves live in `internal/stages/mutation` (`mutationstages`), the generic shard read
+`lydite mutation merge` shares with `lydite test merge` lives in `internal/stages/shards`
+(`shardstages`), and `internal/flows/mutation` (`mutationflow`) declares `New()` and
+`NewRecord()` for `lydite mutation` and `NewMerge()` for `lydite mutation merge`. See
+[`architecture.md`](architecture.md)'s "Mutation flows" section for the stage-by-stage account,
+and [ADR 0065](../../docs/adr/0065-a-stage-reports-its-outcome-as-data-and-the-cli-alone-decides-the-rows.md)
+and [ADR 0066](../../docs/adr/0066-shard-documents-are-read-by-one-generic-stage-both-folds-share.md)
+for why the boundary between a stage and the CLI sits where it does. `mutants.json` — its
+document, `ReadCounts`, `WriteCounts` and `FoldCounts` — lives in `internal/mutation/counts.go`,
+and `cmd/lydite/mutants.go` keeps the aliases and wrappers (`readMutants`, `foldMutants`,
+`writeMutants`) a caller outside the mutation command still uses.
+
 **It is a peer of `scan`, `test` and `review`, not a flag on `lydite test`.** ADR 0016 puts every
 check for one component in one job because they share a compilation; mutation does not — the
 coverage gate builds the instrumented variant once, and mutation builds the plain variant once per

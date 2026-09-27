@@ -8,6 +8,7 @@ says why it is that way and what breaks if it changes.
 |---|---|
 | `flow`, `stages/*`, `flows/*`, `trust`, `test/measure`, `test/run` | [`architecture.md`](../../../agentic/references/architecture.md) |
 | `stages/publish`, `flows/publish` | [`architecture.md`](../../../agentic/references/architecture.md) for the flow, [`surface.md`](../../../agentic/references/surface.md) for the standing comment it renders |
+| `stages/mutation`, `stages/shards`, `flows/mutation`, `shard` | [`architecture.md`](../../../agentic/references/architecture.md) for the flow and stage shape, and [`mutation.md`](../../../agentic/references/mutation.md) for what `lydite mutation` and `lydite mutation merge` decide |
 | `component`, `runner`, `nodedeps`, `cargotool` | [`components.md`](../../../agentic/references/components.md) |
 | `compose`, `scheduler` | [`services-and-scheduling.md`](../../../agentic/references/services-and-scheduling.md) |
 | `orphan`, `affected`, `pathmatch`, `gitdiff` | [`orphan-and-affected.md`](../../../agentic/references/orphan-and-affected.md) |

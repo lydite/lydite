@@ -1,7 +1,9 @@
-// Package mutationflow declares the flows `lydite mutation` runs: one that
-// loads the declaration, provisions each component's toolchain, resolves the
-// base, selects and scopes what the change touched and runs every selected
-// component's mutants; and one that records what became of them.
+// Package mutationflow declares the flows `lydite mutation` and `lydite
+// mutation merge` run: one that loads the declaration, provisions each
+// component's toolchain, resolves the base, selects and scopes what the
+// change touched and runs every selected component's mutants; one that
+// records what became of them; and one that folds a matrix of shards into
+// what a complete mutation run would have reported.
 //
 // They are declarations and nothing else. Every stage lives in
 // internal/stages/mutation and every value a flow starts from is an input its
