@@ -1,8 +1,9 @@
 // Package scmstages holds generic stages that read and write the hosting
-// platform's repository: the comment a command arrived on, a pull request's
-// current head, a commenter's permission, a revision's standing referral
-// status, and a reply. Named apart from internal/forge so a flow definition
-// can import both without renaming either.
+// platform's repository: the comment a command arrived on, the pull request an
+// event payload points at, a pull request's current head, a commenter's
+// permission, a revision's standing referral status, a commit status, and a
+// reply. Named apart from internal/forge so a flow definition can import both
+// without renaming either.
 package scmstages
 
 import (
@@ -165,4 +166,42 @@ type PostCommentIn struct {
 // overwrite it with a reply meant for one person.
 func PostComment(ctx context.Context, in PostCommentIn) (struct{}, error) {
 	return struct{}{}, in.Repository.CreateComment(ctx, in.Number, in.Body)
+}
+
+// LoadPullRequestIn names the event payload LoadPullRequest reads.
+type LoadPullRequestIn struct {
+	// EventPath is the payload's path, already resolved by the caller; an
+	// empty one is forge.ErrNoEvent.
+	EventPath string
+}
+
+// LoadPullRequestOut is the pull request the payload points at.
+type LoadPullRequestOut struct {
+	Ref forge.PullRequestRef
+}
+
+// LoadPullRequest reads the pull request an event payload points at: its
+// number, the revision measured as its head, and its title.
+//
+// forge.LoadPullRequestRef's errors are returned as they are, so a caller can
+// tell no payload (forge.ErrNoEvent) and a payload from some other trigger
+// (*forge.NotAPullRequestError) apart from a payload that would not load.
+func LoadPullRequest(_ context.Context, in LoadPullRequestIn) (LoadPullRequestOut, error) {
+	ref, err := forge.LoadPullRequestRef(in.EventPath)
+	if err != nil {
+		return LoadPullRequestOut{}, err
+	}
+	return LoadPullRequestOut{Ref: ref}, nil
+}
+
+// PostStatusIn is the commit status PostStatus posts.
+type PostStatusIn struct {
+	Repository forge.SCMRepository
+	Status     forge.Status
+}
+
+// PostStatus posts Status against the revision and under the context it
+// names.
+func PostStatus(ctx context.Context, in PostStatusIn) (struct{}, error) {
+	return struct{}{}, in.Repository.PostStatus(ctx, in.Status)
 }

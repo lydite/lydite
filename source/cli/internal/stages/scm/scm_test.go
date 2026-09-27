@@ -3,6 +3,8 @@ package scmstages
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"lydite/lydite/internal/clearance"
@@ -20,6 +22,7 @@ type fakeRepository struct {
 	headSHA        func(ctx context.Context, number int) (string, error)
 	canWrite       func(ctx context.Context, user string) (bool, error)
 	referralStatus func(ctx context.Context, sha string) (*clearance.Status, error)
+	postStatus     func(ctx context.Context, s forge.Status) error
 	createComment  func(ctx context.Context, number int, body string) error
 }
 
@@ -61,9 +64,11 @@ func (f *fakeRepository) ReferralStatus(ctx context.Context, sha string) (*clear
 	return f.referralStatus(ctx, sha)
 }
 
-func (f *fakeRepository) PostStatus(_ context.Context, _ forge.Status) error {
-	f.t.Fatal("PostStatus: unexpected call")
-	return nil
+func (f *fakeRepository) PostStatus(ctx context.Context, s forge.Status) error {
+	if f.postStatus == nil {
+		f.t.Fatal("PostStatus: unexpected call")
+	}
+	return f.postStatus(ctx, s)
 }
 
 func (f *fakeRepository) CreateComment(ctx context.Context, number int, body string) error {
@@ -317,5 +322,87 @@ func TestPostCommentPropagatesTheError(t *testing.T) {
 	_, err := PostComment(context.Background(), PostCommentIn{Repository: repo, Number: 40, Body: "hello"})
 	if !errors.Is(err, postErr) {
 		t.Errorf("PostComment error = %v; want %v", err, postErr)
+	}
+}
+
+// eventFile writes payload as an event file and returns its path.
+func eventFile(t *testing.T, payload string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadPullRequestReadsThePointerThePayloadCarries(t *testing.T) {
+	path := eventFile(t, `{"number": 7, "pull_request": {"number": 7, "title": "feat!: drop v1", "head": {"sha": "abc123"}}}`)
+	out, err := LoadPullRequest(context.Background(), LoadPullRequestIn{EventPath: path})
+	if err != nil {
+		t.Fatalf("LoadPullRequest: %v", err)
+	}
+	want := forge.PullRequestRef{Number: 7, SHA: "abc123", Title: "feat!: drop v1"}
+	if out.Ref != want {
+		t.Errorf("LoadPullRequest Ref = %+v; want %+v", out.Ref, want)
+	}
+}
+
+func TestLoadPullRequestPassesNoEventThroughTyped(t *testing.T) {
+	_, err := LoadPullRequest(context.Background(), LoadPullRequestIn{})
+	if !errors.Is(err, forge.ErrNoEvent) {
+		t.Errorf("LoadPullRequest error = %v; want %v", err, forge.ErrNoEvent)
+	}
+}
+
+func TestLoadPullRequestPassesAPayloadNamingNoPullRequestThroughTyped(t *testing.T) {
+	path := eventFile(t, `{"action": "checks_requested"}`)
+	_, err := LoadPullRequest(context.Background(), LoadPullRequestIn{EventPath: path})
+	var notAPullRequest *forge.NotAPullRequestError
+	if !errors.As(err, &notAPullRequest) {
+		t.Fatalf("LoadPullRequest error = %v; want a *forge.NotAPullRequestError", err)
+	}
+	if notAPullRequest.Path != path {
+		t.Errorf("NotAPullRequestError Path = %q; want %q", notAPullRequest.Path, path)
+	}
+}
+
+func TestLoadPullRequestPropagatesALoadError(t *testing.T) {
+	_, err := LoadPullRequest(context.Background(), LoadPullRequestIn{EventPath: filepath.Join(t.TempDir(), "absent.json")})
+	if err == nil || errors.Is(err, forge.ErrNoEvent) {
+		t.Fatalf("LoadPullRequest error = %v; want the read failure", err)
+	}
+	var notAPullRequest *forge.NotAPullRequestError
+	if errors.As(err, &notAPullRequest) {
+		t.Errorf("LoadPullRequest error = %v; a missing file is not a payload naming no pull request", err)
+	}
+}
+
+func TestPostStatus(t *testing.T) {
+	want := forge.Status{State: clearance.StatePending, Context: clearance.Context, Description: "referred", SHA: "abc123", PullRequest: 40}
+	var got []forge.Status
+	repo := &fakeRepository{
+		t: t,
+		postStatus: func(_ context.Context, s forge.Status) error {
+			got = append(got, s)
+			return nil
+		},
+	}
+	if _, err := PostStatus(context.Background(), PostStatusIn{Repository: repo, Status: want}); err != nil {
+		t.Fatalf("PostStatus: %v", err)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("PostStatus posted %+v; want exactly %+v", got, want)
+	}
+}
+
+func TestPostStatusPropagatesTheError(t *testing.T) {
+	postErr := errors.New("boom")
+	repo := &fakeRepository{
+		t:          t,
+		postStatus: func(_ context.Context, _ forge.Status) error { return postErr },
+	}
+	_, err := PostStatus(context.Background(), PostStatusIn{Repository: repo, Status: forge.Status{SHA: "abc123"}})
+	if !errors.Is(err, postErr) {
+		t.Errorf("PostStatus error = %v; want %v", err, postErr)
 	}
 }
