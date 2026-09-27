@@ -5,11 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -23,302 +20,44 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitdiff"
 	"lydite/lydite/internal/gitstate"
-	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
+	testmeasure "lydite/lydite/internal/test/measure"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
-// measurement is one component's coverage outcome for this run.
-//
-// Every declared component produces exactly one, whether it ran or not. A
-// component dropped from the set instead would leave a run that measured half
-// the repository reading as a complete one, which is the failure every gate in
-// this file is arranged around.
-type measurement struct {
-	// Name is the component's, which is what a baseline entry is keyed by:
-	// two components may legitimately share a directory, and the name is the
-	// only one of the two that is unique by construction.
-	Name string
-	// Dir is the component's directory relative to the scan root, which is
-	// what scopes a diff's changed files to this component.
-	Dir string
-	// Lang is the language its runner implies, empty for a component that
-	// declares a raw command.
-	Lang runner.Lang
-	// Lines is the measurement, zero when Why is set.
-	Lines coverage.LineCount
-	// Hits is the per-line data the patch gate reads, nil when Why is set.
-	Hits coverage.LineHits
-	// Unused names each `[lydite:exclude_from_coverage]` declaration in this
-	// component that covers no function, as "file:line". Its author has taken
-	// the referral a suppression brings and got none of its effect, which is
-	// the one state nothing they can see says anything about.
-	Unused []string
-	// Producer names what wrote the report Lines was read from, and is what
-	// stops a comparison being made across a change to it. Empty for a
-	// component lydite could not identify an instrument for, and for one that
-	// produced no measurement at all.
-	//
-	// It travels on the measurement rather than being recomputed when a
-	// baseline is written, because a carried-forward entry's producer is the
-	// one that measured it — possibly several trees ago — and not this run's.
-	Producer string
-	// CRAP is the component's complexity score: how many of its functions sit
-	// above the threshold, the worst of them, and which they are.
-	//
-	// It rides on the coverage measurement because it is computed from it —
-	// the instrumented run wrote one report, and asking a second question of
-	// it costs no second run. Every language lydite walks; a component whose
-	// language is unstated carries the zero value and the reason below.
-	CRAP crap.Report
-	// CRAPWhy says why there is no score, and is empty exactly when there is
-	// one. It is separate from Why because the two come apart: a measured
-	// component whose source will not parse has a coverage figure and no
-	// score, and one whose coverage report describes no function has a figure
-	// and nothing to score.
-	CRAPWhy string
-	// Why says why there is no measurement, and is empty exactly when there
-	// is one. It is carried rather than inferred, because "this component was
-	// not affected" and "this component's report could not be read" are the
-	// same absence and want opposite reactions from a reader.
-	Why string
-	// Unmeasurable marks a component no run could ever measure: it declares a
-	// raw command, or its runner's instrumented variant names no report. Its
-	// absence from a baseline is permanent and expected rather than a gap one
-	// run created, so it never blocks a recording.
-	Unmeasurable bool
-	// Carryable marks a component whose absence says nothing about its
-	// content: this invocation did not select it, so it is unchanged from the
-	// tree the baseline was recorded for and that entry still describes it.
-	//
-	// A component that ran and failed is not carryable, however tempting the
-	// symmetry. Its content may be exactly what changed, so its old entry is a
-	// guess — and one that renders as a pass, because a language whose only
-	// component failed to build would otherwise report that component's last
-	// good figure with a ✓ beside it.
-	Carryable bool
-	// Unselected marks a component this run never reached, so its absence is
-	// not a gap the run left. Completeness is the fold's question, asked once
-	// against the declaration of the tree being recorded; a run refuses to
-	// establish a candidate only over a component it selected and failed to
-	// measure.
-	Unselected bool
-	// Tests is what became of the component's suite, from the JUnit report its
-	// runner wrote, and is nil when there is none.
-	//
-	// It is deliberately independent of Why: a suite that FAILED has test
-	// counts, and they are the counts a quality history most wants — the
-	// number of tests and how many of them went red is the whole of what a
-	// red build is. Coverage from that same run is refused, because a report
-	// written by a suite that stopped early describes an unfinished run; the
-	// test counts describe exactly what happened.
-	Tests *junit.Counts
-	// TestsWhy says why a report that was expected did not arrive, and is
-	// empty both when the counts are here and when this runner writes no
-	// report at all.
-	//
-	// Both, deliberately. A runner that writes none is not a component with
-	// something missing — nothing was expected, so there is nothing to tell
-	// its author, and a line per jest component on every run is how a
-	// diagnostic teaches its reader to skim past it. A report that was asked
-	// for and is unreadable, or holds no test, is a misconfiguration somebody
-	// can fix once they are told, which is why it is named on stderr.
-	TestsWhy string
-}
+// measurement is one component's coverage outcome for this run. The type and
+// every rule about what it means live in internal/test/measure; this package
+// names it for the commands that build, fold and render one.
+type measurement = testmeasure.Measurement
 
-// Measured reports whether this component produced a coverage measurement.
-func (m measurement) Measured() bool { return m.Why == "" && m.Lines.Measured() }
+// scorableLang is testmeasure.ScorableLang.
+func scorableLang(lang runner.Lang) bool { return testmeasure.ScorableLang(lang) }
 
-// Scored reports whether this component produced a CRAP measurement.
-func (m measurement) Scored() bool { return m.CRAPWhy == "" && m.CRAP.Measured() }
+// fromEntry is testmeasure.FromEntry.
+func fromEntry(m measurement, e gitstate.Entry) measurement { return testmeasure.FromEntry(m, e) }
 
-// crapEntry is what this measurement records as a CRAP baseline: the two
-// scalars, and the instrument that measured the coverage half of them.
-func (m measurement) crapEntry() gitstate.CRAPEntry {
-	return gitstate.CRAPEntry{Above: m.CRAP.Above(), Worst: m.CRAP.Worst, Producer: m.Producer}
-}
-
-// scorable reports whether CRAP could ever apply to this component, which is a
-// property of the language rather than of the run: lydite walks go/ast for Go
-// and internal/treesitter's tables for Rust and TypeScript, all in-process. A
-// component declaring a raw command states no language at all, so there is
-// nothing to walk.
-//
-// The three are enumerated rather than written as "any language lydite gates",
-// so a fourth added without a walk behind it does not become scorable by
-// default — it would score zero functions, which reads exactly like a component
-// that scored clean.
-func (m measurement) scorable() bool {
-	return scorableLang(m.Lang)
-}
-
-// scorableLang is the same predicate as scorable, applied to a bare language
-// rather than a measurement — merge.go's fold needs it against a component
-// declaration, before any measurement exists to ask.
-func scorableLang(lang runner.Lang) bool {
-	switch lang {
-	case runner.Go, runner.Rust, runner.TypeScript:
-		return true
-	default:
-		return false
-	}
-}
-
-// entry is what this measurement records as a baseline: the counts, and what
-// produced them. One conversion, so no caller can write counts and forget the
-// producer beside them.
-func (m measurement) entry() gitstate.Entry {
-	return gitstate.Entry{LineCount: m.Lines, Producer: m.Producer}
-}
-
-// fromEntry is a component whose measurement is a baseline entry carried
-// forward rather than taken this run, keeping the producer that measured it.
-func fromEntry(m measurement, e gitstate.Entry) measurement {
-	return measurement{Name: m.Name, Dir: m.Dir, Lang: m.Lang, Lines: e.LineCount, Producer: e.Producer}
-}
-
-// unmeasuredComponent is a component with no measurement, and the reason.
-//
-// The reason covers the score as well as the coverage, because CRAP is
-// computed from the coverage report: a component that produced none produced
-// no score either, and for exactly the same reason.
+// unmeasuredComponent is testmeasure.UnmeasuredComponent.
 func unmeasuredComponent(c component.Component, why string) measurement {
-	return measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c), Why: why, CRAPWhy: why}
+	return testmeasure.UnmeasuredComponent(c, why)
 }
 
-// unmeasurableComponent is a component no run could ever measure, as opposed to
-// one this run happened not to.
+// unmeasurableComponent is testmeasure.UnmeasurableComponent.
 func unmeasurableComponent(c component.Component, why string) measurement {
-	m := unmeasuredComponent(c, why)
-	m.Unmeasurable = true
-	return m
+	return testmeasure.UnmeasurableComponent(c, why)
 }
 
-// langOf is the language a component's runner implies. A component declaring a
-// raw command has none, which is also why it can have no instrumented variant.
-func langOf(c component.Component) runner.Lang {
-	if r, ok := runner.Lookup(c.Runner); ok {
-		return r.Lang
-	}
-	return ""
-}
+// langOf is testmeasure.LangOf.
+func langOf(c component.Component) runner.Lang { return testmeasure.LangOf(c) }
 
-// measure reads the report the component's instrumented invocation wrote.
-//
-// A component whose invocation names no coverage report is unmeasured with the
-// reason said out loud — a raw `command:` has no instrumented variant to ask
-// for, and no key exists to name where its coverage lands. Excluding it
-// instead would drop it from the language and global figures silently, leaving
-// a gate that covered fewer components than the repository has reading as a
-// complete one.
+// measure is testmeasure.Measure, reading the report under the environment
+// childEnv composes for the component — the one its suite ran under.
 func measure(ctx context.Context, root string, c component.Component, inv runner.Invocation, cfg config.Config, tc *toolchain.Env, instrument bool) measurement {
-	switch {
-	case !instrument:
-		return unmeasuredComponent(c, "coverage is off for this run")
-	case len(c.Command) > 0:
-		return unmeasurableComponent(c, "the component declares a raw command, which has no instrumented variant")
-	case inv.CoverageReport == "":
-		return unmeasurableComponent(c, "the runner's instrumented variant names no coverage report")
-	}
-	rep, err := coverage.Measure(ctx, root, c.Dir, inv.CoverageReport, langOf(c), childEnv(tc, c, runner.Invocation{}))
-	if err != nil {
-		return unmeasuredComponent(c, err.Error())
-	}
-	if !rep.Lines.Measured() {
-		// rep.Unused travels even here: a component whose exclusions
-		// happen to leave zero net coverable lines can still carry a
-		// declaration that covers no function, and nameUnusedDeclarations
-		// reads it off the measurement — a report discarded past this
-		// point is a warning nobody sees.
-		m := unmeasuredComponent(c, "the coverage report lists no coverable line")
-		m.Unused = rep.Unused
-		return m
-	}
-	m := measurement{Name: c.Name, Dir: c.Dir, Lang: langOf(c),
-		Lines: rep.Lines, Hits: rep.Hits, Unused: rep.Unused, Producer: producerOf(root, c, cfg, tc)}
-	m.CRAP, m.CRAPWhy = score(root, m)
-	return m
+	return testmeasure.Measure(ctx, root, c, inv, cfg, tc, instrument, childEnv(tc, c, runner.Invocation{}))
 }
 
-// score is the component's CRAP report, from the per-line hits the coverage
-// measurement just produced.
-//
-// No second run and no second artefact, which is the same rule the patch gate
-// follows: the instrumented variant wrote one report, and complexity is a walk
-// over source lydite can read. A component with no language to walk is not
-// scored and says so, rather than being silently absent — a component nobody
-// scored and one that scored clean read identically in a count of zero.
-//
-// It names nothing on stderr. A base tree is measured through this same path
-// and its report is discarded, so a declaration warned about here would belong
-// to a tree nobody is looking at; the report carries them instead, and the run
-// that renders rows says which of them covered no function.
-func score(root string, m measurement) (crap.Report, string) {
-	if !m.scorable() {
-		return crap.Report{}, noComplexitySource(m)
-	}
-	rep, err := crap.Measure(root, m.Hits)
-	if err != nil {
-		return crap.Report{}, err.Error()
-	}
-	switch {
-	case rep.Measured():
-		return rep, ""
-	case rep.Excluded > 0:
-		// A component whose every scorable function is excluded is not clean;
-		// it is a component nothing was scored in, and it says so. The report
-		// travels with the reason, so the declarations it holds are still
-		// named.
-		return rep, fmt.Sprintf("every function the coverage report describes is excluded (%d)", rep.Excluded)
-	case len(rep.Skipped) > 0:
-		// Every file the report described was one this walk could not read —
-		// a JSX-bearing component, most likely — rather than a component with
-		// nothing in it. The reason says so instead of reading the same as an
-		// empty one.
-		return rep, fmt.Sprintf("every file the coverage report describes could not be walked (%d)", len(rep.Skipped))
-	default:
-		return rep, "the coverage report describes no function to score"
-	}
-}
-
-// noComplexitySource says why a component is not scored, for the one reason
-// that is a property of the metric rather than of the run: every language
-// lydite gates is walked, so the only component left with no complexity source
-// is one whose language is never stated.
-//
-// Built here rather than read off the measurement, because such a component
-// also carries whatever stopped its coverage being measured — and "not scored
-// — the suite failed" reads as though fixing the suite would produce a score.
-func noComplexitySource(m measurement) string {
-	return m.Name + " declares a raw command, so its language is unstated and there is no source to walk"
-}
-
-// producerOf names what wrote this component's report.
-//
-// Asked here rather than at the call site so that a measurement cannot be
-// built without one: a component recorded with no producer compares equal
-// across every change to its instrument, which is the comparison the field
-// exists to prevent, and it would fail silently.
-//
-// The component's own directory, or the workspace root above it when the
-// install hoisted there — a JavaScript workspace's runner and coverage
-// provider are its dependencies, and Producer reads them out of the same
-// tree Install actually wrote to. cfg.TypeScript.Install is passed through
-// for the same reason: an override runs in the component's own directory
-// regardless of any lockfile above it, and Producer has to look where the
-// install actually ran rather than where one would otherwise be inferred.
-//
-// The declared args go with them, because a component may narrow the package
-// set its coverage is measured over and a figure taken over a narrower tree
-// does not compare to one taken over the whole of it.
-func producerOf(root string, c component.Component, cfg config.Config, tc *toolchain.Env) string {
-	r, ok := runner.Lookup(c.Runner)
-	if !ok {
-		return ""
-	}
-	return r.Producer(filepath.Join(root, filepath.FromSlash(c.Dir)), root, cfg.TypeScript.Install, tc.Version(), c.Args...)
-}
+// score is testmeasure.Score.
+func score(root string, m measurement) (crap.Report, string) { return testmeasure.Score(root, m) }
 
 // coverageOptions is what the command decided about coverage before anything
 // ran, so the gate below does not re-derive it.
@@ -530,25 +269,9 @@ func ungatedComponentRows(rep *ui.Report, ms []measurement) {
 	}
 }
 
-// ungatedComposedRow renders one language's or the repository's figure for a
-// run that measured without gating.
-//
-// A figure no component contributed to is `unmeasured`, never a 0.0% context
-// row. 0/0 renders as 0.0%, which reads as a real measurement of no coverage
-// at all — the language whose only component failed would report the worst
-// possible number as though it had been measured, and a reader acting on it
-// would go looking for missing tests rather than for the failing suite.
-// carried names the components whose counts came from the baseline rather than
-// from this run. A figure that counted them as measured would claim to have
-// measured components nothing ran — and would contradict the floor row beside
-// it, which does distinguish the two.
+// ungatedComposedRow is testmeasure.UngatedComposedRow.
 func ungatedComposedRow(label string, ms []measurement, carried map[string]bool, in func(measurement) bool) ui.Row {
-	lines, measured, carriedN := composed(ms, carried, in)
-	total := gateable(ms, in)
-	if !lines.Measured() {
-		return unmeasuredRow(label, fmt.Sprintf("none of its %d component(s) produced a measurement", total))
-	}
-	return ui.Row{Status: ui.StatusContext, Label: label, Value: composedValue(lines, measured, carriedN, total)}
+	return testmeasure.UngatedComposedRow(label, ms, carried, in)
 }
 
 // gatedRows reads the baseline, compares every altitude against it, gates the
@@ -918,7 +641,7 @@ func baseTreeCRAP(ms []measurement) gitstate.CRAPBaseline {
 	out := gitstate.CRAPBaseline{}
 	for _, m := range ms {
 		if m.Scored() {
-			out[m.Name] = m.crapEntry()
+			out[m.Name] = m.CRAPEntry()
 		}
 	}
 	return out
@@ -943,7 +666,7 @@ func baseTreeBaseline(w io.Writer, base string, ms []measurement, tails map[stri
 	for _, m := range ms {
 		switch {
 		case m.Measured():
-			out[m.Name] = m.entry()
+			out[m.Name] = m.Entry()
 		case m.Unmeasurable:
 		default:
 			_, _ = fmt.Fprintf(w, "warning: the base tree at %s could not be measured for component %q: %s\n", shortSHA(base), m.Name, m.Why)
@@ -955,424 +678,35 @@ func baseTreeBaseline(w io.Writer, base string, ms []measurement, tails map[stri
 	return out
 }
 
-// crapRow reports one component's CRAP, and gates it against the baseline's
-// count.
-//
-// The gate is the delta and nothing else: a change may not raise how many
-// functions sit above the threshold. Absolute would fail every repository on
-// the day it upgrades, over debt it has always had — the rule coverage.floor
-// already follows by defaulting to 0 — and scoping to the diff would miss the
-// case the gate is for, since a change can push a function over the threshold
-// without touching it, by complicating a call site or deleting the test that
-// covered it. See docs/adr/0028.
-//
-// Worst is carried and never gated. A change that takes the worst function
-// from 400 to 380 has improved nothing anybody can act on, and one that adds a
-// well-tested complex function raises it without adding a thing to fix.
-//
-// gated says a baseline was read at all, which is not the same as this
-// component having an entry in it: an ungated run renders context, and a gated
-// run with no entry renders new. Without the distinction a workflow that never
-// reads a baseline is indistinguishable from one whose every component is new.
+// crapRow is testmeasure.CRAPRow.
 func crapRow(m measurement, baseline gitstate.CRAPBaseline, gated bool) (ui.Row, []finding.Finding) {
-	label := "crap(" + m.Name + ")"
-	// A component whose language is unstated — a raw `command:`, which names
-	// no source to walk — is context and never amber: nothing about this
-	// repository could make the row green, so spending the tag that exists to
-	// be noticed on it is what teaches a reader to skim past it. It is still a
-	// row, because a component silently absent reads as one that scored clean.
-	if !m.scorable() {
-		return ui.Row{Status: ui.StatusContext, Label: label, Value: "not scored — " + noComplexitySource(m)}, nil
-	}
-	if !m.Scored() {
-		row := unmeasuredRow(label, m.CRAPWhy)
-		// Named, for the reason a carried coverage figure is: this is the
-		// entry the next change is gated against, and a number that says
-		// nothing about itself is one a reader takes for a measurement.
-		if base, ok := baseline[m.Name]; ok && m.Carryable {
-			row.Value += fmt.Sprintf(" — carrying the baseline's %d forward", base.Above)
-		}
-		return row, nil
-	}
-	counts := crapValue(m.CRAP)
-	base, hasBase := baseline[m.Name]
-	switch {
-	case !gated:
-		return ui.Row{Status: ui.StatusContext, Label: label, Value: counts}, nil
-	case !hasBase:
-		return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", no baseline yet"}, nil
-	case base.Producer != m.Producer:
-		// New, and never regressed, for the reason a coverage comparison
-		// refuses the same pair: the coverage half of every score was taken
-		// by a different instrument, so the difference is a change of
-		// definition rather than debt anybody added.
-		if reason, ok := scopeChangeReason(m.Producer, base.Producer); ok {
-			return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", " + reason}, nil
-		}
-		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
-				counts, producerName(m.Producer), producerName(base.Producer))}, nil
-	case m.CRAP.Above() > base.Above:
-		findings := crapFindings(label, m)
-		return ui.Row{Status: ui.StatusFail, Label: label,
-			Value:  fmt.Sprintf("%s, baseline %d — %d more", counts, base.Above, m.CRAP.Above()-base.Above),
-			Detail: worstFunctions(findings, m.CRAP.Above())}, findings
-	default:
-		return ui.Row{Status: ui.StatusPass, Label: label,
-			Value: fmt.Sprintf("%s, baseline %d", counts, base.Above)}, nil
-	}
+	return testmeasure.CRAPRow(m, baseline, gated)
 }
 
-// crapFindings is the claim a failing CRAP row makes, one per function over
-// the threshold.
-//
-// A gate emits findings exactly when it makes a claim the author must clear,
-// which for CRAP is when the count rose. The functions already above the
-// threshold on a passing row are debt this change did not add, and reporting
-// them per site would put a claim on every pull request about code nobody
-// touched — a gate that fires on ordinary work is one that gets switched off.
-//
-// The site is the function's own name, which crap.Function already carries
-// with its receiver, so the claim survives the function moving down its file.
-//
-// It names the same worst few the row does, and no more. The gate is cleared
-// by bringing any one of them under the threshold, so a longer list is not
-// more actionable — and a component carrying hundreds of functions in standing
-// debt would otherwise put every one of them into the document on every run
-// that regressed by one, which is a document that grows with the debt rather
-// than with the change.
-func crapFindings(label string, m measurement) []finding.Finding {
-	over := m.CRAP.Over[:min(len(m.CRAP.Over), worstOffenders)]
-	out := make([]finding.Finding, 0, len(over))
-	for _, f := range over {
-		out = append(out, finding.Finding{
-			Gate:      "crap",
-			Component: m.Name,
-			Row:       label,
-			Path:      f.File,
-			Line:      f.Line,
-			Message: fmt.Sprintf("%s — %.1f (complexity %d, %.1f%% covered)",
-				f.Name, f.Value, f.Complexity, f.Lines.Percent()),
-			Detail: []string{fmt.Sprintf(
-				"Above the CRAP threshold of %d. Testing it or taking it apart clears the gate.",
-				crap.Threshold)},
-			Site: f.Name,
-		})
-	}
-	finding.Number(out)
-	return out
-}
+// crapValue is testmeasure.CRAPValue.
+func crapValue(rep crap.Report) string { return testmeasure.CRAPValue(rep) }
 
-// crapValue renders a score the way every row shows it.
-//
-// The excluded count rides on every row that has one, because a repository can
-// annotate its way to nothing above the threshold and this is the number that
-// makes it visible when one does. Absent when nothing was excluded, since a
-// trailing "0 excluded" on every clean row is a clause readers learn to skip.
-//
-// A skipped file rides on it the same way, for the same reason a gate that
-// could not run must never render as one that passed: a TypeScript component
-// carrying a JSX-bearing file this walk cannot read has not been fully
-// scored, and a row with nothing to say about that would look identical to
-// one that scored every file it was handed.
-func crapValue(rep crap.Report) string {
-	value := fmt.Sprintf("%d function(s) above %d, worst %.1f", rep.Above(), crap.Threshold, rep.Worst)
-	if rep.Excluded > 0 {
-		value += fmt.Sprintf(", %d excluded", rep.Excluded)
-	}
-	if len(rep.Skipped) > 0 {
-		value += fmt.Sprintf(", %d file(s) not walked", len(rep.Skipped))
-	}
-	return value
-}
+// worstOffenders is how many functions a failing CRAP row names.
+const worstOffenders = testmeasure.WorstOffenders
 
-// worstOffenders is how many functions a failing row names. Enough to act on,
-// and short enough that the row's detail is still read: the whole list of a
-// component's debt is a page, and the gate is cleared by testing or splitting
-// any one of them.
-const worstOffenders = 5
-
-// worstFunctions names the work a failing row is cleared by.
-//
-// The worst first, and never "the ones this change added": the baseline stores
-// two scalars on purpose, since a list of names cannot be compared across trees
-// — a function renamed or moved would read as one fixed and one introduced. So
-// the row says what is over the threshold now, and any one of them coming under
-// it clears the gate.
-func worstFunctions(findings []finding.Finding, over int) []string {
-	out := []string{"the count may not rise; testing or splitting any one of these clears it"}
-	for _, f := range findings {
-		out = append(out, fmt.Sprintf("%s:%d %s", f.Path, f.Line, f.Message))
-	}
-	if rest := over - len(findings); rest > 0 {
-		out = append(out, fmt.Sprintf("and %d more above %d", rest, crap.Threshold))
-	}
-	return out
-}
-
-// crapSummaryRow is the two ledger scalars over the repository: how many
-// functions sit above the threshold, and the worst of them.
-//
-// Context, and it gates nothing. Every component's own row already carries the
-// gate, and the per-component rule is the stricter one — a change that adds a
-// function above the threshold to one component and removes one from another
-// fails there and would net to zero here. What this adds is the figure a
-// quality ledger records and a reader asks for, which no per-component row is.
-//
-// The denominator counts the components CRAP could apply to, so a repository
-// whose raw-command components cannot be scored is not reported as two thirds
-// ungated. It is the same rule `gateable` applies to a composed coverage
-// figure.
+// crapSummaryRow is testmeasure.CRAPSummaryRow.
 func crapSummaryRow(scorable int, scored, carried []gitstate.CRAPEntry) (ui.Row, bool) {
-	// Nothing lydite could score, so there is no figure and no gap. A row here
-	// would report a repository that declares no language as ungated, which is
-	// a property of the metric rather than of the run.
-	if scorable == 0 {
-		return ui.Row{}, false
-	}
-	if len(scored)+len(carried) == 0 {
-		return unmeasuredRow("crap", fmt.Sprintf("none of its %d component(s) produced a score", scorable)), true
-	}
-	above, worst := 0, 0.0
-	for _, e := range slices.Concat(scored, carried) {
-		above += e.Above
-		worst = math.Max(worst, e.Worst)
-	}
-	// Carried entries are counted and named, the way a composed coverage
-	// figure counts and names them: the figure is over the repository, so a
-	// component this run did not reach still has a score and leaving it out
-	// would make the number swing with whatever a change happened to touch.
-	// Named, because a figure that does not say how much of it this run
-	// measured is indistinguishable from one that measured everything — and
-	// said nothing about when there is nothing to say, since "0 carried
-	// forward" on every complete run is a clause readers learn to skip.
-	inherited := ""
-	if len(carried) > 0 {
-		inherited = fmt.Sprintf(", %d carried forward", len(carried))
-	}
-	return ui.Row{Status: ui.StatusContext, Label: "crap",
-		Value: fmt.Sprintf("%d function(s) above %d across %d of %d component(s)%s, worst %.1f",
-			above, crap.Threshold, len(scored)+len(carried), scorable, inherited, worst)}, true
+	return testmeasure.CRAPSummaryRow(scorable, scored, carried)
 }
 
-// crapSummaryOf is that figure over a run's own measurements. `lydite test
-// merge` composes the same row from the shards' scalars instead, which is why
-// the row above takes those rather than measurements.
-//
-// carried and anchor are what the gated path already computed for coverage;
-// an ungated run has neither and carries nothing.
+// crapSummaryOf is testmeasure.CRAPSummaryOf.
 func crapSummaryOf(ms []measurement, carried map[string]bool, anchor gitstate.CRAPBaseline) (ui.Row, bool) {
-	scorable := 0
-	var scored, inherited []gitstate.CRAPEntry
-	for _, m := range ms {
-		if !m.scorable() {
-			continue
-		}
-		scorable++
-		if m.Scored() {
-			scored = append(scored, m.crapEntry())
-			continue
-		}
-		if e, ok := carriedScore(m, carried, anchor); ok {
-			inherited = append(inherited, e)
-		}
-	}
-	return crapSummaryRow(scorable, scored, inherited)
+	return testmeasure.CRAPSummaryOf(ms, carried, anchor)
 }
 
-// carriedScore is the baseline score a component keeps when this run did not
-// reach it: only a component affected selection left out, and only when the
-// baseline has an entry for it.
-//
-// One implementation, because both the row a run renders and the document it
-// hands `lydite test merge` are counted from it — and two copies that agreed
-// today would come apart the day one learned something, leaving the same tree
-// reporting one figure sharded and another unsharded.
-func carriedScore(m measurement, carried map[string]bool, anchor gitstate.CRAPBaseline) (gitstate.CRAPEntry, bool) {
-	if m.Scored() || !carried[m.Name] {
-		return gitstate.CRAPEntry{}, false
-	}
-	e, ok := anchor[m.Name]
-	return e, ok
-}
-
-// componentRow gates one component against its own baseline entry.
+// componentRow is testmeasure.ComponentRow.
 func componentRow(m measurement, baseline gitstate.Baseline, tolerance float64) ui.Row {
-	label := "coverage(" + m.Name + ")"
-	base, hasBase := baseline[m.Name]
-	if !m.Measured() {
-		row := unmeasuredRow(label, m.Why)
-		if m.Carryable && hasBase && base.Measured() {
-			// Named, because this is the entry the composed figures below are
-			// built from. A carried number that says nothing about itself is
-			// one a reader takes for a measurement.
-			row.Value += fmt.Sprintf(" — carrying the baseline's %.1f%% forward", base.Percent())
-		}
-		return row
-	}
-	pct := m.Lines.Percent()
-	if !hasBase || !base.Measured() {
-		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: lineValue(m.Lines) + ", no baseline yet"}
-	}
-	// New, and never regressed. The two sides were measured by different
-	// instruments, so their difference is a change of definition rather than
-	// a change in coverage — reporting it as a regression bills it to whoever
-	// bumped the instrument, whose only ways out are to widen the tolerance
-	// for every future change or to merge red.
-	if base.Producer != m.Producer {
-		if reason, ok := scopeChangeReason(m.Producer, base.Producer); ok {
-			return ui.Row{Status: ui.StatusNew, Label: label, Value: lineValue(m.Lines) + ", " + reason}
-		}
-		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: fmt.Sprintf("%s, not compared — measured by %s, baseline by %s",
-				lineValue(m.Lines), producerName(m.Producer), producerName(base.Producer))}
-	}
-	if regressedBeyond(pct, base.Percent(), tolerance) {
-		return ui.Row{Status: ui.StatusFail, Label: label,
-			Value: fmt.Sprintf("%s, baseline %.1f%%, regressed %.1f%%", lineValue(m.Lines), base.Percent(), base.Percent()-pct)}
-	}
-	return ui.Row{Status: ui.StatusPass, Label: label,
-		Value: fmt.Sprintf("%s, baseline %.1f%%", lineValue(m.Lines), base.Percent())}
+	return testmeasure.ComponentRow(m, baseline, tolerance)
 }
 
-// comparableBase is the baseline entry a measurement may be gated against:
-// present, measured, and produced by the same instrument this run used.
-//
-// Anything else answers with the zero entry, which is not Measured — so every
-// caller's existing "no baseline" path renders it as new without a second rule
-// about what an incomparable baseline means.
+// comparableBase is testmeasure.ComparableBase.
 func comparableBase(m measurement, baseline gitstate.Baseline) (gitstate.Entry, bool) {
-	b, ok := baseline[m.Name]
-	if !ok || !b.Measured() || b.Producer != m.Producer {
-		return gitstate.Entry{}, false
-	}
-	return b, true
-}
-
-// producerName renders a producer for a reader, including the one lydite could
-// not identify — which is a real state for a JavaScript component and must not
-// render as an empty gap in the middle of a sentence.
-func producerName(p string) string {
-	if p == "" {
-		return "an unidentified instrument"
-	}
-	return p
-}
-
-// producerScope splits a Go producer into its toolchain half and, when the
-// component declared one, the package scope Runner.Producer appends after
-// ", scope " — the only two things a mismatch needs told apart to say whether
-// it is a toolchain bump or a component narrowing what it measures.
-//
-// No other language's producer carries this suffix, so a non-Go producer
-// simply has no scope half, which is exactly what an absent one means here.
-func producerScope(p string) (toolchain, scope string) {
-	toolchain, scope, ok := strings.Cut(p, ", scope ")
-	if !ok {
-		return p, ""
-	}
-	return toolchain, scope
-}
-
-// scopeChangeReason says a producer mismatch is a scope change — the same
-// toolchain measuring a different package set — rather than a change of
-// instrument, so a reader who just narrowed a component's coverage recognizes
-// their own edit instead of decoding two producer strings to find it.
-//
-// A mismatch that also moved the toolchain is not a pure scope change: the
-// instrument itself is different, and the existing "measured by X, baseline by
-// Y" wording already names that without asking a reader to parse two halves.
-func scopeChangeReason(current, base string) (string, bool) {
-	curTool, curScope := producerScope(current)
-	baseTool, baseScope := producerScope(base)
-	if curTool != baseTool || curScope == baseScope {
-		return "", false
-	}
-	describe := func(scope string) string {
-		if scope == "" {
-			return "the component's default scope"
-		}
-		return scope
-	}
-	return fmt.Sprintf("not compared — the measured scope changed, from %s to %s",
-		describe(baseScope), describe(curScope)), true
-}
-
-// notCompared says why a composed figure has no comparison, naming the
-// components rather than only reporting that something is absent: without them
-// a reader cannot tell a one-off — a component this very change declared —
-// from a baseline that has been incomplete for months.
-func notCompared(missing, reinstrumented []string) string {
-	var parts []string
-	if len(missing) > 0 {
-		parts = append(parts, "no baseline yet for "+strings.Join(missing, ", "))
-	}
-	if len(reinstrumented) > 0 {
-		parts = append(parts, "a different instrument measured the baseline for "+strings.Join(reinstrumented, ", "))
-	}
-	return strings.Join(parts, "; ")
-}
-
-// composedRow gates a language, or the repository, against the same subset of
-// the baseline it is composed from.
-//
-// The baseline side sums exactly the components the current side covers, so a
-// run that measured three of four compares like with like. Summing the whole
-// baseline instead would compare this run's three components against the base
-// tree's four, and every narrowed run would read as a regression the size of
-// the component it did not run.
-func composedRow(label string, current []measurement, carried map[string]bool, baseline gitstate.Baseline, in func(measurement) bool, tolerance float64) ui.Row {
-	lines, measured, carriedN := composed(current, carried, in)
-	total := gateable(current, in)
-	if !lines.Measured() {
-		return unmeasuredRow(label, "no component in it produced a measurement")
-	}
-	var baseLines coverage.LineCount
-	covered := 0
-	var missing, reinstrumented []string
-	for _, m := range current {
-		if !in(m) || !m.Lines.Measured() {
-			continue
-		}
-		b, ok := baseline[m.Name]
-		switch {
-		case ok && b.Measured() && b.Producer == m.Producer:
-			baseLines = baseLines.Add(b.LineCount)
-			covered++
-		case ok && b.Measured():
-			// A baseline exists and is not comparable, which is a different
-			// thing from having none and wants different words: one is a
-			// component nobody has measured yet, the other a component whose
-			// instrument moved under it.
-			reinstrumented = append(reinstrumented, m.Name)
-		default:
-			missing = append(missing, m.Name)
-		}
-	}
-	value := composedValue(lines, measured, carriedN, total)
-	// Compared only when the baseline covers every component this figure is
-	// composed from. A partial comparison is a different quantity, and
-	// rendering one as a comparison is the class of error this file is
-	// arranged around: a newly declared component adds its lines to this side
-	// and nothing to the other, so the figure would move by the size of the
-	// component rather than by anything anyone did to the code.
-	//
-	// Which components are missing is named, because without it the row says
-	// only that something is absent and a reader cannot tell a one-off — a
-	// component declared by this very change — from a baseline that has been
-	// broken for months.
-	if covered != measured+carriedN {
-		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: value + ", " + notCompared(missing, reinstrumented)}
-	}
-	pct, basePct := lines.Percent(), baseLines.Percent()
-	if regressedBeyond(pct, basePct, tolerance) {
-		return ui.Row{Status: ui.StatusFail, Label: label,
-			Value: fmt.Sprintf("%s, baseline %.1f%%, regressed %.1f%%", value, basePct, basePct-pct)}
-	}
-	return ui.Row{Status: ui.StatusPass, Label: label,
-		Value: fmt.Sprintf("%s, baseline %.1f%%", value, basePct)}
+	return testmeasure.ComparableBase(m, baseline)
 }
 
 // patchRows gates each component's changed lines against that component's own
@@ -1454,290 +788,42 @@ func patchRows(ctx context.Context, cmd *cobra.Command, dir, base string, ms []m
 	return byComponent, parts, findings, nil
 }
 
-// patchFindings is the claim a failing patch row makes, one per contiguous
-// stretch of untested new code.
-//
-// A gate emits findings exactly when it makes a claim the author must clear.
-// A component whose patch coverage cleared its own baseline has untested new
-// lines too, and putting a claim on each of them would fire on ordinary work.
-//
-// The site is the stretch's own text rather than where it sits, so inserting
-// code above it does not report it as something new. Its two ends stand for
-// the whole: they identify the stretch, they survive an edit inside it — the
-// same block, still untested — and they keep a claim about three hundred lines
-// from carrying three hundred lines of them. Its length is deliberately not an
-// ingredient, or adding one untested line to an untested block would orphan
-// the claim already made about it.
-//
-// A stretch whose source cannot be read keeps its claim and loses only what
-// tells it from a neighbour, which the ordinal then supplies. The row has
-// already gated on it, and dropping the claim to protect its identity would
-// hide a failure lydite found.
+// patchFindings is testmeasure.PatchFindings.
 func patchFindings(row ui.Row, dir string, m measurement, scoped map[string][]int) []finding.Finding {
-	if row.Status != ui.StatusFail {
-		return nil
-	}
-	var out []finding.Finding
-	src := finding.NewSource(dir)
-	for _, run := range coverage.Uncovered(scoped, m.Hits) {
-		out = append(out, finding.Finding{
-			Gate:      "patch",
-			Component: m.Name,
-			Row:       row.Label,
-			Path:      run.File,
-			Line:      run.First,
-			EndLine:   run.Last,
-			Message:   fmt.Sprintf("%d new line(s) here are covered by no test", run.Lines),
-			Detail: []string{
-				"Patch coverage gates this component against its own aggregate baseline, so a test reaching these lines clears it.",
-			},
-			Site: src.Line(run.File, run.First) + "\x1f" + src.Line(run.File, run.Last),
-		})
-	}
-	finding.Number(out)
-	// Every stretch is made of changed lines by construction, so this
-	// establishes what is already true rather than discovering it. It is
-	// asked anyway, so that the one rule deciding how a claim reaches a
-	// change has one implementation and a producer cannot quietly stop
-	// obeying it.
-	finding.Anchored(out, scoped)
-	return out
+	return testmeasure.PatchFindings(row, dir, m, scoped)
 }
 
-// composedRows renders the two figures over the repository as a whole:
-// coverage(repo) and patch(repo).
-//
-// One implementation with two callers — the unnarrowed local run, and
-// `lydite test merge` folding a matrix of shards. Two that agreed today would
-// come apart the day one learned about a case the other had not, and nothing
-// would show it: the same reason `internal/scheduler` owns the port-conflict
-// predicate the planner also reads.
-//
-// A change that touched no component's measurable lines emits no patch row:
-// there is nothing to gate, and a row saying so on every documentation change
-// is the noise that trains readers to skip the rows that matter.
+// composedRows adds testmeasure.ComposedRows to rep, in the order it returns
+// them.
 func composedRows(rep *ui.Report, current []measurement, carried map[string]bool, baseline gitstate.Baseline, parts []patchPart, cfg config.Config) {
-	rep.Add(composedRow(repoLabel("coverage"), current, carried, baseline, everything, cfg.Coverage.Tolerance))
-	if len(parts) > 0 {
-		rep.Add(composedPatchRow(repoLabel("patch"), parts, cfg.Coverage.Patch.Tolerance))
-	}
-}
-
-// patchPart is one component's contribution to a composed patch figure: the
-// changed lines it had, how many of them the report covers, and the baseline
-// that component is held to.
-type patchPart struct {
-	Name  string
-	Lang  runner.Lang
-	Hit   int
-	Total int
-	Base  coverage.LineCount
-}
-
-// composedPatchRow gates a language's, or the repository's, changed lines.
-//
-// It exists because the per-component rows and the aggregate rows between them
-// still leave a hole. The aggregate says the repository did not get worse
-// overall; the per-component patch rows say each component's new code met that
-// component's own standard. Neither answers the question a reviewer actually
-// has about a change spanning several components — was the new code in this
-// change tested — and a change adding untested code to three components can
-// clear every per-component row on tolerance and still be the change that
-// should not merge.
-//
-// Summed over changed lines rather than averaged over components, for the
-// reason ADR 0007 gives for the aggregate: a mean of percentages lets a
-// two-line component outvote a two-hundred-line one.
-//
-// The baseline side sums exactly the components the current side covers, and a
-// figure whose baseline does not cover all of them is reported rather than
-// compared — the same rule composedRow follows, for the same reason. A
-// component with no baseline contributes its new lines to the numerator and
-// nothing to the comparison, which would read as movement nobody caused.
-func composedPatchRow(label string, parts []patchPart, tolerance float64) ui.Row {
-	var hit, total int
-	var base coverage.LineCount
-	var missing []string
-	for _, p := range parts {
-		hit += p.Hit
-		total += p.Total
-		if p.Base.Measured() {
-			base = base.Add(p.Base)
-			continue
-		}
-		missing = append(missing, p.Name)
-	}
-	pct := float64(hit) / float64(total) * 100
-	counts := fmt.Sprintf("%.1f%% (%d/%d new lines), %d component(s)", pct, hit, total, len(parts))
-	if len(missing) > 0 {
-		return ui.Row{Status: ui.StatusNew, Label: label,
-			Value: fmt.Sprintf("%s, no baseline yet for %s", counts, strings.Join(missing, ", "))}
-	}
-	basePct := base.Percent()
-	if regressedBeyond(pct, basePct, tolerance) {
-		return ui.Row{Status: ui.StatusFail, Label: label,
-			Value: fmt.Sprintf("%s, baseline %.1f%%, below it by %.1f%%", counts, basePct, basePct-pct)}
-	}
-	return ui.Row{Status: ui.StatusPass, Label: label,
-		Value: fmt.Sprintf("%s, baseline %.1f%%", counts, basePct)}
-}
-
-// patchRow renders one component's patch verdict. The gate is that component's
-// own aggregate baseline: patch coverage has no baseline of its own, and its
-// tolerance is deliberately separate, so loosening the noisy aggregate knob
-// never weakens the untested-new-code check.
-func patchRow(label string, hit, total int, base coverage.LineCount, tolerance float64) ui.Row {
-	pct := float64(hit) / float64(total) * 100
-	counts := fmt.Sprintf("%.1f%% (%d/%d new lines)", pct, hit, total)
-	switch {
-	case !base.Measured():
-		return ui.Row{Status: ui.StatusNew, Label: label, Value: counts + ", no baseline yet"}
-	case regressedBeyond(pct, base.Percent(), tolerance):
-		return ui.Row{Status: ui.StatusFail, Label: label,
-			Value: fmt.Sprintf("%s, baseline %.1f%%", counts, base.Percent())}
-	default:
-		return ui.Row{Status: ui.StatusPass, Label: label,
-			Value: fmt.Sprintf("%s, baseline %.1f%%", counts, base.Percent())}
-	}
-}
-
-// scopeToComponent narrows a repository-wide changed-line map to the files
-// this component's coverage can speak for: those under its directory, written
-// in a language its runner implies.
-//
-// Both halves are needed. A component's report says nothing about a file
-// outside its directory, and a repository declaring a Go and a TypeScript
-// component over one root would otherwise score each against the other's
-// changed files.
-//
-// A component rooted at the scan root claims every path under it, which is
-// correct here and is not the question affected selection asks: this is
-// "whose coverage report could contain this file", not "was this path
-// understood".
-func scopeToComponent(changed map[string][]int, m measurement) map[string][]int {
-	exts := runner.SourceExtsFor(m.Lang)
-	prefix := path.Clean(m.Dir)
-	out := map[string][]int{}
-	for file, lines := range changed {
-		if !hasExt(file, exts) {
-			continue
-		}
-		if prefix != "." && !strings.HasPrefix(file, prefix+"/") {
-			continue
-		}
-		out[file] = lines
-	}
-	return out
-}
-
-func hasExt(file string, exts []string) bool {
-	for _, e := range exts {
-		if strings.HasSuffix(file, e) {
-			return true
-		}
-	}
-	return false
-}
-
-// floorRows gates every measured component against coverage.floor.
-//
-// The floor has no baseline and no comparison against last time. The aggregate
-// asks "is this worse than it was"; the floor asks "is this below the bar",
-// which the repository states once and every component meets or does not.
-// Ratcheting it against a prior value would make a component that has never
-// had tests permanently acceptable, which is the gap it exists to close — and
-// it is why the floor gates whether or not this run reads a baseline at all.
-//
-// The unit is the component, which is coarser than the crate or package the
-// floor gated before. An untested crate inside a workspace still contributes
-// its lines as uncovered and still drags its component's figure down in
-// proportion to its size; what a component-level floor cannot catch is a
-// *small* untested sub-unit. A repository that wants crate-level floors
-// declares those crates as components, which is a statement about what it
-// wants tested made in the file whose history records exactly that.
-// summary says whether to add the row counting how many components cleared
-// the floor. It is a figure over every component the declaration holds, so a
-// run responsible for part of it emits the per-component rows alone and
-// `lydite test merge` counts once.
-func floorRows(rep *ui.Report, ms []measurement, floor float64, summary bool) {
-	if floor <= 0 || len(ms) == 0 {
-		return
-	}
-	for _, m := range ms {
-		if m.Unmeasurable {
-			// Named, because a component the floor can never apply to is worth
-			// knowing about — but never as a gap this run left.
-			rep.Add(unmeasuredRow("floor("+m.Name+")", fmt.Sprintf("the %.1f%% floor cannot apply: %s", floor, m.Why)))
-			continue
-		}
-		if !m.Measured() {
-			// Never folded into the passing count, and never a failure: a
-			// gate that did not run must be visibly distinct from one that
-			// passed and from one that failed.
-			rep.Add(unmeasuredRow("floor("+m.Name+")", fmt.Sprintf("the %.1f%% floor was not applied: %s", floor, m.Why)))
-			continue
-		}
-		// Display precision, like every other comparison here: a component
-		// printed as meeting the floor must never be failed for a difference
-		// the report cannot show.
-		if math.Round(m.Lines.Percent()*10) >= math.Round(floor*10) {
-			continue
-		}
-		rep.Add(ui.Row{Status: ui.StatusFail, Label: "floor(" + m.Name + ")",
-			Value: fmt.Sprintf("%s, floor %.1f%%", lineValue(m.Lines), floor)})
-	}
-	if !summary {
-		return
-	}
-	if row, ok := floorSummaryRow(ms, floor); ok {
+	for _, row := range testmeasure.ComposedRows(current, carried, baseline, parts, cfg) {
 		rep.Add(row)
 	}
 }
 
-// floorSummaryRow counts how many components cleared the floor, and false when
-// there is nothing to say: the floor is off, no component is in the set, or one
-// of them is below it and has already failed on its own row.
-//
-// One implementation with two callers — the unnarrowed run, and
-// `lydite test merge` counting once over every shard's components. A shard
-// counts nothing here: the number is over the whole declaration, and three
-// shards publishing three of them under one label is what the responsibility
-// set exists to prevent.
+// patchPart is one component's contribution to a composed patch figure.
+type patchPart = testmeasure.PatchPart
+
+// patchRow is testmeasure.PatchRow.
+func patchRow(label string, hit, total int, base coverage.LineCount, tolerance float64) ui.Row {
+	return testmeasure.PatchRow(label, hit, total, base, tolerance)
+}
+
+// scopeToComponent is testmeasure.ScopeToComponent.
+func scopeToComponent(changed map[string][]int, m measurement) map[string][]int {
+	return testmeasure.ScopeToComponent(changed, m)
+}
+
+// floorRows adds testmeasure.FloorRows to rep, in the order it returns them.
+func floorRows(rep *ui.Report, ms []measurement, floor float64, summary bool) {
+	for _, row := range testmeasure.FloorRows(ms, floor, summary) {
+		rep.Add(row)
+	}
+}
+
+// floorSummaryRow is testmeasure.FloorSummaryRow.
 func floorSummaryRow(ms []measurement, floor float64) (ui.Row, bool) {
-	if floor <= 0 || len(ms) == 0 {
-		return ui.Row{}, false
-	}
-	gateable, cleared, below := 0, 0, 0
-	for _, m := range ms {
-		if m.Unmeasurable {
-			continue
-		}
-		gateable++
-		if !m.Measured() {
-			continue
-		}
-		if math.Round(m.Lines.Percent()*10) >= math.Round(floor*10) {
-			cleared++
-			continue
-		}
-		below++
-	}
-	if below > 0 {
-		return ui.Row{}, false
-	}
-	// A floor that cleared nothing examined nothing, whatever the count reads
-	// like. Without this a run where every component's report was unreadable
-	// renders `✓ floor … 0 of 4 component(s) at or above 80.0%` — a tick on a
-	// gate that looked at no component at all, which is the rule this file is
-	// arranged around, inverted.
-	if cleared == 0 {
-		return unmeasuredRow("floor", fmt.Sprintf("no component was measured, so the %.1f%% floor was applied to none of them", floor)), true
-	}
-	// "N of M" rather than a bare count: the two differ exactly when some
-	// component went ungated, so a partial run cannot read as a
-	// repository-wide pass.
-	return ui.Row{Status: ui.StatusPass, Label: "floor",
-		Value: fmt.Sprintf("%d of %d component(s) at or above %.1f%%", cleared, gateable, floor)}, true
+	return testmeasure.FloorSummaryRow(ms, floor)
 }
 
 // candidateThisTree is what this run would record as the baseline for the tree
@@ -1779,7 +865,7 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 	record := gitstate.Baseline{}
 	for _, m := range ms {
 		if m.Measured() {
-			record[m.Name] = m.entry()
+			record[m.Name] = m.Entry()
 			continue
 		}
 		// A component this run did not select keeps the entry the base tree
@@ -1863,239 +949,38 @@ func candidateThisTree(ctx context.Context, cmd *cobra.Command, dir string, decl
 		len(record), recordable(decl), shortSHA(tree))
 }
 
-// crapRecord is what this run would record as the CRAP baseline.
-//
-// A score rides on a coverage entry and never travels alone: it is computed
-// from the coverage report, so an entry with no counts has nothing to hang one
-// on — and `missingFromRecord` asks only whether a component has an entry, so a
-// CRAP-only entry would satisfy the completeness check for a component whose
-// coverage nobody measured.
-//
-// The carry rule is coverage's, asked again rather than assumed: a component
-// this run did not select is unchanged from the tree the baseline describes,
-// so its score is still that score, while one that ran and failed may be
-// exactly what changed. A component whose coverage carried and which the CRAP
-// baseline has no entry for carries nothing and reports `new` on the next
-// change, which heals on the run after.
+// crapRecord is testmeasure.CRAPRecord.
 func crapRecord(ms []measurement, record gitstate.Baseline, carried map[string]bool, anchor gitstate.CRAPBaseline) gitstate.CRAPBaseline {
-	out := gitstate.CRAPBaseline{}
-	for _, m := range ms {
-		if _, ok := record[m.Name]; !ok {
-			continue
-		}
-		if m.Scored() {
-			out[m.Name] = m.crapEntry()
-			continue
-		}
-		// A component that ran and could not be scored records nothing. Its
-		// content may be exactly what changed, so the baseline's entry is a
-		// guess — and the next change reports it `new`, gates nothing for that
-		// one change, and records it, which heals rather than persisting.
-		if e, ok := carriedScore(m, carried, anchor); ok {
-			out[m.Name] = e
-		}
-	}
-	return out
+	return testmeasure.CRAPRecord(ms, record, carried, anchor)
 }
 
-// recordable counts the declared components a complete baseline must cover:
-// every one except those nothing could ever measure, which contribute to
-// neither side of any comparison and whose absence is permanent and expected.
-//
-// It reads the declaration alone, exactly as `lydite test record` does, so the
-// row a run shows and the question the fold asks are the same question.
-func recordable(decl component.File) int {
-	n := 0
-	for _, c := range decl.Components {
-		if !unmeasurableByDeclaration(c) {
-			n++
-		}
-	}
-	return n
-}
+// recordable is testmeasure.Recordable.
+func recordable(decl component.File) int { return testmeasure.Recordable(decl) }
 
-// sameEntries reports whether two of one metric's baselines hold the same
-// entries, so a run that would rewrite a tree's state byte for byte does not
-// push to do it.
-func sameEntries[M ~map[string]E, E comparable](a, b M) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for name, entry := range a {
-		if other, ok := b[name]; !ok || other != entry {
-			return false
-		}
-	}
-	return true
-}
+// sameEntries is testmeasure.SameEntries.
+func sameEntries[M ~map[string]E, E comparable](a, b M) bool { return testmeasure.SameEntries(a, b) }
 
-// recordingBlockedBy names the component that stops this run establishing the
-// tree's baseline, if any: one with no entry in what is about to be recorded.
-//
-// The question is asked of the record and not of the flags, which is the
-// difference between a component that carried forward and one that was merely
-// entitled to. A deselected component whose baseline entry does not exist
-// carries nothing, so recording anyway would write the same gap forward on
-// every merge — and it can then never heal, because each run reproduces it
-// from the last.
-//
-// A component nothing could ever measure is one exemption: it contributes to
-// neither side of any comparison, so its absence is permanent and expected
-// rather than a gap a run created. A component this run never selected is the
-// other, and for a different reason: completeness is the fold's question,
-// asked once against the declaration of the tree being recorded. A shard is
-// missing most components by construction, so a run that refused over them
-// would establish nothing at all — and `lydite test record` refuses the
-// partial document that leaves behind, by name.
+// recordingBlockedBy is testmeasure.RecordingBlockedBy.
 func recordingBlockedBy(ms []measurement, record gitstate.Baseline) (measurement, bool) {
-	for _, m := range ms {
-		if m.Unmeasurable || m.Unselected {
-			continue
-		}
-		if _, ok := record[m.Name]; !ok {
-			return m, true
-		}
-	}
-	return measurement{}, false
+	return testmeasure.RecordingBlockedBy(ms, record)
 }
 
-// withToleratedDipsRestored returns record with every component whose coverage
-// dipped below its baseline by no more than the tolerance restored to the
-// baseline's counts.
-//
-// Recording the dipped number verbatim turns the tolerance into an unbounded
-// downward ratchet: each change may dip up to the tolerance and pass, the
-// recorded baseline follows it down, and the next change gets another free dip
-// from the lower floor — coverage bleeds one tolerance per merge with every
-// gate green. Anchoring to the high-water mark caps the total tolerated drift
-// at one tolerance. A dip beyond the tolerance is recorded as measured: it
-// failed visibly on the change that introduced it, so accepting it is a
-// deliberate reset rather than leakage.
+// withToleratedDipsRestored is testmeasure.WithToleratedDipsRestored.
 func withToleratedDipsRestored(record, baseline gitstate.Baseline, tolerance float64) gitstate.Baseline {
-	out := make(gitstate.Baseline, len(record))
-	for name, lines := range record {
-		out[name] = lines
-		b, ok := baseline[name]
-		// The same instrument on both sides, or no anchoring. Across a change
-		// of instrument the two percentages measure different quantities, so
-		// anchoring to the old one records a number the new instrument never
-		// produced — for a component the gate itself has just refused to
-		// compare. The measured counts are recorded verbatim instead.
-		if !ok || !b.Measured() || !lines.Measured() || b.Producer != lines.Producer {
-			continue
-		}
-		if lines.Percent() < b.Percent() && !regressedBeyond(lines.Percent(), b.Percent(), tolerance) {
-			out[name] = gitstate.Entry{LineCount: atPercentOf(b.Percent(), lines.Total), Producer: lines.Producer}
-		}
-	}
-	return out
+	return testmeasure.WithToleratedDipsRestored(record, baseline, tolerance)
 }
 
-// atPercentOf is the ratio to anchor to, expressed over the size the component
-// actually is now.
-//
-// Writing the baseline's own counts back would freeze the component's *weight*
-// as well as its ratio: a component that grew from 1,000 lines to 2,000 while
-// dipping inside the tolerance would be recorded as 1,000 lines. The language
-// and global baselines are sums of these counts, so that stale weight then
-// decides how much this component counts towards a figure describing a tree it
-// no longer matches — and the distortion compounds over successive
-// within-tolerance merges. The anchor is the percentage; the size is this
-// tree's.
-func atPercentOf(pct float64, total int) coverage.LineCount {
-	return coverage.LineCount{Covered: int(math.Round(pct / 100 * float64(total))), Total: total}
-}
+// everything is testmeasure.Everything.
+func everything(m measurement) bool { return testmeasure.Everything(m) }
 
-// regressedBeyond reports whether cur dipped below base by more than tolerance
-// percentage points, compared at the report's display precision (tenths) so
-// what is shown and what is gated always agree. A raw float subtraction
-// decides an exactly-at-tolerance dip by representation noise, failing one
-// "regressed 0.1%" while passing an identical-looking other.
-func regressedBeyond(cur, base, tolerance float64) bool {
-	return math.Round((base-cur)*10) > math.Round(tolerance*10)
-}
+// repoLabel is testmeasure.RepoLabel.
+func repoLabel(metric string) string { return testmeasure.RepoLabel(metric) }
 
-// composed sums the counts of every measured component the predicate selects,
-// splitting the contributors into those this run measured and those whose
-// counts were carried forward from the baseline.
-func composed(ms []measurement, carried map[string]bool, in func(measurement) bool) (coverage.LineCount, int, int) {
-	var lines coverage.LineCount
-	fresh, old := 0, 0
-	for _, m := range ms {
-		if !in(m) || !m.Lines.Measured() {
-			continue
-		}
-		lines = lines.Add(m.Lines)
-		if carried[m.Name] {
-			old++
-			continue
-		}
-		fresh++
-	}
-	return lines, fresh, old
-}
+// lineValue is testmeasure.LineValue.
+func lineValue(c coverage.LineCount) string { return testmeasure.LineValue(c) }
 
-// gateable counts the components a composed figure could have been composed
-// from: every one the predicate selects, minus those nothing could ever
-// measure.
-//
-// The exclusion is what makes the denominator readable. `N of M` exists so a
-// partial run cannot read as a repository-wide pass, so an M that counts a
-// raw-command component renders a complete run as `1 of 2` — signalling that
-// something went ungated when nothing did, and contradicting the floor row
-// beside it, which draws the same distinction. A component nothing could ever
-// measure contributes to neither side of any comparison; its absence is
-// permanent and expected rather than a gap one run created.
-func gateable(ms []measurement, in func(measurement) bool) int {
-	n := 0
-	for _, m := range ms {
-		if in(m) && !m.Unmeasurable {
-			n++
-		}
-	}
-	return n
-}
-
-func everything(measurement) bool { return true }
-
-// repoLabel names a figure composed over every component.
-//
-// `coverage(repo)` rather than a bare `coverage`, so every row in the report
-// reads as one metric over one unit and a reader pairs them by eye. A bare
-// label sat between the component rows looking like a heading for them, which
-// is the one thing it is not: it is a peer of theirs measured over a different
-// unit.
-//
-// The unit is the repository, which nothing declares, so a component named
-// `repo` would produce a second row under this label. That is the ambiguity
-// every gate row already carries — nothing forbids a component called
-// `orphans`, `watch` or `schedule` either — and it is the reason a consumer
-// keys on the status rather than parsing the name.
-func repoLabel(metric string) string { return metric + "(repo)" }
-
-// lineValue renders a measurement the way every row shows it: the percentage,
-// and the counts it came from. The counts are there because they are what the
-// baseline stores and what the composed figures are summed from — a reader
-// checking a composed number against its parts needs both.
-func lineValue(c coverage.LineCount) string {
-	return fmt.Sprintf("%.1f%% (%d/%d lines)", c.Percent(), c.Covered, c.Total)
-}
-
-// composedValue renders a language or global figure, and says what it is made
-// of. A composed figure that does not say how much of it this run measured is
-// indistinguishable from one that measured everything.
-func composedValue(lines coverage.LineCount, measured, carried, total int) string {
-	if carried == 0 {
-		return fmt.Sprintf("%s, %d of %d component(s)", lineValue(lines), measured, total)
-	}
-	return fmt.Sprintf("%s, %d of %d component(s), %d carried forward", lineValue(lines), measured+carried, total, carried)
-}
-
-// unmeasuredRow is the shape every "this did not run" row takes: amber, never
-// a vote, and carrying the reason rather than only the absence.
-func unmeasuredRow(label, why string) ui.Row {
-	return ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: "not measured — " + why}
-}
+// unmeasuredRow is testmeasure.UnmeasuredRow.
+func unmeasuredRow(label, why string) ui.Row { return testmeasure.UnmeasuredRow(label, why) }
 
 // firstNonEmpty returns the first non-empty string, so a tree lookup that
 // failed falls back to the commit SHA rather than writing an empty key.

@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
+	"lydite/lydite/internal/crap"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
@@ -72,32 +74,6 @@ func TestAnUnidentifiedProducerGatesAsBefore(t *testing.T) {
 	}
 }
 
-// A composed figure refuses to compare when any component in it was measured by
-// a different instrument, and says which — the same rule it already applies to a
-// component with no baseline, with words that tell the two apart. A reader
-// cannot act on "no baseline yet" for a component that has had one for months.
-func TestAComposedFigureNamesAReinstrumentedComponent(t *testing.T) {
-	api := measured("api", "go", 50, 100)
-	api.Producer = "go 1.26.6"
-	web := measured("web", "typescript", 80, 100)
-	web.Producer = "vitest 4.1.11, @vitest/coverage-v8 4.1.11"
-	baseline := gitstate.Baseline{
-		"api": producing(50, 100, "go 1.26.6"),
-		"web": producing(80, 100, "vitest 3.2.7, @vitest/coverage-v8 3.2.7"),
-	}
-
-	row := composedRow(repoLabel("coverage"), []measurement{api, web}, nil, baseline, everything, 0.1)
-	if row.Status != "new" {
-		t.Errorf("coverage(repo) = %+v, want new — its baseline does not cover every component", row)
-	}
-	if !strings.Contains(row.Value, "different instrument") || !strings.Contains(row.Value, "web") {
-		t.Errorf("row = %q, want the reinstrumented component named", row.Value)
-	}
-	if strings.Contains(row.Value, "no baseline yet") {
-		t.Errorf("row = %q, want a baseline that exists not described as absent", row.Value)
-	}
-}
-
 // A carried entry keeps the producer that measured it, not this run's. Under
 // affected selection an entry rides forward across many trees, and for Go and
 // Rust the instrument is lydite's own pinned tool — so a consumer upgrading
@@ -109,7 +85,7 @@ func TestACarriedEntryKeepsItsOwnProducer(t *testing.T) {
 	if carried.Producer != "vitest 3.2.7, @vitest/coverage-v8 3.2.7" {
 		t.Errorf("producer = %q, want the one that measured the entry", carried.Producer)
 	}
-	if carried.entry().Producer != carried.Producer {
+	if carried.Entry().Producer != carried.Producer {
 		t.Error("the recorded entry lost the producer it was carried with")
 	}
 }
@@ -321,15 +297,6 @@ func TestFoldingKeepsAShardsReason(t *testing.T) {
 	}
 	if got.Reason != "the suite failed" {
 		t.Errorf("reason = %q, want the shard's own reason kept", got.Reason)
-	}
-}
-
-// A component declaring a raw command has no producer, because lydite does not
-// know what such a run would invoke, let alone what wrote a report.
-func TestAComponentWithARawCommandHasNoProducer(t *testing.T) {
-	c := component.Component{Name: "docs", Dir: "docs", Command: []string{"make", "docs"}}
-	if got := producerOf(t.TempDir(), c, config.Default(), nil); got != "" {
-		t.Errorf("producer = %q, want nothing for a component lydite does not invoke", got)
 	}
 }
 
@@ -672,5 +639,131 @@ func TestFoldingCarriesNoTestCountsWhenNoShardReported(t *testing.T) {
 	}
 	if got.Tests != nil {
 		t.Errorf("Tests = %+v, want nothing at all", got.Tests)
+	}
+}
+
+// measurementsGolden is the document measurementsGoldenRun writes, byte for
+// byte. `lydite test merge` and `lydite test record` read it, in a later job
+// and from a binary that may be built from another commit, so its shape is a
+// contract rather than an implementation detail.
+const measurementsGolden = `{
+  "tree": "4b8e9bc",
+  "components": {
+    "api": {
+      "covered": 91,
+      "total": 100,
+      "producer": "go 1.26.6",
+      "unanchored": {
+        "covered": 90,
+        "total": 100
+      },
+      "patch": {
+        "hit": 3,
+        "total": 4
+      },
+      "base": {
+        "covered": 91,
+        "total": 100,
+        "producer": "go 1.26.6"
+      },
+      "crap": {
+        "above": 1,
+        "worst": 41.5,
+        "producer": "go 1.26.6"
+      }
+    },
+    "sdk": {
+      "covered": 30,
+      "total": 40,
+      "producer": "go 1.26.6",
+      "carried": true,
+      "base": {
+        "covered": 30,
+        "total": 40,
+        "producer": "go 1.26.6"
+      },
+      "crap": {
+        "above": 0,
+        "worst": 12,
+        "producer": "go 1.26.6"
+      }
+    },
+    "web": {
+      "covered": 45,
+      "total": 60,
+      "producer": "vitest 4.1.11, @vitest/coverage-v8 4.1.11"
+    }
+  },
+  "gated": true,
+  "tests": {
+    "api": {
+      "total": 12,
+      "failed": 0,
+      "skipped": 1
+    },
+    "web": {
+      "total": 7,
+      "failed": 2,
+      "skipped": 0
+    }
+  }
+}
+`
+
+// measurementsGoldenRun is one run's measurements, and what it would record,
+// covering every field the document can carry: a measured entry anchored
+// back to a tolerated dip, a measured entry whose baseline another instrument
+// took, a carried entry and its carried score, a patch count, and the test
+// counts of a suite that failed.
+func measurementsGoldenRun() measurementsDoc {
+	ms := []measurement{
+		{Name: "api", Dir: "api", Lang: runner.Go, Lines: coverage.LineCount{Covered: 90, Total: 100},
+			Producer: "go 1.26.6", CRAP: crap.Report{Scored: 4, Over: []crap.Function{{Name: "Parse"}}, Worst: 41.5},
+			Tests: &junit.Counts{Total: 12, Skipped: 1}},
+		{Name: "web", Dir: "web", Lang: runner.TypeScript, Lines: coverage.LineCount{Covered: 45, Total: 60},
+			Producer: "vitest 4.1.11, @vitest/coverage-v8 4.1.11", CRAPWhy: "the coverage report describes no function to score",
+			Tests: &junit.Counts{Total: 7, Failed: 2}},
+		{Name: "sdk", Dir: "sdk", Lang: runner.Go, Why: "the component was not selected for this run",
+			CRAPWhy: "the component was not selected for this run", Carryable: true, Unselected: true},
+	}
+	anchor := gitstate.Snapshot{
+		Coverage: gitstate.Baseline{
+			"api": producing(91, 100, "go 1.26.6"),
+			"web": producing(40, 60, "vitest 3.2.7, @vitest/coverage-v8 3.2.7"),
+			"sdk": producing(30, 40, "go 1.26.6"),
+		},
+		CRAP: gitstate.CRAPBaseline{"sdk": {Above: 0, Worst: 12, Producer: "go 1.26.6"}},
+	}
+	record := gitstate.Baseline{"api": ms[0].Entry(), "web": ms[1].Entry(), "sdk": anchor.Coverage["sdk"]}
+	carried := map[string]bool{"sdk": true}
+	scores := crapRecord(ms, record, carried, anchor.CRAP)
+	anchored := withToleratedDipsRestored(record, anchor.Coverage, 2)
+	parts := []patchPart{{Name: "api", Lang: runner.Go, Hit: 3, Total: 4, Base: anchor.Coverage["api"].LineCount}}
+	return measurementsFrom("4b8e9bc", anchored, record, carried, scores, anchor.Coverage, true, parts, testCounts(io.Discard, ms))
+}
+
+// The document a run writes is the one merge and record parse, and it is
+// built from what internal/test/measure computes: each entry, each score, the
+// anchoring and the test counts. Pinned byte for byte, so a change to any of
+// them that moves the file fails here rather than in a later job parsing it.
+func TestTheMeasurementsDocumentKeepsTheShapeItsReadersParse(t *testing.T) {
+	root := t.TempDir()
+	doc := measurementsGoldenRun()
+	if err := writeMeasurements(root, doc); err != nil {
+		t.Fatalf("writeMeasurements: %v", err)
+	}
+	got, err := os.ReadFile(measurementsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != measurementsGolden {
+		t.Errorf("measurements.json =\n%s\nwant\n%s", got, measurementsGolden)
+	}
+	read, err := readMeasurements(reportsDir(root))
+	if err != nil {
+		t.Fatalf("readMeasurements: %v", err)
+	}
+	if !reflect.DeepEqual(read, doc) {
+		t.Errorf("read back %+v, want %+v", read, doc)
 	}
 }
