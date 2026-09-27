@@ -201,7 +201,7 @@ func RunOutputBounded(ctx context.Context, dir string, extraEnv []string, out io
 // would print the file. Those commands are read, not watched.
 // Unlike Run, some of RunQuiet's arguments are derived from CLI flags, so a
 // caller must resolve a user-supplied revision or path before passing it —
-// cmd/lydite's resolveReviewBase is the worked example. What holds
+// internal/reviewdecision's ResolveBase is the worked example. What holds
 // unconditionally, and is what the annotation below rests on, is that name is
 // a fixed literal at every call site and args reach the child as argv with no
 // shell, so there is no command injection here; argument injection is the

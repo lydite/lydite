@@ -21,6 +21,7 @@ again, and that file arrives on its own when you read anything in that subtree.
 | Read | When you are changing |
 |---|---|
 | [`layout.md`](agentic/references/layout.md) | anything — the annotated directory tree, and which reference governs each package |
+| [`architecture.md`](agentic/references/architecture.md) | `internal/flow`, `internal/stages/*`, `internal/flows/*`, `internal/trust`, `internal/forge`'s `SCMRepository`, or a command built as a Flow |
 | [`ci.md`](agentic/references/ci.md) | anything in `.github/workflows/`, or reasoning about what blocks a merge |
 | [`components.md`](agentic/references/components.md) | `.lydite/components.yml`, `internal/component`, `internal/runner`, `internal/nodedeps`, or how a suite's output is captured |
 | [`services-and-scheduling.md`](agentic/references/services-and-scheduling.md) | `internal/compose` or `internal/scheduler` — the services a suite needs, and what may run beside what |

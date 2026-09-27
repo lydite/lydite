@@ -7,6 +7,78 @@ import (
 	"testing"
 )
 
+// A payload only points: the comment's id and the repository it claims are
+// read, and the body, author, time and thread it also carries are not, so
+// nothing downstream can decide from the payload's copy of the comment.
+func TestReadCommentRefReadsOnlyTheIDAndTheClaimedRepository(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	payload := `{
+	  "action": "created",
+	  "issue": {"number": 40, "pull_request": {"url": "https://api.github.com/repos/lydite/lydite/pulls/40"}},
+	  "comment": {"id": 9001, "body": "/lydite clear", "created_at": "2026-08-31T12:00:00Z", "user": {"login": "pedromvgomes"}},
+	  "repository": {"full_name": "lydite/lydite"}
+	}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadCommentRef(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (CommentRef{ID: 9001, Repository: "lydite/lydite"}); got != want {
+		t.Errorf("ReadCommentRef = %+v, want %+v", got, want)
+	}
+}
+
+// The claimed repository is read as the payload spells it, whatever it names:
+// comparing it against the trusted one is the caller's to do, and a reader
+// that normalised or dropped it would hide exactly the mismatch to refuse.
+func TestReadCommentRefKeepsAClaimNamingAnotherRepository(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(`{"comment":{"id":1},"repository":{"full_name":"someone/else"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadCommentRef(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repository != "someone/else" {
+		t.Errorf("Repository = %q, want the payload's own claim", got.Repository)
+	}
+}
+
+// A payload that names no comment has nothing to resolve, and one that names
+// no repository has no claim to check; each is refused, and a payload that
+// cannot be read or parsed says which of the two it was.
+func TestReadCommentRefRefusesAPayloadItCannotUse(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "no comment", payload: `{"repository":{"full_name":"lydite/lydite"}}`, want: "names no comment"},
+		{name: "no comment id", payload: `{"comment":{"body":"/lydite clear"},"repository":{"full_name":"lydite/lydite"}}`, want: "names no comment"},
+		{name: "no repository", payload: `{"comment":{"id":1}}`, want: "names no repository"},
+		{name: "malformed", payload: `{"comment":`, want: "parsing the event payload"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "event.json")
+			if err := os.WriteFile(path, []byte(tc.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadCommentRef(path); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want a refusal carrying %q", err, tc.want)
+			}
+		})
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	if _, err := ReadCommentRef(missing); err == nil || !strings.Contains(err.Error(), "reading the event payload") {
+		t.Errorf("err = %v, want a refusal naming the read", err)
+	}
+}
+
 // The title is what a squash merge lands, so a breaking change declared there
 // is the one the history keeps — a payload read without it would report the
 // declaration missing.

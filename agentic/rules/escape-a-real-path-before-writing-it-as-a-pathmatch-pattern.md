@@ -14,7 +14,7 @@ many-segments wildcard.
 
 Any code that turns a filename or path lydite did not choose (a changed file from
 `forge.Client.ChangedPaths`, a path read off a diff, anything not already hand-written into a
-`paths:` list by a person) into a `pathmatch` pattern. `cmd/lydite/clearance.go`'s `escapeGlob`
+`paths:` list by a person) into a `pathmatch` pattern. `internal/stages/clearance`'s `escapeGlob`
 is the one implementation today, called from `proposalYAML` before a `/lydite exempt` draft is
 encoded.
 

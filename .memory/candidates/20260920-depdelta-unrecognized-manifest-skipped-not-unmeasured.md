@@ -1,22 +1,27 @@
 ---
-about: internal/depdelta.Detect and cmd/lydite/review_depdelta.go's measureDependencies
-saw: implementing .lydite/exemptions.yml's dependency-version-bump entry (chore/declare-the-bump-exemption)
+about: depdelta.Detect does not recognize Cargo.toml or package.json, and reviewdecision's measureDependencies skips an unrecognized path outright rather than reporting it Unmeasured — so an exemption listing a manifest clears a versions condition vacuously
+saw:
+  - source/cli/internal/depdelta/manifest.go
+  - source/cli/internal/reviewdecision/dependencies.go
+  - .claude/rules/an-exemptions-entrys-paths-list-only-depdelta-readable-manifests.md
 ---
 
-`internal/depdelta.Detect` (source/cli/internal/depdelta/manifest.go) recognizes a fixed set of
-base filenames as manifests: `go.mod`, `go.sum`, `Cargo.lock`, `package-lock.json`, plus the
-named-but-unreadable `yarn.lock`, `pnpm-lock.yaml`, `requirements.txt`, `poetry.lock`,
-`Pipfile.lock`. It does **not** recognize `Cargo.toml` or `package.json` — those return
-`ManifestNone`.
+Re-checked on `refactor/flow-architecture-clearance-pilot`: `measureDependencies` and
+`versionsPatchAndMinor` moved from `cmd/lydite/review_depdelta.go` into
+`internal/reviewdecision/dependencies.go` (both still unexported). The claim holds unchanged.
 
-In `cmd/lydite/review_depdelta.go`'s `measureDependencies`, a path that detects as `ManifestNone`
-is `continue`d past outright — it never becomes a `manifestDelta` entry, so it is never reported
-as `Unmeasured` the way an unreadable ecosystem (pip, yarn, pnpm) is. This distinction matters for
-anyone writing an `.lydite/exemptions.yml` entry with a `versions:` condition: listing `Cargo.toml`
-or `package.json` in an exemption's `paths` does not get that file measured — it just marks the
-path as "covered," so a change touching only the manifest (not its lockfile) would satisfy
-`versionsPatchAndMinor` vacuously (empty delta list passes) and clear the exemption with zero
-dependency-delta evidence. The safe pattern is to list only the lockfile (`Cargo.lock`,
-`package-lock.json`) in `paths`, never the manifest beside it — a real Dependabot bump that also
-touches the manifest then has an uncovered path and is referred, same as before the exemption
-existed, rather than silently trusting a file `depdelta` cannot read.
+`depdelta.Detect` (`internal/depdelta/manifest.go`) is `manifests[path.Base(p)]` over a fixed map:
+`go.mod`, `go.sum`, `Cargo.lock`, `package-lock.json`, plus the named-but-unreadable `yarn.lock`,
+`pnpm-lock.yaml`, `requirements.txt`, `poetry.lock`, `Pipfile.lock`. `Cargo.toml` and
+`package.json` are not in it and detect as `ManifestNone`.
+
+In `reviewdecision.measureDependencies`, a `ManifestNone` path is `continue`d past — it never
+becomes a `ManifestDelta`, so unlike an unreadable ecosystem (which gets `Unmeasured: "no
+dependency reader for <ecosystem>"`) it is never reported at all. `versionsPatchAndMinor` fails
+only on an `Unmeasured` or non-patch/minor entry, so an empty delta list passes it.
+
+Consequence for `.lydite/exemptions.yml`: listing `Cargo.toml` or `package.json` in a `paths`
+entry with a `versions:` condition marks it covered without measuring it, so a change touching
+only the manifest clears the exemption with zero dependency evidence. List only the lockfile
+`Detect` reads; a real bump that also touches the manifest then has an uncovered path and is
+referred.

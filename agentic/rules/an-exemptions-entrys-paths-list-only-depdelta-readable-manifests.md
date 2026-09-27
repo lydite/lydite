@@ -1,7 +1,7 @@
 # An exemption's `paths` list only the manifests `depdelta.Detect` actually reads
 
 `versionsPatchAndMinor` and the added-dependency disqualifier both read a path's comparison from
-`measureDependencies`'s `[]manifestDelta`, which `depdelta.Detect` builds by sniffing the diff for
+`internal/reviewdecision`'s `measureDependencies`'s `[]ManifestDelta`, which `depdelta.Detect` builds by sniffing the diff for
 paths it recognizes as a manifest — `go.mod`/`go.sum`, `Cargo.lock`, `package-lock.json` — never a
 component's declared lockfile and never the manifest a lockfile sits beside. `Detect` does not
 recognize `Cargo.toml` or `package.json` as manifests at all, so a path it does not name is not

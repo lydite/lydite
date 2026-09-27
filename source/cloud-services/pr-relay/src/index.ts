@@ -380,8 +380,9 @@ async function handle(request: Request, env: Env, deps: Deps): Promise<Response>
         // referral re-run landing `failure` on this exact head in the gap
         // between them is not caught — the platform's status API has no
         // conditional write to close that window with. It is narrower than
-        // what stands today regardless: the direct-post route
-        // (`recordClearance` in `cmd/lydite/status.go`) resolves
+        // what stands today regardless: the direct-post route (the clearance
+        // flow's `RecordStatuses` stage, in
+        // `source/cli/internal/stages/clearance/statuses.go`) resolves
         // `lydite/referral` to `success` after a clearance with no live read
         // at all, so this is a tighter check on the same exposure rather
         // than a new one.

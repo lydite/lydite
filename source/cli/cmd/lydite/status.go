@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
@@ -176,87 +174,6 @@ func publish(ctx context.Context, out, eventPath string, d referral.Decision, ve
 	}
 	return target.Client.PostStatus(ctx, target.Repo,
 		referralStatus(pullRequestRef{SHA: target.SHA, Number: target.Number}, d, verdict))
-}
-
-// clearanceStatus is a clearance as the document both routes carry, so the
-// status a step posts and the one this process would have posted itself are
-// one derivation rather than two.
-//
-// It names the pull request for the same reason the referral document does,
-// and for one more: a clearance run is an issue_comment run, whose own claims
-// name a branch rather than a pull ref, so the conversation is in the document
-// or nowhere.
-//
-// description is composed through clearance.WithFingerprint, which is what
-// keeps the fingerprint of the cleared decision inside the platform's cap: the
-// description is the whole of where that fingerprint is stored, and forge clips
-// this document's description on the way out by either route.
-func clearanceStatus(ref pullRequestRef, description string) forge.Status {
-	return forge.Status{
-		State:       clearance.StateSuccess,
-		Context:     clearance.ClearanceContext,
-		Description: description,
-		TargetURL:   runURL(),
-		SHA:         ref.SHA,
-		PullRequest: ref.Number,
-	}
-}
-
-// recordClearance records the clearance: posted here with the job's own
-// token, or rendered at out for a step that posts it under lydite's App
-// identity.
-//
-// The two are alternatives the caller chooses between, not a ladder, for the
-// same reason publish's are, and they are not the same write.
-//
-// Either route records two statuses on the head: `lydite/clearance`, which
-// says who cleared the revision, and `lydite/referral` resolved to success,
-// which is what a required check is gated on. A clearance that records only
-// the first leaves every consumer's pull request blocked on a referral nobody
-// can resolve.
-//
-// The rendered route writes them as two documents — the one --status-out
-// names, and its referralDocument sibling — rather than as one document
-// carrying both. Each is a single status object, which is what the relay's
-// /status route and the posting step's `jq -r .context` each read, and the
-// relay admits a clearance ref to `lydite/clearance` alone: the referral
-// document is the posting step's to write with the job's own token, and is
-// never relayed.
-//
-// The clearance goes first on both routes: if the second write or post fails,
-// the run fails loudly and the pull request holds a clearance record beside a
-// referral still standing, which a repeated comment repairs. The other order
-// could leave a green referral with nothing recording who cleared it.
-//
-// A document that cannot be written, or a post that fails, fails the run — a
-// clearance nothing recorded leaves the referral standing while the job that
-// answered the comment reports success.
-func recordClearance(ctx context.Context, client *forge.Client, repo forge.Repo, out string, s forge.Status) error {
-	resolved := s
-	resolved.Context = clearance.Context
-	if out != "" {
-		if err := forge.WriteStatus(out, s); err != nil {
-			return err
-		}
-		return forge.WriteStatus(referralDocument(out), resolved)
-	}
-	if err := client.PostStatus(ctx, repo, s); err != nil {
-		return err
-	}
-	return client.PostStatus(ctx, repo, resolved)
-}
-
-// referralDocument names the second document a rendered clearance writes,
-// beside the one --status-out named.
-//
-// The path is derived rather than configured so that the step posting the
-// documents computes it from the path it already passed, and a lydite that
-// can render a clearance can always render the referral resolving it. A flag
-// for the second path would make resolving the referral something a caller
-// could omit, which is the same pull request blocked on a pending gate.
-func referralDocument(out string) string {
-	ext := filepath.Ext(out)
-	return strings.TrimSuffix(out, ext) + ".referral" + ext
 }
 
 // statusOutFlag names the flag that renders the status instead of posting it.
