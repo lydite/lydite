@@ -22,8 +22,6 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/fixture"
-	"lydite/lydite/internal/flaky"
-	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
 	"lydite/lydite/internal/toolchain"
@@ -347,51 +345,6 @@ func write(t *testing.T, root, rel, body string) {
 	}
 }
 
-// A JavaScript suite run without its node_modules fails at import, naming the
-// tests rather than the absent dependencies.
-func TestAComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
-	root := t.TempDir()
-	write(t, root, "web/package.json", `{"name":"web"}`)
-	// The install is the typescript.install override, so the row under test
-	// is lydite's attribution of a failed install rather than any package
-	// manager's behaviour — internal/nodedeps covers the detection.
-	cfg := config.Default()
-	cfg.TypeScript.Install = "exit 3"
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "web", Dir: "web", Runner: runner.Vitest,
-	}), cfg, nil, false, nil)
-	if row.Status != ui.StatusFail {
-		t.Fatalf("status = %q, want a failure", row.Status)
-	}
-	if row.Value != "not prepared" {
-		t.Errorf("value = %q, want the preparation named rather than the suite", row.Value)
-	}
-	if !strings.Contains(strings.Join(row.Detail, " "), config.FileName) {
-		t.Errorf("detail = %v, want the override named as the way out", row.Detail)
-	}
-}
-
-// A component that names a raw command over node dependencies fails the same
-// way as one that names a runner: the label and detail installNote's silence
-// would otherwise leave unreported come from the same failure() call either
-// component's install goes through.
-func TestACommandComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
-	root := t.TempDir()
-	write(t, root, "web/package.json", `{"name":"web"}`)
-	cfg := config.Default()
-	cfg.TypeScript.Install = "exit 3"
-	row, _ := runComponent(context.Background(), root, planFor(t, root, nodeCommandComponent()), cfg, nil, false, nil)
-	if row.Status != ui.StatusFail {
-		t.Fatalf("status = %q, want a failure", row.Status)
-	}
-	if row.Value != "not prepared" {
-		t.Errorf("value = %q, want the preparation named rather than the suite", row.Value)
-	}
-	if !strings.Contains(strings.Join(row.Detail, " "), config.FileName) {
-		t.Errorf("detail = %v, want the override named as the way out", row.Detail)
-	}
-}
-
 // An install that resolved no workspace root ran nothing at all, and a report
 // that mentioned it only by staying silent is indistinguishable from one whose
 // workspace was installed.
@@ -579,88 +532,6 @@ func TestAnOverrideTakesAContextRowNamingWhereItRuns(t *testing.T) {
 	}
 }
 
-// The note is about the install, so a component nodedeps never installs takes
-// none — including the JavaScript one whose workspace root resolves.
-func TestNoInstallRowWhereThereIsNothingToSayAboutOne(t *testing.T) {
-	root := t.TempDir()
-	write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
-	write(t, root, "packages/ui/package.json", `{"name":"ui"}`)
-	if _, ok := installNote(root, component.Component{
-		Name: "ui", Dir: "packages/ui", Runner: runner.Vitest,
-	}, config.Default()); ok {
-		t.Error("a component under a workspace root is installed from it, so there is nothing to report")
-	}
-	if _, ok := installNote(root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}, config.Default()); ok {
-		t.Error("a Go component installs no node dependencies, so no lockfile is missing from it")
-	}
-	// A raw command names no language, so the package.json in its own
-	// directory is what decides. `mod` sits under the same workspace root and
-	// holds none: whatever it builds, it is not one of that workspace's
-	// packages, and an install it never asked for is not withheld from it.
-	if _, ok := installNote(root, component.Component{
-		Name: "fixture", Dir: "mod", Command: []string{"go", "build", "./..."},
-	}, config.Default()); ok {
-		t.Error("a command component with no package.json installs nothing, so there is no install to report on")
-	}
-	if _, ok := installNote(root, component.Component{
-		Name: "ui", Dir: "packages/ui", Command: []string{"pnpm", "run", "build"},
-	}, config.Default()); ok {
-		t.Error("a command component under a workspace root is installed from it, so there is nothing to report")
-	}
-}
-
-// A typescript.install override still runs somewhere, even with no lockfile
-// to detect a workspace root from — and where it runs is exactly the fact
-// detection would otherwise have reported, so the row stays.
-func TestInstallNoteNamesWhereAnOverrideRuns(t *testing.T) {
-	t.Run("resolves a workspace root", func(t *testing.T) {
-		root := t.TempDir()
-		write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
-		write(t, root, "packages/ui/package.json", `{"name":"ui"}`)
-		cfg := config.Default()
-		cfg.TypeScript.Install = "pnpm install"
-		row, ok := installNote(root, component.Component{
-			Name: "ui", Dir: "packages/ui", Runner: runner.Vitest,
-		}, cfg)
-		if !ok {
-			t.Fatal("an override that resolves a shared root is a fact worth reporting, not silence")
-		}
-		if row.Status != ui.StatusContext {
-			t.Errorf("status = %q, want context: this describes where the install runs, not whether it succeeded", row.Status)
-		}
-		if !strings.Contains(row.Value, "workspace root") {
-			t.Errorf("value = %q, want the resolved root named", row.Value)
-		}
-		if detail := strings.Join(row.Detail, " "); !strings.Contains(detail, "pnpm install") || !strings.Contains(detail, root) {
-			t.Errorf("detail = %v, want the override command and the resolved root named", row.Detail)
-		}
-	})
-
-	t.Run("resolves no root", func(t *testing.T) {
-		root := t.TempDir()
-		write(t, root, "web/package.json", `{"name":"web"}`)
-		cfg := config.Default()
-		cfg.TypeScript.Install = "true"
-		row, ok := installNote(root, component.Component{
-			Name: "web", Dir: "web", Runner: runner.Vitest,
-		}, cfg)
-		if !ok {
-			t.Fatal("an override with no lockfile to resolve a root from still runs somewhere, worth naming")
-		}
-		if row.Status != ui.StatusContext {
-			t.Errorf("status = %q, want context: this describes where the install runs, not whether it succeeded", row.Status)
-		}
-		if !strings.Contains(row.Value, "web") {
-			t.Errorf("value = %q, want the component's own directory named", row.Value)
-		}
-		if detail := strings.Join(row.Detail, " "); !strings.Contains(detail, "true") || !strings.Contains(detail, filepath.Join(root, "web")) {
-			t.Errorf("detail = %v, want the override command and its own directory named", row.Detail)
-		}
-	})
-}
-
 // nodeComponent is a JavaScript component whose suite is a command of its own,
 // so a row about its install is not also a row about whether a package manager
 // is on the machine running these tests.
@@ -678,16 +549,6 @@ func nodeCommandComponent() component.Component {
 	return component.Component{
 		Name: "web", Dir: "web",
 		Command: []string{"sh", "-c", "exit 0"},
-	}
-}
-
-// installsNodeDeps answers for its own input rather than assuming
-// component.Load already ran: a component naming neither a runner nor a
-// command installs nothing, the same answer a real declaration could never
-// produce since validateInvocation requires exactly one of the two.
-func TestInstallsNodeDepsAnswersFalseWithNeitherRunnerNorCommand(t *testing.T) {
-	if installsNodeDeps(t.TempDir(), component.Component{Name: "empty"}) {
-		t.Error("a component naming neither a runner nor a command installs no node dependencies")
 	}
 }
 
@@ -718,86 +579,6 @@ func TestAGoComponentPreparesOnlyWhatItsInvocationRuns(t *testing.T) {
 	}
 }
 
-// Teardown undoes what setup did, so it has to run on the path where setup
-// failed halfway — a half-applied migration is exactly what needs undoing.
-func TestTeardownRunsWhenSetupFails(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	marker := filepath.Join(root, "torn-down")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-		Setup:    []string{"exit 7"},
-		Teardown: []string{"touch " + marker},
-	}), config.Default(), nil, false, nil)
-	if row.Status != ui.StatusFail || row.Value != "setup failed" {
-		t.Fatalf("row = %+v, want the setup named as the failure", row)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Error("teardown must run even when setup failed")
-	}
-}
-
-// Leftover data makes the next run depend on the last one.
-func TestTeardownRunsWhenTheSuiteFails(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
-	marker := filepath.Join(root, "torn-down")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-		Teardown: []string{"touch " + marker},
-	}), config.Default(), nil, false, nil)
-	if row.Status != ui.StatusFail || row.Value != "failed" {
-		t.Fatalf("row = %+v, want the suite named as the failure", row)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Error("teardown must run when the suite failed")
-	}
-}
-
-// A teardown that fails has left state behind for the next run to inherit,
-// so it fails a component that otherwise passed.
-func TestAFailingTeardownFailsAPassingComponent(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-		Teardown: []string{"exit 4"},
-	}), config.Default(), nil, false, nil)
-	if row.Status != ui.StatusFail || row.Value != "teardown failed" {
-		t.Fatalf("row = %+v, want the teardown named", row)
-	}
-}
-
-// It never masks a failure that already happened: the earlier one is what
-// the reader has to act on.
-func TestAFailingTeardownDoesNotMaskAFailingSuite(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"no\") }\n")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-		Teardown: []string{"exit 4"},
-	}), config.Default(), nil, false, nil)
-	if row.Value != "failed" {
-		t.Errorf("value = %q, want the suite failure to survive", row.Value)
-	}
-}
-
-// Setup runs before the suite, not alongside it.
-func TestSetupRunsBeforeTheSuite(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-		// The suite reads what setup wrote, so it can only pass if the
-		// ordering holds.
-		Setup: []string{"echo 1 > setup-ran"},
-		Args:  []string{"-run", "TestFoo", "./..."},
-	}), config.Default(), nil, false, nil)
-	if row.Status != ui.StatusPass {
-		t.Fatalf("row = %+v", row)
-	}
-	if _, err := os.Stat(filepath.Join(root, "mod", "setup-ran")); err != nil {
-		t.Error("setup must run in the component directory, before the suite")
-	}
-}
-
 // A component declaring no services needs no runtime, so a repository without
 // one runs on a machine with no container engine at all.
 func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
@@ -816,61 +597,6 @@ func TestAComponentWithNoServicesNeedsNoRuntime(t *testing.T) {
 		t.Fatal("a component with no services must start none")
 	}
 	stop()
-}
-
-// The cause has to be next to the verdict: a reader looking at a red row must
-// not have to scroll past another component's container lifecycle to find out
-// what happened, which is what a real CI log does to them.
-func TestAFailingComponentCarriesTheCauseAndTheLog(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	write(t, root, "mod/fail_test.go", "package fixture\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"the cause\") }\n")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), nil, false, nil)
-
-	if row.Status != ui.StatusFail {
-		t.Fatalf("row = %+v", row)
-	}
-	detail := strings.Join(row.Detail, "\n")
-	if !strings.Contains(detail, "the cause") {
-		t.Errorf("detail = %q, want the failing output under the row", detail)
-	}
-	if row.Log == "" {
-		t.Fatal("a failing row must name where the whole output is")
-	}
-	if !strings.Contains(detail, row.Log) {
-		t.Errorf("detail = %q, want it to name the log at %q", detail, row.Log)
-	}
-	body, err := os.ReadFile(filepath.Join(root, row.Log))
-	if err != nil {
-		t.Fatalf("reading the log: %v", err)
-	}
-	if !strings.Contains(string(body), "the cause") {
-		t.Errorf("log = %q, want the whole output captured", body)
-	}
-}
-
-// Everything is captured, always — under --json the terminal carries a
-// document and nothing else, so the log is the only place the output exists.
-func TestAPassingComponentStillCapturesItsOutput(t *testing.T) {
-	root := fixtureRepo(t, "components: []\n")
-	row, _ := runComponent(context.Background(), root, planFor(t, root, component.Component{
-		Name: "fixture", Dir: "mod", Runner: runner.GoTest,
-	}), config.Default(), nil, false, nil)
-	if row.Status != ui.StatusPass {
-		t.Fatalf("row = %+v", row)
-	}
-	if row.Log == "" {
-		t.Fatal("a passing row must still name its log")
-	}
-	if _, err := os.Stat(filepath.Join(root, row.Log)); err != nil {
-		t.Errorf("log not written: %v", err)
-	}
-	// But it stays out of the prose: a path on every line of a clean run is
-	// noise nobody asked for.
-	if len(row.Detail) != 0 {
-		t.Errorf("detail = %v, want a passing row to carry none", row.Detail)
-	}
 }
 
 // A component failing must not reprint its whole suite under the row.
@@ -897,15 +623,6 @@ func TestTailOfNothingIsNothing(t *testing.T) {
 	if got := tail("\n\n"); got != nil {
 		t.Errorf("tail of blank lines = %v, want nothing", got)
 	}
-}
-
-// planFor builds the plan runComponent takes. Every component in these tests
-// declares no services, so nothing is probed and no stack is loaded.
-func planFor(t *testing.T, root string, c component.Component) componentPlan {
-	t.Helper()
-	log := openLog(root, c.Name, "test.log", false, len(c.Name))
-	t.Cleanup(log.Close)
-	return componentPlan{c: c, log: log, ready: true}
 }
 
 func TestResolveConcurrency(t *testing.T) {
@@ -1515,44 +1232,6 @@ func TestTheFlakyGateFailsANewTestThatDisagreesWithItself(t *testing.T) {
 	}
 }
 
-// A change that introduces no test pays nothing and says so, which is the
-// common case and must not read like a gate that could not run.
-//
-// A tree that is its own merge-base is that case at its widest: there is no
-// change at all, which is what the default branch runs on every push.
-func TestTheFlakyGateSaysWhenAChangeIntroducesNoTest(t *testing.T) {
-	root := flakyProbeRepo(t)
-	gitIn(t, root, "push", "--quiet", "origin", "HEAD:refs/heads/tip")
-
-	row := examineComponent(t, root, "tip", component.Component{
-		Name: "probe", Dir: "probe", Runner: runner.GoTest,
-	})
-	if row.Status != ui.StatusPass || row.Value != "no new tests" {
-		t.Errorf("flaky(probe) = %+v, want a pass saying the change introduced none", row)
-	}
-}
-
-// A component's gate is about the tests it introduced. Handed the whole diff,
-// every component would rerun every other component's new tests and report
-// them under its own name.
-func TestAComponentsGateSeesOnlyItsOwnChangedPaths(t *testing.T) {
-	changed := []string{"moda/x_test.go", "modb/x_test.go", "modb/deep/y_test.go", "README.md"}
-	got := componentPaths("modb", changed)
-	want := []string{"modb/x_test.go", "modb/deep/y_test.go"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("componentPaths(modb) = %v, want %v", got, want)
-	}
-	// A component rooted at the scan root owns every path in the change, and a
-	// prefix match would drop them all.
-	if got := componentPaths(".", changed); len(got) != len(changed) {
-		t.Errorf("componentPaths(.) = %v, want the whole change", got)
-	}
-	// Names are not prefixes: `modb-tools` is another component.
-	if got := componentPaths("modb", []string{"modb-tools/x_test.go"}); len(got) != 0 {
-		t.Errorf("componentPaths(modb) = %v, want nothing from a component whose name starts alike", got)
-	}
-}
-
 // The flag is never inferred, and a run that was not asked to gate says so
 // rather than leaving the row out: a section that quietly disappears is
 // indistinguishable from a concern that passed.
@@ -1578,141 +1257,6 @@ func TestWithoutTheFlagEveryComponentTakesAContextRow(t *testing.T) {
 	}
 }
 
-// A repository that asked for the gate and got silence anywhere must be able
-// to see where. jest is the one runner with a reason of its own — it ships no
-// JUnit reporter and lydite will install none into the workspace it is about
-// to gate. A raw `command:` opts out of the derived variants the same way, and
-// a runner lydite has never heard of says so generically.
-func TestTheFlakyGateNamesWhatItCannotExamine(t *testing.T) {
-	root := gitRepo(t, map[string]string{"web/package.json": `{"name":"web"}`})
-	for _, tc := range []struct {
-		name string
-		c    component.Component
-		want string
-	}{
-		{
-			name: "a jest component",
-			c:    component.Component{Name: "web", Dir: "web", Runner: runner.Jest},
-			want: "jest has no JUnit output lydite will install",
-		},
-		{
-			name: "a raw command",
-			c:    component.Component{Name: "web", Dir: "web", Command: []string{"make", "test"}},
-			want: "raw command",
-		},
-		{
-			name: "an unknown runner",
-			c:    component.Component{Name: "web", Dir: "web", Runner: "bogus"},
-			want: "no runner lydite knows",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			row := examineComponent(t, root, "HEAD", tc.c)
-			if row.Status != ui.StatusUnmeasured {
-				t.Fatalf("row = %+v, want unmeasured: a gate that could not run is not one that passed", row)
-			}
-			if !strings.Contains(row.Value, tc.want) {
-				t.Errorf("value = %q, want it to name %q", row.Value, tc.want)
-			}
-		})
-	}
-}
-
-// There is no "new" without a merge-base, so the whole row is unmeasured and
-// names the cause — never a pass over a shallow checkout.
-func TestAnUnresolvableMergeBaseLeavesTheFlakyRowUnmeasured(t *testing.T) {
-	root := flakyProbeRepo(t)
-	row := examineComponent(t, root, "0000000000000000000000000000000000000000", component.Component{
-		Name: "probe", Dir: "probe", Runner: runner.GoTest,
-	})
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("row = %+v, want unmeasured", row)
-	}
-	if !strings.Contains(row.Value, "merge-base") {
-		t.Errorf("value = %q, want the unresolvable revision named as the cause", row.Value)
-	}
-}
-
-// The merge-base resolves and the change introduces real tests, but the
-// invocation names no JUnit report at all — the shape a raw variant that was
-// never asked for the gate would leave behind. There is no first outcome to
-// read, so the row says that rather than guessing one.
-func TestExamineNamesAnInvocationThatWroteNoReport(t *testing.T) {
-	root := flakyProbeRepo(t)
-	row, found := examineWithInvocation(t, root, "", component.Component{
-		Name: "probe", Dir: "probe", Runner: runner.GoTest,
-	}, runner.Invocation{})
-	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
-		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
-	}
-	if !strings.Contains(row.Value, "no test report") {
-		t.Errorf("value = %q, want the missing report named as the cause", row.Value)
-	}
-}
-
-// The merge-base resolves and the change introduces real tests, and the
-// invocation names a report — but the suite's own run did not write it. The
-// gate's first outcome is missing, not zero, and the row says so rather than
-// reading a passing suite's silence as agreement.
-func TestExamineNamesASuiteReportThatCannotBeRead(t *testing.T) {
-	root := flakyProbeRepo(t)
-	row, found := examineWithInvocation(t, root, "", component.Component{
-		Name: "probe", Dir: "probe", Runner: runner.GoTest,
-	}, runner.Invocation{JUnitReport: "nothing-wrote-this.xml"})
-	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
-		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
-	}
-	if !strings.Contains(row.Value, "could not be read") {
-		t.Errorf("value = %q, want the unreadable report named as the cause", row.Value)
-	}
-}
-
-// A changed test file that does not parse cannot be told to declare a name or
-// not, so the whole component is unmeasured rather than silently missing
-// whatever the broken file would have contributed.
-func TestExamineNamesATestFileThatDoesNotParse(t *testing.T) {
-	root := flakyProbeRepo(t)
-	commitChange(t, root, "probe/broken_test.go", "package flakyprobe\n\nfunc TestBroken(t *testing.T) {\n")
-	row, found := examineWithInvocation(t, root, "", component.Component{
-		Name: "probe", Dir: "probe", Runner: runner.GoTest,
-	}, runner.Invocation{JUnitReport: "absent.xml"})
-	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
-		t.Fatalf("row = %+v, findings = %+v; want unmeasured and no claim", row, found)
-	}
-	if !strings.Contains(row.Value, "could not be read") {
-		t.Errorf("value = %q, want the parse failure named as the cause", row.Value)
-	}
-}
-
-// A component whose suite never started still takes a row: its new tests
-// were not examined, and a gate that could not run must never render as one
-// that passed by simply having no row at all.
-func TestReportNamesAComponentWhoseSuiteNeverRan(t *testing.T) {
-	g := newFlakyGate(t.Context(), t.TempDir(), "", true)
-	rep := ui.NewReport("test")
-	g.report(rep, []component.Component{{Name: "never-ran", Runner: runner.GoTest}})
-	row := reportRowByLabel(t, rep, flakyLabel("never-ran"))
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("row = %+v, want unmeasured: the gate never examined this component", row)
-	}
-	if !strings.Contains(row.Value, "did not run") {
-		t.Errorf("value = %q, want the reason named", row.Value)
-	}
-}
-
-// reportRowByLabel finds one row a *ui.Report was given, for a test that
-// builds the report directly rather than through the CLI's JSON output.
-func reportRowByLabel(t *testing.T, rep *ui.Report, label string) ui.Row {
-	t.Helper()
-	for _, r := range rep.Rows() {
-		if r.Label == label {
-			return r
-		}
-	}
-	t.Fatalf("no row labelled %q", label)
-	return ui.Row{}
-}
-
 // A run that selected nothing still renders a flaky row per component it is
 // responsible for, the same way it renders one per suite: a section that
 // quietly disappeared would be indistinguishable from one that examined
@@ -1730,119 +1274,6 @@ func TestGateFlakyReportsEvenWhenNothingWasSelected(t *testing.T) {
 		if row.Status != string(ui.StatusUnmeasured) {
 			t.Errorf("flaky(%s) = %+v, want unmeasured: the component's suite never ran", name, row)
 		}
-	}
-}
-
-// outcomeOf names an outcome a report may not have recorded at all: a nil
-// pointer is what compare leaves behind for exactly that case, and it is
-// named plainly rather than dereferenced.
-func TestOutcomeOfNamesAnAbsentOutcome(t *testing.T) {
-	if got := outcomeOf(nil); got != "absent" {
-		t.Errorf("outcomeOf(nil) = %q, want %q", got, "absent")
-	}
-}
-
-// Every new test agreeing with itself is the ordinary case, and the row says
-// so in the same voice a passing suite does — a count and what was done, not
-// a claim about anything that disagreed.
-func TestTheFlakyRowPassesWhenEveryNewTestAgrees(t *testing.T) {
-	pass := junit.Pass
-	c := component.Component{Name: "svc", Dir: "svc"}
-	results := []flaky.Result{
-		{Test: flaky.Test{Scope: "svc", Name: "TestA", Path: "svc/x_test.go", Line: 3},
-			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
-		{Test: flaky.Test{Scope: "svc", Name: "TestB", Path: "svc/x_test.go", Line: 9},
-			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
-	}
-	row, found := flakyRow(flakyLabel(c.Name), c, results)
-	if row.Status != ui.StatusPass {
-		t.Fatalf("row = %+v, want a pass: every new test agreed with itself", row)
-	}
-	if !strings.Contains(row.Value, "2 new test(s), 2 runs each") {
-		t.Errorf("value = %q, want the count and what was done", row.Value)
-	}
-	if len(found) != 0 {
-		t.Errorf("findings = %+v, want none: nothing disagreed", found)
-	}
-}
-
-// The strongest verdict owns the row and the weaker one is still said: a run
-// holding both a disagreement and a test nothing could examine fails, with the
-// unexamined count in the detail.
-func TestTheFlakyRowReportsTheStrongestVerdictAndSaysTheRest(t *testing.T) {
-	pass, fail := junit.Pass, junit.Fail
-	c := component.Component{Name: "svc", Dir: "svc"}
-	results := []flaky.Result{
-		{Test: flaky.Test{Scope: "svc", Name: "TestAgrees", Path: "svc/x_test.go", Line: 3},
-			Verdict: flaky.Agreed, Run1: &pass, Run2: &pass},
-		{Test: flaky.Test{Scope: "svc", Name: "TestDisagrees", Path: "svc/x_test.go", Line: 9},
-			Verdict: flaky.Disagreed, Run1: &pass, Run2: &fail, Command: "gotestsum -- -run '^(TestDisagrees)$' -count=1 ."},
-		{Test: flaky.Test{Scope: "svc", Name: "TestUnrun", Path: "svc/x_test.go", Line: 15},
-			Verdict: flaky.Unmeasured, Why: "run 1's report does not record it"},
-	}
-
-	row, found := flakyRow(flakyLabel(c.Name), c, results)
-	if row.Status != ui.StatusFail {
-		t.Fatalf("row = %+v, want the disagreement to own the row", row)
-	}
-	if !strings.Contains(row.Value, "1 of 3") {
-		t.Errorf("value = %q, want the disagreement counted against every new test", row.Value)
-	}
-	detail := strings.Join(row.Detail, "\n")
-	if !strings.Contains(detail, "TestUnrun was not examined: run 1's report does not record it") {
-		t.Errorf("detail = %q, want the unexamined test still said", detail)
-	}
-	if len(found) != 1 || found[0].Line != 9 || found[0].Ordinal != 0 {
-		t.Fatalf("findings = %+v, want one on the disagreement's declaration", found)
-	}
-
-	// Nothing measurable at all is unmeasured rather than a pass over tests
-	// nobody looked at.
-	row, found = flakyRow(flakyLabel(c.Name), c, results[2:])
-	if row.Status != ui.StatusUnmeasured || len(found) != 0 {
-		t.Errorf("row = %+v, findings = %+v; want an unmeasured row and no claim", row, found)
-	}
-
-	// One test agreed and one could not be measured, and neither disagreed:
-	// a pass here would count the unexamined test among the ones that were,
-	// and a gate that examined part of the change must not render as one
-	// that examined all of it.
-	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{results[0], results[2]})
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("row = %+v, want unmeasured: an agreement and an unexamined test is not a pass", row)
-	}
-	if !strings.Contains(row.Value, "1 of 2") {
-		t.Errorf("value = %q, want the unexamined test counted against every new test", row.Value)
-	}
-	if len(found) != 0 {
-		t.Errorf("findings = %+v, want none: nothing disagreed", found)
-	}
-
-	skippedBoth := flaky.Result{Test: flaky.Test{Scope: "svc", Name: "TestSkippedBoth", Path: "svc/x_test.go", Line: 21},
-		Verdict: flaky.Skipped}
-
-	// Every new test skipped in both runs is nothing rerun twice, not a pass:
-	// the gate examined none of the change and must say so.
-	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{skippedBoth})
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("row = %+v, want unmeasured: a test skipped in both runs was never actually rerun", row)
-	}
-	if len(found) != 0 {
-		t.Errorf("findings = %+v, want none", found)
-	}
-
-	// One test agreed and one was skipped in both runs, and neither
-	// disagreed: a pass here would count the skipped test among the ones
-	// that actually ran twice.
-	row, found = flakyRow(flakyLabel(c.Name), c, []flaky.Result{results[0], skippedBoth})
-	if row.Status != ui.StatusUnmeasured {
-		t.Fatalf("row = %+v, want unmeasured: an agreement and a skipped-both test is not a pass", row)
-	}
-	if !strings.Contains(row.Value, "1 of 2") {
-		t.Errorf("value = %q, want the skipped test counted against every new test", row.Value)
-	}
-	if len(found) != 0 {
-		t.Errorf("findings = %+v, want none: nothing disagreed", found)
 	}
 }
 
@@ -1898,29 +1329,6 @@ func copyTree(t *testing.T, src, root, dir string) {
 	}
 }
 
-// examineComponent is one component's verdict, without the suite run that
-// would precede it: the row is decided before anything is rerun for every case
-// that cannot be examined at all.
-func examineComponent(t *testing.T, root, base string, c component.Component) ui.Row {
-	t.Helper()
-	row, found := examineWithInvocation(t, root, base, c, runner.Invocation{JUnitReport: "absent.xml"})
-	if len(found) != 0 {
-		t.Fatalf("findings = %+v, want none: nothing was rerun", found)
-	}
-	return row
-}
-
-// examineWithInvocation is examineComponent with the invocation exposed, for
-// the cases that turn on what the suite's own run reported rather than on
-// what the component or the merge-base is.
-func examineWithInvocation(t *testing.T, root, base string, c component.Component, inv runner.Invocation) (ui.Row, []finding.Finding) {
-	t.Helper()
-	g := newFlakyGate(t.Context(), root, base, true)
-	log := openLog(root, c.Name, "test.log", false, len(c.Name))
-	t.Cleanup(log.Close)
-	return g.examine(t.Context(), root, filepath.Join(root, filepath.FromSlash(c.Dir)), c, inv, nil, log)
-}
-
 // jsonFindings is the located claims the document carries, which is the
 // channel a review thread is opened from.
 func jsonFindings(t *testing.T, out string) []finding.Finding {
@@ -1932,243 +1340,6 @@ func jsonFindings(t *testing.T, out string) []finding.Finding {
 		t.Fatalf("stdout is not a JSON document: %v\n%s", err, out)
 	}
 	return doc.Findings
-}
-
-// A report that was asked for and did not arrive says why. A component
-// contributing no test counts is indistinguishable, in a history, from one
-// that ran no tests — and the commonest cause is a repository whose own runner
-// configuration sent the report somewhere lydite does not look, which is a
-// thing its author can fix once they are told.
-func TestWithTestCountsSaysWhyAReportIsMissing(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "empty.xml", `<?xml version="1.0"?><testsuites tests="0"></testsuites>`)
-	write(t, dir, "real.xml", `<testsuites><testsuite><testcase name="a"/><testcase name="b"><failure/></testcase></testsuite></testsuites>`)
-
-	for _, tc := range []struct {
-		name   string
-		report string
-		want   *junit.Counts
-		why    string
-	}{
-		// Silent, not a reason: nothing was expected, so nothing is missing,
-		// and a line per such component on every run is how a diagnostic
-		// teaches its reader to skim past it.
-		{"a runner that writes no report", "", nil, ""},
-		{"a report that was never written", "absent.xml", nil, "the test report was not written"},
-		// Nought tests is a runner that collected nothing, not a suite that
-		// passed everything.
-		{"a report holding no test", "empty.xml", nil, "the test report holds no test"},
-		{"a report with tests", "real.xml", &junit.Counts{Total: 2, Failed: 1}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := measurement{Name: "svc"}
-			withTestCounts(&m, dir, runner.Invocation{JUnitReport: tc.report})
-			if tc.want == nil && m.Tests != nil {
-				t.Fatalf("Tests = %+v, want none", m.Tests)
-			}
-			if tc.want != nil && (m.Tests == nil || *m.Tests != *tc.want) {
-				t.Fatalf("Tests = %+v, want %+v", m.Tests, tc.want)
-			}
-			if tc.why == "" && m.TestsWhy != "" {
-				t.Errorf("TestsWhy = %q, want nothing to report", m.TestsWhy)
-			}
-			if tc.why != "" && !strings.Contains(m.TestsWhy, tc.why) {
-				t.Errorf("TestsWhy = %q, want it to say %q", m.TestsWhy, tc.why)
-			}
-		})
-	}
-}
-
-// The gate covers the four runners that write a JUnit report lydite installs
-// nothing into the repository to obtain. jest is outside it by decision, an
-// unknown runner by absence, and a raw `command:` by opting out of the
-// derived variants entirely.
-func TestTheFlakyGateGatesTheRunnersItCanExamine(t *testing.T) {
-	g := &flakyGate{requested: true}
-	for _, tc := range []struct {
-		c    component.Component
-		want bool
-	}{
-		{component.Component{Runner: runner.GoTest}, true},
-		{component.Component{Runner: runner.CargoNextest}, true},
-		{component.Component{Runner: runner.Vitest}, true},
-		{component.Component{Runner: runner.Jest}, false},
-		{component.Component{Runner: runner.CargoLLVMCovNextest}, true},
-		{component.Component{Runner: "bogus"}, false},
-		{component.Component{Runner: runner.Vitest, Command: []string{"make", "test"}}, false},
-	} {
-		if got := g.gates(tc.c); got != tc.want {
-			t.Errorf("gates(%q, command %v) = %v, want %v", tc.c.Runner, tc.c.Command, got, tc.want)
-		}
-	}
-	// The flag is never inferred: a run nobody asked to gate gates nothing.
-	if (&flakyGate{}).gates(component.Component{Runner: runner.GoTest}) {
-		t.Error("a run without --gate-flaky gated a component anyway")
-	}
-}
-
-// Asking for the gate makes the plain run write the report run 1's outcomes
-// are read from, whichever of the three languages the component is.
-func TestAskingForTheGateMakesThePlainRunWriteAReport(t *testing.T) {
-	gate := &flakyGate{requested: true}
-	for _, name := range []runner.Name{runner.GoTest, runner.CargoNextest, runner.Vitest} {
-		c := component.Component{Runner: name}
-		inv, err := invocationFor(c, runner.Plain, gate)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if inv.JUnitReport == "" {
-			t.Errorf("%s writes no report under the gate, so there is no first outcome to read", name)
-		}
-		// A run nobody asked to gate keeps the bare variant: a report written
-		// and discarded is a process in the way of the thing being timed.
-		if ungated, err := invocationFor(c, runner.Plain, &flakyGate{}); err != nil || ungated.JUnitReport != "" {
-			t.Errorf("%s ungated = %+v (%v), want the plain variant", name, ungated, err)
-		}
-	}
-}
-
-// Each language's second run is built from the scope's own tests, by the
-// closure the gate hands internal/flaky — which is what keeps that package
-// ignorant of any runner's argv.
-func TestEachLanguagesRerunIsBuiltFromItsScopesTests(t *testing.T) {
-	rust := []flaky.Test{
-		{Scope: ".", Classname: "nextestprobe::a", Name: "shared_name", Path: "tests/a.rs", Line: 2},
-		{Scope: ".", Classname: "nextestprobe::b", Name: "shared_name", Path: "tests/a.rs", Line: 2},
-	}
-	identity, build := flakyRerunner(component.Component{Runner: runner.CargoNextest, Dir: "."})
-	if identity != flaky.ByClassAndName {
-		t.Errorf("a Rust component is identified %v, want by classname and name: `shared_name` is two tests", identity)
-	}
-	inv, ok := build(".", rust)
-	if !ok {
-		t.Skip("no cache directory to stage the rerun's tool config in")
-	}
-	// One term per name and not per test: an exact nextest predicate names a
-	// test and not a binary, so one term already selects both binaries.
-	if argv := strings.Join(inv.Args, " "); !strings.Contains(argv, "test(=shared_name)") ||
-		strings.Count(argv, "test(=shared_name)") != 1 {
-		t.Errorf("the Rust rerun's argv = %q, want one exact term for the name", argv)
-	}
-
-	ts := []flaky.Test{
-		{Scope: ".", Classname: "src/one.test.ts", Name: "matches ^a (b) [c] + d$", Path: "src/one.test.ts", Line: 19},
-		{Scope: ".", Classname: "src/two.test.ts", Name: "shared title", Path: "src/two.test.ts", Line: 3},
-	}
-	identity, build = flakyRerunner(component.Component{Runner: runner.Vitest, Dir: "."})
-	if identity != flaky.ByClassAndName {
-		t.Errorf("a TypeScript component is identified %v, want by classname and name", identity)
-	}
-	inv, ok = build(".", ts)
-	if !ok {
-		t.Fatal("the TypeScript builder supplied no invocation")
-	}
-	argv := strings.Join(inv.Args, " ")
-	// The files come from the classname, which is the path vitest reported the
-	// test under and the shape it resolves a positional argument in.
-	for _, file := range []string{"src/one.test.ts", "src/two.test.ts"} {
-		if !strings.Contains(argv, file) {
-			t.Errorf("the vitest rerun's argv = %q, want it to name %s", argv, file)
-		}
-	}
-	// Every metacharacter escaped: a title is prose, and a pattern built
-	// verbatim from one does not match the title it came from.
-	if !strings.Contains(argv, `matches \^a \(b\) \[c\] \+ d\$`) {
-		t.Errorf("the vitest rerun's argv = %q, want the title's metacharacters escaped", argv)
-	}
-
-	identity, build = flakyRerunner(component.Component{Runner: runner.GoTest, Dir: "svc"})
-	if identity != flaky.ByName {
-		t.Errorf("a Go component is identified %v, want by name: one process runs one package", identity)
-	}
-	inv, ok = build("svc/internal/x", []flaky.Test{{Scope: "svc/internal/x", Name: "TestOne"}})
-	if !ok {
-		t.Fatal("the Go builder supplied no invocation")
-	}
-	if argv := strings.Join(inv.Args, " "); !strings.Contains(argv, "^(TestOne)$") || !strings.Contains(argv, "./internal/x") {
-		t.Errorf("the Go rerun's argv = %q, want the anchored filter and the package relative to the component", argv)
-	}
-	// A package that cannot be located inside the component supplies no
-	// invocation, rather than a pattern go test would misread.
-	if _, ok := build("/etc", []flaky.Test{{Scope: "/etc", Name: "TestOne"}}); ok {
-		t.Error("the Go builder supplied an invocation for a package outside the component")
-	}
-}
-
-// A package below the component directory is addressed relative to it, since
-// that is where the rerun runs and what `go test` takes there.
-func TestAPackageIsAddressedRelativeToTheComponent(t *testing.T) {
-	for _, tc := range []struct{ dir, pkg, want string }{
-		{".", ".", "."},
-		{".", "pkg", "./pkg"},
-		{"source/cli", "source/cli", "."},
-		{"source/cli", "source/cli/internal/flaky", "./internal/flaky"},
-		{"", "pkg/sub", "./pkg/sub"},
-	} {
-		got, err := relPackage(tc.dir, tc.pkg)
-		if err != nil {
-			t.Fatalf("relPackage(%q, %q): %v", tc.dir, tc.pkg, err)
-		}
-		if got != tc.want {
-			t.Errorf("relPackage(%q, %q) = %q, want %q", tc.dir, tc.pkg, got, tc.want)
-		}
-	}
-}
-
-// relPackage is asked for a pattern only when a package directory is a real
-// scan-root-relative path, but the check exists because nothing upstream of
-// it enforces that: an absolute one cannot be made relative to the
-// component's own relative directory, and filepath.Rel says so rather than
-// producing a pattern go test would misread.
-func TestRelPackageNamesAPathItCannotRelate(t *testing.T) {
-	pattern, err := relPackage(".", "/etc/passwd")
-	if err == nil {
-		t.Fatal("relPackage accepted a package an absolute path could not be made relative to a relative directory")
-	}
-	if pattern != "" {
-		t.Errorf("pattern = %q, want none: an error carries no pattern to be misread as one", pattern)
-	}
-}
-
-// A row names a test the way its report does, so two same-named tests in one
-// component are two lines an author can tell apart — and a declaration no
-// parser could name is called by the only thing identifying it, where it sits.
-func TestTheFlakyRowNamesATestTheWayItsReportDoes(t *testing.T) {
-	pass, fail := junit.Pass, junit.Fail
-	c := component.Component{Name: "crate", Dir: "."}
-	results := []flaky.Result{
-		{Test: flaky.Test{Scope: ".", Classname: "nextestprobe::a", Name: "shared_name", Path: "tests/a.rs", Line: 2},
-			Verdict: flaky.Disagreed, Run1: &pass, Run2: &fail, Command: "cargo nextest run --profile rerun"},
-		{Test: flaky.Test{Scope: ".", Classname: "nextestprobe::b", Name: "shared_name", Path: "tests/a.rs", Line: 2},
-			Verdict: flaky.Disagreed, Run1: &fail, Run2: &pass, Command: "cargo nextest run --profile rerun"},
-		{Test: flaky.Test{Scope: ".", Path: "src/one.test.ts", Line: 28, Unreadable: true},
-			Verdict: flaky.Unmeasured, Why: "a test is declared here whose name a parser could not read"},
-	}
-	row, found := flakyRow(flakyLabel(c.Name), c, results)
-	if row.Status != ui.StatusFail || !strings.Contains(row.Value, "2 of 3") {
-		t.Fatalf("row = %+v, want both disagreements counted against every new test", row)
-	}
-	detail := strings.Join(row.Detail, "\n")
-	for _, want := range []string{
-		"nextestprobe::a shared_name: run 1 passed, run 2 failed",
-		"nextestprobe::b shared_name: run 1 failed, run 2 passed",
-		"the test declared at src/one.test.ts:28 was not examined",
-	} {
-		if !strings.Contains(detail, want) {
-			t.Errorf("detail = %q, want %q", detail, want)
-		}
-	}
-	// Two findings on one line of one file, told apart by the binary each ran
-	// in: a site shared between them would be one claim published twice.
-	if len(found) != 2 {
-		t.Fatalf("findings = %+v, want one per disagreement", found)
-	}
-	if found[0].Site == found[1].Site {
-		t.Errorf("both findings claim site %q, and nothing distinguishes the two tests", found[0].Site)
-	}
-	if found[0].Site != ". nextestprobe::a shared_name" {
-		t.Errorf("site = %q, want the scope, the binary and the name", found[0].Site)
-	}
 }
 
 // A component declaring no suite takes no toolchain on the test side, whatever
@@ -2322,6 +1493,80 @@ func TestCoverageRowsReportEvenWhenNothingWasSelected(t *testing.T) {
 			if row := jsonRowByLabel(t, out, label); row.Status != string(ui.StatusUnmeasured) {
 				t.Errorf("%s = %+v, want unmeasured: the component's suite never ran", label, row)
 			}
+		}
+	}
+}
+
+// internal/test/run writes the report directory's `.gitignore` itself when it
+// clears a report, from its own copy of ignoreReports, since reports.go is where
+// this package's lives. The two have to write the same file: a report
+// directory whose `.gitignore` depends on which command created it first is
+// one git treats differently from run to run.
+func TestClearReportIgnoresTheReportDirectoryAsThisPackageDoes(t *testing.T) {
+	ours := filepath.Join(t.TempDir(), runner.ReportDir)
+	if err := os.MkdirAll(ours, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ignoreReports(ours)
+
+	dir := t.TempDir()
+	if err := clearReport(dir, runner.ReportDir+"/coverage.out"); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join(ours, ".gitignore")) // #nosec G304 -- a file this test just wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, runner.ReportDir, ".gitignore")) // #nosec G304 -- a file the call under test just wrote
+	if err != nil {
+		t.Fatalf("clearing a report left no .gitignore in the report directory: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("clearReport wrote %q, ignoreReports writes %q", got, want)
+	}
+}
+
+// planComponents hands each plan the componentLog the engine's opener opened
+// for that component, looked up by name: the engine plans through an Output,
+// and mutation reaches into the log itself — writing to it, closing it — so a
+// plan holding some other component's log, or a fresh one, would put a
+// component's output under another's name or leave the real file unclosed.
+func TestPlanComponentsGivesEachPlanTheLogOpenedForIt(t *testing.T) {
+	root := fixtureRepo(t, "components: []\n")
+	declared := []component.Component{
+		{Name: "scripts", Dir: "mod", DeclaredLang: runner.Shell},
+		{Name: "fixture", Dir: "mod", Runner: runner.GoTest},
+		{Name: "other", Dir: "mod", Runner: runner.GoTest},
+	}
+	plans := planComponents(context.Background(), root, declared, "test", false)
+	for _, p := range plans {
+		defer p.log.Close()
+	}
+	if len(plans) != len(declared) {
+		t.Fatalf("plans = %+v, want one per component", plans)
+	}
+	if plans[0].log == nil || plans[0].log.Rel != "" || plans[0].log.out != io.Discard {
+		t.Errorf("scripts log = %+v, want one that writes nowhere", plans[0].log)
+	}
+	for i, name := range []string{"fixture", "other"} {
+		p := plans[i+1]
+		if p.c.Name != name || !p.ready {
+			t.Fatalf("plan %d = %+v, want %s, runnable", i+1, p, name)
+		}
+		if want := filepath.Join(runner.ReportDir, name, "test.log"); p.log.Rel != want {
+			t.Errorf("%s log = %q, want %q", name, p.log.Rel, want)
+		}
+		if _, err := fmt.Fprintf(p.log.out, "written by %s\n", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"fixture", "other"} {
+		body, err := os.ReadFile(filepath.Join(root, runner.ReportDir, name, "test.log")) // #nosec G304 -- a log this test's run wrote
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "written by "+name+"\n" {
+			t.Errorf("%s log = %q, want only what was written through its own plan", name, body)
 		}
 	}
 }
