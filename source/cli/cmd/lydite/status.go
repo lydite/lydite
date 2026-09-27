@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -71,21 +72,25 @@ func resolveTarget(what, eventPath string) (publishTarget, error) {
 // It asks for no credential, because a run that renders a status document for
 // another step to post holds none — the whole point of computing a verdict in
 // a job with no token. What names the pull request is the event either way.
+//
+// A thin wrapper over forge.LoadPullRequestRef, mapping its typed errors back
+// onto this command's own wording.
 func resolvePullRequest(what, eventPath string) (pullRequestRef, error) {
 	if eventPath == "" {
 		eventPath = os.Getenv("GITHUB_EVENT_PATH")
 	}
-	if eventPath == "" {
-		return pullRequestRef{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
-	}
-	event, err := forge.LoadPullRequestEvent(eventPath)
+	ref, err := forge.LoadPullRequestRef(eventPath)
 	if err != nil {
+		if errors.Is(err, forge.ErrNoEvent) {
+			return pullRequestRef{}, fmt.Errorf("%s needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout", what)
+		}
+		var notAPullRequest *forge.NotAPullRequestError
+		if errors.As(err, &notAPullRequest) {
+			return pullRequestRef{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", notAPullRequest.Path, what)
+		}
 		return pullRequestRef{}, err
 	}
-	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
-		return pullRequestRef{}, fmt.Errorf("the event at %s names no pull request: %s belongs on a pull_request trigger", eventPath, what)
-	}
-	return pullRequestRef{SHA: event.PullRequest.Head.SHA, Number: event.Number}, nil
+	return pullRequestRef{SHA: ref.SHA, Number: ref.Number}, nil
 }
 
 // stateFor maps a run's verdict onto a commit status state.
