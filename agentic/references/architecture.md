@@ -141,6 +141,57 @@ This is why trust and the repository are resolved before the comment: reading th
 both, and refusing a mismatched payload before any request is made is cheaper and safer than
 fetching first and refusing to act on the result.
 
+## The scan flow: components walked inside a stage, not fanned out by the engine
+
+`scan` is the second command built on Flow, and the first whose whole job is to visit every
+declared component rather than one pull request. `internal/flow.Run` still executes one declared
+list of stages, each called once — it has no notion of running a stage N times, once per
+component an earlier stage produced — so `scanflow.New` declares eleven stages, and a stage that
+must act on every component (`plan-components`, `run-checks`, `gate-licences`, and
+`provision-toolchains`, `warn-unscanned`) walks `[]component.Component` or the `[]Planned` an
+earlier stage produced in its own body, in declaration order:
+
+`load-config` → `load-components` → `resolve-diff-base` → `read-changed-lines` →
+`provision-toolchains` → `warn-unscanned` → `plan-components` → `run-checks` → `gate-licences` →
+`semgrep` → `secrets`.
+
+`run-checks` and `gate-licences` each return a slice the same length, and at the same index, as
+the `[]Planned` `plan-components` produced — a plan entry that is not `Scan` reads back as the
+zero value in each, so one component's checks or licence verdict can never be read at another's
+index. See [ADR 0067](../../docs/adr/0067-scan-runs-as-eleven-single-responsibility-stages-walking-components-in-their-own-body.md)
+for why the walk sits inside a stage rather than being one stage per component or per language,
+and why `gate-licences` is its own stage rather than folded into `run-checks`.
+
+**`semgrep` and `secrets` condition on `load-config`'s own output with no preceding guard,
+unlike the ordering subtlety above.** Both are declared `When(flow.FromStage(StageLoadConfig,
+"SemgrepEnabled"))` and `When(...,"SecretsEnabled")` with nothing declared ahead of that
+condition — safe here for a reason the clearance flow's `decide`/`fingerprint` pair does not share:
+`load-config` is declared first, under no condition of its own and the default `FailFlow`, so by
+the time either later condition is evaluated `load-config` has already either produced the output
+being read or its own `FailFlow` error has already stopped the run. The ordering subtlety applies
+to a condition reading a stage that itself runs conditionally; `load-config` never does, so there
+is no earlier condition to declare first.
+
+**Three inputs are declared as interfaces in `scanstages` and adapted by the CLI**, so no stage
+below it imports `cobra` or reads the process environment: `Toolchains.Ensure` provisions each
+scan unit's language toolchain (`cmd/lydite`'s `scanToolchains` wraps the command's own
+toolchain provisioning); `Environment.Compose`/`.Declared` composes a component's checks
+environment and reports what its declaration alone contributed (`scanEnvironment` wraps the
+command's `childEnv`/`splitPath`); `Diagnostics io.Writer` is where a stage writes its own
+warnings as they arise rather than returning them — see
+[ADR 0068](../../docs/adr/0068-a-stages-diagnostics-are-written-as-they-arise-not-returned.md) —
+and the CLI supplies `cmd.ErrOrStderr()`.
+
+**The CLI renders by walking the same plan the stages walked.** `recordComponents`
+(`cmd/lydite/scan.go`) reads `plan-components`'s `[]Planned` once and, per entry in declaration
+order, reads `run-checks`'s and `gate-licences`'s output at that same index — a non-`Scan` entry's
+unscanned, off-by-default or duplicate row; a `Scan` entry's check rows, findings and licence
+verdict, in that order. `semgrep` and `secrets` are read afterwards, each only when
+`!r.Skipped(stage)`: a gate a run's own configuration switched off contributes nothing, because a
+zero result in its place would render as a check that ran and found nothing — the same rule
+[the gate-that-could-not-run rule](../../agentic/rules/a-gate-that-could-not-run-never-renders-as-one-that-passed.md)
+states for a gate that could not run at all.
+
 ## Package layout
 
 - **`internal/flow`** — the engine: `Builder`, `Binding`, `Policy`, `Flow`, `Result`. Knows
