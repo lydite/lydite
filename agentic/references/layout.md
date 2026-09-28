@@ -23,6 +23,9 @@ source/cli/internal/flows/mutation/ # lydite mutation's, lydite mutation merge's
                                   #   record's flow declarations (see architecture.md)
 source/cli/internal/shard/       # the shard domain value: one report directory's document for
                                   #   one command, or why it could not be read (see architecture.md)
+source/cli/internal/stages/threads/ # find, list, plan, write and apply a pull request's review
+                                  #   threads (see architecture.md)
+source/cli/internal/flows/threads/  # declares the threads flow (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
 source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own

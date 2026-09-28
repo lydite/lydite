@@ -15,6 +15,7 @@ import (
 
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/threads"
+	"lydite/lydite/internal/trust"
 	"lydite/lydite/internal/ui"
 )
 
@@ -585,5 +586,195 @@ func TestEveryFileThreadThatLandedIsOneFewerClaimLost(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "1 located finding(s) reached no surface") {
 		t.Fatalf("the count ignores the thread that landed: %v", err)
+	}
+}
+
+// threadsFlowRun runs the command against eventPath exactly as given, so a run
+// with no event at all is reachable, which runThreadsCmd never makes.
+func threadsFlowRun(t *testing.T, reports []string, opsPath, eventPath string, apply bool) (string, string, error) {
+	t.Helper()
+	cmd := &cobra.Command{}
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetContext(context.Background())
+	err := runThreads(cmd, reports, opsPath, eventPath, apply)
+	return out.String(), errOut.String(), err
+}
+
+// threadsFlowServer stands the platform up behind handler, in the environment
+// a run on a pull request is given.
+func threadsFlowServer(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv("GITHUB_API_URL", server.URL)
+	t.Setenv("GITHUB_TOKEN", "token")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_REPOSITORY", "lydite/lydite")
+}
+
+// threadsFlowEvent writes payload as an event and names where.
+func threadsFlowEvent(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A run that has to write refuses without a credential, naming the command
+// and where a workflow grants one, rather than skipping and reading as green.
+func TestThreadsWithoutATokenNamesWhereOneIsGranted(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t, located("a.ts", 3))},
+		filepath.Join(t.TempDir(), "threads.json"), false)
+	want := "threads needs GITHUB_TOKEN (the workflow's `env:` block, with `statuses: write`)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v; want %q", err, want)
+	}
+	if out != "" {
+		t.Fatalf("a run that stopped before applying anything wrote a report:\n%s", out)
+	}
+}
+
+// The head the threads are anchored to is read from the event, so a run with
+// none is refused, naming the variable that carries it.
+func TestThreadsWithoutAnEventNamesTheVariableThatCarriesOne(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	t.Setenv("GITHUB_EVENT_PATH", "")
+
+	_, _, err := threadsFlowRun(t, []string{reportsWith(t)}, filepath.Join(t.TempDir(), "threads.json"), "", false)
+	want := "threads needs GITHUB_EVENT_PATH: the head revision is read from the event, not from the checkout"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v; want %q", err, want)
+	}
+}
+
+// An event from some other trigger names no pull request to put threads on,
+// and the refusal says which trigger the command belongs on.
+func TestThreadsOnAnEventNamingNoPullRequestNamesItsTrigger(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	event := threadsFlowEvent(t, map[string]any{"ref": "refs/heads/main"})
+
+	_, _, err := threadsFlowRun(t, []string{reportsWith(t)}, filepath.Join(t.TempDir(), "threads.json"), event, false)
+	want := "the event at " + event + " names no pull request: threads belongs on a pull_request trigger"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v; want %q", err, want)
+	}
+}
+
+// A run that cannot say which repository it acts on is refused in trust's own
+// words: the repository is decided there, once, and nowhere else.
+func TestThreadsWithoutARepositoryIsRefusedByTrust(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "")
+	_, want := trust.FromEnvironment()
+	if want == nil {
+		t.Fatal("trust accepted an environment with no repository")
+	}
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t)}, filepath.Join(t.TempDir(), "threads.json"), false)
+	if err == nil || err.Error() != want.Error() {
+		t.Fatalf("err = %v; want trust's %q", err, want)
+	}
+	if out != "" {
+		t.Fatalf("a run that stopped before applying anything wrote a report:\n%s", out)
+	}
+}
+
+// A delete the platform refused was answered on the pull request, so it is
+// reported even when a later delete then fails the run: the answer is there
+// whether or not the run went on to finish.
+func TestAnAnswerMadeBeforeATakeDownFailedIsStillReported(t *testing.T) {
+	first, second := located("b.ts", 9), located("c.ts", 11)
+	existing := []map[string]any{
+		{"id": 101, "body": threads.Body(first), "path": "b.ts", "line": 9, "position": 1},
+		{"id": 201, "body": threads.Body(second), "path": "c.ts", "line": 11, "position": 1},
+	}
+	var deletes []string
+	threadsFlowServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			deletes = append(deletes, r.URL.Path)
+			if len(deletes) == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		case strings.HasSuffix(r.URL.Path, "/replies"):
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasSuffix(r.URL.Path, "/comments") && r.URL.Query().Get("page") == "1":
+			_ = json.NewEncoder(w).Encode(existing)
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	})
+
+	out, errOut, err := runThreadsCmd(t, []string{reportsWith(t)}, filepath.Join(t.TempDir(), "threads.json"), true)
+	if err == nil {
+		t.Fatal("a delete the platform failed outright must fail the run")
+	}
+	if len(deletes) != 2 {
+		t.Fatalf("expected two deletes, got %v", deletes)
+	}
+	answered := deletes[0][strings.LastIndex(deletes[0], "/")+1:]
+	if !strings.Contains(errOut, "comment "+answered+" was written by another identity") {
+		t.Fatalf("the answer made before the failure was not reported: %q", errOut)
+	}
+	if strings.Contains(out, "applied") {
+		t.Fatalf("a run that failed applying its plan reported it applied:\n%s", out)
+	}
+	if !strings.Contains(out, "plan") {
+		t.Fatalf("the plan the run acted on is not reported:\n%s", out)
+	}
+}
+
+// A run that stops before applying anything has no plan it acted on, so it
+// writes no report, and the warnings it raised on the way are still written.
+func TestAFailureBeforeTakeDownWritesNoReport(t *testing.T) {
+	threadsFlowServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	out, errOut, err := runThreadsCmd(t,
+		[]string{reportsWith(t, located("a.ts", 3)), filepath.Join(t.TempDir(), "gone")},
+		filepath.Join(t.TempDir(), "threads.json"), true)
+	if err == nil {
+		t.Fatal("a listing the platform refused must fail the run")
+	}
+	if out != "" {
+		t.Fatalf("a run that stopped before applying anything wrote a report:\n%s", out)
+	}
+	if !strings.Contains(errOut, "gone") {
+		t.Fatalf("the warning raised before the failure was not written: %q", errOut)
+	}
+}
+
+// The threads row names the repository the run is trusted for, so a reader
+// sees which repository's pull request the standing threads were read from.
+func TestTheThreadsRowNamesTheTrustedRepository(t *testing.T) {
+	forge := &fakeReviews{}
+	forge.start(t)
+	t.Setenv("GITHUB_REPOSITORY", "someone/elsewhere")
+
+	out, _, err := runThreadsCmd(t, []string{reportsWith(t)}, filepath.Join(t.TempDir(), "threads.json"), false)
+	if err != nil {
+		t.Fatalf("runThreads: %v", err)
+	}
+	if !strings.Contains(out, "0 standing on someone/elsewhere#7") {
+		t.Fatalf("the threads row does not name the trusted repository:\n%s", out)
 	}
 }

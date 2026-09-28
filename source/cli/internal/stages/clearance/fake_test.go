@@ -12,6 +12,7 @@ import (
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/forge"
+	"lydite/lydite/internal/threads"
 	"lydite/lydite/internal/toolchain"
 )
 
@@ -69,6 +70,31 @@ func (f *fakeRepository) PostStatus(ctx context.Context, s forge.Status) error {
 
 func (f *fakeRepository) CreateComment(_ context.Context, _ int, _ string) error {
 	f.t.Fatal("CreateComment: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) ReviewComments(_ context.Context, _ int) ([]threads.Comment, error) {
+	f.t.Fatal("ReviewComments: unexpected call")
+	return nil, nil
+}
+
+func (f *fakeRepository) CreateReview(_ context.Context, _ int, _ string, _ []threads.Create) error {
+	f.t.Fatal("CreateReview: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) CreateFileComment(_ context.Context, _ int, _ string, _ threads.Create) error {
+	f.t.Fatal("CreateFileComment: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) ReplyToReviewComment(_ context.Context, _ int, _ int64, _ string) error {
+	f.t.Fatal("ReplyToReviewComment: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) DeleteReviewComment(_ context.Context, _ int64) error {
+	f.t.Fatal("DeleteReviewComment: unexpected call")
 	return nil
 }
 

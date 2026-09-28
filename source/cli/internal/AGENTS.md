@@ -29,6 +29,7 @@ says why it is that way and what breaks if it changes.
 | `ui` | [`output-grammar.md`](../../../agentic/references/output-grammar.md), and [`surface.md`](../../../agentic/references/surface.md) for the comment |
 | `referral`, `clearance`, `forge`, `depdelta`, `apisurface`, `rustapisurface`, `tsapisurface`, `declaration`, `reviewdecision` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |
+| `stages/threads`, `flows/threads` | [`architecture.md`](../../../agentic/references/architecture.md) |
 
 A `*-pin/` directory is a tool pin, not a component: see
 [`tool-pins.md`](../../../agentic/references/tool-pins.md) before adding one.
