@@ -73,14 +73,32 @@ func readShards(rep *ui.Report, reports []string, command string, alongside func
 //
 // A shard whose document could not be read adds a failing row naming why, and
 // no findings, and is never handed to alongside — there is no report for
-// whatever else its directory holds to be read beside.
+// whatever else its directory holds to be read beside. Its directory can still
+// say something about the run that died there, and shardInputsNoting hands it
+// to a caller that asks.
 func shardInputs(rep *ui.Report, command string, shards []shardreport.Shard, alongside func(dir string, in *shardInput, row *ui.Row)) []shardInput {
+	return shardInputsNoting(rep, command, shards, alongside, nil)
+}
+
+// shardInputsNoting is shardInputs with a hook that says what else an unread
+// shard's directory holds.
+//
+// unread is handed the directory of each shard whose document could not be
+// read, and whatever it returns is appended to that shard's detail, after the
+// reason the document was not read. It adds detail and nothing else: the row
+// fails whatever the directory holds, because a shard with no report is a run
+// the fold cannot count, and nothing left beside it can make that less so.
+func shardInputsNoting(rep *ui.Report, command string, shards []shardreport.Shard, alongside func(dir string, in *shardInput, row *ui.Row), unread func(dir string) []string) []shardInput {
 	inputs := make([]shardInput, 0, len(shards))
 	for _, shard := range shards {
 		in := shardInput{dir: shard.Dir}
 		if !shard.Read {
+			detail := []string{shard.Err.Error()}
+			if unread != nil {
+				detail = append(detail, unread(shard.Dir)...)
+			}
 			rep.Add(ui.Row{Status: ui.StatusFail, Label: "read(" + shard.Dir + ")",
-				Value: "no " + command + " report", Detail: []string{shard.Err.Error()}})
+				Value: "no " + command + " report", Detail: detail})
 			inputs = append(inputs, in)
 			continue
 		}
