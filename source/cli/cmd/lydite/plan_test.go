@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/scheduler"
+	teststages "lydite/lydite/internal/stages/test"
 	"lydite/lydite/internal/ui"
 )
 
@@ -273,7 +275,7 @@ func TestComponentsOccupyingOneTreeAreOneShard(t *testing.T) {
 }
 
 // The planner groups by the predicate the scheduler serialises by, so the two
-// items have to carry the same fields: one that planItems fills and itemFor
+// items have to carry the same fields: one that the planner fills and itemFor
 // does not is a pair the matrix keeps together and the run then lets overlap,
 // and one the other way round is a pair split across jobs that nothing
 // serialises. Neither shows up in either command's own tests.
@@ -293,9 +295,9 @@ func TestPlanAndRunSeeTheSameConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	planned, err := planItems(root, file)
+	grouped, err := teststages.GroupShards(context.Background(), teststages.GroupShardsIn{Dir: root, File: file})
 	if err != nil {
-		t.Fatalf("planItems: %v", err)
+		t.Fatalf("GroupShards: %v", err)
 	}
 	var ran []scheduler.Item
 	for _, p := range planComponents(context.Background(), root, file.Components, "test", false) {
@@ -303,7 +305,15 @@ func TestPlanAndRunSeeTheSameConflicts(t *testing.T) {
 		ran = append(ran, itemFor(p))
 	}
 
-	a, b := scheduler.Conflicts(planned), scheduler.Conflicts(ran)
+	// Every conflict the planner found sits on the shard it binds, so the
+	// shards together hold all of them; sorted, because a shard lists its own
+	// in the order the scheduler returned them and the shards are in
+	// declaration order.
+	var planned []scheduler.Conflict
+	for _, s := range grouped.Shards {
+		planned = append(planned, s.Conflicts...)
+	}
+	a, b := sortedConflicts(planned), sortedConflicts(scheduler.Conflicts(ran))
 	if len(a) == 0 {
 		t.Fatal("the declaration produced no conflicts, so the comparison proves nothing")
 	}
@@ -330,13 +340,13 @@ func TestAComponentDeclaringNoSuiteIsInNoShard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := planItems(root, file)
+	grouped, err := teststages.GroupShards(context.Background(), teststages.GroupShardsIn{Dir: root, File: file})
 	if err != nil {
-		t.Fatalf("planItems: %v", err)
+		t.Fatalf("GroupShards: %v", err)
 	}
-	for _, it := range items {
-		if it.Name == "scripts" {
-			t.Errorf("items = %+v, want no item for a component declaring no suite", items)
+	for _, s := range grouped.Shards {
+		if slices.Contains(s.Components, "scripts") {
+			t.Errorf("shards = %+v, want no shard running a component declaring no suite", grouped.Shards)
 		}
 	}
 
@@ -364,4 +374,15 @@ func TestAComponentDeclaringNoSuiteIsInNoShard(t *testing.T) {
 	if !strings.Contains(strings.Join(row.Detail, "\n"), "scripts declares no suite") {
 		t.Errorf("plan detail = %q, want the unsharded component named", row.Detail)
 	}
+}
+
+// sortedConflicts renders each conflict as text, in sorted order, so two lists
+// holding the same conflicts compare equal whatever order each was built in.
+func sortedConflicts(conflicts []scheduler.Conflict) []string {
+	out := make([]string, 0, len(conflicts))
+	for _, c := range conflicts {
+		out = append(out, fmt.Sprint(c))
+	}
+	slices.Sort(out)
+	return out
 }

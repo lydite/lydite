@@ -6,9 +6,10 @@ saw: source/cli/cmd/lydite/fold.go, merge.go, mutation_merge.go
 `fold.go`'s `componentRowsNoting`/`componentRows` iterate every component in the declaration and
 report a problem ("<name> has no row in any shard's report") for one no shard mentions. They have
 no idea a component can legitimately take no row at all — a no-suite component (ADR 0056,
-`declaresNoSuite` in `test.go`) is deliberately placed in no shard by `plan.go`'s `planItems`, so
-it will never appear in any shard's report, and that absence is the plan working correctly rather
-than a dead shard.
+`declaresNoSuite` in `test.go`) is deliberately placed in no shard by `planItems` (unexported,
+`internal/stages/test/plan.go` as of the `test plan`/`test merge`-onto-Flow branch — previously
+`cmd/lydite/plan.go`), so it will never appear in any shard's report, and that absence is the
+plan working correctly rather than a dead shard.
 
 Every fold command that calls these helpers has to special-case `declaresNoSuite` itself, before
 handing the rest of the declaration to the shared helper — the helper does not and should not

@@ -10,6 +10,7 @@ import (
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
+	teststages "lydite/lydite/internal/stages/test"
 )
 
 // measurementsName is the file a run writes what it measured to, inside the
@@ -179,6 +180,32 @@ func readMeasurements(dir string) (measurementsDoc, error) {
 		return measurementsDoc{}, fmt.Errorf("%s: names no tree, so there is nothing it can be recorded against", path)
 	}
 	return doc, nil
+}
+
+// shardMeasurements is teststages.MeasurementsReader over the measurements
+// documents a matrix of `lydite test` shards wrote.
+//
+// Each is read by readMeasurements and its error returned unchanged, so the
+// text a shard's row shows is the text that code wrote. It keeps every document
+// it read, keyed by the directory it was read from: the fold composes from what
+// the reads returned, through the document's own fields and methods, which no
+// stage boundary carries — rather than reading a directory a second time.
+type shardMeasurements struct {
+	docs map[string]measurementsDoc
+}
+
+var _ teststages.MeasurementsReader = (*shardMeasurements)(nil)
+
+func (s *shardMeasurements) ReadMeasurements(dir string) error {
+	doc, err := readMeasurements(dir)
+	if err != nil {
+		return err
+	}
+	if s.docs == nil {
+		s.docs = map[string]measurementsDoc{}
+	}
+	s.docs[dir] = doc
+	return nil
 }
 
 // foldMeasurements merges the documents of a sharded run into one.

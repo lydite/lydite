@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ui"
@@ -907,5 +910,62 @@ func TestMergeGivesANoSuiteComponentNoCoverageRowsTheShardsDidNotTake(t *testing
 	}
 	if n := countRows(t, out, testLabel("scripts")); n != 1 {
 		t.Errorf("test(scripts) appears %d times, want exactly once", n)
+	}
+}
+
+// A declaration that will not parse fails the run with the loader's own
+// error, word for word — testMergeError unwraps the flow's framing of it
+// rather than reformatting it.
+func TestMergeFailsOnADeclarationThatWillNotLoad(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".lydite/components.yml", "components: [\n")
+	want := func() error { _, err := component.Load(root); return err }()
+	if want == nil {
+		t.Fatal("component.Load accepted a malformed declaration")
+	}
+	out, err := runMergeCmd(t, root, shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: "orphans", Value: "none in 0 source file(s)"},
+	}, nil))
+	if err == nil {
+		t.Fatalf("a malformed declaration reported a verdict:\n%s", out)
+	}
+	if err.Error() != want.Error() {
+		t.Errorf("error = %q\nwant    %q (the loader's own)", err.Error(), want.Error())
+	}
+}
+
+// A config file that will not parse fails the run with config.Load's own
+// error: the declaration alone is not enough to fold, since coverage rows
+// need the config's tolerances too.
+func TestMergeFailsOnAConfigThatWillNotLoad(t *testing.T) {
+	root := mergeRepo(t)
+	write(t, root, config.FileName, "licence: [\n")
+	want := func() error { _, err := config.Load(root); return err }()
+	if want == nil {
+		t.Fatal("config.Load accepted a malformed config")
+	}
+	out, err := runMergeCmd(t, root, shardDir(t, []ui.Row{
+		{Status: ui.StatusPass, Label: "orphans", Value: "none in 0 source file(s)"},
+	}, nil))
+	if err == nil {
+		t.Fatalf("a malformed config reported a verdict:\n%s", out)
+	}
+	if err.Error() != want.Error() {
+		t.Errorf("error = %q\nwant    %q (the loader's own)", err.Error(), want.Error())
+	}
+}
+
+// planError and testMergeError each unwrap a flow's own *flow.StageError back
+// to the stage's error, and pass anything else through unchanged — a run
+// failing for a reason that never reaches a stage (a cancelled context, a
+// malformed binding) still prints as itself rather than as the flow's own
+// wrapping.
+func TestTheFlowErrorUnwrapHelpersPassThroughAnythingThatIsNotAStageError(t *testing.T) {
+	plain := errors.New("boom")
+	if got := planError(plain); got != plain {
+		t.Errorf("planError(%v) = %v, want it unchanged", plain, got)
+	}
+	if got := testMergeError(plain); got != plain {
+		t.Errorf("testMergeError(%v) = %v, want it unchanged", plain, got)
 	}
 }

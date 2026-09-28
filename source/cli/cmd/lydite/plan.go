@@ -1,20 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/component"
-	"lydite/lydite/internal/compose"
-	"lydite/lydite/internal/scheduler"
+	"lydite/lydite/internal/flow"
+	testflow "lydite/lydite/internal/flows/test"
+	teststages "lydite/lydite/internal/stages/test"
 	"lydite/lydite/internal/ui"
 )
 
@@ -71,23 +71,8 @@ plan passes.
 The matrix goes to --out; stdout carries the report.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
-			file, err := component.Load(dir)
+			file, shards, err := planShards(cmd.Context(), dir)
 			if err != nil {
-				return err
-			}
-			// A matrix with no entries is a job that runs nothing, and every
-			// gate downstream of it goes green over an untested repository.
-			// The same refusal `lydite scan` makes, for the same reason.
-			if len(file.Components) == 0 {
-				return errors.New("no components declared in " + component.FileName +
-					"\n       there is nothing to shard, and a matrix with no entries runs no suite at all")
-			}
-			items, err := planItems(dir, file)
-			if err != nil {
-				return err
-			}
-			shards := shardsOf(file.Components, items)
-			if err := uniqueNames(shards); err != nil {
 				return err
 			}
 
@@ -103,7 +88,7 @@ The matrix goes to --out; stdout carries the report.`,
 			// is where that is cheapest to say.
 			rep.Add(orphanRow(cmd.Context(), dir, file))
 			for _, s := range shards {
-				rep.Add(s.row())
+				rep.Add(shardRow(s))
 			}
 			rep.Add(planRow(file, shards))
 			if err := writeMatrix(out, shards); err != nil {
@@ -130,23 +115,50 @@ The matrix goes to --out; stdout carries the report.`,
 	return cmd
 }
 
-// shard is one CI job's worth of components: the set that must run in one
-// process, and what makes it a set.
-type shard struct {
-	// Name is the members joined by "-", checked for collisions by
-	// uniqueNames.
-	Name string
-	// Components are its members, in declaration order.
-	Components []string
-	// Conflicts are the pairs inside it that the scheduler will serialise,
-	// which is why they are together at all.
-	Conflicts []scheduler.Conflict
+// planShards runs the plan's flow over dir and answers the declaration it
+// loaded and the shards it grouped that declaration into.
+func planShards(ctx context.Context, dir string) (component.File, []teststages.PlanShard, error) {
+	plan, err := testflow.NewPlan()
+	if err != nil {
+		return component.File{}, nil, err
+	}
+	r, err := plan.Run(ctx, testflow.PlanParams{Dir: dir}.Inputs())
+	if err != nil {
+		return component.File{}, nil, planError(err)
+	}
+	loaded, err := flow.Output[teststages.LoadPlanComponentsOut](r, testflow.StageLoadPlanComponents)
+	if err != nil {
+		return component.File{}, nil, err
+	}
+	// A matrix with no entries is a job that runs nothing, and every gate
+	// downstream of it goes green over an untested repository. The same
+	// refusal `lydite scan` makes, for the same reason.
+	if !loaded.Declared {
+		return component.File{}, nil, errors.New("no components declared in " + component.FileName +
+			"\n       there is nothing to shard, and a matrix with no entries runs no suite at all")
+	}
+	grouped, err := flow.Output[teststages.GroupShardsOut](r, testflow.StageGroupShards)
+	if err != nil {
+		return component.File{}, nil, err
+	}
+	return loaded.File, grouped.Shards, nil
 }
 
-// row says what a shard is and why it is a group. A shard of one names no
+// planError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it. A compose file that will not load or two
+// shards taking one name reads word for word as the stage that found it said.
+func planError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
+	}
+	return err
+}
+
+// shardRow says what a shard is and why it is a group. A shard of one names no
 // conflict, because it has none — it is alone precisely because nothing
 // contends with it.
-func (s shard) row() ui.Row {
+func shardRow(s teststages.PlanShard) ui.Row {
 	row := ui.Row{Status: ui.StatusContext, Label: "shard(" + s.Name + ")",
 		Value: fmt.Sprintf("%d component(s)", len(s.Components))}
 	for _, c := range s.Conflicts {
@@ -161,7 +173,7 @@ func (s shard) row() ui.Row {
 // suite is named beside it rather than folded into the count: a matrix over
 // fewer components than the file declares, saying nothing about the rest, is
 // indistinguishable from a planner that dropped them.
-func planRow(file component.File, shards []shard) ui.Row {
+func planRow(file component.File, shards []teststages.PlanShard) ui.Row {
 	sharded := 0
 	for _, s := range shards {
 		sharded += len(s.Components)
@@ -191,7 +203,7 @@ type matrixEntry struct {
 }
 
 // writeMatrix saves the matrix, or does nothing when no --out was named.
-func writeMatrix(out string, shards []shard) error {
+func writeMatrix(out string, shards []teststages.PlanShard) error {
 	if out == "" {
 		return nil
 	}
@@ -209,143 +221,4 @@ func writeMatrix(out string, shards []shard) error {
 		}
 	}
 	return os.WriteFile(out, append(data, '\n'), 0o600)
-}
-
-// planItems is every declared component as the scheduler sees it: its root,
-// the further paths it declares it writes into, and the host ports its compose
-// services publish.
-//
-// It holds the same fields itemFor does, because the planner groups by the
-// predicate the scheduler serialises by: a field one of the two left out is a
-// pair the matrix splits across jobs and nothing serialises.
-//
-// The stack is read with no container runtime, because plan starts nothing.
-// Probing would make the matrix depend on the state of the machine that
-// planned it, and the ports are in the file whether or not anything can run
-// it.
-//
-// A compose file that will not load is an error rather than a component with
-// no ports. Its ports are unknown, so a matrix built without them could put
-// two components that contend for one port into different jobs — which is the
-// single thing this command exists to prevent.
-//
-// A component declaring no suite is not among them. It runs nothing, so it
-// contends with nothing, and no shard runs it: `test merge` reports it from
-// the declaration.
-func planItems(root string, file component.File) ([]scheduler.Item, error) {
-	items := make([]scheduler.Item, 0, len(file.Components))
-	for _, c := range file.Components {
-		if declaresNoSuite(c) {
-			continue
-		}
-		item := scheduler.Item{Name: c.Name, Dir: path.Clean(c.Dir), Occupies: c.Occupies}
-		if c.Compose.Declared() {
-			dir := filepath.Join(root, filepath.FromSlash(c.Dir))
-			stack, err := compose.LoadWith(compose.NoRuntime, dir, c, io.Discard)
-			if err != nil {
-				return nil, fmt.Errorf("planning %s: %w"+
-					"\n       a shard is grouped by the host ports its components publish, and this file's are unknown", c.Name, err)
-			}
-			item.Ports = stack.HostPorts()
-		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
-// shardsOf groups components into the transitive closure of the conflict
-// relation.
-//
-// scheduler.Conflicts is the predicate, shared rather than reimplemented: two
-// that agreed today would come apart the day one learned about a port syntax
-// the other had not, and nothing would show it. It returns one entry per thing
-// a pair shares, so a pair sharing two ports is one edge here and two lines in
-// the shard's row.
-//
-// Shards are ordered by the declaration position of their first member, and
-// members are in declaration order, so two runs of one declaration emit an
-// identical matrix. A component with no item — one declaring no suite — is in
-// no shard.
-func shardsOf(components []component.Component, items []scheduler.Item) []shard {
-	// Union-find over item positions, which follow declaration order, so the
-	// representative of a group is the earliest component in it and the
-	// ordering falls out.
-	parent := make([]int, len(items))
-	for i := range parent {
-		parent[i] = i
-	}
-	find := func(i int) int {
-		for parent[i] != i {
-			parent[i] = parent[parent[i]]
-			i = parent[i]
-		}
-		return i
-	}
-	at := make(map[string]int, len(items))
-	for i, it := range items {
-		at[it.Name] = i
-	}
-	conflicts := scheduler.Conflicts(items)
-	for _, c := range conflicts {
-		a, b := find(at[c.A]), find(at[c.B])
-		if a == b {
-			continue
-		}
-		if a > b {
-			a, b = b, a
-		}
-		parent[b] = a
-	}
-
-	byRoot := map[int]*shard{}
-	var order []int
-	for _, c := range components {
-		i, ok := at[c.Name]
-		if !ok {
-			continue
-		}
-		root := find(i)
-		s, ok := byRoot[root]
-		if !ok {
-			s = &shard{}
-			byRoot[root] = s
-			order = append(order, root)
-		}
-		s.Components = append(s.Components, c.Name)
-	}
-	for _, c := range conflicts {
-		byRoot[find(at[c.A])].Conflicts = append(byRoot[find(at[c.A])].Conflicts, c)
-	}
-	out := make([]shard, 0, len(order))
-	for _, root := range order {
-		s := byRoot[root]
-		s.Name = strings.Join(s.Components, "-")
-		out = append(out, *s)
-	}
-	return out
-}
-
-// uniqueNames refuses a plan whose shards would take the same name.
-//
-// The name is the matrix job's and the artifact's suffix, so two shards sharing
-// one collide on upload and the fold reads one of them twice while the other's
-// components go missing — which it reports as a shard that died, naming
-// components nothing was wrong with.
-//
-// Joining members with "-" is ambiguous, because nothing forbids a component
-// name containing one: `a-b` beside `c` and `a` beside `b-c` both spell
-// `a-b-c`. It is a declaration nobody writes and a failure nobody could
-// diagnose from the symptom, so it is refused here rather than disambiguated
-// with an index a reader cannot map back to the components.
-func uniqueNames(shards []shard) error {
-	seen := make(map[string][]string, len(shards))
-	for _, s := range shards {
-		if first, ok := seen[s.Name]; ok {
-			return fmt.Errorf("two shards would both be named %q — [%s] and [%s]"+
-				"\n       a shard is named for its members, so rename a component so the two differ",
-				s.Name, strings.Join(first, ", "), strings.Join(s.Components, ", "))
-		}
-		seen[s.Name] = s.Components
-	}
-	return nil
 }

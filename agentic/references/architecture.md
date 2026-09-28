@@ -328,18 +328,60 @@ Two packages sit underneath the stages, split by what they own rather than by re
   `Output{W, Rel}` — so the CLI's own log-opening decisions (a file, a mirror to the terminal, or
   nothing) stay the CLI's.
 
+### `test plan` and `test merge`
+
+`testflow` holds two more flows beside `New()`: `NewPlan()` for `lydite test plan` and
+`NewMerge()` for `lydite test merge`. Both are wired over stages in `teststages` that return data
+and an unwrapped error only, never a `ui.Row` — a deliberate departure from `Declaration` and the
+rest of `New()`'s own stages, which predate ADR 0065 and still return `Rows []ui.Row`.
+
+`NewPlan()` runs `LoadPlanComponents` then `GroupShards`, the second `.When(Declared)`: a
+declaration naming no component has nothing to group. `LoadPlanComponents` reads the declaration
+alone — no configuration, no toolchain, no orphan gate — because a plan runs no suite.
+`GroupShards` groups every component that declares a suite into the transitive closure of
+`scheduler.Conflicts`, reading each compose file with `compose.NoRuntime` so grouping depends on
+nothing but the declaration and the files beside it. A compose file that will not load, or two
+shards that would take one name, fail the stage with the error that says so; `planError` unwraps
+the flow's `*flow.StageError` back to that error, the same unwrap `release check`'s `ResolveTag`
+performs for `ErrNoTag` (see "The release flow" below) to keep a stage's own words intact rather
+than the flow's framing of them. The `--out` matrix's own row type, `matrixEntry`, stays in
+`cmd/lydite/plan.go`: the stage returns plain shard-grouping data (`PlanShard`), and the CLI is
+what turns it into the matrix's JSON shape.
+
+`NewMerge()` runs `LoadMergeComponents`, then, both `.When(Declared)`, the generic
+`shardstages.ReadShards` (`Command = flow.Literal("test")`) and `ReadShardMeasurements`.
+`ReadShardMeasurements` never fails the flow as a whole: a shard's `measurements.json` that will
+not parse becomes that shard's own `Err`, the same shape mutation's `ReadShardCounts` already
+uses for a shard whose counts document will not parse (see "Mutation flows" below). It reads
+through `teststages.MeasurementsReader` — a stage-owned interface, not a reuse of
+`recordstages.ReportReader`, because that interface is a different concern's own boundary type.
+`cmd/lydite`'s implementation, `shardMeasurements` (`cmd/lydite/measurements.go`), caches each real
+`measurementsDoc` it reads, keyed by directory, mirroring `record.go`'s `recordReports`; the
+stage's own `Out` carries only which directories were read and each shard's error, never the
+document itself — the same shape the section below states for keeping that schema off a stage
+boundary at all. No fold stage exists for `test merge`: `foldMeasured` and every row it renders
+stay in `cmd/lydite/merge.go`, calling `fold.go`'s row-fold helpers (`shardInputs`, `rowsFor`,
+`carryUnhandled`) directly, the way `mutation_merge.go` already does, rather than duplicating
+them.
+
 ### `componentPlan`, `componentLog`, `measurementsDoc` and `componentMeasurement` stay in `cmd/lydite`
 
 These four types are test/coverage logic by every other measure, and were left out of the move
-anyway: `cmd/lydite/mutants.go`, `merge.go` and `record.go` — owned by other sessions in the same
-milestone, and out of reach of this one — reach into their *unexported fields and methods*
-directly (`p.c`, `p.log`, `folded.snapshot()`, `e.asMeasurement(c)`), and no alias or rename
-survives a type changing package: a field selector or a method call on a value of that type
+anyway: `cmd/lydite/mutants.go`, `merge.go` and `record.go` reach into their *unexported fields and
+methods* directly (`p.c`, `p.log`, `folded.snapshot()`, `e.asMeasurement(c)`), and no alias or
+rename survives a type changing package: a field selector or a method call on a value of that type
 breaks the moment the type is no longer the one declared where the caller's own compiler unit
 sees it. This is the decision the rest of the migration is arranged around, and it generalises: a
 future stage extraction should check, symbol by symbol, whether the calling file reaches a
 *field or method* on a type (the type has to stay where it is) or merely *calls a function*
 (safe to move behind a same-signature wrapper the CLI keeps).
+
+`teststages.MeasurementsReader` is built to this same constraint rather than around it: the stage
+never receives a `measurementsDoc` or a `componentMeasurement`, only whether a directory's document
+was read and why not, and `shardMeasurements` is what keeps the real, unexported-field-bearing
+values the composition still reaches into once the flow has returned. It is the general pattern
+`recordstages.ReportReader` already establishes for `record` (above), not an exception carved out
+for `test merge`.
 
 ### `measurements.json` stays a `cmd/lydite` document
 

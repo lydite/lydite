@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"regexp"
 	"sort"
 	"strconv"
@@ -96,23 +94,6 @@ func shardInputs(rep *ui.Report, command string, shards []shardreport.Shard, alo
 		inputs = append(inputs, in)
 	}
 	return inputs
-}
-
-// readTestMeasurements is that hook for `lydite test merge`.
-//
-// A shard run with --no-coverage writes no measurements at all, which is a run
-// that gated nothing rather than a run that went missing. A file that is there
-// and will not parse is neither, and is named: treated as absent it would leave
-// that shard's components composing nothing while the row still read `pass`.
-func readTestMeasurements(dir string, in *shardInput, row *ui.Row) {
-	switch m, err := readMeasurements(dir); {
-	case err == nil:
-		in.measured = m
-	case !errors.Is(err, fs.ErrNotExist):
-		row.Status = ui.StatusFail
-		row.Value += ", measurements not readable"
-		row.Detail = []string{err.Error()}
-	}
 }
 
 // rowsFor returns every row carrying a label, in shard order.
