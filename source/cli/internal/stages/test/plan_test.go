@@ -207,3 +207,87 @@ func TestAComposeFileThatWillNotLoadFailsTheStage(t *testing.T) {
 		t.Errorf("shards = %+v, want none beside a failure", got.Shards)
 	}
 }
+
+// A declaration that will not parse fails the stage with the loader's own
+// error, rather than reading as a declaration naming nothing.
+func TestALoadFailureFailsTheStage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, component.FileName, "components: [\n")
+	want := func() error { _, err := component.Load(root); return err }()
+	if want == nil {
+		t.Fatal("component.Load accepted a malformed declaration")
+	}
+	_, err := LoadPlanComponents(context.Background(), LoadPlanComponentsIn{Dir: root})
+	if err == nil || err.Error() != want.Error() {
+		t.Errorf("err = %v, want the loader's own %q", err, want)
+	}
+}
+
+// A pair sharing both a port and a directory is still one shard, not two: the
+// second conflict for an already-grouped pair finds the two already sharing a
+// root and is folded onto that same shard.
+func TestTwoConflictsOnOnePairStillMakeOneShard(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: ui\n    dir: packages/ui\n    runner: vitest\n    occupies: [\"packages/tokens\"]\n    compose:\n      file: compose.yml\n"+
+			"  - name: storybook\n    dir: apps/storybook\n    runner: vitest\n    occupies: [\"packages/tokens/dist\"]\n    compose:\n      file: compose.yml\n")
+	service := func(dir string) {
+		write(t, root, dir+"/compose.yml",
+			"services:\n  db:\n    image: postgres\n    ports: [\"5432:5432\"]\n"+
+				"    healthcheck:\n      test: [\"CMD\", \"true\"]\n")
+	}
+	service("packages/ui")
+	service("apps/storybook")
+	got, err := GroupShards(context.Background(), GroupShardsIn{Dir: root, File: loadPlan(t, root).File})
+	if err != nil {
+		t.Fatalf("GroupShards: %v", err)
+	}
+	want := []PlanShard{
+		{Name: "ui-storybook", Components: []string{"ui", "storybook"},
+			Conflicts: []scheduler.Conflict{
+				{A: "ui", B: "storybook", On: "directory packages/tokens"},
+				{A: "ui", B: "storybook", On: "port 5432"},
+			}},
+	}
+	if !reflect.DeepEqual(got.Shards, want) {
+		t.Errorf("shards = %+v\nwant     %+v", got.Shards, want)
+	}
+}
+
+// A component conflicting separately with two others that never conflict with
+// each other still groups all three into one shard: the second of the two
+// conflicts finds its components already rooted through the first.
+func TestATransitiveConflictGroupsThreeIntoOneShard(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, component.FileName,
+		"components:\n"+
+			"  - name: one\n    dir: one\n    runner: go-test\n    compose:\n      file: compose.yml\n"+
+			"  - name: two\n    dir: two\n    runner: go-test\n    occupies: [\"shared\"]\n"+
+			"  - name: three\n    dir: three\n    runner: go-test\n    occupies: [\"shared/inner\"]\n    compose:\n      file: compose.yml\n")
+	service := func(dir string) {
+		write(t, root, dir+"/compose.yml",
+			"services:\n  db:\n    image: postgres\n    ports: [\"5432:5432\"]\n"+
+				"    healthcheck:\n      test: [\"CMD\", \"true\"]\n")
+	}
+	service("one")
+	service("three")
+	write(t, root, "two/.keep", "")
+	got, err := GroupShards(context.Background(), GroupShardsIn{Dir: root, File: loadPlan(t, root).File})
+	if err != nil {
+		t.Fatalf("GroupShards: %v", err)
+	}
+	want := []PlanShard{
+		{Name: "one-two-three", Components: []string{"one", "two", "three"},
+			Conflicts: []scheduler.Conflict{
+				{A: "one", B: "three", On: "port 5432"},
+				{A: "two", B: "three", On: "directory shared"},
+			}},
+	}
+	if !reflect.DeepEqual(got.Shards, want) {
+		t.Errorf("shards = %+v\nwant     %+v", got.Shards, want)
+	}
+}

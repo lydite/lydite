@@ -173,7 +173,7 @@ func shardsOf(components []component.Component, items []scheduler.Item) []PlanSh
 		if a == b {
 			continue
 		}
-		if a > b {
+		if a > b { // [lydite:exclude_from_mutation][which of the two becomes the canonical root is never read: order and byRoot are keyed by whichever value find returns, consistently, and the outer loop over components — not this comparison — decides a shard's declaration-order position, so a>b, a>=b and a<=b group identically for every input]
 			a, b = b, a
 		}
 		parent[b] = a
