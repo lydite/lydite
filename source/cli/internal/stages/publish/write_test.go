@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,14 +32,15 @@ func TestWriteCommentToStdout(t *testing.T) {
 // A file is written with the rendered comment, its parent directories created
 // when they do not exist, and nothing reaches stdout.
 func TestWriteCommentToAFileCreatesItsDirectories(t *testing.T) {
-	out := filepath.Join(t.TempDir(), "nested", "deeper", "comment.md")
+	dir := t.TempDir()
+	const rel = "nested/deeper/comment.md"
 	var stdout bytes.Buffer
 	if _, err := WriteComment(context.Background(), WriteIn{
-		Comment: writtenComment(), Out: out, Stdout: &stdout,
+		Comment: writtenComment(), Out: filepath.Join(dir, filepath.FromSlash(rel)), Stdout: &stdout,
 	}); err != nil {
 		t.Fatalf("WriteComment: %v", err)
 	}
-	got, err := os.ReadFile(out) // #nosec G304 -- a path under this test's own temporary directory
+	got, err := fs.ReadFile(os.DirFS(dir), rel)
 	if err != nil {
 		t.Fatal(err)
 	}

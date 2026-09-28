@@ -82,6 +82,122 @@ func TestQuotedOutputIsCappedButNoRowIsLost(t *testing.T) {
 	}
 }
 
+// failingRows is n failing rows, each carrying a detail of its own.
+func failingRows(n int) []ui.Row {
+	var rows []ui.Row
+	for i := range n {
+		rows = append(rows, ui.Row{
+			Status: ui.StatusFail,
+			Label:  fmt.Sprintf("test(c%d)", i),
+			Value:  "failed",
+			Detail: []string{fmt.Sprintf("component %d blew up", i)},
+		})
+	}
+	return rows
+}
+
+// The further-results line tells a reader the quoted output stops short. A
+// section whose failures all fit under the cap — none, some, or exactly the
+// cap — quotes every one of them and says nothing was left out.
+func TestASectionWithinTheCapQuotesEveryFailureAndLeavesNothingOut(t *testing.T) {
+	for _, failing := range []int{0, 1, detailCap - 1, detailCap} {
+		t.Run(fmt.Sprintf("%d failing", failing), func(t *testing.T) {
+			rows := append(failingRows(failing),
+				ui.Row{Status: ui.StatusPass, Label: "scan(cli)", Value: "passed"})
+			comment := buildComment(t, reportDirWith("test", rows...))
+			got := comment.Sections[0]
+			if len(got.Details) != failing {
+				t.Errorf("%d blocks of output were quoted, want %d", len(got.Details), failing)
+			}
+			if len(got.Items) != 0 {
+				t.Errorf("items = %q, want none when no failure was left out", got.Items)
+			}
+		})
+	}
+}
+
+// A section's summary names every state its rows are in, in a fixed order, and
+// names no state none of them is in.
+func TestCountsNamesOnlyTheStatesItsRowsAreIn(t *testing.T) {
+	row := func(s ui.Status) ui.Row { return ui.Row{Status: s} }
+	for _, tc := range []struct {
+		name string
+		rows []ui.Row
+		want string
+	}{
+		{"no rows", nil, "nothing reported"},
+		{"one passing row", []ui.Row{row(ui.StatusPass)}, "1 passed"},
+		{"mixed", []ui.Row{row(ui.StatusPass), row(ui.StatusFail), row(ui.StatusPass)}, "1 failed, 2 passed"},
+		{
+			"every state",
+			[]ui.Row{
+				row(ui.StatusDropped), row(ui.StatusContext), row(ui.StatusNew), row(ui.StatusPass),
+				row(ui.StatusUnmeasured), row(ui.StatusDeclined), row(ui.StatusRefer), row(ui.StatusFail),
+			},
+			"1 failed, 1 referred, 1 declined, 1 unmeasured, 1 passed, 1 new, 1 not gated, 1 dropped",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := counts(tc.rows); got != tc.want {
+				t.Errorf("counts = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// sortedKeys is what keeps an undeclared command's section in the same place
+// across runs, rather than following Go's randomised map order.
+func TestSortedKeysOrdersAlphabetically(t *testing.T) {
+	names := []string{"zeta", "alpha", "mid", "kappa", "omega", "beta", "gamma", "delta", "iota", "eta"}
+	m := map[string][]section{}
+	for _, name := range names {
+		m[name] = nil
+	}
+	want := []string{"alpha", "beta", "delta", "eta", "gamma", "iota", "kappa", "mid", "omega", "zeta"}
+	if got := sortedKeys(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("sortedKeys(...) = %v, want %v", got, want)
+	}
+}
+
+// A document naming a command the comment does not declare renders under its
+// own name after the declared concerns, and those sections appear in the same
+// alphabetical order whichever directories they arrived in.
+func TestUndeclaredCommandsRenderAfterTheConcernsInAlphabeticalOrder(t *testing.T) {
+	pass := ui.Row{Status: ui.StatusPass, Label: "check", Value: "passed"}
+	doc := func(command string) ui.Document {
+		return ui.Document{Command: command, Rows: []ui.Row{pass}}
+	}
+	comment := buildComment(t,
+		ReportDir{Dir: "one", Documents: []ui.Document{doc("zeta"), doc("mid"), doc("test")}},
+		ReportDir{Dir: "two", Documents: []ui.Document{doc("alpha"), doc("omega")}},
+		ReportDir{Dir: "three", Documents: []ui.Document{doc("kappa"), doc("gamma"), doc("beta")}},
+	)
+	var titles []string
+	for _, s := range comment.Sections {
+		titles = append(titles, s.Title)
+	}
+	want := []string{"test", "alpha", "beta", "gamma", "kappa", "mid", "omega", "zeta"}
+	if !reflect.DeepEqual(titles, want) {
+		t.Errorf("sections are %v, want %v", titles, want)
+	}
+}
+
+// The footer's base is the commit's first twelve characters, and a shorter
+// one whole.
+func TestShortSHAKeepsTwelveCharactersAtMost(t *testing.T) {
+	for _, tc := range []struct{ sha, want string }{
+		{"", ""},
+		{"4c2eaea", "4c2eaea"},
+		{"4c2eaea1f2b3", "4c2eaea1f2b3"},
+		{"4c2eaea1f2b3c", "4c2eaea1f2b3"},
+		{"4c2eaea1f2b3c4d5e6f708192a3b4c5d6e7f8091", "4c2eaea1f2b3"},
+	} {
+		if got := shortSHA(tc.sha); got != tc.want {
+			t.Errorf("shortSHA(%q) = %q, want %q", tc.sha, got, tc.want)
+		}
+	}
+}
+
 // StatusDeclined is non-voting, like StatusContext — it must never turn a
 // comment's badge into a referral or a failure on its own.
 func TestADeclinedSectionDoesNotVoteOnTheVerdict(t *testing.T) {

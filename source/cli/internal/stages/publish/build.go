@@ -487,10 +487,11 @@ func sortedKeys(m map[string][]section) []string {
 	return out
 }
 
-// shortSHA is a commit as the footer names it: its first twelve characters.
+// shortSHA is a commit as the footer names it: its first twelve characters, or
+// the whole of one no longer than that.
+//
+// Stated as a clamp so a SHA of exactly twelve characters and one under take
+// the same path, leaving no boundary a test could not observe.
 func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
+	return sha[:min(len(sha), 12)]
 }
