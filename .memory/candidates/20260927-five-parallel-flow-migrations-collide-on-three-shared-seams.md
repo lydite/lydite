@@ -5,6 +5,8 @@ saw:
   - source/cli/cmd/lydite/toolchain.go
   - source/cli/cmd/lydite/coverage.go
   - source/cli/cmd/lydite/mutation.go
+  - source/cli/internal/stages/mutation/mutation.go
+  - docs/adr/0065-a-stage-reports-its-outcome-as-data-and-the-cli-alone-decides-the-rows.md
   - source/cli/cmd/lydite/scan.go
   - source/cli/cmd/lydite/review_apisurface.go
   - source/cli/internal/test/run/run.go
@@ -41,6 +43,17 @@ stages already do, rather than reaching into `cmd/lydite`. `ensureToolchains` mo
 way, into `internal/test/run`'s `EnsureToolchains`, with `toolchain.go`'s wrapper adapting away
 `*cobra.Command` for `io.Writer`. Whichever of the remaining streams first needs one of these
 should check `internal/test/run` before assuming a fresh extraction is still owed.
+
+The `mutation` migration (`internal/flows/mutation`, `internal/stages/mutation`) is landed and
+did not import `internal/test/run` from its stages: `RunMutants` needs the per-component
+lifecycle `lydite test` runs (plan and log, `prepare`, compose services, setup/teardown), and
+those helpers answer a decided `ui.Row`, which a stage may not produce. It declares
+`mutationstages.Shape`, `Lifecycle` and `Toolchains` interfaces instead
+(`internal/stages/mutation/mutation.go`), and `cmd/lydite/mutation.go`'s `mutationShape`,
+`mutationLifecycle` and `commandToolchains{cmd}` implement them over the same `cmd/lydite`
+wrappers — so `mutation.go` still calls `childEnv`, `invocation`, `langOf`, `prepare`,
+`startServices`, `runCommands` and `planComponents` by those names (see ADR 0065 and
+`agentic/rules/a-row-a-shared-helper-already-decided-crosses-into-a-stage-as-an-opaque-error.md`).
 
 **Seam 2 — `forge.SCMRepository` (`internal/forge/repository.go:18`) is the interface every
 Flow stage that touches the platform must go through (ADR 0060), and it is deliberately grown

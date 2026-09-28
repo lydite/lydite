@@ -1,49 +1,49 @@
 ---
-about: toolchain provisioning and environment composition are implemented only in cmd/lydite (ensureToolchains, childEnv), so every flow that needs them declares its own interface and takes the implementation as a flow input the CLI injects — clearance and review via reviewdecision.Toolchains, scan via scanstages.Toolchains/Environment
+about: toolchain provisioning and environment composition are implemented in internal/test/run (EnsureToolchains, ChildEnv), which lydite test's own stages import directly, while the clearance, review, scan and mutation flows each declare their own interface and take the implementation as a flow input the CLI injects over cmd/lydite's thin wrappers
 saw:
-  - source/cli/internal/reviewdecision/surface.go
-  - source/cli/cmd/lydite/review_apisurface.go
+  - source/cli/internal/test/run/run.go
+  - source/cli/internal/stages/test/toolchains.go
   - source/cli/internal/flows/review/review.go
   - source/cli/cmd/lydite/toolchain.go
   - source/cli/cmd/lydite/test.go
+  - source/cli/cmd/lydite/review_apisurface.go
+  - source/cli/internal/reviewdecision/surface.go
   - source/cli/internal/flows/clearance/clearance.go
-  - source/cli/internal/stages/clearance/fingerprint.go
   - source/cli/cmd/lydite/clearance.go
   - source/cli/internal/stages/scan/toolchains.go
-  - source/cli/internal/flows/scan/scan.go
   - source/cli/cmd/lydite/scan.go
+  - source/cli/internal/stages/mutation/mutation.go
+  - source/cli/internal/flows/mutation/mutation.go
+  - source/cli/cmd/lydite/mutation.go
 ---
 
-`reviewdecision.Toolchains` (`internal/reviewdecision/surface.go`) is the interface an in-process
-API-surface comparison provisions through: `Ensure(ctx, dir, cfg, components)` and
-`CheckEnv(tc, c)`. Its only production implementation is `commandToolchains{cmd}` in
-`cmd/lydite/review_apisurface.go`, which delegates to helpers that live in `package main`:
+The logic lives below `cmd/`: `internal/test/run`'s `EnsureToolchains`, `ChildEnv`,
+`ComponentUnits`, `SplitPath` and `Env`. `cmd/lydite` keeps same-name wrappers —
+`ensureToolchains` (`toolchain.go` line ~15, adapting `*cobra.Command` to its stderr writer) and
+`childEnv`/`componentUnits`/`splitPath`/`env` (`test.go` lines ~734-748). `lydite test`'s own
+stages call the package directly: `internal/stages/test/toolchains.go`'s `Toolchains` stage calls
+`testrun.EnsureToolchains(..., testrun.ComponentUnits(in.Own))`.
 
-- `ensureToolchains(ctx, cmd, dir, cfg, units)` (`cmd/lydite/toolchain.go`) — takes the
-  `*cobra.Command` for its diagnostics writer and maps `.lydite/config.yml` to
-  `toolchain.Overrides` via `toolchainOverrides`;
-- `componentUnits` and `childEnv(tc, c, runner.Invocation{})` (`cmd/lydite/test.go`) — the same
-  environment composition `test` uses.
+The other three flows do not import `internal/test/run` for this; each stage package declares an
+interface-typed field in its `In`, the flow binds it from an input, and the CLI supplies an
+adapter over the `cmd/lydite` wrappers:
 
-`package main` cannot be imported, and the Flow layering forbids stages reaching into `cmd/`
-anyway, so a stage that needs provisioning declares an interface-typed field in its `In` and the
-flow binds it from an input the CLI supplies. Three flows do this, with two interfaces:
-
-- clearance: `InputToolchains` in `internal/flows/clearance/clearance.go` → `FingerprintIn.Toolchains`
-  (`internal/stages/clearance/fingerprint.go`, type `reviewdecision.Toolchains`), set to
-  `commandToolchains{cmd}` by `runClearance` (`cmd/lydite/clearance.go`).
-- review: `review.go` and `review_compare.go` set the same `commandToolchains{cmd}` as
-  `reviewflow.Params.Toolchains`/`CompareParams.Toolchains` (`internal/flows/review`), bound into
-  the `surfaces` and `compare-surfaces` stages (`internal/stages/review`).
+- clearance: `reviewdecision.Toolchains` (`internal/reviewdecision/surface.go`:
+  `Ensure(ctx, dir, cfg, components)` and `CheckEnv(tc, c)`), bound from `InputToolchains` in
+  `internal/flows/clearance/clearance.go` into `FingerprintIn.Toolchains`, implemented by
+  `commandToolchains{cmd}` (`cmd/lydite/review_apisurface.go`) and passed by `clearance.go`.
+- review: `review.go` and `review_compare.go` pass the same `commandToolchains{cmd}` as
+  `reviewflow.Params.Toolchains`/`CompareParams.Toolchains` (`internal/flows/review/review.go`,
+  `InputToolchains`), bound into the `surfaces` and `compare-surfaces` stages.
 - scan: `scanstages.Toolchains` (only `Ensure`, taking `[]toolchain.Unit`) and
-  `scanstages.Environment` (`Compose` and `Declared`) in `internal/stages/scan/toolchains.go`,
-  bound from `InputToolchains`/`InputEnvironment` in `internal/flows/scan/scan.go`, implemented by
-  `scanToolchains{cmd}` and `scanEnvironment{}` in `cmd/lydite/scan.go` — which wrap the same
-  `ensureToolchains`, `childEnv`, `splitPath` and `env` helpers.
+  `scanstages.Environment` in `internal/stages/scan/toolchains.go`, implemented by
+  `scanToolchains{cmd}` and `scanEnvironment{}` (`cmd/lydite/scan.go` lines ~59-60).
+- mutation: `mutationstages.Toolchains` (`internal/stages/mutation/mutation.go` line ~34, only
+  `Ensure(ctx, dir, cfg, components)`, the same method set `commandToolchains` already has, so
+  `cmd/lydite/mutation.go` passes `commandToolchains{cmd}` as `Params.Toolchains`) plus
+  `mutationstages.Shape`, whose `Env` the CLI's `mutationShape` answers with `childEnv` and whose
+  `Invocation`/`Lang`/`NoSuite`/`Scope` wrap the same helpers `lydite test` uses.
 
-`test`, `mutation` and `coverage` still call `ensureToolchains`/`childEnv` directly (`test.go`,
-`mutation.go`, `coverage.go`). Migrating them onto a Flow means either a third per-flow adapter
-over the same helpers, or moving the helpers below `cmd/` into an internal package first (which
-also means `childEnv`, currently in the ~2300-line `test.go`, has to be separated from `test`'s own
-logic). The test fakes are `noToolchains` (`reviewdecision/surface_test.go`) and
-`refusingToolchains` (`internal/stages/clearance/fake_test.go`).
+The test fakes are `noToolchains` (`reviewdecision/surface_test.go`), `refusingToolchains`
+(`internal/stages/clearance/fake_test.go`) and `fakeToolchains`/`fakeShape`
+(`internal/stages/mutation/fake_test.go`).

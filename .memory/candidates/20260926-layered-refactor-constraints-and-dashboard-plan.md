@@ -12,6 +12,7 @@ saw:
   - source/cli/cmd/lydite/root.go
   - source/cli/internal/forge/repository.go
   - source/cli/cmd/lydite/record.go
+  - source/cli/internal/stages/mutation/fake_test.go
 targets: null
 verdict: null
 ---
@@ -107,16 +108,17 @@ GitHub access today (three paths, not fully reconciled into one abstraction):
   (`.claude/rules/sort-a-fallback-transports-response-into-three-not-two.md`).
 
 Pain points / seams for a layered refactor, read directly (not from memory):
-- Command-file sizes, re-measured 2026-09-27 on `refactor/flow-record` after the `test`, `scan`
-  and `record` Flow migrations: `mutation.go` 1285 lines (unmigrated, now the largest),
-  `test.go` 776, `scan.go` 538, `record.go` 572, `coverage.go` 156. The migrated commands' logic
-  now lives in `internal/stages/{test,scan,record}` and `internal/test/{run,measure}`;
-  `record.go` keeps only flags, row rendering, the `recordReports` `ReportReader` adapter and four
-  shims.
-- `internal/forge` now has one: `SCMRepository` (`internal/forge/repository.go`), which Flow
-  stages go through (ADR 0060); `*forge.Client` remains the concrete client beneath it.
-- Hand-rolled fakes exist only at the Flow stages' seams and in mutation:
-  `internal/stages/clearance/fake_test.go`, `internal/stages/scm/scm_test.go`,
-  `internal/stages/scan/toolchains_test.go`, `internal/flows/scan/scan_test.go` and
-  `internal/mutation/executor_test.go`. Elsewhere tests exercise real code paths or a local HTTP
-  test server (`internal/forge`) rather than interface substitution.
+- Command-file sizes after the `test`, `scan`, `record` and `mutation` Flow migrations: `mutation.go`
+  924 lines (mostly row wording and the adapters its flow is injected with), `test.go` 771,
+  `record.go` 572, `scan.go` 538, `coverage.go` 156. Every one of those commands now runs on a
+  flow (`internal/flows/{test,scan,record,clearance,mutation}`), with its logic in
+  `internal/stages/*` and `internal/test/{run,measure}`; the command files keep flags, row
+  rendering, adapters and same-name shims.
+- `internal/forge` now has one interface: `SCMRepository` (`internal/forge/repository.go`), which
+  Flow stages go through (ADR 0060); `*forge.Client` remains the concrete client beneath it.
+- Hand-rolled fakes exist where a Flow stage takes an injected interface —
+  `internal/stages/clearance/fake_test.go`, `internal/stages/mutation/fake_test.go`,
+  `internal/stages/scm/scm_test.go`, `internal/stages/scan/toolchains_test.go`,
+  `internal/flows/scan/scan_test.go` — plus `internal/mutation/executor_test.go`'s; elsewhere
+  tests exercise real code paths or a local HTTP test server (`internal/forge`) rather than
+  interface substitution.

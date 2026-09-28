@@ -284,9 +284,15 @@ input. No `package main` type reaches `internal/stages/record`.
     vendor.
   - **Domain** — `clearancestages` (`internal/stages/clearance`) holds stages specific to
     answering a clearance command: parsing it, deciding it, fingerprinting it, composing its
-    reply.
+    reply. `mutationstages` (`internal/stages/mutation`) holds `lydite mutation`'s and `lydite
+    mutation merge`'s own stages the same way.
+  - `shardstages` (`internal/stages/shards`) is generic in the same sense as `truststages` and
+    `scmstages`: any flow that folds a matrix of shards reads them through
+    `shardstages.ReadShards`, not through a copy of its own.
 - **`internal/flows/<command>`** — one package per command, holding that command's `New() (*flow.Flow, error)`, its `Params`, and the `Input`/`Stage` name constants a caller (today, only
-  the CLI) reads a `flow.Result` back through.
+  the CLI) reads a `flow.Result` back through. `mutationflow` (`internal/flows/mutation`) holds
+  three: `New()` and `NewRecord()` for `lydite mutation`, and `NewMerge()` for `lydite mutation
+  merge`.
 
 Every stage package is named apart from the domain package it wraps — `truststages` beside
 `internal/trust`, `scmstages` beside `internal/forge`, `clearancestages` beside
@@ -511,3 +517,95 @@ are both injected as `In` fields rather than imported — the functions stay def
 flow inputs the same way `review` hands a stage `reviewdecision.Toolchains`. Which rows' logs get
 read is an assembly decision `BuildComment` makes from each row's status and from `detailCap`, so
 the reader is a field on `BuildIn` rather than something `GatherReports` resolves ahead of it.
+
+## Mutation flows
+
+`mutation` is built this way too, and unlike `clearance` it does not answer a webhook — it
+reads the working tree, decides which components' mutants to run, and runs them.
+`internal/flows/mutation` (`mutationflow`) declares three flows: `New()` for `lydite mutation`,
+`NewRecord()` for the record it runs afterward, and `NewMerge()` for `lydite mutation merge`.
+
+`New()` runs six stages in order — `LoadDeclaration`, `ProvisionToolchains`, `ResolveBase`,
+`SelectAffected`, `ScopeChange`, `RunMutants` — the last five `.When(Declared)`, since a
+declaration naming no component has nothing to provision, resolve or mutate. Every stage but
+the last is a small, ordinary transform of the declaration into what the run needs before any
+mutant executes; `RunMutants` is where the per-component work stays — `scheduler.Run`,
+`mutation.Slots`, `mutation.Execute` — because that work is one scheduler dispatching each
+component's whole lifecycle rather than a later stage reading an earlier one's output, and Flow
+runs its stages once each, never in a loop and never concurrently (see "Why execution is
+sequential" above). `RunMutants` answers with one `ComponentOutcome` per component, each naming
+an `OutcomeKind` — one per distinct row `lydite mutation` can render, so two paths share a kind
+only when their rows would be byte-identical — plus the facts that kind's row needs. It marks
+`Scheduled` for what it handed to the scheduler and `Interrupted` for a run cancellation cut
+short, and it never renders a row itself.
+
+The CLI is the only place a `ComponentOutcome` becomes a `ui.Row`: `cmd/lydite/mutation.go`'s
+`addMutationRows` walks the outcomes in declaration order, adds the select row, the schedule
+row, one row per component (a skipped one interleaved where its declaration named it), every
+survivor's finding, and the summary — and, when `RunMutants` reports the run interrupted, calls
+`withdrawInterrupted` to pull back the failing verdict of every component the run had scheduled
+but never got a real answer from, deciding what to withdraw from the row a gating run would have
+rendered (`outcomeRow(o, false)`) rather than from the row this run displays, so `--no-gate`
+withdraws exactly what a gating run would. Only the outcomes whose verdict still stands after
+that withdrawal are handed to `NewRecord()`.
+
+A lifecycle helper `lydite test` and `lydite mutation` share — `prepare`, `runCommands`,
+`startServices`, each returning a decided `(ui.Row, bool)` (or, for the last, `(func(), ui.Row,
+bool)`) — has nowhere type-safe to put that row across a stage boundary, since a stage's `In`
+and `Out` never name `internal/ui`'s report type. The CLI's `mutationLifecycle` adapter wraps
+the row in a `lifecycleRowError{row}` and returns it as a plain `error`; `mutationstages`
+receives it as opaque, on `Planned.NotReady`, on a `KindBlocked` outcome, or on
+`RunMutants.TeardownErr`, and hands it back unread. The CLI recovers the row with `errors.As`
+only where the outcome kind says one was already decided (`KindBlocked`, a teardown);
+`lifecycleRowError.Error()` is the row's detail joined by `"; "`, and a worker's preparation
+failure reaches the report only through the executor's own error — `preparing the worker
+directory: ` followed by that joined detail — which `KindExecuteFailed` renders as an
+unmeasured row carrying the executor's text verbatim, never unwrapped with `errors.As`. See
+[ADR 0065](../../docs/adr/0065-a-stage-reports-its-outcome-as-data-and-the-cli-alone-decides-the-rows.md)
+and the rule it produced,
+[`a-row-a-shared-helper-already-decided-crosses-into-a-stage-as-an-opaque-error.md`](../rules/a-row-a-shared-helper-already-decided-crosses-into-a-stage-as-an-opaque-error.md).
+
+`NewRecord()` holds one stage, `RecordMutants`, in a flow of its own rather than as `New()`'s
+seventh stage — `flow.Run` checks `ctx.Err()` before every stage it runs, and a flow that ran
+`RecordMutants` as `New()`'s last stage would skip it on the same interrupt that cut
+`RunMutants` short. The CLI runs `NewRecord()` on `context.WithoutCancel(ctx)` whenever
+`RunMutants`' output is available at all, so a run cancelled mid-mutation still records the
+components it finished before the signal arrived. The accepted residual: an interrupt landing
+between two stages of `New()` itself — after `ScopeChange` and before `RunMutants`, say —
+returns the bare context error rather than a "not run" row for every selected component, and
+records nothing for that run. It is accepted because the window one `ctx.Err()` check leaves
+open here is the same one every other flow leaves open between any two of its stages, not a
+gap specific to mutation.
+
+`NewMerge()` folds a matrix of shards for `lydite mutation merge`, in the order `LoadComponents`
+(the declaration alone, no configuration), `shardstages.ReadShards` (`Command =
+Literal("mutation")`), `ReadShardCounts`, `FoldShardCounts`, `ReadProjections` — the last four
+`.When(Declared)`. Every stage past the first returns a problem as data rather than failing the
+flow: a shard whose counts document will not parse is that shard's `Err`, and shards whose
+counts disagree about the tree fold to an `Err` on the fold's own output, never a stage error.
+The CLI composes the rendered rows afterward, in this order: shard inputs, the whole-tree
+rows, the folded schedule row, the per-component rows, the folded mutation row, the carried
+findings, the shards row.
+
+### The shard domain value
+
+Reading one report directory's document for one command is not specific to mutation:
+`shardstages.ReadShards` (`internal/stages/shards`) is the generic stage both `lydite test
+merge` and `lydite mutation merge` read their shards through, rather than each through its own
+copy. What it returns — one `shard.Shard{Dir; Document ui.Document; Read bool; Err error}` per
+directory — is a domain value in `internal/shard`, not a type either stage package owns,
+because a type two stage packages both need is exactly the case that must never make one stage
+package import another: `shardstages` produces `shard.Shard`, `mutationstages` consumes it in
+its own `ReadShardCounts`, and the dependency arrow between the two stage packages stays absent.
+This is the same principle `internal/trust`'s `TrustedContext` already establishes for
+`truststages` and every stage downstream of it. See
+[ADR 0066](../../docs/adr/0066-shard-documents-are-read-by-one-generic-stage-both-folds-share.md).
+
+### A stage may read the report grammar, never write it
+
+`internal/stages/clearance/reply.go`'s reply stage reads a `ui.Comment` as input, to compose the
+next one; `shardstages` and `mutationstages`' `ReadShardCounts` read a `shard.Shard`, which
+carries the shard's `ui.Document`, as input the same way. Neither builds a `ui.Row` or a
+`ui.Report` — reading the grammar as data a caller supplied is not the same thing as deciding
+what a report says, and every stage in this codebase does the first and never the second.
+Deciding a row, in every flow built so far, is the CLI's job alone.

@@ -15,6 +15,14 @@ source/cli/internal/flows/        # one package per command's flow declaration, 
 source/cli/internal/stages/publish/ # gather-reports, build-comment, write-comment: lydite
                                   #   publish's three stages (see architecture.md and surface.md)
 source/cli/internal/flows/publish/ # the publish flow declaration (see architecture.md)
+source/cli/internal/stages/mutation/ # the stages lydite mutation and lydite mutation merge run
+                                  #   (see architecture.md and mutation.md)
+source/cli/internal/stages/shards/ # the generic shard-reading stage lydite test merge and
+                                  #   lydite mutation merge both read through (see architecture.md)
+source/cli/internal/flows/mutation/ # lydite mutation's, lydite mutation merge's and their
+                                  #   record's flow declarations (see architecture.md)
+source/cli/internal/shard/       # the shard domain value: one report directory's document for
+                                  #   one command, or why it could not be read (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
 source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own

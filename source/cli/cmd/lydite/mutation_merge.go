@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,7 +12,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/component"
+	"lydite/lydite/internal/flow"
+	mutationflow "lydite/lydite/internal/flows/mutation"
 	"lydite/lydite/internal/runner"
+	mutationstages "lydite/lydite/internal/stages/mutation"
+	shardstages "lydite/lydite/internal/stages/shards"
 	"lydite/lydite/internal/ui"
 )
 
@@ -54,19 +55,10 @@ became of the mutants it ran.`,
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
 			streamDiagnostics(asJSON)
-			decl, err := component.Load(dir)
+			rep, err := mergeMutationShards(cmd.Context(), dir, reports)
 			if err != nil {
 				return err
 			}
-			// Completeness is a question about the declaration, and an empty
-			// one answers every question with yes. `plan` and `lydite test
-			// merge` refuse the same state for the same reason.
-			if len(decl.Components) == 0 {
-				return errors.New("no components declared in " + component.FileName +
-					"\n       there is nothing to fold, and a fold over no component cannot report a shard that died")
-			}
-			rep := ui.NewReport("mutation")
-			mergeMutationShards(rep, decl, reports)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -82,34 +74,84 @@ became of the mutants it ran.`,
 // declaration, which every shard therefore answers identically.
 var mutationWholeTreeRows = []string{"select"}
 
-// mergeMutationShards builds the folded report.
-func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) {
-	var docs []mutantsDoc
-	inputs := readShards(rep, reports, "mutation", func(dir string, _ *shardInput, row *ui.Row) {
-		if doc, ok := readShardMutants(dir, row); ok {
-			docs = append(docs, doc)
-		}
+// mergeMutationShards runs the fold's flow over the shards' report directories
+// and builds the folded report from what it read.
+func mergeMutationShards(ctx context.Context, dir string, reports []string) (*ui.Report, error) {
+	merge, err := mutationflow.NewMerge()
+	if err != nil {
+		return nil, err
+	}
+	r, err := merge.Run(ctx, mutationflow.MergeParams{
+		Dir:     dir,
+		Reports: reports,
+		LogName: mutationLogName,
+	}.Inputs())
+	if err != nil {
+		return nil, mutationError(err)
+	}
+	loaded, err := flow.Output[mutationstages.LoadComponentsOut](r, mutationflow.StageLoadComponents)
+	if err != nil {
+		return nil, err
+	}
+	// Completeness is a question about the declaration, and an empty one
+	// answers every question with yes. `plan` and `lydite test merge` refuse
+	// the same state for the same reason.
+	if !loaded.Declared {
+		return nil, errors.New("no components declared in " + component.FileName +
+			"\n       there is nothing to fold, and a fold over no component cannot report a shard that died")
+	}
+	var read mutationMergeRead
+	if read.shards, err = flow.Output[shardstages.ReadShardsOut](r, mutationflow.StageReadShards); err != nil {
+		return nil, err
+	}
+	if read.counts, err = flow.Output[mutationstages.ReadShardCountsOut](r, mutationflow.StageReadShardCounts); err != nil {
+		return nil, err
+	}
+	if read.folded, err = flow.Output[mutationstages.FoldShardCountsOut](r, mutationflow.StageFoldShardCounts); err != nil {
+		return nil, err
+	}
+	if read.projections, err = flow.Output[mutationstages.ReadProjectionsOut](r, mutationflow.StageReadProjections); err != nil {
+		return nil, err
+	}
+	rep := ui.NewReport("mutation")
+	addMergedMutationRows(rep, loaded.File, read)
+	return rep, nil
+}
+
+// mutationMergeRead is what the fold's flow read out of the shards.
+type mutationMergeRead struct {
+	shards      shardstages.ReadShardsOut
+	counts      mutationstages.ReadShardCountsOut
+	folded      mutationstages.FoldShardCountsOut
+	projections mutationstages.ReadProjectionsOut
+}
+
+// addMergedMutationRows builds the folded report.
+func addMergedMutationRows(rep *ui.Report, decl component.File, read mutationMergeRead) {
+	// Keyed by directory, which is what shardInputs hands the hook: a shard's
+	// counts are read from the directory its report was, so a directory named
+	// twice reads the same both times.
+	counted := map[string]mutationstages.ShardCounts{}
+	for _, c := range read.counts.Shards {
+		counted[c.Dir] = c
+	}
+	inputs := shardInputs(rep, "mutation", read.shards.Shards, func(dir string, _ *shardInput, row *ui.Row) {
+		shardCountsRow(counted[dir], row)
 	})
 
 	problems := wholeTreeRows(rep, inputs, mutationWholeTreeRows)
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, mutationRows(rep, decl, inputs)...)
+	problems = append(problems, mutationRows(rep, decl, inputs, read.projections.Projections)...)
 	// A tree the shards disagree about is reported under `shards`, which is the
 	// row that says these documents are not one run. The counts still fold from
 	// the rows, because a fold that dropped them would answer a narrower
 	// question than the one that failed.
-	var counts mutantsDoc
-	if len(docs) > 0 {
-		folded, err := foldMutants(docs)
-		if err != nil {
-			problems = append(problems, err.Error())
-		} else {
-			counts = folded
-		}
+	if read.folded.Err != nil {
+		problems = append(problems, read.folded.Err.Error())
 	}
-	rep.Add(foldedMutationRow(inputs, counts, decl))
+	rep.Add(foldedMutationRow(inputs, read.folded.Counts, decl))
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedMutationLabel(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
 }
@@ -123,7 +165,7 @@ func mergeMutationShards(rep *ui.Report, decl component.File, reports []string) 
 // died. Its row is the one an unsharded run gives it, and a shard that reported
 // it anyway is not read: foldedMutationLabel claims its label, so its copy is
 // neither carried nor counted twice.
-func mutationRows(rep *ui.Report, decl component.File, inputs []shardInput) []string {
+func mutationRows(rep *ui.Report, decl component.File, inputs []shardInput, projections map[string]mutationstages.Projection) []string {
 	var problems []string
 	for _, c := range decl.Components {
 		if declaresNoSuite(c) {
@@ -132,7 +174,7 @@ func mutationRows(rep *ui.Report, decl component.File, inputs []shardInput) []st
 		}
 		one := component.File{Components: []component.Component{c}}
 		problems = append(problems, componentRowsNoting(rep, one, inputs, mutationLabel,
-			func(name string) string { return projectionNote(inputs, name) })...)
+			func(name string) string { return projectionNote(projections, name) })...)
 	}
 	return problems
 }
@@ -147,54 +189,17 @@ func mutationRows(rep *ui.Report, decl component.File, inputs []shardInput) []st
 // memory and an upload that never arrived all leave exactly this behind, and a
 // projection is a statement made before any of them happened.
 //
-// The first shard that has the log answers. A component is one shard's
-// responsibility, so there is normally one; two would mean two jobs ran the same
-// work, which is the failure the second arm of componentRows reports and not
-// this one.
-func projectionNote(inputs []shardInput, name string) string {
-	for _, in := range inputs {
-		line, ok := shardProjection(in.dir, name)
-		if !ok {
-			continue
-		}
-		return fmt.Sprintf("and the log it left in %s says the run projected: %q — what the run said it was about to cost, not what became of it",
-			in.dir, line)
+// The first shard that has the log answers, which is the one projections
+// holds. A component is one shard's responsibility, so there is normally one;
+// two would mean two jobs ran the same work, which is the failure the second
+// arm of componentRows reports and not this one.
+func projectionNote(projections map[string]mutationstages.Projection, name string) string {
+	p, ok := projections[name]
+	if !ok {
+		return ""
 	}
-	return ""
-}
-
-// shardProjection reads the projection out of one component's mutation log
-// inside a shard's report directory.
-//
-// The log is found by the layout openLog writes — a directory named for the
-// component, holding the log named for the command — rather than by walking
-// whatever subdirectories the artifact happens to hold, so a lone shard
-// extracted straight into the reports directory reads the same as one nested
-// under a directory of its own.
-//
-// Every failure is the same answer, which is that there is no projection to
-// quote: a missing directory, a log that cannot be opened, and a log that never
-// reached the line are all a fold that says what it said before.
-func shardProjection(dir, name string) (string, bool) {
-	f, err := os.Open(filepath.Join(dir, name, mutationLogName)) // #nosec G304 -- a shard's own report directory, under a directory named for a declared component
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = f.Close() }()
-	scan := bufio.NewScanner(f)
-	// A suite writes whatever it likes into this log, and a single line longer
-	// than the scanner's token limit ends the scan where it stands. The
-	// projection is one short line below those, so the limit is raised past the
-	// default until a log holding long lines is read through. The ceiling is the
-	// whole of the decision: the scanner grows its own buffer to whatever a line
-	// needs up to it.
-	scan.Buffer(nil, 1024*1024)
-	for scan.Scan() {
-		if line, ok := costProjectionIn(scan.Text()); ok {
-			return line, true
-		}
-	}
-	return "", false
+	return fmt.Sprintf("and the log it left in %s says the run projected: %q — what the run said it was about to cost, not what became of it",
+		p.Dir, p.Line)
 }
 
 // foldedMutationLabel names every label this fold produces itself, so
@@ -220,23 +225,20 @@ func foldedMutationLabel(label string, decl component.File) bool {
 	return false
 }
 
-// readShardMutants reads the counts a shard wrote beside its report.
+// shardCountsRow says on a shard's row that the counts it wrote beside its
+// report would not read.
 //
 // A shard that wrote none is a shard whose lydite is older than the document,
-// which is a run whose counts have to come back out of its prose rather than a
-// run that went missing. A file that is there and will not parse is neither,
-// and is named on that shard's row: treated as absent it would have the fold
-// quietly answer from the prose while the row still read `pass`.
-func readShardMutants(dir string, row *ui.Row) (mutantsDoc, bool) {
-	switch doc, err := readMutants(dir); {
-	case err == nil:
-		return doc, true
-	case !errors.Is(err, fs.ErrNotExist):
-		row.Status = ui.StatusFail
-		row.Value += ", mutant counts not readable"
-		row.Detail = []string{err.Error()}
+// and its row is left as it is: its counts come back out of its prose. A file
+// that is there and will not parse is named: treated as absent it would have
+// the fold quietly answer from the prose while the row still read `pass`.
+func shardCountsRow(counts mutationstages.ShardCounts, row *ui.Row) {
+	if counts.Err == nil {
+		return
 	}
-	return mutantsDoc{}, false
+	row.Status = ui.StatusFail
+	row.Value += ", mutant counts not readable"
+	row.Detail = []string{counts.Err.Error()}
 }
 
 // killedOf reads a component row's score back out of its value.
@@ -280,9 +282,9 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			// mutants said nothing about the suite — its row is `unmeasured`
 			// and its denominator nought, and counting it is what makes a
 			// folded run report the component count an unsharded one does.
-			n, of := s.summary().Score()
+			n, of := s.Summary().Score()
 			killed, total, covered = killed+n, total+of, covered+1
-			if d, ok := s.elapsed(); ok {
+			if d, ok := s.Elapsed(); ok {
 				elapsed += d
 				timed++
 			}

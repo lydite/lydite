@@ -2,26 +2,33 @@
 name: mutatecomponent-teardown-only-replaces-a-pass-or-context-row
 kind: invariant
 about: source/cli/cmd/lydite/mutation.go
-description: mutateComponent's deferred teardown check replaces the row only when the measurement itself would otherwise report success (StatusPass or, under --no-gate, StatusContext) — a row already reporting a survivor or a setup failure keeps that reason instead.
+description: a component's failed teardown replaces its mutation row only when the measurement itself would otherwise report success (StatusPass or, under --no-gate, StatusContext) — a row already reporting a survivor or a setup failure keeps that reason instead. The stage carries the teardown error beside the outcome; the CLI decides whether it takes over the row.
 anchors:
   - path: source/cli/cmd/lydite/mutation.go
-    blob: 02b5149b468c00483a1f030a1e4aca19419891d3
+    blob: 42d44e167d073f970c70ff265aca2516e1bda35f
+  - path: source/cli/internal/stages/mutation/run.go
+    blob: f2d6f052cb325cc8b4dadc9c82db0c9748d59f9a
 confidence: verified
 ---
 
-`mutateComponent` defers a teardown run and, if it fails, replaces `row` with the failure —
-but only when `teardownFailureReplaces(row.Status)` holds, i.e. the row is currently
-`StatusPass` or `StatusContext`. A survivor's `StatusFail` row is left alone even if teardown
-also fails: the cause a reader acts on is the survivor, which is upstream of the teardown.
+`internal/stages/mutation/run.go`'s `mutateComponent` defers the component's teardown commands
+(line ~384) once its services have started, on `context.WithoutCancel(ctx)`, and stores the
+Lifecycle's error on the outcome's `TeardownErr` — beside whatever `Kind` the component reached,
+never in place of it. The stage decides nothing about rows.
 
-Before `--no-gate` (ADR 0048) existed, this check was just `row.Status == ui.StatusPass`,
-because a passing component was the only completed-and-clean state reachable at that point —
-`StatusContext` from `mutation: false` returns earlier, before the defer is even installed.
-Once `--no-gate` converts a clean *and* a survivor row's `StatusPass`/`StatusFail` to
-`StatusContext` before the defers run, a `StatusPass`-only check would have made a failing
-teardown under `--no-gate` invisible rather than merely non-voting — the row would keep
-reporting `StatusContext` with no trace the teardown ever failed.
+`cmd/lydite/mutation.go`'s `outcomeRow` (line ~523) is where the teardown matters: it builds the
+row through `kindRow` first, and replaces it with `lifecycleRow(label, o.TeardownErr)` only when
+`teardownFailureReplaces(row.Status)` holds — `StatusPass` or `StatusContext`. A survivor's
+`StatusFail` row, or a row naming why the component could not be measured, is left alone even
+if teardown also fails: the cause a reader acts on is upstream of the teardown.
+
+The order is load-bearing: `kindRow`'s `KindCompleted` arm applies `completedRow(row, noGate)`
+before `outcomeRow` asks the predicate, so under `--no-gate` (ADR 0048) a clean *and* a
+survivor row have already become `StatusContext`. A `StatusPass`-only predicate would make a
+failing teardown under `--no-gate` invisible — the row would keep reporting `StatusContext` with
+no trace the teardown failed. `KindMutationOff`'s own `StatusContext` row is not at risk: that
+kind returns from `prepareTarget` before any service starts, so its `TeardownErr` is always nil.
 
 Anyone adding another status that can mean "the measurement itself found nothing wrong" must
-check `teardownFailureReplaces` (or wherever this predicate lives) is widened to include it,
-or a real teardown failure will be silently absorbed into a green-looking row.
+widen `teardownFailureReplaces` to include it, or a real teardown failure will be silently
+absorbed into a green-looking row.

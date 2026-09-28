@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 
 	"lydite/lydite/internal/component"
+	shardreport "lydite/lydite/internal/shard"
+	shardstages "lydite/lydite/internal/stages/shards"
 	"lydite/lydite/internal/ui"
 )
 
@@ -57,22 +60,37 @@ type shardInput struct {
 // per directory under the same label is what a consumer keying rows by label
 // cannot survive.
 func readShards(rep *ui.Report, reports []string, command string, alongside func(dir string, in *shardInput, row *ui.Row)) []shardInput {
-	inputs := make([]shardInput, 0, len(reports))
-	for _, dir := range reports {
-		in := shardInput{dir: dir}
-		doc, err := readDocument(documentPath(dir, command))
-		if err != nil {
-			rep.Add(ui.Row{Status: ui.StatusFail, Label: "read(" + dir + ")",
-				Value: "no " + command + " report", Detail: []string{err.Error()}})
+	// ReadShards never fails as a whole: a shard it could not read is that
+	// shard's own Err, which shardInputs turns into that shard's row.
+	out, _ := shardstages.ReadShards(context.Background(),
+		shardstages.ReadShardsIn{Reports: reports, Command: command})
+	return shardInputs(rep, command, out.Shards, alongside)
+}
+
+// shardInputs adds what each shard read says to the report, in the order the
+// shards arrive: its findings, then its row, with alongside given the row
+// before it is added.
+//
+// A shard whose document could not be read adds a failing row naming why, and
+// no findings, and is never handed to alongside — there is no report for
+// whatever else its directory holds to be read beside.
+func shardInputs(rep *ui.Report, command string, shards []shardreport.Shard, alongside func(dir string, in *shardInput, row *ui.Row)) []shardInput {
+	inputs := make([]shardInput, 0, len(shards))
+	for _, shard := range shards {
+		in := shardInput{dir: shard.Dir}
+		if !shard.Read {
+			rep.Add(ui.Row{Status: ui.StatusFail, Label: "read(" + shard.Dir + ")",
+				Value: "no " + command + " report", Detail: []string{shard.Err.Error()}})
 			inputs = append(inputs, in)
 			continue
 		}
+		doc := shard.Document
 		in.doc, in.read = doc, true
 		rep.AddFindings(doc.Findings...)
-		row := ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
+		row := ui.Row{Status: ui.StatusContext, Label: "read(" + shard.Dir + ")",
 			Value: fmt.Sprintf("%d row(s), %s", len(doc.Rows), doc.Verdict)}
 		if alongside != nil {
-			alongside(dir, &in, &row)
+			alongside(shard.Dir, &in, &row)
 		}
 		rep.Add(row)
 		inputs = append(inputs, in)
