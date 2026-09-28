@@ -39,10 +39,13 @@ outcomes whose `componentMutation.ran` survived are returned as `kept` and passe
   own row.
 
 The teardown interplay (`teardownFailureReplaces`, line ~712, replaces only Pass and Context):
-a gating survivor's Fail is never replaced by a failed teardown, so it is withdrawn; under
---no-gate the displayed row is the teardown's, but the withdrawal reads the gating Fail and the
-component renders the gating run's "not completed" row. A kill-everything component with a failed
-teardown renders the teardown row under both, since Pass and Context are both replaced. A decided
-teardown row whose own status is not Fail therefore never keeps a survivor's claims under
---no-gate either. This matches `agentic/references/mutation.md` (line ~59), which lists "a run
-interrupted before it finished" among the rows --no-gate leaves untouched.
+a gating survivor's Fail is never replaced by a failed teardown, so it is withdrawn on its own
+Fail already. A kill-everything component's Pass — or, under --no-gate, the Context
+`completedRow` converts it to — is replaced before either `outcomeRow` call returns, by the
+teardown's own row, which `RunCommands`'s failure path (`internal/test/run/run.go`'s `Failure`)
+always renders as `ui.StatusFail`. So the gating row `withdrawInterrupted` reads is Fail either
+way, and a kill-everything component whose teardown failed is withdrawn to "not completed" —
+row, findings and counts — under an interrupt whether or not --no-gate is set. The teardown's own
+row is visible only when the run was not interrupted. This matches
+`agentic/references/mutation.md` (line ~59), which lists "a run interrupted before it finished"
+among the rows --no-gate leaves untouched.

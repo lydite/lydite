@@ -2136,6 +2136,7 @@ func TestAMutationRunsOutcomesRenderAsOneReport(t *testing.T) {
 func TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould(t *testing.T) {
 	survivor := mutationSurvivor()
 	cTeardown := mutationLifecycleFailure("c", "teardown failed", "docker compose down failed in c")
+	dTeardown := mutationLifecycleFailure("d", "teardown failed", "docker compose down failed in d")
 	run := mutationstages.RunMutantsOut{
 		Components: []mutationstages.ComponentOutcome{
 			mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 5*time.Second),
@@ -2145,13 +2146,22 @@ func TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould(t *testing.T) {
 				o.TeardownErr = lifecycleRowError{cTeardown}
 				return o
 			}(),
+			// d killed every mutant, so its own row is a pass (or, under
+			// --no-gate, context) — the shape teardownFailureReplaces also
+			// swaps for the teardown's row, which withdrawInterrupted then
+			// reads as the gating row regardless of --no-gate.
+			func() mutationstages.ComponentOutcome {
+				o := mutationCompleted("d", mutation.Summary{Killed: 4}, nil, 6*time.Second)
+				o.TeardownErr = lifecycleRowError{dTeardown}
+				return o
+			}(),
 		},
-		Schedule:    scheduler.Outcome{MaxConcurrent: 2, Started: 3},
-		Suites:      3,
+		Schedule:    scheduler.Outcome{MaxConcurrent: 2, Started: 4},
+		Suites:      4,
 		Interrupted: true,
 	}
 	sel := mutationstages.SelectAffectedOut{Selected: []component.Component{
-		{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}, {Name: "c", Dir: "c"}}}
+		{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}, {Name: "c", Dir: "c"}, {Name: "d", Dir: "d"}}}
 	withdrawn := func(name string) ui.Row {
 		return ui.Row{Status: ui.StatusUnmeasured, Label: mutationLabel(name), Value: "not completed",
 			Detail: []string{"the run was interrupted before this component finished"}, Log: mutationLogRel(name)}
@@ -2159,7 +2169,7 @@ func TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould(t *testing.T) {
 	killed := func(status ui.Status) ui.Row {
 		return ui.Row{Status: status, Label: "mutation(b)", Value: "2 of 2 mutant(s) killed in 8s", Log: mutationLogRel("b")}
 	}
-	schedule := ui.Row{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 3 of 3 component(s)"}
+	schedule := ui.Row{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 4 of 4 component(s)"}
 	summary := ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "2 of 2 mutant(s) killed across 1 component(s) in 8s"}
 
 	for _, c := range []struct {
@@ -2167,9 +2177,9 @@ func TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould(t *testing.T) {
 		noGate   bool
 		wantRows []ui.Row
 	}{
-		{name: "gating", wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusPass), withdrawn("c"), summary}},
+		{name: "gating", wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusPass), withdrawn("c"), withdrawn("d"), summary}},
 		{name: "under --no-gate", noGate: true,
-			wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusContext), withdrawn("c"), summary}},
+			wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusContext), withdrawn("c"), withdrawn("d"), summary}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rep := ui.NewReport("mutation")
