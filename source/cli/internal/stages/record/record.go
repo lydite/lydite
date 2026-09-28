@@ -2,12 +2,13 @@
 // measured: loading the tree's own declaration, reading the report
 // directories, folding the measurements, binding the recording to the tree
 // that is checked out, counting the scan's findings, binding the mutant
-// counts, deciding the baseline, composing the quality history, and the one
-// write that lands both. Named apart from recordflow (internal/flows/record),
-// which wires these stages and shares their directory name, so the flow
-// definition imports both without renaming either — and apart from the
-// `lydite test record` command in cmd/lydite, which renders every row these
-// stages' outcomes become.
+// counts, deciding the baseline, and composing what a quality history is made
+// of, in the ledger's own vocabulary. Named apart from recordflow
+// (internal/flows/record), which wires these stages and shares their
+// directory name, so the flow definition imports both without renaming either
+// — and apart from the `lydite test record` command in cmd/lydite, which
+// renders every row these stages' outcomes become, and from ledgerstages
+// (internal/stages/ledger), which composes and lands the history itself.
 //
 // Every stage is a plain function of its own In. Nothing here reads a report
 // document itself: each is written by another command, in that command's own
