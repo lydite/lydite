@@ -1022,8 +1022,8 @@ func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 	if row.Status != ui.StatusUnmeasured {
 		t.Fatalf("row = %+v, want unmeasured: an acknowledged mutant measures nothing", row)
 	}
-	if !strings.Contains(row.Value, "declared equivalent") {
-		t.Errorf("value = %q, want it to name the declaration", row.Value)
+	if !strings.Contains(row.Value, "declared equivalent (refers this change for review)") {
+		t.Errorf("value = %q, want it to name the declaration and that it refers the change", row.Value)
 	}
 }
 
@@ -1137,17 +1137,52 @@ func TestTheAsideNamesOnlyTheMutantsThatAreThere(t *testing.T) {
 		want string
 	}{
 		{"unviable", mutation.Summary{Killed: 1, Unviable: 2}, "2 did not compile"},
-		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent"},
+		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent (refers this change for review)"},
 		{"timed out", mutation.Summary{Killed: 1, TimedOut: 3}, "3 timed out"},
 		{"out of memory", mutation.Summary{Killed: 1, OutOfMemory: 2}, "2 ran out of memory"},
 		{"all four", mutation.Summary{Unviable: 1, Acknowledged: 2, TimedOut: 3, OutOfMemory: 4},
-			"1 did not compile, 2 declared equivalent, 3 timed out, 4 ran out of memory"},
+			"1 did not compile, 2 declared equivalent (refers this change for review), 3 timed out, 4 ran out of memory"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := aside(c.s); got != c.want {
 				t.Errorf("aside = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// The help text tells an author where the marker goes, what one marker
+// covers, and what a formatter that moves trailing comments requires — an
+// author who places it on the line above, or lets Biome relocate it, gets a
+// mutant the gate never reads the marker for.
+func TestTheHelpTextExplainsWhereTheMarkerGoes(t *testing.T) {
+	long := newMutationCmd().Long
+	for _, want := range []string{
+		"trailing the mutated line",
+		"every innermost mutant",
+		"biome-ignore format",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("help text does not mention %q: %s", want, long)
+		}
+	}
+}
+
+// A survivor's finding tells the author the same thing the row's own remedy
+// does: the marker sits on the mutated line, and one there answers every
+// innermost mutant on it.
+func TestASurvivorsFindingNamesWhereTheMarkerGoes(t *testing.T) {
+	survivor := mutation.Result{
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}
+	findings := mutationFindings(mutationLabel("app"), "app", "app", []mutation.Result{survivor}, nil)
+	if len(findings) != 1 {
+		t.Fatalf("mutationFindings = %v, want exactly one", findings)
+	}
+	detail := strings.Join(findings[0].Detail, "\n")
+	if !strings.Contains(detail, "trailing the mutated line") || !strings.Contains(detail, "every innermost mutant") {
+		t.Errorf("finding detail does not say where the marker goes: %v", findings[0].Detail)
 	}
 }
 
@@ -1979,7 +2014,7 @@ func mutationLifecycleFailure(name, value, what string) ui.Row {
 
 // mutationRemedy is the line a failing row closes its survivors with.
 var mutationRemedy = "write the assertion that fails when the code changes this way, or declare the mutant equivalent with " +
-	annotationMarker + " beside it"
+	annotationMarker + " trailing the mutated line — one marker there covers every innermost mutant on it"
 
 // The whole report a run's outcomes become, in the order a reader and a
 // consumer keying rows by label both depend on: the select row when selection

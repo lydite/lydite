@@ -69,9 +69,13 @@ whole-repository mode: it would run for hours on any mature codebase, and a
 mutant on an uncovered line cannot be killed by construction.
 
 An author who believes a survivor is unkillable declares it with a
-` + mutationMarker + ` comment beside it. The declared mutant is generated,
-counted and never run — and, because internal/referral reads the same token as
-a suppression, declaring one refers the change to a human.`,
+` + mutationMarker + ` comment trailing the mutated line itself — the same
+line, not the line above it — and one marker covers every innermost mutant on
+that line. A formatter that moves a trailing comment off its line (Biome does,
+on a line ending in ` + "`{`" + `) needs a ` + "`// biome-ignore format`" + ` comment above it to
+keep the marker where the mutation gate reads it. The declared mutant is
+generated, counted and never run — and, because internal/referral reads the
+same token as a suppression, declaring one refers the change to a human.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("mutation")
@@ -778,7 +782,7 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	row.Detail = append(row.Detail,
 		"write the assertion that fails when the code changes this way, or declare the mutant equivalent with "+
-			annotationMarker+" beside it")
+			annotationMarker+" trailing the mutated line — one marker there covers every innermost mutant on it")
 	if log.Rel != "" {
 		row.Detail = append(row.Detail, "full output: "+log.Rel)
 	}
@@ -816,7 +820,7 @@ func mutationFindings(label, component, dir string, survivors []mutation.Result,
 			Detail: []string{
 				"This mutant survived: the suite passed with the code changed this way.",
 				"Write the assertion that fails when it is, or declare the mutant equivalent with " +
-					annotationMarker + " beside it.",
+					annotationMarker + " trailing the mutated line — one marker there covers every innermost mutant on it.",
 			},
 			Site: string(m.Operator) + "\x1f" + finding.Normalise(m.Original) + "\x1f" + finding.Normalise(m.Mutated),
 		})
@@ -842,7 +846,7 @@ func aside(s mutation.Summary) string {
 		parts = append(parts, fmt.Sprintf("%d did not compile", s.Unviable))
 	}
 	if s.Acknowledged > 0 {
-		parts = append(parts, fmt.Sprintf("%d declared equivalent", s.Acknowledged))
+		parts = append(parts, fmt.Sprintf("%d declared equivalent (refers this change for review)", s.Acknowledged))
 	}
 	if s.TimedOut > 0 {
 		parts = append(parts, fmt.Sprintf("%d timed out", s.TimedOut))
