@@ -3,35 +3,34 @@ about: adding a new per-component gate row (beyond test/coverage/patch/crap/floo
 saw:
   - source/cli/cmd/lydite/fold.go
   - source/cli/cmd/lydite/merge.go
-  - source/cli/cmd/lydite/test.go
+  - source/cli/cmd/lydite/mutation_merge.go
+  - source/cli/cmd/lydite/mutation_merge_test.go
+  - source/cli/internal/test/run/flaky.go
+  - source/cli/internal/stages/test/flaky.go
 ---
 
-`fold.go`'s `componentRows` (and the `foldedRow`/`carryUnhandled` machinery around it) folds a
+`fold.go`'s `componentRows` (and the `rowsFor`/`carryUnhandled` machinery around it) folds a
 per-component row across shards by requiring exactly one row under that label from exactly one
-shard — zero is "a shard whose job died," two is "two jobs running the same work." Adding
-`--gate-flaky`'s `flaky(<name>)` row (`merge.go`, `componentRows(rep, decl, inputs, flakyLabel)`)
-meant every shard has to emit a `flaky(<name>)` row for every component it owns *whether or not
-`--gate-flaky` was passed* — a `context` row ("not gated") when the flag is off, the same way
-`coverage(<name>)` is always present. A row emitted only when the gate is requested would make
-`componentRows` see zero rows for that component on an ungated run and report it as a dead shard,
-which is wrong.
+shard — zero is "a shard whose job died," two is "two jobs running the same work." The
+`--gate-flaky` gate's `flaky(<name>)` row is folded the same way (`merge.go` line ~107,
+`suiteRows(rep, decl, inputs, flakyLabel, noSuiteFlakyRow)`), which means every shard has to
+emit a `flaky(<name>)` row for every component it owns *whether or not `--gate-flaky` was
+passed*. `internal/test/run/flaky.go`'s `FlakyGate.Report(own)` does: a component with no
+examined row gets a `context` row ("not gated — --gate-flaky reruns the tests a change
+introduces") when the gate was not requested, the same way `coverage(<name>)` is always present;
+`internal/stages/test/flaky.go`'s `FlakyGate` stage renders it on every run. A row emitted only
+when the gate is requested would make `componentRows` see zero rows for that component on an
+ungated run and report it as a dead shard.
 
-Consequence for `cmd/lydite/test.go`: the `flakyGate` type renders a row for every component in
-`own` (the shard's responsibility set) via `gate.report(rep, own)`, called on both the
-"nothing selected" early-return path and the normal path — not just when `gate.requested` is
-true.
+A second, smaller gotcha: `componentRowsNoting`'s own problem message (`fold.go` line ~295,
+"`<name> has no row in any shard's report`") does not name which label was missing, because it
+takes one `label func(string) string` per call and is called once per gate kind. Folding a second
+gate's rows through it produces a problem string indistinguishable from the other gate's if both
+are missing — `merge.go` works around this by prefixing `"flaky: "` onto that call's returned
+problem strings (line ~108) rather than changing the shared helper, whose message text
+`mutation_merge_test.go` asserts verbatim (lines ~172 and ~183).
 
-A second, smaller gotcha: `componentRows`'s own problem message ("`<name> has no row in any
-shard's report`") does not name which label was missing, because it takes one `label func(string)
-string` per call and is called once per gate kind. Folding a second gate's rows through it (as
-`merge.go` now does for `flakyLabel` beside `testLabel`) produces a problem string
-indistinguishable from the other gate's if both are missing — `merge.go` works around this by
-prefixing its own `"flaky: "` onto that call's returned problem strings before appending them,
-rather than changing `componentRows` itself (whose message text `mutation_test.go` already
-asserts verbatim, outside that change's boundary).
-
-`componentRows` is now a thin wrapper over `componentRowsNoting`, which takes an extra
-`note func(string) string` and appends a non-empty note after the same "has no row in any
-shard's report" sentence (`mutation_merge.go`'s `projectionNote` is the one caller that passes
-one). Every other caller still gets the sentence with nothing appended, so the label-less
-message and the verbatim assertion in `mutation_test.go` are unchanged for them.
+`componentRows` is a thin wrapper over `componentRowsNoting`, which takes an extra
+`note func(string) string` and appends a non-empty note after the same sentence.
+`mutation_merge.go`'s `mutationRows` is the one caller that passes one (`projectionNote`); every
+other caller gets the sentence with nothing appended.
