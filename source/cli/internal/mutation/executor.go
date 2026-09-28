@@ -260,6 +260,10 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 // run builds one mutant and, if it built, runs it against each phase in turn.
 func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 	started := time.Now()
+	// Named before it runs, not only when it finishes: a run cancelled or
+	// timed out mid-mutant leaves no finish line at all, and this is the
+	// only trace in the log of what was in flight when it died.
+	_, _ = fmt.Fprintf(logOf(opts), "start %s\n", m)
 	// Whether the ceiling this run asked for reached this mutant, as each
 	// execution reports it: one execution the platform could not bound is a
 	// mutant that was held to nothing, whatever the others managed.
