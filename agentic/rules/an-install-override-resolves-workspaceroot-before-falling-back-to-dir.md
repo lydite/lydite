@@ -1,3 +1,7 @@
+---
+description: "An install override still resolves WorkspaceRoot first so siblings coalesce, falling back to dir only when no root resolves."
+---
+
 # An install override still resolves `WorkspaceRoot` first, and only falls back to `dir` when no root resolves
 
 `typescript.install` replaces *what* runs, never *where*. `nodedeps.Install` must attempt

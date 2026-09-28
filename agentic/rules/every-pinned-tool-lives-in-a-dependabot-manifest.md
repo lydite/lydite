@@ -1,3 +1,7 @@
+---
+description: "Every pinned tool version lives in its own manifest that Dependabot watches."
+---
+
 # Every pinned tool version lives in a manifest Dependabot watches
 
 A pin nothing can age out is a scanner that goes stale while still reporting a pass. A new pin

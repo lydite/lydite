@@ -1,3 +1,7 @@
+---
+description: "Guard an in-process untrusted-build comparison by whether the command always holds a credential, not by another command's flag."
+---
+
 # Guard an in-process untrusted-build comparison by whether the command always holds a credential, not by mirroring another command's flag-conditioned guard
 
 `review`'s own `reviewdecision.Surfaces` guards the in-process comparison only when the invocation
@@ -15,7 +19,8 @@ build code beside a token it does hold, because the premise the condition tests 
 ## Applies to
 
 Any new `cmd/lydite` command or flag that runs an untrusted API-surface or build-code comparison
-in-process, and any change to `clearedDecision`'s or `reviewdecision.Surfaces`'s guard condition.
+in-process, and any change to the guard condition in `clearedDecision`
+(`internal/stages/clearance/fingerprint.go`) or `reviewdecision.Surfaces`.
 
 ## Example
 

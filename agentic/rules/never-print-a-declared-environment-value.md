@@ -1,3 +1,7 @@
+---
+description: "Report a component's declared environment variables by name only, never their values."
+---
+
 # Never print a declared environment variable's value, only its name
 
 A component's `env:` declaration is arbitrary text the repository controls, and the places a

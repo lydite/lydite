@@ -1,3 +1,7 @@
+---
+description: "A switch keyed on treesitter.Grammar names every grammar it handles and errors on the rest, never falling through."
+---
+
 # Refuse an unhandled grammar rather than let it fall through to another's rule
 
 A per-grammar dispatch — `internal/crap`'s `complexityOf`, or any future switch keyed on

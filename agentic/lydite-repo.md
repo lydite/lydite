@@ -8,8 +8,12 @@ blocking gate) across `wardnet`, `wardnet-cloud`, and `inforge` with one consist
 
 ## Rules
 
-This module has prescriptive rules in `agentic/rules/`. **Read every file in that directory before making changes here, and follow each rule strictly.**
-Each file contains one rule. New rules go in that directory — one file per rule, kebab-case filename matching the rule's intent.
+The rules in `agentic/rules/` are rendered into `.claude/rules/` and `.agents/rules/`, and each
+one applies to every change it covers. New rules go in `agentic/rules/` — one file per rule, a
+kebab-case filename matching the rule's intent, and a `description:` line in its frontmatter.
+
+This file itself is rendered from `agentic/lydite-repo.md` (the entry manifest's `context:`), so
+edits to it go there; a new instruction file goes under `agentic/instructions/`.
 
 ## Where the detail is
 
@@ -104,9 +108,10 @@ See [`layout.md`](agentic/references/layout.md) for the full annotated tree — 
 
 ## Status
 
-All nine subcommands (`scan`, `test`, `mutation`, `review`, `publish`, `threads`, `clearance`,
-`version`, `update`) are fully implemented, plus `test plan`, `test merge`, `test record` and
-`mutation merge` — every check is a real tool invocation, not a stub. `lydite coverage` is
+Every subcommand `cmd/lydite/root.go` registers — `scan`, `test`, `mutation`, `review`,
+`publish`, `threads`, `clearance`, `release`, `version`, `update` — is fully implemented, and so
+is each nested one: `test plan`, `test merge`, `test record`, `mutation merge`, `review compare`,
+`clearance queue` and `release check`. Every check is a real tool invocation, not a stub. `lydite coverage` is
 **removed** (see [`coverage.md`](agentic/references/coverage.md)); the relay in
 `source/cloud-services/pr-relay` is deployed and live (see
 [`surface.md`](agentic/references/surface.md)); the quality-history dashboard is a later

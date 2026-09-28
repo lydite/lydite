@@ -1,3 +1,7 @@
+---
+description: "Thread the caller's real scan root down; derive the bound from the tree only for a mutation worker's copy."
+---
+
 # Thread the real root down; read it off the tree only where there is no real root to thread
 
 A walk that climbs from a component's directory looking for something above it — a workspace

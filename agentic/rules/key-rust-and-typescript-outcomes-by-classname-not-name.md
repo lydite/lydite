@@ -1,3 +1,7 @@
+---
+description: "Key Rust and TypeScript JUnit test outcomes by classname and name together, never by name alone."
+---
+
 # Key a Rust or TypeScript test outcome by classname and name, never by name alone
 
 `go test` scopes one process to one package, where the compiler forbids two functions sharing a

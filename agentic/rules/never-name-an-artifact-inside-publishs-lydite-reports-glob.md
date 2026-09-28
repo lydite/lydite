@@ -1,3 +1,7 @@
+---
+description: "Never name an uploaded artifact so it matches publish's lydite-reports-* glob."
+---
+
 # Never name an uploaded artifact inside `publish`'s `lydite-reports-*` glob
 
 `lydite/actions`' `publish` step downloads every artifact in the run matching
@@ -5,9 +9,8 @@
 verdict. An `actions/upload-artifact` step named for an unrelated reason — a proving-ground
 fixture, a future job nobody thought to check against this glob — or a call to the local
 `lydite-reports` composite action that never overrides its colliding default `prefix`
-(`lydite-reports`), folds in silently: exactly what once happened to `ci-end2end.yml`'s
-proving-ground legs before they were renamed to `proving-ground-reports-*` and renamed back only
-after their own job downloaded them. `.github/assert-no-lydite-reports-collision.py`, run by
+(`lydite-reports`), folds in silently — which is why `ci-end2end.yml`'s proving-ground legs
+upload as `proving-ground-reports-*`. `.github/assert-no-lydite-reports-collision.py`, run by
 `ci-end2end.yml`'s `no-lydite-reports-collision` job, fails whenever an artifact name's fixed
 text — the part before any `${{ … }}` expression — matches that prefix, or cannot be ruled out
 against it from the text alone.

@@ -1,3 +1,7 @@
+---
+description: "Ask internal/treesitter's TestFile/TestModule whether code is test code; never reimplement the check in a gate."
+---
+
 # Ask `internal/treesitter` whether code is the suite, never reimplement the check
 
 Whether a file, or an inline module, is test code rather than code under test is one question,

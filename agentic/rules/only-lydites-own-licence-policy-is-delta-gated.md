@@ -1,3 +1,7 @@
+---
+description: "Only a licence policy generated from lydite's config is delta-gated; a consumer's own deny.toml gates absolutely."
+---
+
 # Only lydite's own licence policy is delta-gated; a consumer's own config gates absolutely
 
 A Rust component's licence check runs under one of three policy sources —

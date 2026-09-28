@@ -1,3 +1,7 @@
+---
+description: "Fold into a coverage producer string only the arguments that change what the figure is a proportion of."
+---
+
 # Fold only a denominator-moving argument into a producer string
 
 A producer compares verbatim against a baseline's, so every argument folded into it retires an

@@ -1,3 +1,7 @@
+---
+description: "A scanner wrapper sets Crashed from the tool's own structured report, never from Err or the exit code."
+---
+
 # Derive `Crashed` from the tool's own report, never from `Err`/`Ok` or the exit code
 
 Every scanner wrapped here exits non-zero when it finds something, so a failing exit code or a

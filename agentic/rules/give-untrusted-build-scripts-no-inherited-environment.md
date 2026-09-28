@@ -1,3 +1,7 @@
+---
+description: "A subprocess that builds or runs the scanned tree's own code gets an isolated environment, never this process's own."
+---
+
 # Give a subprocess that builds or runs the scanned tree's own code no inherited environment
 
 `executil`'s ordinary `Run*` functions layer a declared or toolchain environment onto this
@@ -13,18 +17,17 @@ This closes one path and not the whole exposure: `os.Unsetenv` changes only the 
 process's own live copy of its environment, never `/proc/<pid>/environ`, which is a snapshot
 taken at exec time — a same-user descendant can still read a credential the calling process
 held, however briefly, at its own start. A job that runs untrusted code like this must not
-hold the credential at all — see `persist-credentials: false` on the `referral` job's own
-checkout in [`.github/workflows/lydite-pr.yml`](../../.github/workflows/lydite-pr.yml), since
-`actions/checkout` otherwise embeds the token into `.git/config` regardless of anything this
-rule's isolation does. `lydite review --publish` also refuses to run a Rust comparison in its
-own process at all when `--surfaces` is absent, for any caller of the single-invocation form,
-not only this workflow.
+hold the credential at all, and a job that holds one checks out with `persist-credentials:
+false` (as `lydite/actions`' `lydite-referral-publish.yml` does), since `actions/checkout`
+otherwise embeds the token into `.git/config` regardless of anything this rule's isolation does.
+`lydite review --publish` also refuses to run a Rust comparison in its own process at all when
+`--surfaces` is absent, for any caller of the single-invocation form, not only that workflow.
 
 The credential is only half of what a job running untrusted code must not be trusted with.
-`referral` writes the raw comparison to an artifact (`lydite review compare
---write-surfaces`) rather than a decision, and `referral-publish` (never re-running the
-comparison) checks the document's base and the set of components it names against what it
-resolves and reads itself — but a **claimed-clean result's own content is not independently
+The comparison job holds no token and writes the raw comparison to an artifact (`lydite review
+compare --write-surfaces`, uploaded as `referral-surfaces`) rather than a decision, and
+`lydite/actions`' `lydite-referral-publish.yml` (never re-running the comparison) checks the
+document's base and the set of components it names against what it resolves and reads itself — but a **claimed-clean result's own content is not independently
 verified**. A process a malicious build script leaves running past its own subprocess call
 could still overwrite the artifact with a well-formed document before the upload step
 captures it, naming the right base and every opted-in component with no findings. Splitting
@@ -33,14 +36,13 @@ untrusted code likes" to "a clean api-surface result specifically", but does not
 see ci.md's `referral`/`referral-publish` paragraph for what remains open.
 
 The credential and the binary are two separate things to keep out of untrusted hands, and
-closing one does not close the other: `referral-publish` also builds its own `lydite` from a
-checkout of the base commit rather than running `setup`'s artifact, which is built from the
-pull request's own tree — a modified `publish` function reporting success regardless of the
-verdict it was given is exactly as available to the pull request as a modified `build.rs`.
-The same reasoning rules out a `uses: owner/repo/path@${{ expression }}` reference to fetch a
-trusted action version at all: Actions does not evaluate expressions in `uses:`, so the only
-way to reach the base commit's own copy of a local action is to check it out (as its own,
-separately pathed checkout) and reference it from there.
+closing one does not close the other: the publishing job runs a released `lydite` (through
+`lydite/actions/setup` and its `lydite-version` input), never one built from the pull request's
+own tree — a modified `publish` function reporting success regardless of the verdict it was given
+is exactly as available to the pull request as a modified `build.rs`. The same reasoning keeps a
+credentialed job off a local action (`uses: ./…`) from the pull request's checkout: Actions does
+not evaluate expressions in `uses:`, so the only way to reach a trusted copy of a local action is
+to check a trusted ref out as its own, separately pathed checkout and reference it from there.
 
 ## Applies to
 

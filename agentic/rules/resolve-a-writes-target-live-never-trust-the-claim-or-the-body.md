@@ -1,3 +1,7 @@
+---
+description: "A pr-relay write resolves its target live with the App's token and refuses a mismatch, never trusting the OIDC claim or request body."
+---
+
 # Resolve a write's target live, and check it — never trust the OIDC claim or the request body alone
 
 `/review` refuses any `reply` or `delete` naming a comment id outside the pull request's own,
@@ -24,8 +28,9 @@ an identifier in the request body (a comment id, a commit sha, a check run id, a
 await postStatus(token, claims.repository, payload, deps.fetcher);
 
 // right: resolves the target live, and refuses on mismatch
-const head = await pullRequestHeadSha(token, claims.repository, fromRef, deps.fetcher);
-if (payload.sha !== head) {
+const pr = await pullRequest(token, claims.repository, pull, deps.fetcher);
+const head = pr?.head?.sha;
+if (!head || payload.sha !== head) {
   return json(403, { error: "the sha submitted is not this pull request's head" });
 }
 await postStatus(token, claims.repository, payload, deps.fetcher);

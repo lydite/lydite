@@ -1,3 +1,7 @@
+---
+description: "A stage on a flow whose other stages stream output writes its diagnostics as they arise, rather than returning them in Out."
+---
+
 # Write a stage's diagnostic to the injected writer as it arises, only return it in `Out` when nothing else interleaves
 
 The clearance pilot's stages return a diagnostic (`Warnings []string`) in their `Out`, for the
