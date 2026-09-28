@@ -9,6 +9,7 @@ import (
 
 	"lydite/lydite/internal/clearance"
 	"lydite/lydite/internal/forge"
+	"lydite/lydite/internal/threads"
 	"lydite/lydite/internal/trust"
 )
 
@@ -76,6 +77,31 @@ func (f *fakeRepository) CreateComment(ctx context.Context, number int, body str
 		f.t.Fatal("CreateComment: unexpected call")
 	}
 	return f.createComment(ctx, number, body)
+}
+
+func (f *fakeRepository) ReviewComments(_ context.Context, _ int) ([]threads.Comment, error) {
+	f.t.Fatal("ReviewComments: unexpected call")
+	return nil, nil
+}
+
+func (f *fakeRepository) CreateReview(_ context.Context, _ int, _ string, _ []threads.Create) error {
+	f.t.Fatal("CreateReview: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) CreateFileComment(_ context.Context, _ int, _ string, _ threads.Create) error {
+	f.t.Fatal("CreateFileComment: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) ReplyToReviewComment(_ context.Context, _ int, _ int64, _ string) error {
+	f.t.Fatal("ReplyToReviewComment: unexpected call")
+	return nil
+}
+
+func (f *fakeRepository) DeleteReviewComment(_ context.Context, _ int64) error {
+	f.t.Fatal("DeleteReviewComment: unexpected call")
+	return nil
 }
 
 // trustedContext builds a trust.TrustedContext for a test the way trust's own

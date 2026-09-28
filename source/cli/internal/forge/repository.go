@@ -5,16 +5,19 @@ import (
 	"fmt"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/threads"
 	"lydite/lydite/internal/trust"
 )
 
-// SCMRepository is one repository on the hosting platform, as the clearance
-// workflow reads and writes it.
+// SCMRepository is one repository on the hosting platform, as lydite's flows
+// read and write it.
 //
 // Every method is typed in lydite's own terms — a pull request is an int, a
-// status is this package's Status, a standing verdict is clearance.Status —
-// so nothing holding one depends on the platform's own payload shapes. The
-// set is exactly what clearance reaches for; review threads are not here.
+// status is this package's Status, a standing verdict is clearance.Status,
+// a review thread is threads.Comment — so nothing holding one depends on
+// the platform's own payload shapes. The set is what a flow reaches for:
+// clearance's own reads and writes, and the review threads the threads flow
+// lists, opens, answers and removes.
 type SCMRepository interface {
 	IssueComment(ctx context.Context, id int64) (IssueComment, error)
 	HeadSHA(ctx context.Context, number int) (string, error)
@@ -24,6 +27,11 @@ type SCMRepository interface {
 	ReferralStatus(ctx context.Context, sha string) (*clearance.Status, error)
 	PostStatus(ctx context.Context, s Status) error
 	CreateComment(ctx context.Context, number int, body string) error
+	ReviewComments(ctx context.Context, number int) ([]threads.Comment, error)
+	CreateReview(ctx context.Context, number int, head string, comments []threads.Create) error
+	CreateFileComment(ctx context.Context, number int, head string, create threads.Create) error
+	ReplyToReviewComment(ctx context.Context, number int, id int64, body string) error
+	DeleteReviewComment(ctx context.Context, id int64) error
 }
 
 var _ SCMRepository = (*GitHubRepository)(nil)
@@ -91,4 +99,31 @@ func (g *GitHubRepository) PostStatus(ctx context.Context, s Status) error {
 // CreateComment posts body as a new comment on pull request number.
 func (g *GitHubRepository) CreateComment(ctx context.Context, number int, body string) error {
 	return g.Client.CreateComment(ctx, g.Repo, number, body)
+}
+
+// ReviewComments lists every comment on pull request number's diff, replies
+// included.
+func (g *GitHubRepository) ReviewComments(ctx context.Context, number int) ([]threads.Comment, error) {
+	return g.Client.ReviewComments(ctx, g.Repo, number)
+}
+
+// CreateReview opens every line-anchored thread comments carries in one
+// review against head.
+func (g *GitHubRepository) CreateReview(ctx context.Context, number int, head string, comments []threads.Create) error {
+	return g.Client.CreateReview(ctx, g.Repo, number, head, comments)
+}
+
+// CreateFileComment opens a thread on a whole file at head.
+func (g *GitHubRepository) CreateFileComment(ctx context.Context, number int, head string, create threads.Create) error {
+	return g.Client.CreateFileComment(ctx, g.Repo, number, head, create)
+}
+
+// ReplyToReviewComment adds body to the thread id names.
+func (g *GitHubRepository) ReplyToReviewComment(ctx context.Context, number int, id int64, body string) error {
+	return g.Client.ReplyToReviewComment(ctx, g.Repo, number, id, body)
+}
+
+// DeleteReviewComment removes the review comment id names.
+func (g *GitHubRepository) DeleteReviewComment(ctx context.Context, id int64) error {
+	return g.Client.DeleteReviewComment(ctx, g.Repo, id)
 }
