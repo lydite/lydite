@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1023,6 +1024,48 @@ func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 	}
 	if !strings.Contains(row.Value, "declared equivalent") {
 		t.Errorf("value = %q, want it to name the declaration", row.Value)
+	}
+}
+
+// A declaration covering no mutant is named on stderr as it arises, and
+// counted on the component's row, which is what the report, mutation.json and
+// the fold over it carry. It gates nothing: the row passes on its mutants.
+func TestADeclarationCoveringNoMutantIsCountedOnTheRow(t *testing.T) {
+	root := goModuleRepo(t, deeper+"\n// "+annotation.Marker(annotation.Mutation)+
+		"[nothing on this line is ever mutated]\n", killsItsMutants)
+	var doc ui.Document
+	var err error
+	stderr := capturedStderr(t, func() {
+		doc, _, err = runMutationCmd(t, "--dir", root, "--base-branch", "main")
+	})
+	if err != nil {
+		t.Fatalf("an unmatched declaration failed the gate: %v\n%+v", err, doc.Rows)
+	}
+	if strings.Count(stderr, "covers no mutant") != 1 {
+		t.Errorf("stderr = %q, want the unmatched declaration named once", stderr)
+	}
+	const note = "1 declaration(s) cover no mutant"
+	row, _ := rowNamed(doc, mutationLabel("app"))
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v, want a pass: the count gates nothing", row)
+	}
+	if !slices.Contains(row.Detail, note) {
+		t.Errorf("detail = %v, want %q", row.Detail, note)
+	}
+
+	written, err := readDocument(documentPath(reportsDir(root), "mutation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := rowNamed(written, mutationLabel("app")); !slices.Contains(got.Detail, note) {
+		t.Errorf("mutation.json's row = %+v, want %q in its detail", got, note)
+	}
+	folded, err := runMutationMerge(t, root, reportsDir(root))
+	if err != nil {
+		t.Fatalf("a fold over one complete shard failed: %v", err)
+	}
+	if got, _ := rowNamed(folded, mutationLabel("app")); !slices.Contains(got.Detail, note) {
+		t.Errorf("the folded row = %+v, want %q carried through", got, note)
 	}
 }
 

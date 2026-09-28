@@ -1,10 +1,13 @@
 package mutationstages
 
 import (
+	"bytes"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
+	"lydite/lydite/internal/annotation"
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/coverage"
 	"lydite/lydite/internal/runner"
@@ -43,7 +46,7 @@ func TestOnlyAnExecutedLineIsMutated(t *testing.T) {
 
 	// Line 4 holds the comparison; the report says it never ran.
 	hits := coverage.LineHits{"a.go": {4: 0, 5: 1}}
-	mutants, err := generate(root, c, runner.Go, hits, map[string][]int{"a.go": {4, 5}}, io.Discard)
+	mutants, _, err := generate(root, c, runner.Go, hits, map[string][]int{"a.go": {4, 5}}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +67,39 @@ func TestOnlyAnExecutedLineIsMutated(t *testing.T) {
 func TestAChangedFileThatIsGoneIsSkipped(t *testing.T) {
 	root := t.TempDir()
 	c := component.Component{Name: "app", Dir: ".", Runner: "go-test"}
-	mutants, err := generate(root, c, runner.Go, coverage.LineHits{"gone.go": {3: 1}}, map[string][]int{"gone.go": {3}}, io.Discard)
+	mutants, _, err := generate(root, c, runner.Go, coverage.LineHits{"gone.go": {3: 1}}, map[string][]int{"gone.go": {3}}, io.Discard)
 	if err != nil {
 		t.Fatalf("a deleted file failed the run: %v", err)
 	}
 	if len(mutants) != 0 {
 		t.Errorf("%d mutant(s) from a file that is not there", len(mutants))
+	}
+}
+
+// A declaration covering no mutant is both named on diagnostics, as it
+// arises, and counted across the component's files, since the count is what
+// reaches the row a reader of the report sees.
+func TestADeclarationCoveringNoMutantIsNamedAndCounted(t *testing.T) {
+	root := t.TempDir()
+	marker := annotation.Marker(annotation.Mutation)
+	writeFile(t, root, "app/a.go", "package a\n\n// "+marker+"[nothing on this line is ever mutated]\nfunc One() bool {\n\treturn true\n}\n")
+	writeFile(t, root, "app/b.go", "package a\n\n// "+marker+"[nor on this one]\nfunc Two() bool {\n\treturn true\n}\n")
+	c := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	hits := coverage.LineHits{"app/a.go": {5: 1}, "app/b.go": {5: 1}}
+	var diagnostics bytes.Buffer
+	mutants, unmatched, err := generate(root, c, runner.Go, hits,
+		map[string][]int{"app/a.go": {3, 5}, "app/b.go": {3, 5}}, &diagnostics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mutants) == 0 {
+		t.Fatal("no mutant was generated from the covered return")
+	}
+	if unmatched != 2 {
+		t.Errorf("unmatched = %d, want the one declaration in each file counted", unmatched)
+	}
+	if got := strings.Count(diagnostics.String(), "covers no mutant"); got != 2 {
+		t.Errorf("diagnostics = %q, want each declaration named once", diagnostics.String())
 	}
 }
 

@@ -610,8 +610,11 @@ func kindRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentM
 		// A run with nothing to mutate must not report a pass: a green row
 		// from a gate that examined nothing is indistinguishable from one
 		// that examined everything.
-		return detailed(unmeasuredRow(label,
-			"no line this change touched is both mutable and reported as executed"), log), componentMutation{}
+		row := unmeasuredRow(label, "no line this change touched is both mutable and reported as executed")
+		if n := unmatchedNote(o.Summary); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		return detailed(row, log), componentMutation{}
 	case mutationstages.KindCompleted:
 		out := componentMutation{summary: o.Summary, elapsed: o.Elapsed, ran: true}
 		row, findings := mutationRow(label, c.Name, c.Dir, log, o.Summary, o.Results, o.Scoped, o.Elapsed)
@@ -727,8 +730,12 @@ func teardownFailureReplaces(status ui.Status) bool {
 func mutationRow(label, component, dir string, log *componentLog, s mutation.Summary, results []mutation.Result, changed map[string][]int, elapsed time.Duration) (ui.Row, []finding.Finding) {
 	killed, total := s.Score()
 	if total == 0 {
-		return detailed(unmeasuredRow(label, fmt.Sprintf(
-			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log), nil
+		row := unmeasuredRow(label, fmt.Sprintf(
+			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s)))
+		if n := unmatchedNote(s); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		return detailed(row, log), nil
 	}
 	// The elapsed time is in the value rather than under the row, because a
 	// reader deciding whether this component is worth mutating on every pull
@@ -739,6 +746,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 		Value: fmt.Sprintf("%d of %d mutant(s) killed in %s", killed, total, elapsed.Round(time.Second))}
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
+	}
+	if n := unmatchedNote(s); n != "" {
+		row.Detail = append(row.Detail, n)
 	}
 	if n := unboundedNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
@@ -759,6 +769,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	}
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
+	}
+	if n := unmatchedNote(s); n != "" {
+		row.Detail = append(row.Detail, n)
 	}
 	if n := unboundedNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
@@ -838,6 +851,22 @@ func aside(s mutation.Summary) string {
 		parts = append(parts, fmt.Sprintf("%d ran out of memory", s.OutOfMemory))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// unmatchedNote counts the equivalence declarations that covered no mutant.
+//
+// A line of its own rather than a part of aside, because these are not mutants
+// at all: aside's parts are each a share of the mutants the run generated, and
+// a declaration covering nothing adds no mutant to any of them. It is on the
+// row, and not only on the diagnostic stream, because the row is what a
+// reader of the report or of the pull-request comment sees — and the author of
+// such a declaration believes they have answered a survivor that is generated
+// and run anyway. It gates nothing.
+func unmatchedNote(s mutation.Summary) string {
+	if s.Unmatched == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d declaration(s) cover no mutant", s.Unmatched)
 }
 
 // unboundedNote says on the row that the memory bound did not reach the

@@ -243,6 +243,11 @@ type Summary struct {
 	Survived     int
 	Unviable     int
 	Acknowledged int
+	// Unmatched counts the equivalence declarations on the component's
+	// mutated lines that covered no mutant. It is no mutant's outcome, so Add
+	// never moves it and Total never includes it: it is the row's account of
+	// declarations whose author believes they answered a survivor.
+	Unmatched int
 }
 
 // Add folds one result in.
