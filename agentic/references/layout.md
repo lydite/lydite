@@ -31,6 +31,9 @@ source/cli/internal/relay/        # the pr-relay client: minting an Actions OIDC
 source/cli/internal/stages/threads/ # find, list, plan, write and apply a pull request's review
                                   #   threads (see architecture.md)
 source/cli/internal/flows/threads/  # declares the threads flow (see architecture.md)
+source/cli/internal/stages/release/ # resolve-tag, previous-tag, read-commits, judge: lydite
+                                  #   release check's four stages (see architecture.md)
+source/cli/internal/flows/release/  # the release flow declaration (see architecture.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
 source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own
