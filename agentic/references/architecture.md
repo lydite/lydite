@@ -360,8 +360,9 @@ through `teststages.MeasurementsReader` — a stage-owned interface, not a reuse
 stage's own `Out` carries only which directories were read and each shard's error, never the
 document itself — the same shape the section below states for keeping that schema off a stage
 boundary at all. No fold stage exists for `test merge`: `foldMeasured` and every row it renders
-stay in `cmd/lydite/fold.go`, called directly the way `mutation_merge.go` already calls the same
-package's row-fold helpers rather than duplicating them.
+stay in `cmd/lydite/merge.go`, calling `fold.go`'s row-fold helpers (`shardInputs`, `rowsFor`,
+`carryUnhandled`) directly, the way `mutation_merge.go` already does, rather than duplicating
+them.
 
 ### `componentPlan`, `componentLog`, `measurementsDoc` and `componentMeasurement` stay in `cmd/lydite`
 
