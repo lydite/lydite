@@ -769,8 +769,3 @@ func affectedFrom(ctx context.Context, dir string, file component.File, base str
 
 // selectRow is testrun.SelectRow.
 func selectRow(res affected.Result, declared int) ui.Row { return testrun.SelectRow(res, declared) }
-
-// intersect is testrun.Intersect.
-func intersect(cs []component.Component, own []component.Component) []component.Component {
-	return testrun.Intersect(cs, own)
-}
