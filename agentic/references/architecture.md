@@ -4,10 +4,11 @@
 > `internal/forge`'s `SCMRepository`, and any `cmd/lydite` command built as a Flow.**
 
 `clearance` is the first command built this way; `internal/flow`'s own doc comment names the
-rest of the shape. A command that answers a webhook by reading a platform live, deciding
-something, and writing back to the platform is the pattern this exists for — `test`, `mutation`,
-`scan`, `review`, `publish` and the others stay as they are until each is migrated on its own
-terms, which is a decision made command by command rather than one this file makes for them.
+rest of the shape. Business logic — what lydite does to, or concludes about, a repository:
+reading its state, deciding a verdict, writing a result back to it or to disk — runs on this
+scaffold; the CLI's own concerns, the tool managing itself (`version`, `update`, the update
+nudge), do not. See [ADR 0076](../../docs/adr/0076-business-logic-runs-as-a-flow-and-the-cli-keeps-its-own-concerns.md)
+for the principle and the verdict for every command.
 
 ## Four layers, and no jumping
 
@@ -682,3 +683,45 @@ answered instead of deleted before the failure, which is why the CLI still print
 each of those even when the run as a whole fails; `*threadsstages.OpenError{Lost, Posted int, Err
 error}`'s `Error()` reads `"<Lost> located finding(s) reached no surface: <Err>"`. Both implement
 `Unwrap`, so `errors.Is`/`errors.As` still reach the underlying cause.
+
+## The release flow
+
+`releaseflow.New` (`internal/flows/release`) declares `lydite release check`'s stages in this
+order: `resolve-tag`, `previous-tag`, `read-commits`, `judge`. `internal/stages/release`
+(`releasestages`) holds all four — `ResolveTag`, `PreviousTag`, `ReadCommits`, `Judge` — no
+platform, no credential, and no webhook in the loop: the command reads a checkout's own tags and
+commit messages and concludes whether a declared break lands on a bump that admits one, which is
+business logic by [ADR 0076](../../docs/adr/0076-business-logic-runs-as-a-flow-and-the-cli-keeps-its-own-concerns.md)'s
+definition even though it reads no platform live.
+
+`resolve-tag` settles which tag is being released, in descending order of how explicitly it was
+stated: a caller's own `--tag`, then the short name of the ref a run was triggered by (only when
+that ref's type says it is a tag — a branch build's ref name is a branch, and checking it as a
+version would report a misconfiguration as a malformed tag), then the tag the checkout itself is
+on. `previous-tag` finds the release before it and runs unconditionally — a run with nothing to
+check still needs to know whether this is the repository's first release. `read-commits` and
+`judge` are declared `.Unless(flow.FromStage(StagePreviousTag, "First"))`: a first release has an
+empty range, with no commits to read and nothing to judge. This is safe with no preceding guard,
+for the reason the scan flow's `semgrep`/`secrets` pair already states for the same shape:
+`previous-tag` runs under no condition of its own and the default `FailFlow`, so by the time
+either later stage's condition is evaluated, `previous-tag` has either produced the `First` output
+being read or already failed the run — there is no earlier condition to declare first, because
+there is no way to reach the read with `previous-tag` having been skipped.
+
+`ResolveTag` answers `releasestages.ErrNoTag` when neither the flag, the ref, nor the checkout
+names a tag — a sentinel, not a worded message: a stage speaks in its own domain's terms and knows
+nothing about how the CLI wants a person told to fix it. `runReleaseCheck` unwraps the flow's
+`*flow.StageError` back to the stage's own error before comparing it against `ErrNoTag`, the same
+unwrap every other command's top-level error handling performs to keep a stage's own error text
+intact rather than reporting the flow's framing of it; only then does it supply the CLI's own
+words naming `--tag`, `GITHUB_REF_NAME` and a checked-out tag as the three places one could have
+come from.
+
+The CLI picks the row from `previous-tag`'s and `judge`'s outputs in the same order the flow's own
+conditions read them: `releaseRow` reads `previous-tag`'s `First` before it ever reads `judge`'s
+output, because a first release's `judge` never ran and reading an unavailable stage's output
+outside a flow's own guarded `Run` is exactly as unsafe as reading it from inside one. A first
+release renders as an empty range that passed; declaring no break in the range renders as a pass
+naming the range's size; a declared break the bump admits renders as a pass naming which commits
+declared one; a declared break the bump does not admit renders as the one row this command exists
+to produce, its detail closing with the rule the bump failed to satisfy.

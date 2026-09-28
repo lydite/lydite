@@ -32,6 +32,7 @@ says why it is that way and what breaks if it changes.
 | `relay` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |
 | `stages/threads`, `flows/threads` | [`architecture.md`](../../../agentic/references/architecture.md) |
+| `stages/release`, `flows/release` | [`architecture.md`](../../../agentic/references/architecture.md) for the flow, and [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) for the tag resolution it reads |
 
 A `*-pin/` directory is a tool pin, not a component: see
 [`tool-pins.md`](../../../agentic/references/tool-pins.md) before adding one.
