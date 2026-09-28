@@ -87,11 +87,13 @@ this architecture's terms — ordinary stages, once the Source/Sink framing turn
 A second alternative was building the `Source`/`Sink` distinction the issue assumed already
 existed — a new engine concept for "a stage that reads" and "a stage that writes," so `publish`'s
 shape could be described in those terms literally. This was rejected because `internal/flow` is
-frozen, and because it is a distinction the architecture draws nowhere else: `scmstages.
-LoadComment` reads, `clearancestages.RenderStatuses` writes, and neither is typed any differently
-from `clearancestages.Decide`, which does neither. Building the distinction for `publish` alone
-would give one flow a shape no other flow shares, for a question — "is this stage reading or
-writing" — the engine has never needed answered to run one.
+frozen, and because the engine draws that distinction nowhere: `scmstages.LoadComment` reads,
+`clearancestages.RenderStatuses` writes, and neither is typed any differently from
+`clearancestages.Decide`, which does neither — "sink" appears only as a description of what a
+stage does, as in [ADR 0070](0070-the-ledger-sink-composes-and-lands-history-and-record-decides-what-it-holds.md),
+never as a kind of stage `internal/flow` distinguishes. Building the distinction for `publish`
+alone would give one flow a shape no other flow shares, for a question — "is this stage reading
+or writing" — the engine has never needed answered to run one.
 
 ## Consequences
 
@@ -102,9 +104,10 @@ writing" — the engine has never needed answered to run one.
 - A command with nothing to read or write from a hosting platform is still three stages, because
   "read," "assemble," and "write" are three responsibilities regardless of where the data comes
   from — the same three-stage shape a future purely computational command would reach for.
-- The Source/Sink language in the originating issue does not name anything real in this codebase
-  and should not be repeated as though it did; the correct description is "stages, some of which
-  read and some of which write."
+- "Source" and "sink" name no type in `internal/flow`. Where this architecture says "sink" —
+  [ADR 0070](0070-the-ledger-sink-composes-and-lands-history-and-record-decides-what-it-holds.md)'s
+  ledger sink — it describes what an ordinary stage does, not a kind of stage the engine tells
+  apart: a stage that reads and one that writes are the same shape.
 
 See [`agentic/references/architecture.md`](../../agentic/references/architecture.md) for the
 publish flow among the four layers, and
