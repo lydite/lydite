@@ -9,6 +9,7 @@ says why it is that way and what breaks if it changes.
 | `flow`, `stages/*`, `flows/*`, `trust`, `test/measure`, `test/run` | [`architecture.md`](../../../agentic/references/architecture.md) |
 | `stages/publish`, `flows/publish` | [`architecture.md`](../../../agentic/references/architecture.md) for the flow, [`surface.md`](../../../agentic/references/surface.md) for the standing comment it renders |
 | `stages/mutation`, `stages/shards`, `flows/mutation`, `shard` | [`architecture.md`](../../../agentic/references/architecture.md) for the flow and stage shape, and [`mutation.md`](../../../agentic/references/mutation.md) for what `lydite mutation` and `lydite mutation merge` decide |
+| `stages/queue`, `flows/queue` | [`architecture.md`](../../../agentic/references/architecture.md) |
 | `component`, `runner`, `nodedeps`, `cargotool` | [`components.md`](../../../agentic/references/components.md) |
 | `compose`, `scheduler` | [`services-and-scheduling.md`](../../../agentic/references/services-and-scheduling.md) |
 | `orphan`, `affected`, `pathmatch`, `gitdiff` | [`orphan-and-affected.md`](../../../agentic/references/orphan-and-affected.md) |
@@ -28,6 +29,7 @@ says why it is that way and what breaks if it changes.
 | `secrets` | [`scanning.md`](../../../agentic/references/scanning.md), and [`tool-pins.md`](../../../agentic/references/tool-pins.md) for the gitleaks pin |
 | `ui` | [`output-grammar.md`](../../../agentic/references/output-grammar.md), and [`surface.md`](../../../agentic/references/surface.md) for the comment |
 | `referral`, `clearance`, `forge`, `depdelta`, `apisurface`, `rustapisurface`, `tsapisurface`, `declaration`, `reviewdecision` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
+| `relay` | [`referral-and-clearance.md`](../../../agentic/references/referral-and-clearance.md) |
 | `threads` | [`surface.md`](../../../agentic/references/surface.md), and [`findings.md`](../../../agentic/references/findings.md) for what becomes one |
 
 A `*-pin/` directory is a tool pin, not a component: see

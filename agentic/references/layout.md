@@ -23,6 +23,11 @@ source/cli/internal/flows/mutation/ # lydite mutation's, lydite mutation merge's
                                   #   record's flow declarations (see architecture.md)
 source/cli/internal/shard/       # the shard domain value: one report directory's document for
                                   #   one command, or why it could not be read (see architecture.md)
+source/cli/internal/stages/queue/ # load-event, resolve-base, recompute-decision, mint-token,
+                                  #   submit-comparison: lydite clearance queue's five stages (see architecture.md)
+source/cli/internal/flows/queue/  # the queue flow declaration (see architecture.md)
+source/cli/internal/relay/        # the pr-relay client: minting an Actions OIDC token and
+                                  #   submitting a merge-group comparison (see referral-and-clearance.md)
 source/cli/internal/trust/        # the sealed TrustedContext a run's identity and credential are
                                   #   decided into, once, from the environment (see architecture.md)
 source/cli/internal/test/measure/ # coverage/CRAP figures and rows, shared by lydite test's own
