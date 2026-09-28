@@ -306,9 +306,10 @@ func TestOnlyRequestedLinesAreMutated(t *testing.T) {
 // that carried it: each link is mutated at its own byte range.
 //
 // What the chain does not get is its own exclusion. A declaration on that line
-// attaches to every mutant tied for the shortest replaced text, so two
-// single-character bounds are covered together — sites.go's tie-break, stated
-// beside the fixture's own chain, and not a property of this extraction.
+// attaches to every innermost mutant on it, and neither link's range encloses
+// the other's, so both bounds are covered together — sites.go's containment
+// rule, stated beside the fixture's own chain, and not a property of this
+// extraction.
 func TestEachLinkOfAChainedComparisonIsItsOwnMutant(t *testing.T) {
 	src := []byte("def banded(low, score, high):\n    return low < score < high\n")
 	mutants, _, err := GenerateTreeSitter(runner.Python, "banded.py", src, everyLine(src))
@@ -413,5 +414,102 @@ func TestALanguageWithNoGeneratorIsRefused(t *testing.T) {
 	}
 	if _, _, err := Generate("cobol", "a.cbl", []byte("x"), nil); err == nil {
 		t.Error("the dispatcher accepted a language with no generator")
+	}
+}
+
+// One declaration answers every innermost mutant on its line. In a loop
+// condition the comparison and the addition beside it are both innermost —
+// neither encloses the other — so a claim about the line covers the two-byte
+// `<=` and the one-byte `+` alike, and leaves the loop statement enclosing
+// them unanswered.
+func TestADeclarationCoversEveryInnermostMutantOnATypeScriptLine(t *testing.T) {
+	src := []byte("export function unique(used: Set<string>, key: string): number {\n" +
+		"  let n = 0;\n" +
+		"  for (let suffix = 1; suffix <= used.size + 1 && used.has(key); suffix++) { " + equiv("r") + "\n" +
+		"    n += suffix;\n" +
+		"  }\n" +
+		"  return n;\n" +
+		"}\n")
+	mutants, unmatched, err := GenerateTreeSitter(runner.TypeScript, "unique.ts", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmatched) != 0 {
+		t.Errorf("unmatched = %v, want none", unmatched)
+	}
+	seen := map[Operator]bool{}
+	for _, m := range mutants {
+		if m.Line != 3 {
+			if m.Acknowledged() {
+				t.Errorf("%s: acknowledged by a declaration on another line", m)
+			}
+			continue
+		}
+		seen[m.Operator] = true
+		if !m.Acknowledged() {
+			t.Errorf("%s: an innermost mutant on the declared line is unanswered", m)
+		}
+	}
+	for _, op := range []Operator{ConditionalBoundary, NegateConditional, ArithmeticOperator} {
+		if !seen[op] {
+			t.Errorf("no %s mutant on the declared line, so the fixture asserts nothing about it", op)
+		}
+	}
+}
+
+// A declaration beside an operator inside a call is a claim about the
+// operator. The call's deletion encloses it and is left unanswered, while the
+// operator's boundary shift and negation — one range, two mutants — are both
+// covered.
+func TestATypeScriptDeclarationSkipsTheStatementEnclosingItsOperator(t *testing.T) {
+	src := []byte("export function show(a: number, b: number): void {\n" +
+		"  console.log(a <= b); " + equiv("r") + "\n" +
+		"}\n")
+	mutants, _, err := GenerateTreeSitter(runner.TypeScript, "show.ts", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[Operator]bool{}
+	for _, m := range mutants {
+		seen[m.Operator] = true
+		switch m.Operator {
+		case RemoveStatement:
+			if m.Acknowledged() {
+				t.Errorf("%s: deleting the whole call was acknowledged by a claim about one operator in it", m)
+			}
+		case ConditionalBoundary, NegateConditional:
+			if !m.Acknowledged() {
+				t.Errorf("%s: the declaration beside it did not reach it", m)
+			}
+		}
+	}
+	for _, op := range []Operator{RemoveStatement, ConditionalBoundary, NegateConditional} {
+		if !seen[op] {
+			t.Errorf("no %s mutant, so the fixture asserts nothing about it", op)
+		}
+	}
+}
+
+// A declaration binds to its own line. Written on the line above the code it
+// is about, it covers nothing and is reported as covering nothing.
+func TestATypeScriptDeclarationOnTheLineAboveCoversNothing(t *testing.T) {
+	src := []byte("export function over(n: number): boolean {\n" +
+		"  " + equiv("r") + "\n" +
+		"  return n <= 10;\n" +
+		"}\n")
+	mutants, unmatched, err := GenerateTreeSitter(runner.TypeScript, "over.ts", src, everyLine(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmatched) != 1 || unmatched[0].Line != 2 {
+		t.Errorf("unmatched = %v, want the declaration on line 2", unmatched)
+	}
+	if len(mutants) == 0 {
+		t.Fatal("no mutant on the line below the declaration")
+	}
+	for _, m := range mutants {
+		if m.Acknowledged() {
+			t.Errorf("%s: acknowledged by a declaration on the line above it", m)
+		}
 	}
 }

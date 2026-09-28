@@ -72,13 +72,18 @@ func (s *sites) add(op Operator, line, column, lo, hi, first, last int, mutated 
 // the declarations that turned out to be about nothing.
 //
 // A declaration covers the mutants whose replaced range contains its line and
-// whose range is the shortest of those. Position alone cannot tell what an
-// author meant, because one line holds mutants at several scopes: beside
-// `println(a < b)` sit two mutants of the comparison and one that deletes the
-// whole call. The shortest range is the innermost thing written at that line,
-// which is what somebody annotating a line is looking at — so a claim about an
-// operator acknowledges the operator, and deleting the call remains a mutant
-// they have not answered.
+// that are innermost among those: no other such mutant's range sits strictly
+// inside theirs. Position alone cannot tell what an author meant, because one
+// line holds mutants at several scopes: beside `println(a < b)` sit two
+// mutants of the comparison and one that deletes the whole call. The call's
+// range encloses the comparison's, so the claim acknowledges the operator, and
+// deleting the call remains a mutant its author has not answered.
+//
+// Innermost is decided by containment, never by width. Mutants replacing the
+// same range — an operator's boundary shift and its negation — are all
+// innermost, and so are mutants replacing disjoint ranges on the line: in
+// `i <= n + 1` neither the comparison nor the addition encloses the other, so
+// one declaration answers both, however many bytes each replaces.
 //
 // Reaching by containment rather than by a window of lines is what lets a
 // declaration inside a multi-line statement work: it sits on no line the
@@ -100,17 +105,28 @@ func (s *sites) resolve() []UnmatchedDeclaration {
 			unmatched = append(unmatched, UnmatchedDeclaration{Path: s.path, Line: line, Reason: s.reasons[line]})
 			continue
 		}
-		shortest := s.out[inside[0]].Length
-		for _, i := range inside[1:] {
-			shortest = min(shortest, s.out[i].Length)
-		}
 		for _, i := range inside {
-			if s.out[i].Length == shortest {
+			if !s.enclosesAnother(i, inside) {
 				s.out[i].Reason = s.reasons[line]
 			}
 		}
 	}
 	return unmatched
+}
+
+// enclosesAnother reports whether the range out[i] replaces strictly contains
+// the range of some other mutant among candidates. An identical range is not
+// strict containment, so mutants replacing the same text never exclude one
+// another.
+func (s *sites) enclosesAnother(i int, candidates []int) bool {
+	lo, hi := s.out[i].Offset, s.out[i].Offset+s.out[i].Length
+	for _, j := range candidates {
+		jlo, jhi := s.out[j].Offset, s.out[j].Offset+s.out[j].Length
+		if lo <= jlo && jhi <= hi && (lo != jlo || hi != jhi) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[int]string) []int {

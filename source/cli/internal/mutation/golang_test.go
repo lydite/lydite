@@ -402,3 +402,37 @@ func TestGenerateRefusesAPathOutsideTheComponent(t *testing.T) {
 		t.Errorf("GenerateGo on an ordinary relative path: %v", err)
 	}
 }
+
+// Innermost is decided by containment in Go as in every other language. The
+// comparison and the addition inside one call are both innermost, whatever
+// their widths, so one declaration covers both; the call's deletion encloses
+// them and is left unanswered.
+func TestAGoDeclarationCoversEveryInnermostMutantOnItsLine(t *testing.T) {
+	src := "package p\n\nfunc F(a, b int) {\n\tprintln(a <= b+1) " + equiv("r") + "\n}\n"
+	got, unmatched, err := GenerateGo("x.go", []byte(src), allLines(6))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if len(unmatched) != 0 {
+		t.Errorf("unmatched = %v, want none", unmatched)
+	}
+	seen := map[Operator]bool{}
+	for _, m := range got {
+		seen[m.Operator] = true
+		switch m.Operator {
+		case RemoveStatement:
+			if m.Acknowledged() {
+				t.Errorf("%s: deleting the whole call was acknowledged by a claim about what is inside it", m)
+			}
+		default:
+			if !m.Acknowledged() {
+				t.Errorf("%s: an innermost mutant on the declared line is unanswered", m)
+			}
+		}
+	}
+	for _, op := range []Operator{RemoveStatement, ConditionalBoundary, NegateConditional, ArithmeticOperator} {
+		if !seen[op] {
+			t.Errorf("no %s mutant, so the fixture asserts nothing about it", op)
+		}
+	}
+}
