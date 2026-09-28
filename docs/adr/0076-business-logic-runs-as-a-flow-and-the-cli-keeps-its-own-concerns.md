@@ -37,8 +37,8 @@ the same reasoning again for the next command shaped like none of the first thre
 | `scan` | runs as a flow |
 | `test` | runs as a flow |
 | `test record` | runs as a flow |
-| `test plan` | should move — not moved here, see the follow-up issue below |
-| `test merge` | should move — not moved here, see the follow-up issue below |
+| `test plan` | runs as a flow |
+| `test merge` | runs as a flow |
 | `mutation` | runs as a flow |
 | `mutation merge` | runs as a flow |
 | `review` | runs as a flow |
@@ -91,9 +91,10 @@ the repository it is running against.
 - A new command's business logic starts as a flow; the CLI's own concerns (a self-check, a
   self-update, a version string) start, and stay, in `cmd/lydite`.
 - `test plan` and `test merge` are pure folds over documents already on disk, sharing `fold.go`'s
-  conflict predicate with `mutation merge`, which already runs as a flow — the fold's own
-  reasoning does not change, so their move is a layering exercise, not a judgment call about
-  whether Flow fits. [#296](https://github.com/lydite/lydite/issues/296) tracks it.
+  conflict predicate with `mutation merge`: both run as a flow for the same reason `mutation
+  merge` does, over `teststages`' own `LoadPlanComponents`/`GroupShards` and
+  `LoadMergeComponents`/`ReadShardMeasurements` — the fold's own reasoning did not change, only
+  its layering. See `architecture.md`'s "Test" section for both flows' stages.
 - `architecture.md`'s "The release flow" section describes `release check`'s four stages among
   the four layers.
 
