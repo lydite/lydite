@@ -18,6 +18,7 @@ import (
 	"lydite/lydite/internal/flow"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
+	ledgerstages "lydite/lydite/internal/stages/ledger"
 	recordstages "lydite/lydite/internal/stages/record"
 )
 
@@ -159,7 +160,8 @@ func recordParams(dir string, reader recordstages.ReportReader) Params {
 // recordGuarded is every stage that runs only when the recording binds to the
 // checked-out tree.
 var recordGuarded = []string{
-	StageCountFindings, StageBindMutants, StageComposeHistory, StageDecideBaseline, StageWriteState,
+	StageCountFindings, StageBindMutants, StageComposeLedgerInputs, StageComposeRecords,
+	StageDecideBaseline, StageWriteState,
 }
 
 // recordRun builds the flow and runs it with p.
@@ -291,7 +293,7 @@ func TestABoundRecordingLandsTheBaselineAndTheHistory(t *testing.T) {
 	if baseline.Verdict != recordstages.VerdictToRecord {
 		t.Errorf("Verdict = %v, want VerdictToRecord", baseline.Verdict)
 	}
-	written, err := flow.Output[recordstages.WriteStateOut](res, StageWriteState)
+	written, err := flow.Output[ledgerstages.WriteStateOut](res, StageWriteState)
 	if err != nil {
 		t.Fatalf("write-state: %v", err)
 	}
@@ -312,7 +314,7 @@ func TestABoundRecordingLandsTheBaselineAndTheHistory(t *testing.T) {
 
 // A write that never lands is recorded on the Result and the run still
 // completes: whether it fails the recording is the caller's to judge from what
-// decide-baseline and compose-history said was being landed, and both
+// decide-baseline and compose-records said was being landed, and both
 // outcomes are still there to read.
 func TestAWriteThatNeverLandsIsRecordedAndTheRunCompletes(t *testing.T) {
 	dir, origin, tree := recordRepo(t)
@@ -336,15 +338,15 @@ func TestAWriteThatNeverLandsIsRecordedAndTheRunCompletes(t *testing.T) {
 	if !strings.HasPrefix(errs[0].Err.Error(), prefix) {
 		t.Errorf("write-state's error = %v, want gitstate.Write's own, starting %q", errs[0].Err, prefix)
 	}
-	if _, err := flow.Output[recordstages.WriteStateOut](res, StageWriteState); !errors.Is(err, flow.ErrUnavailable) {
+	if _, err := flow.Output[ledgerstages.WriteStateOut](res, StageWriteState); !errors.Is(err, flow.ErrUnavailable) {
 		t.Errorf("write-state's output: err = %v, want it unavailable", err)
 	}
-	history, err := flow.Output[recordstages.ComposeHistoryOut](res, StageComposeHistory)
+	history, err := flow.Output[ledgerstages.ComposeRecordsOut](res, StageComposeRecords)
 	if err != nil {
-		t.Fatalf("compose-history: %v", err)
+		t.Fatalf("compose-records: %v", err)
 	}
-	if history.Reason != recordstages.HistoryToAppend {
-		t.Errorf("history reason = %v, want HistoryToAppend", history.Reason)
+	if history.Reason != nil || history.Records == nil {
+		t.Errorf("history reason = %v, want none and records to append", history.Reason)
 	}
 	baseline, err := flow.Output[recordstages.DecideBaselineOut](res, StageDecideBaseline)
 	if err != nil {

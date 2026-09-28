@@ -1,4 +1,4 @@
-package recordstages
+package ledgerstages
 
 import (
 	"context"
@@ -11,12 +11,13 @@ import (
 type WriteStateIn struct {
 	// Dir is the checkout being recorded.
 	Dir string
-	// Head is BindTreeOut.Head, the tree the baseline is keyed by.
+	// Head is the tree the baseline is keyed by.
 	Head string
-	// Snapshot is DecideBaselineOut.Snapshot, empty when there is no
-	// baseline to land.
+	// Snapshot is the baseline to land, empty when there is none. It is
+	// passed to the write unopened: what a baseline holds, and whether there
+	// is one, is the caller's to decide.
 	Snapshot gitstate.Snapshot
-	// Records is ComposeHistoryOut.Records, nil when there is no history to
+	// Records is ComposeRecordsOut.Records, nil when there is no history to
 	// append.
 	Records gitstate.Records
 }
@@ -33,12 +34,12 @@ type WriteStateOut struct {
 // WriteState lands the baseline and the quality history in one commit on the
 // state branch.
 //
-// The one place a recording reaches the state branch, over both policies and
-// whichever of them has something to say. A second call site is a second
-// place state can reach the branch, which is the invariant a recording rests
-// on and which a grep for `gitstate.Write` answers. One commit and never two,
-// because a baseline landed with no record beside it is a hole in the history
-// the write path itself invented.
+// The one place a recording reaches the state branch, whichever of the
+// baseline and the history has something to say. A second call site is a
+// second place state can reach the branch, which is the invariant a recording
+// rests on and which a grep for `gitstate.Write` answers. One commit and never
+// two, because a baseline landed with no record beside it is a hole in the
+// history the write path itself invented.
 //
 // A write that never lands is returned as the error gitstate.Write gave, and
 // never folded into the outcome: what a failed write means — a recording that

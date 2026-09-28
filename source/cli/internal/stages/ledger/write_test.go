@@ -1,4 +1,4 @@
-package recordstages
+package ledgerstages
 
 import (
 	"context"
@@ -28,8 +28,8 @@ func TestWriteStateWithNothingToLandLandsNothing(t *testing.T) {
 // the outcome — so the same recording made twice lands no record the second
 // time.
 func TestWriteStateLandsTheBaselineAndTheRecordsInOneWrite(t *testing.T) {
-	dir, tree := recordRemote(t)
-	snap := gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": recordEntry(1, 2)}}
+	dir, tree := ledgerRemote(t)
+	snap := gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": ledgerEntry(1, 2)}}
 	rec := ledger.Record{
 		Kind: ledger.KindEntry, At: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC),
 		Commit: "0123456789abcdef0123456789abcdef01234567", Branch: "main",
@@ -68,17 +68,17 @@ func TestWriteStateLandsTheBaselineAndTheRecordsInOneWrite(t *testing.T) {
 	}
 }
 
-// The history ComposeHistory composes reaches the branch only through the
+// The history ComposeRecords composes reaches the branch only through the
 // write, asked of the branch the write fetched.
-func TestComposedHistoryLandsThroughTheWrite(t *testing.T) {
-	dir, tree := recordRemote(t)
+func TestComposedRecordsLandThroughTheWrite(t *testing.T) {
+	dir, tree := ledgerRemote(t)
 	head, err := gitstate.DescribeCommit(context.Background(), dir, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := ComposeHistory(context.Background(), ComposeHistoryIn{Dir: dir, Folded: recordScalar()})
+	history, err := ComposeRecords(context.Background(), ComposeRecordsIn{Dir: dir, Components: ledgerScalar()})
 	if err != nil {
-		t.Fatalf("ComposeHistory: %v", err)
+		t.Fatalf("ComposeRecords: %v", err)
 	}
 
 	out, err := WriteState(context.Background(), WriteStateIn{Dir: dir, Head: tree, Records: history.Records})
@@ -93,8 +93,8 @@ func TestComposedHistoryLandsThroughTheWrite(t *testing.T) {
 // A write that never lands is the stage's error, exactly as gitstate.Write
 // gave it, and never an outcome claiming anything landed.
 func TestWriteStateReturnsAWriteThatNeverLandedAsItsError(t *testing.T) {
-	dir, tree := recordRepo(t, map[string]string{"README.md": "a repository with no remote\n"})
-	snap := gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": recordEntry(1, 2)}}
+	dir, tree := ledgerRepo(t, map[string]string{"README.md": "a repository with no remote\n"})
+	snap := gitstate.Snapshot{Coverage: gitstate.Baseline{"svc": ledgerEntry(1, 2)}}
 
 	out, err := WriteState(context.Background(), WriteStateIn{Dir: dir, Head: tree, Snapshot: snap})
 

@@ -196,18 +196,20 @@ states for a gate that could not run at all.
 
 `lydite test record` is built this way too. `recordstages`
 (`internal/stages/record`) holds `LoadDeclaration`, `ReadReports`, `FoldMeasurements`, `BindTree`,
-`CountFindings`, `BindMutants`, `ComposeHistory`, `DecideBaseline` and `WriteState`; `recordflow`
-(`internal/flows/record`) wires them in that order; `cmd/lydite/record.go` builds `recordflow.Params`,
-runs the flow, and renders every row from `flow.Result`.
+`CountFindings`, `BindMutants`, `ComposeLedgerInputs` and `DecideBaseline`; `ledgerstages`
+(`internal/stages/ledger`) holds `ComposeRecords` and `WriteState`; `recordflow`
+(`internal/flows/record`) wires the two packages' stages together in that order;
+`cmd/lydite/record.go` builds `recordflow.Params`, runs the flow, and renders every row from
+`flow.Result`.
 
 `load-declaration`, `read-reports`, `fold-measurements` and `bind-tree` run unconditionally, each
 `FailFlow` by default: a declaration that cannot be read, a set of report directories holding no
 measurements document, or a checkout whose tree cannot be resolved leaves nothing a recording
 could be filed against. `bind-tree` is the exception among the four — a mismatch between the tree
 that is checked out and the tree the measurements describe is its *answer*, `Bound == false`,
-never its error. Every stage after it — `count-findings`, `bind-mutants`, `compose-history`,
-`decide-baseline`, `write-state` — declares exactly one condition, `.When(bound)` reading
-`bind-tree`'s own `Bound` field, and no stage declares any other. [The ordering
+never its error. Every stage after it — `count-findings`, `bind-mutants`, `compose-ledger-inputs`,
+`compose-records`, `decide-baseline`, `write-state` — declares exactly one condition, `.When(bound)`
+reading `bind-tree`'s own `Bound` field, and no stage declares any other. [The ordering
 subtlety](#the-ordering-subtlety) does not apply to this flow: that rule matters
 only when a condition reads a stage that itself ran conditionally, because a skipped stage's
 output is `flow.ErrUnavailable` and reading it unguarded stops the run. `bind-tree` has no
@@ -215,19 +217,39 @@ condition of its own and fails the run outright on its own error, so every stage
 output is guaranteed to find it there — there is no guard-precedence chain to build, because there
 is only the one guarded stage upstream of every reader.
 
-`compose-history` answers with a `gitstate.Records` function rather than the records themselves,
-carried across the stage boundary as an ordinary `Out` field (`ComposeHistoryOut.Records`) that
+### `recordstages` decides what was measured; `ledgerstages` decides how history is composed and landed
+
+`compose-ledger-inputs` (`recordstages.ComposeLedgerInputs`) is where the two packages' concerns
+meet. It turns what the recording folded — the measurements, the per-component and root-scoped
+finding counts, the mutant counts, and the scan's own crashed buckets — into the ledger's own
+vocabulary: a `map[string]ledger.Component` per component's scalars, the root-scoped finding
+counts, and the set of finding buckets this recording measured. Everything downstream of it,
+`compose-records` (`ledgerstages.ComposeRecords`) and `write-state` (`ledgerstages.WriteState`),
+takes those three values as plain data and knows nothing about a report document, a `finding.Crash`,
+or which command produced either — `ledgerstages`' own package doc states this apart from
+`internal/ledger`, the history's format and reader, the way `truststages`' and `scmstages`' doc
+comments name themselves apart from the domain packages they wrap. Neither stage package imports
+the other; `recordflow` is what binds `compose-ledger-inputs`' `Out` to `compose-records`' `In`, the
+same `flow.FromStage` reference every other value crosses a stage boundary by in this flow.
+
+`compose-records` answers with a `gitstate.Records` function rather than the records themselves,
+carried across the stage boundary as an ordinary `Out` field (`ComposeRecordsOut.Records`) that
 `write-state` receives as part of its own `In` and hands, unevaluated, to `gitstate.Write`. Nothing
 else calls it. `gitstate.Write`'s retry loop re-fetches the state branch on each of its three
 attempts, so whether this commit follows the branch's last-recorded one — and which findings
 newly appeared or resolved since then — has to be answered against the branch as that attempt
 just fetched it, not against a value computed once before the first attempt. See
 [ADR 0069](../../docs/adr/0069-a-recordings-history-is-a-deferred-closure-and-its-inputs-cross-a-boundary-type.md)
-for the decision and its rejected alternatives.
+for the decision and its rejected alternatives, and
+[ADR 0070](../../docs/adr/0070-the-ledger-sink-composes-and-lands-history-and-record-decides-what-it-holds.md)
+for the cut between `recordstages` and `ledgerstages` this section describes. `write-state` never
+inspects the baseline snapshot it is handed alongside the records function — it passes `Snapshot`
+to `gitstate.Write` unopened, because what a baseline holds is `decide-baseline`'s policy, not the
+sink's to judge.
 
 `write-state` is wired `.OnError(flow.RecordAndContinue)`, the one non-default policy in this
 flow: a write that never lands is worth knowing about, but it must not undo the verdict
-`decide-baseline` and `compose-history` already reached about what was being landed. `record.go`
+`decide-baseline` and `compose-records` already reached about what was being landed. `record.go`
 reads it back through `res.Errors()` rather than unwrapping a returned error the way it does for
 a `FailFlow` stage — `Result.Errors()` is where a `RecordAndContinue` stage's failure surfaces, one
 `*flow.StageError` per stage that failed under that policy, while the flow itself still ran to
