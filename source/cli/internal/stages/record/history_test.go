@@ -4,7 +4,6 @@ import (
 	"context"
 	"reflect"
 	"testing"
-	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
@@ -14,60 +13,6 @@ import (
 	"lydite/lydite/internal/ledger"
 )
 
-// recordedFindingEvents is the finding events the record this commit appends
-// carries, diffed against a ledger already holding prior.
-//
-// The ledger is a directory of its own rather than the state branch, because
-// what is under test is the diff against whatever the fetched branch holds,
-// and the closure ComposeHistory returns is handed exactly that directory.
-// Every prior record is filed an hour before this commit, which is what makes
-// it history rather than this commit's own events read back.
-func recordedFindingEvents(t *testing.T, folded Measurements, perComponent map[string]map[string]int,
-	root map[string]int, found []finding.Finding, crashed []finding.Crash, prior ...[]ledger.FindingEvent) []ledger.FindingEvent {
-	t.Helper()
-	repo, _ := recordRepo(t, map[string]string{"README.md": "a repository\n"})
-	head, err := gitstate.DescribeCommit(context.Background(), repo, "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	store := t.TempDir()
-	for i, events := range prior {
-		rec := ledger.Record{
-			Kind:          ledger.KindEntry,
-			At:            head.At.Add(-time.Duration(len(prior)-i) * time.Hour),
-			Commit:        "prior" + string(rune('a'+i)),
-			Branch:        "main",
-			FindingEvents: events,
-		}
-		if _, _, err := ledger.Append(store, []ledger.Record{rec}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	out, err := ComposeHistory(context.Background(), ComposeHistoryIn{
-		Dir: repo, Branch: "main", Folded: folded,
-		PerComponent: perComponent, Root: root, Found: found, Crashed: crashed,
-	})
-	if err != nil {
-		t.Fatalf("ComposeHistory: %v", err)
-	}
-	if out.Records == nil {
-		t.Fatalf("no record to append: reason %d, %v", out.Reason, out.Err)
-	}
-	recs, err := out.Records(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, rec := range recs {
-		if rec.Kind == ledger.KindEntry {
-			return rec.FindingEvents
-		}
-	}
-	t.Fatalf("no entry among %+v", recs)
-	return nil
-}
-
 func recordGosecClaim(path, site string) finding.Finding {
 	return finding.Finding{Gate: "gosec", Component: "cli", Path: path, Rule: "G101", Site: site}
 }
@@ -75,20 +20,12 @@ func recordGosecClaim(path, site string) finding.Finding {
 // A bucket the scan names as crashed is not measured, however FindingCounts
 // counts it: a scanner that crashed made no claim, so it counts 0 like a clean
 // one, and reading that as measured would record every finding it held open as
-// resolved and then as appeared again on the next clean run. Its open set
-// carries over untouched — nothing resolves there, and a partial claim it did
-// make does not appear — while a bucket beside it that finished is diffed as
-// ever.
-func TestACrashedBucketKeepsWhatItHeldOpen(t *testing.T) {
-	held := recordGosecClaim("a.go", "held")
-	fixed := finding.Finding{Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1", Site: "GO-1\x1fm"}
-	leak := finding.Finding{Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key", Site: "held"}
+// resolved and then as appeared again on the next clean run. It is left out of
+// scope, so its open set carries over untouched — nothing resolves there, and a
+// partial claim it did make does not appear — while a bucket beside it that
+// finished stays in scope and is diffed as ever.
+func TestACrashedBucketIsLeftOutOfScope(t *testing.T) {
 	partial := finding.Finding{Gate: "gitleaks", Path: "c.env", Rule: "generic-api-key", Site: "partial"}
-	prior := []ledger.FindingEvent{
-		{Transition: ledger.FindingAppeared, Fingerprint: held.Fingerprint(), Gate: "gosec", Component: "cli", Path: "a.go", Rule: "G101"},
-		{Transition: ledger.FindingAppeared, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli", Path: "go.mod", Rule: "GO-1"},
-		{Transition: ledger.FindingAppeared, Fingerprint: leak.Fingerprint(), Gate: "gitleaks", Path: "b.env", Rule: "generic-api-key"},
-	}
 
 	// Through ReadReports, so the crash reaches the recording the way a scan
 	// job's does: read beside the findings, out of the directory's scan
@@ -111,14 +48,27 @@ func TestACrashedBucketKeepsWhatItHeldOpen(t *testing.T) {
 	if n, ok := perComponent["cli"]["gosec"]; !ok || n != 0 {
 		t.Fatalf("gosec(cli) counts %d (keyed %v), want the 0 a crashed scanner still records", n, ok)
 	}
-
-	got := recordedFindingEvents(t, Measurements{}, perComponent, root, read.Found, read.Crashed, prior)
-
-	want := []ledger.FindingEvent{
-		{Transition: ledger.FindingResolved, Fingerprint: fixed.Fingerprint(), Gate: "govulncheck", Component: "cli"},
+	if _, ok := root["gitleaks"]; !ok {
+		t.Fatalf("root counts %+v, want gitleaks keyed: a crashed scanner is still counted", root)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("events = %+v, want only the finished bucket's resolution — nothing from a crashed one", got)
+	if _, ok := perComponent["cli"]["govulncheck"]; !ok {
+		t.Fatalf("cli counts %+v, want govulncheck keyed beside the crashed gosec", perComponent["cli"])
+	}
+
+	out, err := ComposeLedgerInputs(context.Background(), ComposeLedgerInputsIn{
+		PerComponent: perComponent, Root: root, Crashed: read.Crashed,
+	})
+	if err != nil {
+		t.Fatalf("ComposeLedgerInputs: %v", err)
+	}
+
+	for _, crashed := range []ledger.FindingBucket{{Gate: "gosec", Component: "cli"}, {Gate: "gitleaks"}} {
+		if out.Scope[crashed] {
+			t.Errorf("scope holds %+v, which the scan named as crashed", crashed)
+		}
+	}
+	if finished := (ledger.FindingBucket{Gate: "govulncheck", Component: "cli"}); !out.Scope[finished] {
+		t.Errorf("scope = %+v, want the finished bucket %+v in it", out.Scope, finished)
 	}
 }
 
@@ -269,5 +219,30 @@ func TestFindingScopeIsEveryCountedBucketLessTheCrashedOnes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("findingScope = %+v, want %+v", got, want)
+	}
+}
+
+// Every value a history is composed from comes out of the one stage: each
+// component's scalars, the root-scoped counts as they were counted, and the
+// buckets in scope.
+func TestComposeLedgerInputsCarriesTheScalarsTheCountsAndTheScope(t *testing.T) {
+	folded := Measurements{Components: map[string]Measurement{"svc": {Entry: recordEntry(1, 2)}}}
+	perComponent := map[string]map[string]int{"svc": {"gosec": 2}}
+	root := map[string]int{"gitleaks": 1}
+	mutants := map[string]MutantCounts{"svc": {Killed: 3}}
+
+	got, err := ComposeLedgerInputs(context.Background(), ComposeLedgerInputsIn{
+		Folded: folded, PerComponent: perComponent, Root: root, Mutants: mutants,
+	})
+	if err != nil {
+		t.Fatalf("ComposeLedgerInputs: %v", err)
+	}
+	want := ComposeLedgerInputsOut{
+		Components:   historyComponents(folded, perComponent, mutants),
+		RootFindings: map[string]int{"gitleaks": 1},
+		Scope:        map[ledger.FindingBucket]bool{{Gate: "gosec", Component: "svc"}: true, {Gate: "gitleaks"}: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ComposeLedgerInputs = %+v, want %+v", got, want)
 	}
 }

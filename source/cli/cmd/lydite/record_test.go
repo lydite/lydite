@@ -16,6 +16,7 @@ import (
 	"lydite/lydite/internal/executil"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
+	ledgerstages "lydite/lydite/internal/stages/ledger"
 	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/ui"
 )
@@ -552,25 +553,26 @@ func TestTheReportReaderFoldsWhatItReadRatherThanReadingAgain(t *testing.T) {
 // Each reason a recording appends no history reads as its own, and a history
 // nothing composed is an error rather than a row claiming an append.
 func TestEveryHistoryReasonSaysWhyNothingWasAppended(t *testing.T) {
+	records := func(string) ([]ledger.Record, error) { return nil, nil }
 	for _, tc := range []struct {
-		composed recordstages.ComposeHistoryOut
+		composed ledgerstages.ComposeRecordsOut
 		want     string
 	}{
-		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryToAppend}, ""},
-		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryNoBranch},
+		{ledgerstages.ComposeRecordsOut{Records: records}, ""},
+		{ledgerstages.ComposeRecordsOut{Reason: ledgerstages.NoBranch{}},
 			"this checkout names no branch, so pass " + gitstate.BranchFlag +
 				" — history is per branch, and one filed under the wrong branch is worse than none"},
-		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryNoScalar}, "no component produced a scalar"},
-		{recordstages.ComposeHistoryOut{Reason: recordstages.HistoryUndescribed, Err: errors.New("no HEAD")},
+		{ledgerstages.ComposeRecordsOut{Reason: ledgerstages.NoScalars{}}, "no component produced a scalar"},
+		{ledgerstages.ComposeRecordsOut{Reason: ledgerstages.Undescribable{Err: errors.New("no HEAD")}},
 			"this commit could not be described: no HEAD"},
 	} {
 		got, err := historyWhy(tc.composed)
 		if err != nil || got != tc.want {
-			t.Errorf("historyWhy(%d) = %q, %v; want %q", tc.composed.Reason, got, err, tc.want)
+			t.Errorf("historyWhy(%T) = %q, %v; want %q", tc.composed.Reason, got, err, tc.want)
 		}
 	}
-	if got, err := historyWhy(recordstages.ComposeHistoryOut{}); err == nil || got != "" {
-		t.Errorf("historyWhy(0) = %q, %v; want no reason and an error for a history nothing composed", got, err)
+	if got, err := historyWhy(ledgerstages.ComposeRecordsOut{}); err == nil || got != "" {
+		t.Errorf("historyWhy(nothing) = %q, %v; want no reason and an error for a history nothing composed", got, err)
 	}
 }
 

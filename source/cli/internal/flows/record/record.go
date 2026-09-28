@@ -1,20 +1,24 @@
 // Package recordflow declares the flow that records what one or more runs
 // measured: loading the tree's own declaration, reading and folding the report
 // directories, binding the recording to the tree that is checked out, counting
-// the scan's findings, binding the mutant counts, composing the quality
-// history, deciding the baseline, and the one write that lands both on the
-// state branch.
+// the scan's findings, binding the mutant counts, composing what the quality
+// history is made of, composing the history, deciding the baseline, and the
+// one write that lands both on the state branch.
 //
-// It is a declaration and nothing else. Every stage lives in recordstages and
-// every value the flow starts from is an input its caller supplies — the
-// documents themselves arrive through a ReportReader, because each is written
-// by another command in that command's own types — so nothing here reads a
-// document, prints, or chooses a report row: what the run produced is read
-// back off the Result by the stage names below.
+// It is a declaration and nothing else. What a recording measured is
+// recordstages' to decide, and how a history is composed and landed is
+// ledgerstages': neither imports the other, and this declaration is what binds
+// one's outputs to the other's inputs. Every value the flow starts from is an
+// input its caller supplies — the documents themselves arrive through a
+// ReportReader, because each is written by another command in that command's
+// own types — so nothing here reads a document, prints, or chooses a report
+// row: what the run produced is read back off the Result by the stage names
+// below.
 package recordflow
 
 import (
 	"lydite/lydite/internal/flow"
+	ledgerstages "lydite/lydite/internal/stages/ledger"
 	recordstages "lydite/lydite/internal/stages/record"
 )
 
@@ -46,15 +50,16 @@ const (
 
 // The names of the flow's stages, in the order they run.
 const (
-	StageLoadDeclaration  = "load-declaration"
-	StageReadReports      = "read-reports"
-	StageFoldMeasurements = "fold-measurements"
-	StageBindTree         = "bind-tree"
-	StageCountFindings    = "count-findings"
-	StageBindMutants      = "bind-mutants"
-	StageComposeHistory   = "compose-history"
-	StageDecideBaseline   = "decide-baseline"
-	StageWriteState       = "write-state"
+	StageLoadDeclaration     = "load-declaration"
+	StageReadReports         = "read-reports"
+	StageFoldMeasurements    = "fold-measurements"
+	StageBindTree            = "bind-tree"
+	StageCountFindings       = "count-findings"
+	StageBindMutants         = "bind-mutants"
+	StageComposeLedgerInputs = "compose-ledger-inputs"
+	StageComposeRecords      = "compose-records"
+	StageDecideBaseline      = "decide-baseline"
+	StageWriteState          = "write-state"
 )
 
 // Params is what one run records.
@@ -95,15 +100,23 @@ func (p Params) Inputs() flow.Inputs {
 // bind-tree's output there, and no condition needs another declared before
 // it.
 //
+// compose-ledger-inputs turns what the recording measured into the ledger's
+// own vocabulary — each component's scalars, and which finding buckets were
+// in scope — and compose-records composes the history from those alone.
+// compose-records reads compose-ledger-inputs' output under the same one
+// condition and needs no second: whenever that condition holds,
+// compose-ledger-inputs held it too and ran, and it fails the run on any error
+// of its own, so its output is always there to read.
+//
 // The history is composed before the baseline is decided, and the two are
 // independent: a partial baseline is refused while the history of the same
-// run is still appended. compose-history hands write-state a function rather
+// run is still appended. compose-records hands write-state a function rather
 // than the records, which only gitstate.Write's retry loop ever calls, so each
 // attempt composes against the branch it just fetched. write-state is the one
 // stage that reaches the branch, landing both in one commit, and its error is
 // recorded on the Result rather than failing the run: what a write that never
 // landed means — a recording that failed, or a routine push race over history
-// alone — depends on what decide-baseline and compose-history said was being
+// alone — depends on what decide-baseline and compose-records said was being
 // landed, which is the caller's to read off the Result.
 func New() (*flow.Flow, error) {
 	reader := flow.FromInput(InputReader)
@@ -141,16 +154,21 @@ func New() (*flow.Flow, error) {
 		With("Reader", reader).
 		With("Mutated", flow.FromStage(StageReadReports, "Mutated")).
 		With("Tree", head).
-		Stage(StageComposeHistory, recordstages.ComposeHistory).
+		Stage(StageComposeLedgerInputs, recordstages.ComposeLedgerInputs).
 		When(bound).
-		With("Dir", dir).
-		With("Branch", flow.FromInput(InputBranch)).
 		With("Folded", folded).
 		With("PerComponent", flow.FromStage(StageCountFindings, "PerComponent")).
 		With("Root", flow.FromStage(StageCountFindings, "Root")).
-		With("Found", found).
 		With("Crashed", flow.FromStage(StageReadReports, "Crashed")).
 		With("Mutants", flow.FromStage(StageBindMutants, "Components")).
+		Stage(StageComposeRecords, ledgerstages.ComposeRecords).
+		When(bound).
+		With("Dir", dir).
+		With("BranchOverride", flow.FromInput(InputBranch)).
+		With("Components", flow.FromStage(StageComposeLedgerInputs, "Components")).
+		With("RootFindings", flow.FromStage(StageComposeLedgerInputs, "RootFindings")).
+		With("Scope", flow.FromStage(StageComposeLedgerInputs, "Scope")).
+		With("Found", found).
 		Stage(StageDecideBaseline, recordstages.DecideBaseline).
 		When(bound).
 		With("Dir", dir).
@@ -159,12 +177,12 @@ func New() (*flow.Flow, error) {
 		With("Folded", folded).
 		With("Head", head).
 		With("RestoreToleratedDips", flow.FromInput(InputRestoreToleratedDips)).
-		Stage(StageWriteState, recordstages.WriteState).
+		Stage(StageWriteState, ledgerstages.WriteState).
 		When(bound).
 		With("Dir", dir).
 		With("Head", head).
 		With("Snapshot", flow.FromStage(StageDecideBaseline, "Snapshot")).
-		With("Records", flow.FromStage(StageComposeHistory, "Records")).
+		With("Records", flow.FromStage(StageComposeRecords, "Records")).
 		OnError(flow.RecordAndContinue).
 		Build()
 }

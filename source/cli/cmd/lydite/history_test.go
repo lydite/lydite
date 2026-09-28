@@ -21,6 +21,7 @@ import (
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
+	ledgerstages "lydite/lydite/internal/stages/ledger"
 	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
@@ -551,11 +552,17 @@ func TestARecordingWithNoBranchSaysWhichFlagNamesIt(t *testing.T) {
 // commit and holding no number is a point on no line, and writing one would
 // make the history claim a measurement that was never taken.
 func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
-	composed, err := recordstages.ComposeHistory(context.Background(), recordstages.ComposeHistoryIn{
-		Dir: t.TempDir(), Branch: "main",
+	inputs, err := recordstages.ComposeLedgerInputs(context.Background(), recordstages.ComposeLedgerInputsIn{
 		Folded: recordedMeasurements(measurementsDoc{Components: map[string]componentMeasurement{
 			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
 		}}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := ledgerstages.ComposeRecords(context.Background(), ledgerstages.ComposeRecordsIn{
+		Dir: t.TempDir(), BranchOverride: "main",
+		Components: inputs.Components, RootFindings: inputs.RootFindings, Scope: inputs.Scope,
 	})
 	if err != nil {
 		t.Fatal(err)

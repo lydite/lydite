@@ -17,6 +17,7 @@ import (
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
 	"lydite/lydite/internal/runner"
+	ledgerstages "lydite/lydite/internal/stages/ledger"
 	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/ui"
 )
@@ -174,7 +175,7 @@ func recordRows(res *flow.Result) ([]ui.Row, error) {
 	}
 	rows = append(rows, findingsRow(counted.PerComponent, counted.Root, read.Scanned))
 
-	composed, err := flow.Output[recordstages.ComposeHistoryOut](res, recordflow.StageComposeHistory)
+	composed, err := flow.Output[ledgerstages.ComposeRecordsOut](res, recordflow.StageComposeRecords)
 	if err != nil {
 		return nil, err
 	}
@@ -218,13 +219,13 @@ func recordRows(res *flow.Result) ([]ui.Row, error) {
 		// with it — unless there was nothing to append, in which case the
 		// reason is still its own and not this one.
 		failure := ""
-		if composed.Reason == recordstages.HistoryToAppend {
+		if composed.Records != nil {
 			failure = "the write to the " + gitstate.BranchName + " branch did not land"
 		}
 		return append(rows, historyRow(nil, why, failure)), nil
 	}
 
-	landed, err := flow.Output[recordstages.WriteStateOut](res, recordflow.StageWriteState)
+	landed, err := flow.Output[ledgerstages.WriteStateOut](res, recordflow.StageWriteState)
 	if err != nil {
 		return nil, err
 	}
@@ -347,20 +348,24 @@ func baselineRow(decided recordstages.DecideBaselineOut, head string) (ui.Row, e
 }
 
 // historyWhy is why a recording appends no history, and empty when it
-// appends some.
-func historyWhy(composed recordstages.ComposeHistoryOut) (string, error) {
-	switch composed.Reason {
-	case recordstages.HistoryToAppend:
+// appends some. A history holding neither records nor a reason is one nothing
+// composed, and is an error rather than a row claiming an append.
+func historyWhy(composed ledgerstages.ComposeRecordsOut) (string, error) {
+	switch reason := composed.Reason.(type) {
+	case nil:
+		if composed.Records == nil {
+			return "", errors.New("the history was given neither records nor a reason")
+		}
 		return "", nil
-	case recordstages.HistoryNoBranch:
+	case ledgerstages.NoBranch:
 		return "this checkout names no branch, so pass " + gitstate.BranchFlag +
 			" — history is per branch, and one filed under the wrong branch is worse than none", nil
-	case recordstages.HistoryNoScalar:
+	case ledgerstages.NoScalars:
 		return "no component produced a scalar", nil
-	case recordstages.HistoryUndescribed:
-		return "this commit could not be described: " + composed.Err.Error(), nil
+	case ledgerstages.Undescribable:
+		return "this commit could not be described: " + reason.Err.Error(), nil
 	default:
-		return "", fmt.Errorf("the history was given no reason (%d)", composed.Reason)
+		return "", fmt.Errorf("the history was given a reason with no wording (%T)", reason)
 	}
 }
 
