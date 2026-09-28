@@ -156,7 +156,8 @@ func TestPreviousTagReturnsAnInvalidTagsErrorAsItIs(t *testing.T) {
 }
 
 // isShallow answers what git says about the checkout, and a directory git
-// cannot answer for is an error rather than a "not shallow".
+// cannot answer for is an error rather than a "not shallow", with no answer
+// beside it.
 func TestIsShallowAnswersWhatGitSays(t *testing.T) {
 	origin := releaseRepo(t,
 		releaseCommit{message: "feat: the first release"},
@@ -170,8 +171,11 @@ func TestIsShallowAnswersWhatGitSays(t *testing.T) {
 	if shallow, err := isShallow(ctx, releaseShallowClone(t, origin)); err != nil || !shallow {
 		t.Errorf("a depth-1 clone: isShallow = %v, %v; want true, nil", shallow, err)
 	}
-	_, err := isShallow(ctx, t.TempDir())
+	shallow, err := isShallow(ctx, t.TempDir())
 	if err == nil || !strings.HasPrefix(err.Error(), "git rev-parse --is-shallow-repository: ") {
 		t.Errorf("no repository: err = %v, want the git rev-parse failure", err)
+	}
+	if shallow {
+		t.Error("no repository: isShallow = true beside its error, want false")
 	}
 }
