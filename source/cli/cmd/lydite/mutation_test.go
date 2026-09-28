@@ -2128,6 +2128,73 @@ func TestAMutationRunsOutcomesRenderAsOneReport(t *testing.T) {
 	}
 }
 
+// An interrupted run under --no-gate withdraws exactly what the same run
+// withdraws when it gates: a survivor, with or without a teardown that failed
+// after it, loses its row, its findings and its record, and a component that
+// killed every mutant keeps its row and its record. The only difference between
+// the two reports is that kept row's vote.
+func TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould(t *testing.T) {
+	survivor := mutationSurvivor()
+	cTeardown := mutationLifecycleFailure("c", "teardown failed", "docker compose down failed in c")
+	run := mutationstages.RunMutantsOut{
+		Components: []mutationstages.ComponentOutcome{
+			mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 5*time.Second),
+			mutationCompleted("b", mutation.Summary{Killed: 2}, nil, 8*time.Second),
+			func() mutationstages.ComponentOutcome {
+				o := mutationCompleted("c", mutation.Summary{Killed: 3, Survived: 1}, []mutation.Result{survivor}, 9*time.Second)
+				o.TeardownErr = lifecycleRowError{cTeardown}
+				return o
+			}(),
+		},
+		Schedule:    scheduler.Outcome{MaxConcurrent: 2, Started: 3},
+		Suites:      3,
+		Interrupted: true,
+	}
+	sel := mutationstages.SelectAffectedOut{Selected: []component.Component{
+		{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}, {Name: "c", Dir: "c"}}}
+	withdrawn := func(name string) ui.Row {
+		return ui.Row{Status: ui.StatusUnmeasured, Label: mutationLabel(name), Value: "not completed",
+			Detail: []string{"the run was interrupted before this component finished"}, Log: mutationLogRel(name)}
+	}
+	killed := func(status ui.Status) ui.Row {
+		return ui.Row{Status: status, Label: "mutation(b)", Value: "2 of 2 mutant(s) killed in 8s", Log: mutationLogRel("b")}
+	}
+	schedule := ui.Row{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 3 of 3 component(s)"}
+	summary := ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "2 of 2 mutant(s) killed across 1 component(s) in 8s"}
+
+	for _, c := range []struct {
+		name     string
+		noGate   bool
+		wantRows []ui.Row
+	}{
+		{name: "gating", wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusPass), withdrawn("c"), summary}},
+		{name: "under --no-gate", noGate: true,
+			wantRows: []ui.Row{schedule, withdrawn("a"), killed(ui.StatusContext), withdrawn("c"), summary}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rep := ui.NewReport("mutation")
+			kept := addMutationRows(rep, sel, run, mutationReporting{limit: 2, noGate: c.noGate, summary: true})
+			doc := documentOf(t, rep)
+
+			if !reflect.DeepEqual(doc.Rows, c.wantRows) {
+				got, _ := json.MarshalIndent(doc.Rows, "", "  ")
+				want, _ := json.MarshalIndent(c.wantRows, "", "  ")
+				t.Errorf("rows are\n%s\nwant\n%s", got, want)
+			}
+			if len(doc.Findings) != 0 {
+				t.Errorf("findings are %+v, want none: every survivor was withdrawn", doc.Findings)
+			}
+			var names []string
+			for _, o := range kept {
+				names = append(names, o.Component.Name)
+			}
+			if !reflect.DeepEqual(names, []string{"b"}) {
+				t.Errorf("the outcomes recorded are %v, want [b]", names)
+			}
+		})
+	}
+}
+
 // Each OutcomeKind is exactly one row, and only a completed component counts
 // toward the summary and the counts. A kind added to the stage with no row of
 // its own here fails this, rather than rendering as whatever the default says.

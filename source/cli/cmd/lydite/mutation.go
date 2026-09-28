@@ -450,6 +450,12 @@ type mutationReporting struct {
 // a mutant whose suite was killed, and a claim nobody can stand behind is worse
 // than none. A withdrawn component is absent from what is returned, exactly as
 // one that never ran is.
+//
+// What is withdrawn is decided by the row a gating run renders, whatever
+// --no-gate says: the flag turns a survivor's fail into context, and a
+// withdrawal keyed on the displayed row would keep claims under --no-gate that
+// the same interrupted run takes back when it gates. A component the gating row
+// keeps renders its own row, so the vote is the one thing --no-gate changes.
 func addMutationRows(rep *ui.Report, sel mutationstages.SelectAffectedOut, run mutationstages.RunMutantsOut, how mutationReporting) []mutationstages.ComponentOutcome {
 	var skipped map[string]ui.Row
 	if how.onlyAffected {
@@ -471,7 +477,19 @@ func addMutationRows(rep *ui.Report, sel mutationstages.SelectAffectedOut, run m
 		}
 	}
 	if run.Interrupted {
-		withdrawInterrupted(rows, results, scheduled)
+		gating := make([]ui.Row, len(run.Components))
+		for i, o := range run.Components {
+			gating[i], _ = outcomeRow(o, false)
+		}
+		withdrawInterrupted(gating, results, scheduled)
+		// A scheduled component left holding no result was either withdrawn,
+		// and takes the withdrawn row, or never completed, where --no-gate
+		// changes nothing and the gating row is the row it already had.
+		for _, i := range scheduled {
+			if !results[i].ran {
+				rows[i] = gating[i]
+			}
+		}
 	}
 
 	// Counted over the components that declare a suite: one that declares none

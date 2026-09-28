@@ -1,5 +1,5 @@
 ---
-about: an interrupted lydite mutation withdraws only the scheduled components whose row is StatusFail; a completed component whose row is Pass — or, under --no-gate, Context, survivors included — keeps its row, its findings and its entry in mutants.json, because the withdrawal keys on the row's status after completedRow has already run
+about: an interrupted lydite mutation withdraws the scheduled components whose gating row is StatusFail, deciding it off the row outcomeRow(o, false) renders rather than the displayed one, so --no-gate withdraws exactly what a gating run would — a survivor loses its row, findings and mutants.json entry either way, and a completed component with every mutant killed keeps them, differing only in its row's vote
 saw:
   - source/cli/cmd/lydite/mutation.go
   - source/cli/cmd/lydite/mutation_test.go
@@ -10,33 +10,39 @@ saw:
 ---
 
 `internal/stages/mutation/run.go`'s `RunMutants` states facts only: after `scheduler.Run` it marks
-`Scheduled` on every component it handed to the scheduler (line ~249) and sets
+`Scheduled` on every component it handed to the scheduler (line ~250) and sets
 `Interrupted = ctx.Err() != nil` (line ~252); every outcome keeps its `Kind` and facts either way.
 `RecordMutants` (`record.go` line ~48) records every outcome it is handed whose `Ran()` is true
 (`countsOf`, line ~65) and trusts the caller to have removed withdrawn ones — its `Components`
 field's comment says only the caller knows which verdicts it withdrew.
 
-The decision is `cmd/lydite/mutation.go`'s. `addMutationRows` (line ~453) builds each row through
-`outcomeRow` → `kindRow`, collects the `Scheduled` indices, and on `Interrupted` calls
-`withdrawInterrupted` (line ~619), which replaces a row with the unmeasured "not completed" row and
-zeroes its `componentMutation` **only when `rows[i].Status == ui.StatusFail`**. Only outcomes whose
-`componentMutation.ran` survived are returned as `kept` and passed to `recordMutants` → the
-`NewRecord` flow. So after an interrupt:
+The decision is `cmd/lydite/mutation.go`'s. `addMutationRows` (line ~459) builds each displayed
+row through `outcomeRow(o, how.noGate)` → `kindRow`, collects the `Scheduled` indices, and on
+`Interrupted` builds a second, gating row per component with `outcomeRow(o, false)` (line ~482) and
+runs `withdrawInterrupted` (line ~637) over *those* rows and the shared results. `withdrawInterrupted`
+replaces a row with the unmeasured "not completed" row and zeroes its `componentMutation` **only
+when the row's status is `ui.StatusFail`** — so the gating status decides, and `completedRow`'s
+--no-gate conversion of a survivor's Fail into Context never reaches the check. Every scheduled
+component left with `!results[i].ran` then takes its gating row: the withdrawn row where it was
+withdrawn, and otherwise a kind that never completed, whose row `noGate` does not touch. Only
+outcomes whose `componentMutation.ran` survived are returned as `kept` and passed to
+`recordMutants` → the `NewRecord` flow. So after an interrupt, gating or not:
 
-- a component that completed with every mutant killed keeps its `pass` row and is written to
-  `mutants.json` — pinned by the "an interrupted run" case of
-  `TestAMutationRunsOutcomesRenderAsOneReport` (`mutation_test.go` line ~2061, `wantKept: b`);
-- a gating component with a survivor, or one whose setup failed (`KindBlocked`, scheduled), is
-  withdrawn — row, findings and counts;
+- a component that completed with every mutant killed keeps its row (`pass`, or `context` under
+  --no-gate) and is written to `mutants.json` — pinned by the "an interrupted run" case of
+  `TestAMutationRunsOutcomesRenderAsOneReport` (`mutation_test.go` line ~2065, `wantKept: b`) and
+  by `TestAnInterruptedRunUnderNoGateWithdrawsWhatAGatingRunWould` (line ~2136);
+- a component with a survivor, or one whose setup failed (`KindBlocked`, scheduled), is
+  withdrawn — row, findings and counts — under --no-gate exactly as when gating, pinned by that
+  same second test;
 - a component that never started stays "not run", and one that could not be planned keeps its
   own row.
 
-Not pinned by any test, and following from the order of operations: `kindRow`'s `KindCompleted`
-arm applies `completedRow(row, noGate)` before `withdrawInterrupted` looks at the status, so under
-`--no-gate` a completed component *with survivors* already reads `StatusContext` and is **not**
-withdrawn — its survivors stay in the report as findings and its counts are recorded, even though
-the withdrawal's own rationale (under cancellation a survivor cannot be told from a killed suite)
-applies to it equally. ADR 0065's Consequences say withdrawal depends on the row ("a survivor
-withdraws; `KindMutationOff` does not") without stating the Pass/Context cases, and
-`agentic/references/mutation.md` (line ~59) lists "a run interrupted before it finished" among
-rows `--no-gate` leaves untouched, which describes the "not completed" row but not this path.
+The teardown interplay (`teardownFailureReplaces`, line ~712, replaces only Pass and Context):
+a gating survivor's Fail is never replaced by a failed teardown, so it is withdrawn; under
+--no-gate the displayed row is the teardown's, but the withdrawal reads the gating Fail and the
+component renders the gating run's "not completed" row. A kill-everything component with a failed
+teardown renders the teardown row under both, since Pass and Context are both replaced. A decided
+teardown row whose own status is not Fail therefore never keeps a survivor's claims under
+--no-gate either. This matches `agentic/references/mutation.md` (line ~59), which lists "a run
+interrupted before it finished" among the rows --no-gate leaves untouched.
