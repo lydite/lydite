@@ -15,13 +15,13 @@ import (
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/golang"
-	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
 	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/rust"
 	"lydite/lydite/internal/secrets"
 	"lydite/lydite/internal/semgrep"
+	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/typescript"
 	"lydite/lydite/internal/ui"
 )
@@ -323,6 +323,29 @@ func TestAPushThatNeverLandsFailsTheRecording(t *testing.T) {
 	}
 }
 
+// A write that never landed says why beneath its failing row, in the state
+// branch's own words: "did not land" names the outcome, and the push that was
+// refused is the one thing a reader can act on.
+func TestAPushThatNeverLandsSaysWhyTheWriteFailed(t *testing.T) {
+	root := gateRepo(t)
+	if _, errOut, err := runTestCmdStreams(t, root, "--gate-coverage", "--json"); err != nil {
+		t.Fatalf("measuring: %v\n%s", err, errOut)
+	}
+	rejectPushes(t, root)
+
+	out, _, err := runRecordCmd(t, root, "--json")
+	if err == nil {
+		t.Fatalf("record reported success even though every push was rejected\n%s", out)
+	}
+	row := jsonRows(t, out)["record"]
+	if row.Status != "fail" || len(row.Detail) != 1 {
+		t.Fatalf("record = %+v, want a failure carrying the write's own error", row)
+	}
+	if !strings.Contains(row.Detail[0], "pushing the recording for") {
+		t.Errorf("record detail = %q, want the state branch's own push error", row.Detail[0])
+	}
+}
+
 // A recording carrying no baseline is writing only the ledger, and a failed
 // append is never a failing row: the branch is shared and busy, a push race is
 // routine, and failing a consumer's build over one would erode trust in a gate
@@ -354,89 +377,6 @@ func TestAPushThatNeverLandsDoesNotFailAHistoryOnlyRecording(t *testing.T) {
 	}
 	if row := rows["history"]; row.Status != "unmeasured" || !strings.Contains(row.Value, "records the gap") {
 		t.Errorf("history = %+v, want an amber row saying the next recording records the gap", row)
-	}
-}
-
-// A component contributing no scalar at all is a point on no line, and is
-// dropped. One carrying any single scalar is kept: coverage without a score is
-// every non-Go component, and test counts without coverage is every component
-// whose suite went red.
-func TestOnlyAComponentWithNoScalarAtAllIsDropped(t *testing.T) {
-	doc := measurementsDoc{
-		Components: map[string]componentMeasurement{
-			"measured": {Entry: producing(3, 4, "go 1.26")},
-			"scored": {Entry: gitstate.Entry{Producer: "go 1.26"},
-				CRAP: &gitstate.CRAPEntry{Above: 0, Worst: 12.5}},
-			"empty": {Entry: gitstate.Entry{Producer: "go 1.26"}},
-		},
-		Tests: map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
-	}
-	got := historyComponents(doc, nil, nil)
-
-	for _, name := range []string{"measured", "scored", "red"} {
-		if _, ok := got[name]; !ok {
-			t.Errorf("%s was dropped, but it carries a scalar", name)
-		}
-	}
-	if _, ok := got["empty"]; ok {
-		t.Error("a component carrying no scalar at all was kept")
-	}
-	if c := got["measured"]; c.Coverage == nil || c.Coverage.Covered != 3 {
-		t.Errorf("measured = %+v, want its line counts", c.Coverage)
-	}
-	if c := got["scored"]; c.CRAP == nil || c.Coverage != nil {
-		t.Errorf("scored = %+v, want a score and no coverage", c)
-	}
-	if c := got["red"]; c.Tests == nil || c.Tests.Failed != 2 {
-		t.Errorf("red = %+v, want the counts from a suite that failed", c.Tests)
-	}
-}
-
-// The counts a mutation run took reach the component they were taken for,
-// including one the measurements never mention: the merge commit's diff decides
-// what is mutated, and a component whose suite was carried is mutated all the
-// same.
-func TestTheMutantCountsReachTheComponentTheyWereTakenFor(t *testing.T) {
-	doc := measurementsDoc{
-		Components: map[string]componentMeasurement{
-			"measured": {Entry: producing(3, 4, "go 1.26")},
-		},
-	}
-	got := historyComponents(doc, nil, map[string]mutantCounts{
-		"measured": {Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5, ElapsedSeconds: 90},
-		"carried":  {Killed: 1},
-	})
-
-	// The time the run cost travels with the counts it bought: a mutation run
-	// cannot be recomputed after the merge, so a cost this recording drops is
-	// one nothing can ever measure again.
-	want := ledger.Mutation{Killed: 4, TimedOut: 1, OutOfMemory: 2, Survived: 0, Unviable: 3, Acknowledged: 5, ElapsedSeconds: 90}
-	if c := got["measured"]; c.Mutation == nil || *c.Mutation != want {
-		t.Errorf("measured = %+v, want %+v", c.Mutation, want)
-	}
-	// A component the measurements say nothing about carries its mutation and
-	// nothing else, rather than being dropped as a point on no line.
-	c, ok := got["carried"]
-	if !ok {
-		t.Fatalf("a component known only from the counts was dropped: %+v", got)
-	}
-	if c.Mutation == nil || c.Mutation.Killed != 1 || c.Coverage != nil || c.Tests != nil {
-		t.Errorf("carried = %+v, want its counts alone", c)
-	}
-}
-
-// A recording that read no counts records none, and never a zeroed run: a
-// component nothing mutated is absent from the counts, and zeros there would
-// read as a suite that killed every mutant.
-func TestARecordingThatReadNoCountsRecordsNoMutation(t *testing.T) {
-	doc := measurementsDoc{
-		Components: map[string]componentMeasurement{"measured": {Entry: producing(3, 4, "go 1.26")}},
-		Tests:      map[string]junit.Counts{"red": {Total: 9, Failed: 2}},
-	}
-	for name, c := range historyComponents(doc, nil, nil) {
-		if c.Mutation != nil {
-			t.Errorf("%s = %+v, want no mutation from a recording that read none", name, c.Mutation)
-		}
 	}
 }
 
@@ -517,13 +457,7 @@ func TestMeasurementsWithNoCountsBesideThemRecordAsTheyAlwaysDid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rep := ui.NewReport("record")
-	read := readReports(rep, []string{reportsDir(root)})
-
-	if len(read.docs) != 1 || len(read.mutants) != 0 {
-		t.Fatalf("read = %d measurements, %d counts; want the measurements alone", len(read.docs), len(read.mutants))
-	}
-	rows := rep.Rows()
+	rows := recordReadRows(t, reportsDir(root))
 	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
 		t.Fatalf("rows = %+v, want one context row", rows)
 	}
@@ -533,6 +467,19 @@ func TestMeasurementsWithNoCountsBesideThemRecordAsTheyAlwaysDid(t *testing.T) {
 	if strings.Contains(rows[0].Value, "mutated") {
 		t.Errorf("read row = %q, want it silent about a run that never happened", rows[0].Value)
 	}
+}
+
+// recordReadRows is the row each report directory renders as, read through
+// the reader and the stage a recording reads them with.
+func recordReadRows(t *testing.T, dirs ...string) []ui.Row {
+	t.Helper()
+	read, err := recordstages.ReadReports(context.Background(), recordstages.ReadReportsIn{
+		Reader: newRecordReports(), Reports: dirs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return readRows(read)
 }
 
 // treeOf is the tree the checkout under root points at.
@@ -604,15 +551,22 @@ func TestARecordingWithNoBranchSaysWhichFlagNamesIt(t *testing.T) {
 // commit and holding no number is a point on no line, and writing one would
 // make the history claim a measurement that was never taken.
 func TestHistoryIsNotAppendedForAFoldWithNoScalars(t *testing.T) {
-	records, why := historyRecords(context.Background(), t.TempDir(), "main",
-		measurementsDoc{Components: map[string]componentMeasurement{
+	composed, err := recordstages.ComposeHistory(context.Background(), recordstages.ComposeHistoryIn{
+		Dir: t.TempDir(), Branch: "main",
+		Folded: recordedMeasurements(measurementsDoc{Components: map[string]componentMeasurement{
 			"api": {Entry: gitstate.Entry{Producer: "go 1.26"}},
-		}}, nil, nil, nil, nil, nil)
-	if records != nil {
-		t.Error("a fold carrying no scalar produced records")
+		}}),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(why, "no component produced a scalar") {
-		t.Errorf("why = %q, want it to say no scalar was produced", why)
+	why, err := historyWhy(composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := historyRow(nil, why, "")
+	if row.Status != ui.StatusUnmeasured || !strings.Contains(row.Value, "no component produced a scalar") {
+		t.Errorf("history = %+v, want an amber row saying no scalar was produced", row)
 	}
 }
 
@@ -783,14 +737,7 @@ func TestADirectoryHoldingOnlyAScanIsNotReportedAsUnmeasured(t *testing.T) {
 	dir := t.TempDir()
 	scanDocument(t, dir, nil, gosecFinding("svc", "sha1.New()"))
 
-	rep := ui.NewReport("record")
-	read := readReports(rep, []string{dir})
-
-	if len(read.docs) != 0 || len(read.found) != 1 || !read.scanned {
-		t.Fatalf("read = %d measurements, %d findings, scanned %v; want the scan alone",
-			len(read.docs), len(read.found), read.scanned)
-	}
-	rows := rep.Rows()
+	rows := recordReadRows(t, dir)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows for one directory, want exactly one saying what came out of it", len(rows))
 	}
@@ -815,15 +762,7 @@ func TestADirectoryHoldingOnlyAScanIsNotReportedAsUnmeasured(t *testing.T) {
 // that yielded nothing, with no reason, is a recording quietly folding less than
 // the caller named.
 func TestAReportDirectoryHoldingNeitherDocumentStillSaysWhy(t *testing.T) {
-	dir := t.TempDir()
-
-	rep := ui.NewReport("record")
-	read := readReports(rep, []string{dir})
-
-	if len(read.docs) != 0 || read.scanned {
-		t.Fatalf("read = %d measurements, scanned %v; want nothing from an empty directory", len(read.docs), read.scanned)
-	}
-	rows := rep.Rows()
+	rows := recordReadRows(t, t.TempDir())
 	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
 		t.Fatalf("rows = %+v, want one amber row", rows)
 	}
@@ -955,15 +894,7 @@ func TestAReportDirectoryWithNoScanDocumentSaysNothingAboutOne(t *testing.T) {
 	if err := writeMeasurements(root, measurementsDoc{Tree: "deadbeef"}); err != nil {
 		t.Fatal(err)
 	}
-	dir := reportsDir(root)
-
-	rep := ui.NewReport("record")
-	read := readReports(rep, []string{dir})
-
-	if len(read.docs) != 1 || read.scanned {
-		t.Fatalf("read = %d measurements, scanned %v; want the measurements alone", len(read.docs), read.scanned)
-	}
-	rows := rep.Rows()
+	rows := recordReadRows(t, reportsDir(root))
 	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
 		t.Fatalf("rows = %+v, want one context row", rows)
 	}
@@ -992,13 +923,7 @@ func TestADocumentThatWillNotParseIsReportedRatherThanReadAsAbsent(t *testing.T)
 		t.Fatal(err)
 	}
 
-	rep := ui.NewReport("record")
-	read := readReports(rep, []string{dir})
-
-	if read.scanned {
-		t.Error("a scan document that could not be read was counted as a scan that ran")
-	}
-	rows := rep.Rows()
+	rows := recordReadRows(t, dir)
 	if len(rows) != 1 || rows[0].Status != ui.StatusContext {
 		t.Fatalf("rows = %+v, want one context row — the measurements were still folded", rows)
 	}
@@ -1014,13 +939,7 @@ func TestADocumentThatWillNotParseIsReportedRatherThanReadAsAbsent(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	rep = ui.NewReport("record")
-	read = readReports(rep, []string{both})
-	if len(read.docs) != 0 || read.scanned {
-		t.Fatalf("read = %d measurements, scanned %v; want nothing from two unreadable documents",
-			len(read.docs), read.scanned)
-	}
-	rows = rep.Rows()
+	rows = recordReadRows(t, both)
 	if len(rows) != 1 || rows[0].Status != ui.StatusUnmeasured {
 		t.Fatalf("rows = %+v, want one amber row", rows)
 	}

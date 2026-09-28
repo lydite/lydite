@@ -4,6 +4,7 @@ saw:
   - source/cli/internal/stages/scan/plan.go
   - source/cli/cmd/lydite/scan.go
   - source/cli/internal/stages/scan/toolchains.go
+  - source/cli/internal/stages/record/findings.go
   - source/cli/cmd/lydite/record.go
   - source/cli/internal/scanlang/scanlang.go
 ---
@@ -18,9 +19,10 @@ constant behind it; nothing in `cmd/lydite/publish.go` special-cases that label.
 
 Two other paths decide the same "does anything scan this component" question differently:
 `scanUnits` (`internal/stages/scan/toolchains.go`, what gets a toolchain provisioned) and
-`findingCounts` (`cmd/lydite/record.go`, what records a zero per gate) both skip through
-`lang == "" || !scanlang.Enabled(...)` (`findingCounts` via `cmd/lydite/scan.go`'s `langEnabled`
-shim), not through `scanlang.Scanned`. That is correct only because `scanlang.Enabled` answers
+`FindingCounts` (`internal/stages/record/findings.go`, what records a zero per gate) both skip
+through `lang == "" || !scanlang.Enabled(...)` (`FindingCounts` via its `LangEnabled` function
+argument, which `cmd/lydite/record.go` fills with `cmd/lydite/scan.go`'s `langEnabled` shim), not
+through `scanlang.Scanned`. That is correct only because `scanlang.Enabled` answers
 false for every language it has no config key for, and its keys are exactly the `Scanned`
 languages today. A language given an `Enabled` key without a `Scanned` entry would be provisioned a
 toolchain and seeded zero counts while `PlanComponents` renders it unscanned.

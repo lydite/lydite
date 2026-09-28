@@ -10,6 +10,8 @@ saw:
   - docs/adr/0021-source-root-for-the-monorepo.md
   - source/cli/internal/forge/forge.go
   - source/cli/cmd/lydite/root.go
+  - source/cli/internal/forge/repository.go
+  - source/cli/cmd/lydite/record.go
 targets: null
 verdict: null
 ---
@@ -105,13 +107,16 @@ GitHub access today (three paths, not fully reconciled into one abstraction):
   (`.claude/rules/sort-a-fallback-transports-response-into-three-not-two.md`).
 
 Pain points / seams for a layered refactor, read directly (not from memory):
-- `source/cli/cmd/lydite/coverage.go` is 2139 lines, `test.go` 2285, `mutation.go` 1285,
-  `scan.go` 1168, `record.go` 1023 — these are the largest command files and the obvious
-  candidates for a handler/service split.
-- `internal/forge` has no interface — a repository abstraction over GitHub would need one
-  introduced (or keep using the concrete client with a narrower interface defined at each
-  consumer, Go-idiomatic style).
-- No `fake`/`mock` types found anywhere under `source/cli/internal/*/*.go` except
-  `internal/mutation/executor_test.go` — most tests exercise real code paths or a local HTTP
-  test server (`internal/forge`) rather than hand-rolled fakes, suggesting the codebase leans on
-  integration-style tests over interface substitution today.
+- Command-file sizes, re-measured 2026-09-27 on `refactor/flow-record` after the `test`, `scan`
+  and `record` Flow migrations: `mutation.go` 1285 lines (unmigrated, now the largest),
+  `test.go` 776, `scan.go` 538, `record.go` 572, `coverage.go` 156. The migrated commands' logic
+  now lives in `internal/stages/{test,scan,record}` and `internal/test/{run,measure}`;
+  `record.go` keeps only flags, row rendering, the `recordReports` `ReportReader` adapter and four
+  shims.
+- `internal/forge` now has one: `SCMRepository` (`internal/forge/repository.go`), which Flow
+  stages go through (ADR 0060); `*forge.Client` remains the concrete client beneath it.
+- Hand-rolled fakes exist only at the Flow stages' seams and in mutation:
+  `internal/stages/clearance/fake_test.go`, `internal/stages/scm/scm_test.go`,
+  `internal/stages/scan/toolchains_test.go`, `internal/flows/scan/scan_test.go` and
+  `internal/mutation/executor_test.go`. Elsewhere tests exercise real code paths or a local HTTP
+  test server (`internal/forge`) rather than interface substitution.

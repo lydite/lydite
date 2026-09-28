@@ -4,7 +4,7 @@ Every scanner wrapped here exits non-zero when it finds something, so a failing 
 set `Err` means "crashed or found something" and cannot tell the two apart — Biome's wrapper
 reuses `Err` on purpose to report a finding, which would make every Biome finding read as a
 crash if `Crashed` were derived from it. A consumer that diffs one run's findings against
-another's (`findingScope` in `cmd/lydite/record.go`) needs to know when the claims it has are
+another's (`findingScope` in `internal/stages/record`) needs to know when the claims it has are
 not a complete answer: a scanner that crashed and reported zero findings looks identical to a
 clean run unless something else says otherwise, and treating a crashed run as clean writes
 every finding open in that bucket as resolved, then reappearing as new the next time the

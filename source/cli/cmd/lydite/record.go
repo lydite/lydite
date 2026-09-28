@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,13 +12,12 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/finding"
+	"lydite/lydite/internal/flow"
+	recordflow "lydite/lydite/internal/flows/record"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ledger"
-	"lydite/lydite/internal/licence"
 	"lydite/lydite/internal/runner"
-	"lydite/lydite/internal/rust"
-	"lydite/lydite/internal/secrets"
-	"lydite/lydite/internal/semgrep"
+	recordstages "lydite/lydite/internal/stages/record"
 	"lydite/lydite/internal/ui"
 )
 
@@ -75,7 +72,7 @@ cannot be recorded anywhere but where it was taken.`,
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
 			rep := ui.NewReport("record")
-			if err := recordBaseline(cmd.Context(), cmd, rep, dir, branch, reports); err != nil {
+			if err := recordBaseline(cmd.Context(), rep, dir, branch, reports); err != nil {
 				return err
 			}
 			saveDocument(dir, rep)
@@ -101,97 +98,97 @@ cannot be recorded anywhere but where it was taken.`,
 // Every refusal is a failing row rather than an error, because this command
 // reached an answer: the documents were read and something about them says
 // they must not be recorded. An error is reserved for not reaching one at all
-// — an unreadable directory, a checkout with no tree.
-func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir, branch string, reports []string) error {
-	// Read from the tree being recorded and never from the documents: the
-	// declaration says which components a complete baseline must cover and
-	// which gates each one's language implies, and taking either from the
-	// documents whose completeness is in question would make the check answer
-	// itself.
-	decl, err := component.Load(dir)
+// — an unreadable directory, a checkout with no tree — and adds no row, so a
+// run that reached no answer renders nothing.
+func recordBaseline(ctx context.Context, rep *ui.Report, dir, branch string, reports []string) error {
+	record, err := recordflow.New()
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", component.FileName, err)
+		return err
 	}
-	// The tolerance this tree accepts, and which of its languages are checked
-	// at all. Both are that tree's own statements about itself.
-	cfg, err := config.Load(dir)
+	res, err := record.Run(ctx, recordflow.Params{
+		Dir:                  dir,
+		Branch:               branch,
+		Reports:              reports,
+		Reader:               newRecordReports(),
+		LangEnabled:          langEnabled,
+		ScannerGates:         scannerGates,
+		RestoreToleratedDips: withToleratedDipsRestored,
+	}.Inputs())
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", config.FileName, err)
+		return recordError(err)
 	}
-	read := readReports(rep, reports)
-	// A measurements document is required and a scan document is not, because
-	// only the first names the tree it describes. That name is what binds a
-	// recording to the checkout below, so a set of directories holding scans
-	// alone could be recorded against nothing and is refused here rather than
-	// filed against a commit this command would have had to guess at.
-	if len(read.docs) == 0 {
+	rows, err := recordRows(res)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		rep.Add(row)
+	}
+	return nil
+}
+
+// recordError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it, and a set of directories holding no
+// measurements named by the document a run has to write.
+func recordError(err error) error {
+	if errors.Is(err, recordstages.ErrNoMeasurements) {
 		return errors.New("none of the named report directories holds a " + measurementsName +
 			"\n       a `lydite test` run writes one; a run with --no-coverage does not")
 	}
-	folded, err := foldMeasurements(read.docs)
-	if err != nil {
-		return err
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
 	}
-	// The binding. A document names the tree it measured, and this refuses
-	// to record it anywhere else: without it a mis-wired workflow lands one
-	// tree's numbers under another tree's key, silently, and that entry then
-	// gates every later change whose merge-base is that tree.
-	//
-	// It is asked before anything is written and before the fold is asked
-	// whether it holds a baseline, because it binds the history as well: a
-	// document describing another tree describes another commit, and a record
-	// filed against this one would be this command inventing a data point.
-	head, err := gitstate.TreeSHA(ctx, dir, "HEAD")
+	return err
+}
+
+// recordRows is every row a completed run renders, in the order a reader
+// follows the recording: what each directory held, whether the measurements
+// bind to this checkout, how much of a scan was counted, what became of the
+// baseline, and what reached the quality history.
+func recordRows(res *flow.Result) ([]ui.Row, error) {
+	read, err := flow.Output[recordstages.ReadReportsOut](res, recordflow.StageReadReports)
 	if err != nil {
-		return fmt.Errorf("resolving the tree that is checked out: %w", err)
+		return nil, err
 	}
-	if head != folded.Tree {
-		rep.Add(ui.Row{Status: ui.StatusFail, Label: "record",
-			Value: fmt.Sprintf("not recorded — the measurement was taken on %s, but %s is checked out", shortSHA(folded.Tree), shortSHA(head)),
+	rows := readRows(read)
+
+	// A document describing another tree is refused before anything is
+	// counted or written: it describes another commit, so neither a baseline
+	// nor a record may be filed against this one.
+	bound, err := flow.Output[recordstages.BindTreeOut](res, recordflow.StageBindTree)
+	if err != nil {
+		return nil, err
+	}
+	if !bound.Bound {
+		return append(rows, ui.Row{Status: ui.StatusFail, Label: "record",
+			Value: fmt.Sprintf("not recorded — the measurement was taken on %s, but %s is checked out", shortSHA(bound.Measured), shortSHA(bound.Head)),
 			Detail: []string{
 				"record where the measurement was taken, or check that tree out first",
-			}})
-		return nil
+			}}), nil
 	}
 
-	// What became of the mutants, bound to the same tree the measurements are
-	// bound to and dropped silently when it does not bind. Absence is a
-	// legitimate answer for this document at every step — most recordings read
-	// none at all — so a set of counts that cannot be tied to this checkout is
-	// counts this recording does not have, and never a refusal to record the
-	// measurements that did bind.
-	mutants := boundMutants(read.mutants, head)
-
-	// The quality history is decided independently of the baseline. The two
-	// are different policies over one branch: a baseline is a cache, refused
-	// whenever it would be partial, because a partial one reads as a cache hit
-	// and gates every later change on nothing. A record is not recomputable at
-	// all, so what a run measured is appended whether or not it adds up to a
-	// baseline — and the run whose suite went red, which establishes no
-	// baseline by construction, is exactly the one whose test counts a history
-	// most wants.
-
-	// How many claims each scanner gate made, which is the one scalar in a
-	// recording that comes from `lydite scan` rather than from `lydite test`.
-	perComponent, root := findingCounts(dir, decl, cfg, read.found, read.scanned)
-	rep.Add(findingsRow(perComponent, root, read.scanned))
-
-	history, historyWhy := historyRecords(ctx, dir, branch, folded, perComponent, root, read.found, read.crashed, mutants)
-
-	// What may be recorded as a baseline, and the row that says why when
-	// nothing may. An empty snapshot is a legitimate answer here, and is what
-	// lets a refusal and an append land through the one write below.
-	record, verdict, err := baselineToRecord(ctx, dir, decl, cfg, folded, head)
+	counted, err := flow.Output[recordstages.CountFindingsOut](res, recordflow.StageCountFindings)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	rows = append(rows, findingsRow(counted.PerComponent, counted.Root, read.Scanned))
+
+	composed, err := flow.Output[recordstages.ComposeHistoryOut](res, recordflow.StageComposeHistory)
+	if err != nil {
+		return nil, err
+	}
+	why, err := historyWhy(composed)
+	if err != nil {
+		return nil, err
+	}
+	decided, err := flow.Output[recordstages.DecideBaselineOut](res, recordflow.StageDecideBaseline)
+	if err != nil {
+		return nil, err
 	}
 
-	// The one place a recording reaches the state branch, over both policies
-	// and whichever of them has something to say. A second call site is a
-	// second place state can reach the branch, which is the invariant this
-	// command rests on and which a grep for `gitstate.Write` answers.
-	landed, err := gitstate.Write(ctx, dir, head, record, history)
-	if err != nil {
+	if res.Status(recordflow.StageWriteState) == flow.StatusFailed {
+		written := writeError(res)
 		// A failing row only when a baseline was actually being landed. That
 		// write is what this command exists to do, so one that never landed is
 		// this command failing. A recording carrying no baseline — a run whose
@@ -203,428 +200,168 @@ func recordBaseline(ctx context.Context, cmd *cobra.Command, rep *ui.Report, dir
 		// gap.
 		//
 		// A snapshot that is empty for any other reason than a stated one
-		// still fails: `verdict` carries the refusal that emptied it, and an
-		// empty snapshot with nothing to say about why is this command
-		// failing to do its job.
-		if record.Recorded() || verdict.Value == "" {
-			rep.Add(ui.Row{Status: ui.StatusFail, Label: "record",
+		// still fails: the verdict carries the refusal that emptied it, and an
+		// empty snapshot with nothing to say about why is this command failing
+		// to do its job.
+		if decided.Snapshot.Recorded() || decided.Verdict == recordstages.VerdictToRecord {
+			rows = append(rows, ui.Row{Status: ui.StatusFail, Label: "record",
 				Value:  "not recorded — the write to the " + gitstate.BranchName + " branch did not land",
-				Detail: []string{err.Error()}})
+				Detail: []string{written.Error()}})
 		} else {
-			rep.Add(verdict)
+			row, err := baselineRow(decided, bound.Head)
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, row)
 		}
 		// The write carried both, so a push that never landed took the record
 		// with it — unless there was nothing to append, in which case the
 		// reason is still its own and not this one.
-		failure := "the write to the " + gitstate.BranchName + " branch did not land"
-		if history == nil {
-			failure = ""
+		failure := ""
+		if composed.Reason == recordstages.HistoryToAppend {
+			failure = "the write to the " + gitstate.BranchName + " branch did not land"
 		}
-		rep.Add(historyRow(nil, historyWhy, failure))
-		return nil
+		return append(rows, historyRow(nil, why, failure)), nil
 	}
-	if verdict.Value == "" {
-		verdict = ui.Row{Status: ui.StatusPass, Label: "record",
-			Value: fmt.Sprintf("%d component(s) recorded for %s", len(record.Coverage), shortSHA(head))}
+
+	landed, err := flow.Output[recordstages.WriteStateOut](res, recordflow.StageWriteState)
+	if err != nil {
+		return nil, err
 	}
-	rep.Add(verdict)
-	rep.Add(historyRow(landed, historyWhy, ""))
-	return nil
+	row, err := baselineRow(decided, bound.Head)
+	if err != nil {
+		return nil, err
+	}
+	return append(rows, row, historyRow(landed.Landed, why, "")), nil
 }
 
-// baselineToRecord is what this fold may be recorded as, merged onto whatever
-// the tree already holds — and, when it may not be recorded at all, the row
-// that says why beside an empty snapshot.
+// writeError is the error the write to the state branch failed with, which
+// the flow records rather than failing the run on.
+func writeError(res *flow.Result) error {
+	for _, failed := range res.Errors() {
+		if failed.Stage == recordflow.StageWriteState {
+			return failed.Err
+		}
+	}
+	return errors.New("the write failed and recorded no error")
+}
+
+// readRows is one row per report directory, saying what came out of it.
 //
-// A refusal is a row rather than an error because this command reached an
-// answer: the documents were read and something about them says they must not
-// become a baseline. An error is reserved for not reaching one — an unreadable
-// declaration, a configuration that will not parse.
+// A directory holding none of the documents is named and skipped rather than
+// failing the command: a run with --no-coverage writes no measurements, and a
+// caller passing the same directory list to `record` as to `publish` is doing
+// something reasonable.
 //
-// It writes nothing. Whether there is a baseline to land and whether there is
-// history to append are separate questions with separate answers, and the one
-// write below is what makes them one commit.
-func baselineToRecord(ctx context.Context, dir string, decl component.File, cfg config.Config, folded measurementsDoc, head string) (gitstate.Snapshot, ui.Row, error) {
-	if len(folded.Components) == 0 {
-		// A fold with no component may still hold test counts: a run whose
-		// every suite failed establishes no baseline by construction and knows
-		// exactly how many tests went red, which is the data point a history
-		// most wants and the one nothing can recover later.
-		//
-		// The reason travels as a Detail line rather than inside the value.
-		// It is the one field here written by a run this command did not
-		// perform, so it may carry anything that run's own inputs carried —
-		// and a Detail is indented, which is what stops a line of it being
-		// read as a status row of its own.
-		return gitstate.Snapshot{}, ui.Row{Status: ui.StatusUnmeasured, Label: "record",
-			Value: "nothing to record", Detail: []string{folded.Reason}}, nil
+// One row per directory whatever it held, because the row answers "what came
+// out of here" and a directory that answers twice is one a reader has to add
+// up themselves.
+func readRows(read recordstages.ReadReportsOut) []ui.Row {
+	rows := make([]ui.Row, 0, len(read.Directories))
+	for _, d := range read.Directories {
+		rows = append(rows, readRow(d))
+	}
+	return rows
+}
+
+// readRow is what one report directory held.
+//
+// A document that is simply not there says nothing a reader must act on: each
+// job writes some of the three, so another's absence is that job's shape rather
+// than news. A document that is there and will not parse is the opposite, and
+// is the only thing the detail reports — a scan whose claims stay absent, or
+// measurements that would have been folded, each with the reason nothing else
+// would say.
+//
+// The counts are the document absent from almost every directory: a `lydite
+// test` shard writes none, and a mutation run writes one whether or not it
+// mutated anything. Its absence is therefore never reported — only a document
+// that is there and will not parse is.
+func readRow(d recordstages.Directory) ui.Row {
+	var held, detail []string
+	switch {
+	case d.MeasurementsErr == nil:
+		held = append(held, fmt.Sprintf("%d component(s) for %s", len(d.Measurements.Components), shortSHA(d.Measurements.Tree)))
+	case !errors.Is(d.MeasurementsErr, os.ErrNotExist):
+		detail = append(detail, d.MeasurementsErr.Error())
+	}
+	switch {
+	case d.ScanErr == nil:
+		held = append(held, fmt.Sprintf("%d finding(s) from scan", len(d.Scan.Findings)))
+	case !errors.Is(d.ScanErr, os.ErrNotExist):
+		detail = append(detail, d.ScanErr.Error())
+	}
+	switch {
+	case d.MutantsErr == nil:
+		held = append(held, fmt.Sprintf("%d component(s) mutated for %s", len(d.Mutants.Components), shortSHA(d.Mutants.Tree)))
+	case !errors.Is(d.MutantsErr, os.ErrNotExist):
+		detail = append(detail, d.MutantsErr.Error())
 	}
 
-	if gap, blocked := missingFromRecord(decl, folded); blocked {
-		return gitstate.Snapshot{}, ui.Row{Status: ui.StatusFail, Label: "record",
-			Value: fmt.Sprintf("not recorded — %s has no entry, and a baseline missing a component gates on nothing", gap),
+	if len(held) == 0 {
+		// Nothing came out of this directory at all, so why is the whole of
+		// what the row has to say — a plain absence included. That is the one
+		// place it is worth reporting: a directory that held another document
+		// is not missing anything, and this one is missing every one.
+		if len(detail) == 0 {
+			detail = []string{d.MeasurementsErr.Error()}
+		}
+		return ui.Row{Status: ui.StatusUnmeasured, Label: "read(" + d.Dir + ")",
+			Value: "no measurements", Detail: detail}
+	}
+	// Context and not amber. A directory holding a scan and no measurements is
+	// what the scan job uploads, and rendering the expected shape of a job as
+	// an amber row trains a reader to skip the tag that exists to be noticed.
+	return ui.Row{Status: ui.StatusContext, Label: "read(" + d.Dir + ")",
+		Value: strings.Join(held, ", "), Detail: detail}
+}
+
+// baselineRow says what became of the baseline, for a write that landed and
+// for a refusal whose own row stands whether or not it did.
+//
+// The reason a fold holds nothing travels as a Detail line rather than inside
+// the value. It is the one field here written by a run this command did not
+// perform, so it may carry anything that run's own inputs carried — and a
+// Detail is indented, which is what stops a line of it being read as a status
+// row of its own.
+func baselineRow(decided recordstages.DecideBaselineOut, head string) (ui.Row, error) {
+	switch decided.Verdict {
+	case recordstages.VerdictToRecord:
+		return ui.Row{Status: ui.StatusPass, Label: "record",
+			Value: fmt.Sprintf("%d component(s) recorded for %s", len(decided.Snapshot.Coverage), shortSHA(head))}, nil
+	case recordstages.VerdictUnchanged:
+		return ui.Row{Status: ui.StatusPass, Label: "record",
+			Value: shortSHA(head) + " already holds this measurement"}, nil
+	case recordstages.VerdictRefused:
+		return ui.Row{Status: ui.StatusFail, Label: "record",
+			Value: fmt.Sprintf("not recorded — %s has no entry, and a baseline missing a component gates on nothing", decided.Missing),
 			Detail: []string{
 				"the next change against this tree measures it instead of gating against a partial baseline",
 			}}, nil
+	case recordstages.VerdictNothingToRecord:
+		return ui.Row{Status: ui.StatusUnmeasured, Label: "record",
+			Value: "nothing to record", Detail: []string{decided.Reason}}, nil
+	default:
+		return ui.Row{}, fmt.Errorf("the baseline was given no verdict (%d)", decided.Verdict)
 	}
-
-	// The declaration bounds what may be recorded, on both sides of the merge
-	// below. The fold is written by runs this command did not perform, so
-	// a name in it that the tree does not declare is a component nothing can
-	// ever measure again — the same thing an entry left behind by a deleted
-	// component is, and it is dropped for the same reason.
-	record := declaredOnly(decl, folded.snapshot())
-
-	// Merged onto whatever this tree already holds, never skipped because it
-	// holds something: a re-run that measured more than the last one must not
-	// be refused for finding an entry there.
-	existing := existingSnapshot(ctx, dir, head)
-	if !existing.Recorded() {
-		return record, ui.Row{}, nil
-	}
-	// Anchored against what this tree already holds, not only against what
-	// the measuring run compared with. The same tree is the same content, so
-	// a difference between two measurements of it is the measurement noise
-	// the tolerance exists for — and without this a recording that
-	// re-measures a tree an earlier one already recorded replaces the
-	// anchored high-water entry with a raw dipped one, handing the next
-	// change a lowered number to gate against. That is the per-merge ratchet
-	// withToleratedDipsRestored exists to prevent.
-	//
-	// No CRAP equivalent, and none is wanted: the score is a count of
-	// functions, so two measurements of one tree differ only if what is
-	// measured changed. There is no sub-tenth noise for a tolerance to
-	// absorb, and a tolerance over an integer count would be a free function
-	// above the threshold per merge.
-	record.Coverage = withToleratedDipsRestored(record.Coverage, existing.Coverage, cfg.Coverage.Tolerance)
-	merged := declaredOnly(decl, existing)
-	for name, e := range record.Coverage {
-		merged.Coverage[name] = e
-	}
-	for name, e := range record.CRAP {
-		merged.CRAP[name] = e
-	}
-	if sameSnapshot(merged, existing) {
-		// The same bytes as the branch already holds. It is still handed to
-		// the write, which stages it, finds nothing changed and pushes only if
-		// the history beside it did — so a recording that adds a record to an
-		// already-recorded tree is one commit carrying only the record.
-		return merged, ui.Row{Status: ui.StatusPass, Label: "record",
-			Value: shortSHA(head) + " already holds this measurement"}, nil
-	}
-	return merged, ui.Row{}, nil
 }
 
-// historyRecords is the quality history this recording appends, and why there
-// is none when there is none.
-//
-// It answers with a function rather than the records themselves because
-// whether this commit follows the last one recorded is a question about the
-// branch as fetched by the attempt that is about to write — a retry fetches a
-// branch a concurrent run may have advanced, and an answer computed once would
-// have that retry declare a gap the intervening run had just filled. Which
-// findings appeared and resolved is the same kind of question, asked of the
-// same fetched branch for the same reason.
-func historyRecords(ctx context.Context, dir, override string, folded measurementsDoc,
-	perComponent map[string]map[string]int, root map[string]int, found []finding.Finding,
-	crashed []finding.Crash, mutants map[string]mutantCounts) (gitstate.Records, string) {
-	// A branch and never a guess. History is per branch, so a record filed
-	// under a branch this checkout is not on puts one line's points on
-	// another line, and nothing downstream can tell. The caller's own
-	// statement comes first, because a detached HEAD is the normal shape of a
-	// CI checkout and the job that chose the ref is the one that knows.
-	branch := gitstate.Branch(ctx, dir, override)
-	if branch == "" {
-		return nil, "this checkout names no branch, so pass " + gitstate.BranchFlag +
-			" — history is per branch, and one filed under the wrong branch is worse than none"
+// historyWhy is why a recording appends no history, and empty when it
+// appends some.
+func historyWhy(composed recordstages.ComposeHistoryOut) (string, error) {
+	switch composed.Reason {
+	case recordstages.HistoryToAppend:
+		return "", nil
+	case recordstages.HistoryNoBranch:
+		return "this checkout names no branch, so pass " + gitstate.BranchFlag +
+			" — history is per branch, and one filed under the wrong branch is worse than none", nil
+	case recordstages.HistoryNoScalar:
+		return "no component produced a scalar", nil
+	case recordstages.HistoryUndescribed:
+		return "this commit could not be described: " + composed.Err.Error(), nil
+	default:
+		return "", fmt.Errorf("the history was given no reason (%d)", composed.Reason)
 	}
-	// What there is to say, before asking git anything: a fold carrying no
-	// scalar is a record naming a commit and holding no number, which is a
-	// point on no line — and there is no reason to describe a commit nothing
-	// is going to be filed against.
-	components := historyComponents(folded, perComponent, mutants)
-	// The root-scoped counts are a scalar of their own and keep a recording
-	// worth making on their own: a repository whose every suite was carried and
-	// whose scan found something still has a point to put on that line.
-	if len(components) == 0 && len(root) == 0 {
-		return nil, "no component produced a scalar"
-	}
-	head, err := gitstate.DescribeCommit(ctx, dir, "HEAD")
-	if err != nil {
-		return nil, "this commit could not be described: " + err.Error()
-	}
-	entry := ledger.Record{
-		Kind:         ledger.KindEntry,
-		At:           head.At,
-		Commit:       head.SHA,
-		Parent:       head.Parent,
-		Tree:         head.Tree,
-		Branch:       branch,
-		Components:   components,
-		RootFindings: root,
-	}
-	scope := findingScope(perComponent, root, crashed)
-	return func(worktree string) ([]ledger.Record, error) {
-		// One walk of the branch's own history serves both gap detection and
-		// the finding diff, rather than each reading the same partitions on
-		// its own — see ledger.BranchState.
-		open, previous, hasPrevious := ledger.BranchState(worktree, branch, head.At)
-		// A copy per attempt, so a retry's events are diffed against the
-		// branch it fetched and never carry an earlier attempt's.
-		rec := entry
-		// No scope is no scan, and a recording that measured no bucket has
-		// nothing to diff against what the branch holds open.
-		if len(scope) > 0 {
-			rec.FindingEvents = findingEvents(scope, found, open)
-		}
-		if gap, ok := gapBefore(ctx, dir, branch, head, previous, hasPrevious); ok {
-			return []ledger.Record{gap, rec}, nil
-		}
-		return []ledger.Record{rec}, nil
-	}, ""
-}
-
-// findingScope is every bucket this recording measured: each gate
-// findingCounts keyed for a component, and each root-scoped one it keyed for
-// the repository, less every bucket the scan named as crashed.
-//
-// Read off the counts rather than decided again, because a bucket a finding
-// can resolve in is a gate that applied, and the counts are already the one
-// answer to that. A second notion of what applied would drift from the first,
-// and the drift would be a resolution recorded for a bucket nothing measured.
-//
-// The counts cannot say whether an applicable gate finished: a scanner that
-// crashed found no claims and counts 0 like a clean one, which is a limit a
-// scalar tolerates and a transition does not — every finding held open there
-// would be recorded resolved, and appear again on the next clean run, in a
-// ledger nothing is ever removed from. The scan document names each crash as
-// data, and a crashed bucket is left out so the open set it holds carries over
-// untouched.
-func findingScope(perComponent map[string]map[string]int, root map[string]int, crashed []finding.Crash) map[ledger.FindingBucket]bool {
-	scope := map[ledger.FindingBucket]bool{}
-	for name, gates := range perComponent {
-		for gate := range gates {
-			scope[ledger.FindingBucket{Gate: gate, Component: name}] = true
-		}
-	}
-	for gate := range root {
-		scope[ledger.FindingBucket{Gate: gate}] = true
-	}
-	for _, c := range crashed {
-		delete(scope, ledger.FindingBucket{Gate: c.Gate, Component: c.Component})
-	}
-	return scope
-}
-
-// findingEvents is what became of each fingerprint in scope since the branch's
-// last recording: appeared when this scan holds it and the open set did not,
-// resolved when the open set held it and this scan does not.
-//
-// A bucket outside scope is never diffed. Its gate did not run this time, so
-// the absence of its findings from this scan says nothing about them, and a
-// resolution recorded there would close a finding nothing looked for.
-//
-// A resolution carries no path or rule. The claim it would read them from is
-// the one this scan no longer makes, and the open set records only the
-// fingerprint; the appearance that opened it carries both.
-//
-// Sorted, so the same scan over the same history writes the same line.
-func findingEvents(scope map[ledger.FindingBucket]bool, found []finding.Finding,
-	open map[ledger.FindingBucket]map[string]bool) []ledger.FindingEvent {
-	current := map[ledger.FindingBucket]map[string]finding.Finding{}
-	for _, f := range found {
-		bucket := ledger.FindingBucket{Gate: f.Gate, Component: f.Component}
-		if !scope[bucket] {
-			continue
-		}
-		if current[bucket] == nil {
-			current[bucket] = map[string]finding.Finding{}
-		}
-		fp := f.Fingerprint()
-		if _, seen := current[bucket][fp]; !seen {
-			current[bucket][fp] = f
-		}
-	}
-	var events []ledger.FindingEvent
-	for bucket := range scope {
-		for fp, f := range current[bucket] {
-			if !open[bucket][fp] {
-				events = append(events, ledger.FindingEvent{
-					Transition: ledger.FindingAppeared, Fingerprint: fp,
-					Gate: bucket.Gate, Component: bucket.Component, Path: f.Path, Rule: f.Rule,
-				})
-			}
-		}
-		for fp := range open[bucket] {
-			if _, still := current[bucket][fp]; !still {
-				events = append(events, ledger.FindingEvent{
-					Transition: ledger.FindingResolved, Fingerprint: fp,
-					Gate: bucket.Gate, Component: bucket.Component,
-				})
-			}
-		}
-	}
-	sort.Slice(events, func(i, j int) bool {
-		a, b := events[i], events[j]
-		if a.Gate != b.Gate {
-			return a.Gate < b.Gate
-		}
-		if a.Component != b.Component {
-			return a.Component < b.Component
-		}
-		if a.Transition != b.Transition {
-			return a.Transition < b.Transition
-		}
-		return a.Fingerprint < b.Fingerprint
-	})
-	return events
-}
-
-// gapBefore is the explicit break to append ahead of this commit's record,
-// when the newest record on this branch is not this commit's parent.
-//
-// The break is already visible without it — every record names its parent, so
-// a reader that finds one whose parent is not the previous record's commit has
-// found the hole in the file it is already reading. What this adds is the one
-// thing that reader cannot work out: how wide the hole is, which needs the
-// repository. That division is what makes a gap recordable at all: the append
-// that would have consumed a sequence number is the append that failed, so
-// nothing about the failure can be written BY the failing run. It is written
-// by the next successful one, out of git history — the one input a failed
-// write cannot have damaged.
-//
-// previous and hasPrevious are the caller's own ledger.BranchState answer, not
-// a fresh ledger.Latest lookup here: the caller already paid for one walk of
-// the branch's partitions and this does not pay for a second.
-func gapBefore(ctx context.Context, dir, branch string, head gitstate.Commit, previous ledger.Record, hasPrevious bool) (ledger.Record, bool) {
-	// Nothing recorded on this branch yet is not a gap: a repository adopting
-	// the ledger has no history to be missing, and claiming one would put a
-	// break at the start of every line ever drawn.
-	if !hasPrevious {
-		return ledger.Record{}, false
-	}
-	if previous.Commit == head.Parent || previous.Commit == head.SHA {
-		return ledger.Record{}, false
-	}
-	gap := ledger.Gap{From: previous.Commit}
-	// At least one commit lies between, and never nought: CommitsBetween
-	// answers nought only when the last recorded commit is this one's first
-	// parent, and that is the contiguous case the return above already took.
-	missing, known := gitstate.CommitsBetween(ctx, dir, previous.Commit, head.SHA)
-	if !known {
-		// A force-push, an unrelated history, or a checkout too shallow to
-		// see back that far. The break is real and its width is not
-		// establishable, and saying so is the whole of what this record is
-		// for — a width invented here would be worse than the honest absence.
-		gap.Reason = "the last recorded commit is not an ancestor of this one, so how many recordings are missing cannot be established"
-	} else {
-		gap.Reason = fmt.Sprintf("%d commit(s) between the last recorded one and this one were never recorded", missing)
-		gap.Missing = missing
-	}
-	return ledger.Record{
-		Kind: ledger.KindGap, At: head.At, Commit: head.SHA,
-		Parent: head.Parent, Branch: branch, Gap: &gap,
-	}, true
-}
-
-// historyComponents is each component's scalars as the ledger records them.
-//
-// The counts are what was MEASURED and never the anchored ones a baseline
-// records: anchoring exists so a within-tolerance dip does not ratchet the
-// gate downwards, which is a property of the gate rather than of the commit,
-// and a history that recorded it would draw a line nothing ever measured.
-//
-// A component this run carried rather than measured keeps its number, because
-// affected selection established that the change could not have touched it —
-// so a flat line is the true one, and dropping it would make the series vanish
-// and reappear with whatever a change happened to touch.
-//
-// The per-gate finding counts come in from the side, because they are measured
-// by `lydite scan` and not by the run that wrote these measurements.
-//
-// The mutant counts come in from the side for the same reason, out of a
-// `lydite mutation` run, and are empty for every recording that read none. A
-// component absent from them is a component nothing mutated — untouched by the
-// diff, declared `mutation: false`, or a run that did not complete — and
-// records no mutation at all, because a zeroed one reads as a suite that killed
-// everything and nothing later corrects it.
-func historyComponents(doc measurementsDoc, perComponent map[string]map[string]int,
-	mutants map[string]mutantCounts) map[string]ledger.Component {
-	out := map[string]ledger.Component{}
-	for name, m := range doc.Components {
-		c := ledger.Component{Producer: m.Producer}
-		lines := m.LineCount
-		if m.Unanchored != nil {
-			lines = *m.Unanchored
-		}
-		if lines.Measured() {
-			c.Coverage = &ledger.Lines{Covered: lines.Covered, Total: lines.Total}
-		}
-		if m.CRAP != nil {
-			c.CRAP = &ledger.CRAP{Above: m.CRAP.Above, Worst: m.CRAP.Worst}
-		}
-		out[name] = c
-	}
-	for name, counts := range doc.Tests {
-		c := out[name]
-		c.Tests = &counts
-		out[name] = c
-	}
-	// The finding counts reach a component the measurements never mention, and
-	// that is the point: a scan covers every declared component whatever the
-	// suites did, so a component whose tests were carried still has a finding
-	// series.
-	for name, gates := range perComponent {
-		c := out[name]
-		c.Findings = gates
-		out[name] = c
-	}
-	// And the mutant counts reach one the measurements never mention for the
-	// same reason: a component the merge commit's diff touched is mutated
-	// whatever its suite was carried or measured by.
-	for name, counts := range mutants {
-		c := out[name]
-		c.Mutation = &ledger.Mutation{
-			Killed:         counts.Killed,
-			TimedOut:       counts.TimedOut,
-			OutOfMemory:    counts.OutOfMemory,
-			Survived:       counts.Survived,
-			Unviable:       counts.Unviable,
-			Acknowledged:   counts.Acknowledged,
-			ElapsedSeconds: counts.ElapsedSeconds,
-		}
-		out[name] = c
-	}
-	// A component holding no scalar at all contributes nothing but its name,
-	// which is a point on no line.
-	for name, c := range out {
-		if c.Coverage == nil && c.CRAP == nil && c.Tests == nil && c.Findings == nil && c.Mutation == nil {
-			delete(out, name)
-		}
-	}
-	return out
-}
-
-// boundMutants is the folded mutant counts for the tree being recorded, and
-// nothing at all when they describe another one.
-//
-// The binding is the same one the measurements carry and the answer to failing
-// it is not: measurements name the tree a record is filed against, so a
-// document describing another tree fails the command, while counts that cannot
-// be tied to this checkout are simply counts this recording does not have.
-// Absence is a legitimate answer for this document at every step — most
-// recordings read none — so degrading to it loses nothing a reader could have
-// acted on, and refusing the whole recording over it would drop the coverage
-// and test series of a commit that measured both.
-func boundMutants(docs []mutantsDoc, tree string) map[string]mutantCounts {
-	if len(docs) == 0 {
-		return nil
-	}
-	folded, err := foldMutants(docs)
-	if err != nil || folded.Tree != tree {
-		return nil
-	}
-	return folded.Components
 }
 
 // findingsRow says how much of a scan reached the record.
@@ -697,327 +434,139 @@ func historyRow(landed []ledger.Record, why, failure string) ui.Row {
 		Detail: []string{gap.Reason}}
 }
 
-// existingSnapshot is what the branch already holds for this tree, across every
-// metric, so a recording merges onto it rather than replacing it.
+// recordReports is recordstages.ReportReader over the documents this package's
+// other commands write: measurements from `lydite test`, a report document
+// from `lydite scan`, and mutant counts from `lydite mutation`.
 //
-// A read that fails is an empty snapshot rather than an error: the question is
-// only whether there is something to merge onto, and a run that cannot answer
-// it records what it measured — which is the state the tree would have been
-// left in had nothing been there.
-func existingSnapshot(ctx context.Context, dir, tree string) gitstate.Snapshot {
-	snap, err := gitstate.ReadSnapshot(ctx, dir, tree)
+// Each document is read and folded by the code that owns it, in its own types
+// and by its own rules, and converted only on the way out; every error is the
+// owning code's own, unchanged, so the text a reader of the recording is shown
+// is the text that code wrote.
+//
+// It keeps every document it read, keyed by the directory it was read from,
+// because a fold folds what the reads returned rather than reading a directory
+// a second time.
+type recordReports struct {
+	measurements map[string]measurementsDoc
+	mutants      map[string]mutantsDoc
+}
+
+func newRecordReports() *recordReports {
+	return &recordReports{measurements: map[string]measurementsDoc{}, mutants: map[string]mutantsDoc{}}
+}
+
+func (r *recordReports) ReadMeasurements(dir string) (recordstages.Measurements, error) {
+	doc, err := readMeasurements(dir)
 	if err != nil {
-		return gitstate.Snapshot{}
+		return recordstages.Measurements{}, err
 	}
-	return snap
+	r.measurements[dir] = doc
+	return recordedMeasurements(doc), nil
 }
 
-// sameSnapshot reports whether two snapshots hold the same entries under every
-// metric, so a run that would rewrite a tree's state byte for byte does not
-// push to do it.
-func sameSnapshot(a, b gitstate.Snapshot) bool {
-	return sameEntries(a.Coverage, b.Coverage) && sameEntries(a.CRAP, b.CRAP)
+func (r *recordReports) ReadScan(dir string) (recordstages.Scan, error) {
+	doc, err := readDocument(documentPath(dir, "scan"))
+	if err != nil {
+		return recordstages.Scan{}, err
+	}
+	return recordstages.Scan{Findings: doc.Findings, Crashed: doc.Crashed}, nil
 }
 
-// reportsRead is what a recording's report directories hold.
-//
-// Three documents and not one, because each is written by a different command
-// in a different job: `lydite test` writes what it measured, `lydite scan`
-// writes what it found, `lydite mutation` writes what became of its mutants,
-// and a recording folds all three. A directory holding only one of them is the
-// ordinary shape of each of those jobs rather than a malfunction.
-type reportsRead struct {
-	// docs is every measurements document read, which is what the baseline and
-	// the tree binding are folded from.
-	docs []measurementsDoc
-	// mutants is every mutant-counts document read, absent for a directory no
-	// mutation run ever wrote to — a `lydite test` shard with no mutation
-	// matrix beside it, or a lydite that predates the document.
-	mutants []mutantsDoc
-	// found is every located claim the scan documents made.
-	found []finding.Finding
-	// crashed is every gate the scan documents name as not having finished a
-	// trustworthy scan, whose findings are therefore not a complete answer.
-	crashed []finding.Crash
-	// scanned says that some directory held a readable scan document, which is
-	// what separates a gate that found nothing from a scan that never ran. A
-	// count of nought and no scan at all are the same empty list of findings,
-	// and only this tells them apart.
-	scanned bool
+func (r *recordReports) ReadMutants(dir string) (recordstages.Mutants, error) {
+	doc, err := readMutants(dir)
+	if err != nil {
+		return recordstages.Mutants{}, err
+	}
+	r.mutants[dir] = doc
+	return recordedMutants(doc), nil
 }
 
-// readReports reads each document out of each named directory, adding a row
-// for each so a folded recording says what it was folded from.
-//
-// A directory holding none of them is named and skipped rather than failing the
-// command: a run with --no-coverage writes no measurements, and a caller
-// passing the same directory list to `record` as to `publish` is doing
-// something reasonable.
-//
-// One row per directory whatever it held, because the row answers "what came
-// out of here" and a directory that answers twice is one a reader has to add
-// up themselves.
-func readReports(rep *ui.Report, reports []string) reportsRead {
-	var out reportsRead
-	for _, dir := range reports {
-		var held, detail []string
-
-		// A document that is simply not there says nothing a reader must act
-		// on: each of these jobs writes one of the two, so the other's absence
-		// is that job's shape rather than news. A document that is there and
-		// will not parse is the opposite, and is the only thing these branches
-		// report — a scan whose claims stay absent, or measurements that would
-		// have been folded, each with the reason nothing else would say.
-		doc, docErr := readMeasurements(dir)
-		switch {
-		case docErr == nil:
-			out.docs = append(out.docs, doc)
-			held = append(held, fmt.Sprintf("%d component(s) for %s", len(doc.Components), shortSHA(doc.Tree)))
-		case !errors.Is(docErr, os.ErrNotExist):
-			detail = append(detail, docErr.Error())
+func (r *recordReports) FoldMeasurements(dirs []string) (recordstages.Measurements, error) {
+	docs := make([]measurementsDoc, 0, len(dirs))
+	for _, dir := range dirs {
+		doc, ok := r.measurements[dir]
+		if !ok {
+			return recordstages.Measurements{}, fmt.Errorf("%s: no %s was read from it to fold", dir, measurementsName)
 		}
-
-		scan, scanErr := readDocument(documentPath(dir, "scan"))
-		switch {
-		case scanErr == nil:
-			out.found = append(out.found, scan.Findings...)
-			out.crashed = append(out.crashed, scan.Crashed...)
-			out.scanned = true
-			held = append(held, fmt.Sprintf("%d finding(s) from scan", len(scan.Findings)))
-		case !errors.Is(scanErr, os.ErrNotExist):
-			detail = append(detail, scanErr.Error())
-		}
-
-		// The counts are the third document and the one absent from almost
-		// every directory: a `lydite test` shard writes none, and a mutation
-		// run writes one whether or not it mutated anything. Its absence is
-		// therefore never reported — only a document that is there and will
-		// not parse is.
-		counts, countsErr := readMutants(dir)
-		switch {
-		case countsErr == nil:
-			out.mutants = append(out.mutants, counts)
-			held = append(held, fmt.Sprintf("%d component(s) mutated for %s", len(counts.Components), shortSHA(counts.Tree)))
-		case !errors.Is(countsErr, os.ErrNotExist):
-			detail = append(detail, countsErr.Error())
-		}
-
-		if len(held) == 0 {
-			// Nothing came out of this directory at all, so why is the whole of
-			// what the row has to say — a plain absence included. That is the
-			// one place it is worth reporting: a directory that held the other
-			// document is not missing anything, and this one is missing both.
-			if len(detail) == 0 {
-				detail = []string{docErr.Error()}
-			}
-			rep.Add(ui.Row{Status: ui.StatusUnmeasured, Label: "read(" + dir + ")",
-				Value: "no measurements", Detail: detail})
-			continue
-		}
-		// Context and not amber. A directory holding a scan and no
-		// measurements is what the scan job uploads, and rendering the
-		// expected shape of a job as an amber row trains a reader to skip the
-		// tag that exists to be noticed.
-		rep.Add(ui.Row{Status: ui.StatusContext, Label: "read(" + dir + ")",
-			Value: strings.Join(held, ", "), Detail: detail})
+		docs = append(docs, doc)
 	}
-	return out
+	folded, err := foldMeasurements(docs)
+	if err != nil {
+		return recordstages.Measurements{}, err
+	}
+	return recordedMeasurements(folded), nil
 }
 
-// findingCounts is how many claims each scanner gate made: per component, and
-// over the repository for the gates that are root-scoped.
-//
-// The counts come from the scan documents and the GATE SET comes from the tree,
-// and that split is the whole of what makes the numbers readable. A clean gate
-// reports no findings at all, so a count on its own cannot tell a Go component
-// gosec found nothing in from one gosec never looked at — while the
-// declaration and the configuration together say exactly which gates each
-// component's language implies. A gate that applies records 0; one that does
-// not is not a key, which is ADR 0029's "absent is not zero" for a quantity a
-// single integer cannot express.
-//
-// A language's gate set is not the whole answer for the licence gate, which
-// runs only where a policy governs the component: the repository's own
-// licence.policy.allow, or — for Rust — the component's deny.toml. Its nought
-// is seeded under the same condition scan gates on, so a repository that never
-// stated a policy records no licence key at all rather than the trend line of
-// one whose policy ran clean on every commit.
-//
-// Nothing at all is returned when no scan document was read. Every applicable
-// gate would otherwise record nought, which says the gate ran and found
-// nothing — the one thing a recording must not invent about a scan that never
-// happened.
-//
-// Two limits, both stated rather than worked around. A scanner that crashed —
-// a component that would not build — found no claims, so it records 0 like a
-// clean one; the red scan is in the document's rows and its verdict, and the
-// ledger holds scalars rather than verdicts. And two components over one
-// directory and environment are deliberately scanned once, under the first
-// one's name, so the other records 0 for gates that ran for its twin. Reading
-// the gate set from the scan's own rows would answer both and cost the thing
-// this channel exists for: the rows are prose, and `gosec(cli)` parsed back
-// into a gate and a component is the text-scraping findings-as-data removed.
-func findingCounts(dir string, decl component.File, cfg config.Config, found []finding.Finding, scanned bool) (map[string]map[string]int, map[string]int) {
-	if !scanned {
-		return nil, nil
-	}
-	policy := licence.NewPolicy(cfg.Licence.Policy.Allow)
-	perComponent := map[string]map[string]int{}
-	for _, c := range decl.Components {
-		lang := c.ScanLang()
-		// A component stating no language it is scanned as, and a language
-		// switched off in .lydite/config.yml, are ones whose checks never
-		// run. Neither has a gate that applies, so neither records a
-		// zero that would read as a clean scan.
-		if lang == "" || !langEnabled(lang, cfg) {
-			continue
+func (r *recordReports) FoldMutants(dirs []string) (recordstages.Mutants, error) {
+	docs := make([]mutantsDoc, 0, len(dirs))
+	for _, dir := range dirs {
+		doc, ok := r.mutants[dir]
+		if !ok {
+			return recordstages.Mutants{}, fmt.Errorf("%s: no %s was read from it to fold", dir, mutantsName)
 		}
-		gates := scannerGates(lang)
-		gated := licenceGated(filepath.Join(dir, c.Dir), lang, policy)
-		counts := make(map[string]int, len(gates))
-		for _, gate := range gates {
-			if gate == licence.Gate && !gated {
-				continue
-			}
-			counts[gate] = 0
-		}
-		if len(counts) == 0 {
-			continue
-		}
-		perComponent[c.Name] = counts
+		docs = append(docs, doc)
 	}
-	// Each root-scoped gate seeds its own nought, independently of the others:
-	// a gate switched off records no key, and a gate that is on records 0 even
-	// when its neighbour is off. One seed shared between them would let a clean
-	// gitleaks run read as a gate nobody asked for.
-	var root map[string]int
-	seed := func(gate string) {
-		if root == nil {
-			root = map[string]int{}
-		}
-		root[gate] = 0
+	folded, err := foldMutants(docs)
+	if err != nil {
+		return recordstages.Mutants{}, err
 	}
-	if cfg.Semgrep.Enabled {
-		seed(semgrep.Gate)
-	}
-	if cfg.Secrets.Enabled {
-		seed(secrets.Gate)
-	}
-	for _, f := range found {
-		// A root-scoped claim names no component, and nothing here invents
-		// one: whichever component happens to contain the path is an
-		// ownership question the declaration does not answer.
-		if f.Component == "" {
-			if root == nil {
-				root = map[string]int{}
-			}
-			root[f.Gate]++
-			continue
-		}
-		// Bounded by the declaration, exactly as a baseline entry is: a claim
-		// naming a component the tree no longer declares is one nothing can
-		// ever measure again. The gate key is created rather than required,
-		// because a claim is itself proof that its gate ran.
-		if counts, ok := perComponent[f.Component]; ok {
-			counts[f.Gate]++
-		}
-	}
-	return perComponent, root
+	return recordedMutants(folded), nil
 }
 
-// licenceGated reports whether the licence gate runs over the component in
-// cdir, which is what decides whether its nought is seeded.
-//
-// The same condition each language's scan gates on, asked from the tree rather
-// than from the scan's rows: Go and TypeScript run the gate only under the
-// repository's own policy, and Rust runs it under that policy or under the
-// component's own deny.toml, which is rust.PolicyFor's answer. Every other
-// language declares no licence gate, so none applies.
-func licenceGated(cdir string, lang runner.Lang, policy licence.Policy) bool {
-	switch lang {
-	case runner.Go, runner.TypeScript:
-		return policy.Configured()
-	case runner.Rust:
-		return rust.PolicyFor(cdir, policy) != rust.PolicyFromNone
-	default:
-		return false
+// recordedMeasurements is doc as a recording reads it, its snapshot taken by
+// the document's own rule for what the lydite branch stores.
+func recordedMeasurements(doc measurementsDoc) recordstages.Measurements {
+	components := make(map[string]recordstages.Measurement, len(doc.Components))
+	for name, m := range doc.Components {
+		components[name] = recordstages.Measurement{Entry: m.Entry, Unanchored: m.Unanchored, CRAP: m.CRAP}
+	}
+	return recordstages.Measurements{
+		Tree:       doc.Tree,
+		Components: components,
+		Tests:      doc.Tests,
+		Reason:     doc.Reason,
+		Snapshot:   doc.snapshot(),
 	}
 }
 
-// missingFromRecord names a declared component the fold has no entry for.
-//
-// The same rule a single run applies to what it would record, asked again here
-// because a sharded run's completeness is a property of the fold and of no
-// document in it: each shard is missing most components until they are put
-// together.
-//
-// A component nothing could ever measure is not a gap — a raw `command:`, or a
-// runner whose instrumented variant names no report — and it is recognised the
-// same way `lydite test` recognises it, from the declaration alone.
+// recordedMutants is doc as a recording reads it.
+func recordedMutants(doc mutantsDoc) recordstages.Mutants {
+	components := make(map[string]recordstages.MutantCounts, len(doc.Components))
+	for name, c := range doc.Components {
+		components[name] = recordstages.MutantCounts{
+			Killed:         c.Killed,
+			TimedOut:       c.TimedOut,
+			OutOfMemory:    c.OutOfMemory,
+			Survived:       c.Survived,
+			Unviable:       c.Unviable,
+			Acknowledged:   c.Acknowledged,
+			ElapsedSeconds: c.ElapsedSeconds,
+		}
+	}
+	return recordstages.Mutants{Tree: doc.Tree, Components: components}
+}
+
+// missingFromRecord is recordstages.MissingFromRecord over this package's own
+// measurements document, so `lydite test merge` refuses a partial fold by the
+// same rule a recording does.
 func missingFromRecord(decl component.File, doc measurementsDoc) (string, bool) {
-	var gaps []string
-	for _, c := range decl.Components {
-		if _, ok := doc.Components[c.Name]; ok {
-			continue
-		}
-		if unmeasurableByDeclaration(c) {
-			continue
-		}
-		gaps = append(gaps, c.Name)
-	}
-	if len(gaps) == 0 {
-		return "", false
-	}
-	sort.Strings(gaps)
-	return strings.Join(gaps, ", "), true
+	return recordstages.MissingFromRecord(decl, recordedMeasurements(doc))
 }
 
-// unmeasurableByDeclaration reports whether no run could ever measure this
-// component, from what it declares and nothing else — which is all this
-// command has, since it runs none of them.
+// unmeasurableByDeclaration is recordstages.UnmeasurableByDeclaration, so a
+// run, a fold and a recording recognise a component nothing could ever measure
+// by one rule.
 func unmeasurableByDeclaration(c component.Component) bool {
-	if len(c.Command) > 0 {
-		return true
-	}
-	r, ok := runner.Lookup(c.Runner)
-	if !ok {
-		return true
-	}
-	inv, ok := r.Build(runner.Instrumented, c.Args)
-	return !ok || inv.CoverageReport == ""
+	return recordstages.UnmeasurableByDeclaration(c)
 }
 
-// declaredOnly is a baseline narrowed to the components the tree declares.
-//
-// It is applied to everything that reaches the branch, so the declaration read
-// from the recorded tree is the whole of what may appear under that tree's
-// key. A component the declaration no longer holds dies with it rather than
-// leaving a tail of entries nobody can measure, and a name a document
-// invented never arrives.
-func declaredOnly(decl component.File, snap gitstate.Snapshot) gitstate.Snapshot {
-	out := gitstate.Snapshot{
-		Coverage: make(gitstate.Baseline, len(snap.Coverage)),
-		CRAP:     make(gitstate.CRAPBaseline, len(snap.CRAP)),
-	}
-	for name, e := range snap.Coverage {
-		if declares(decl, name) {
-			out.Coverage[name] = e
-		}
-	}
-	for name, e := range snap.CRAP {
-		if declares(decl, name) {
-			out.CRAP[name] = e
-		}
-	}
-	return out
+// findingCounts is recordstages.FindingCounts under `lydite scan`'s own
+// answers to which languages are checked and which gates each reports under.
+func findingCounts(dir string, decl component.File, cfg config.Config, found []finding.Finding, scanned bool) (map[string]map[string]int, map[string]int) {
+	return recordstages.FindingCounts(dir, decl, cfg, found, scanned, langEnabled, scannerGates)
 }
 
-// declares reports whether the declaration still holds a component by name.
+// declares is recordstages.Declares.
 func declares(decl component.File, name string) bool {
-	for _, c := range decl.Components {
-		if c.Name == name {
-			return true
-		}
-	}
-	return false
+	return recordstages.Declares(decl, name)
 }

@@ -6,6 +6,8 @@ saw:
   - source/cli/internal/stages/scan/checks.go
   - source/cli/internal/stages/scan/licences.go
   - source/cli/cmd/lydite/scan.go
+  - source/cli/cmd/lydite/record.go
+  - source/cli/internal/stages/record/findings.go
 ---
 
 `PlanComponents` (`internal/stages/scan/plan.go`) asks `scanlang.Scanned(lang)` first and marks
@@ -20,8 +22,9 @@ The reverse omission is loud: a language in `scanlang.Scanned` (and switched on 
 `scanlang.Enabled`) with no `checksFor` case makes `RunChecks` return an error ("is planned for
 scanning and has no language checks") before any check runs, and one with no `licenceGateFor` case
 makes `GateLicences` return "has no licence gate" before anything is read or checked out — both
-stop the flow under the default FailFlow policy. `scannerGates` (`cmd/lydite/scan.go`, read by
-`record.go`'s `findingCounts`) has no such refusal: it returns nil for an unnamed language, so a
+stop the flow under the default FailFlow policy. `scannerGates` (`cmd/lydite/scan.go`, handed by
+`cmd/lydite/record.go` into the record flow as its `ScannerGates` input and called by
+`recordstages.FindingCounts` in `internal/stages/record/findings.go`) has no such refusal: it returns nil for an unnamed language, so a
 missing case there silently records no per-gate zero. A new scanned language therefore touches
 `scanlang.Scanned` and `scanlang.Enabled`, `checksFor`, `licenceGateFor`, and `scannerGates` — plus
 `offByDefaultRows` in `scan.go` if it ships off by default.
