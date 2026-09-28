@@ -544,8 +544,10 @@ The CLI is the only place a `ComponentOutcome` becomes a `ui.Row`: `cmd/lydite/m
 row, one row per component (a skipped one interleaved where its declaration named it), every
 survivor's finding, and the summary — and, when `RunMutants` reports the run interrupted, calls
 `withdrawInterrupted` to pull back the failing verdict of every component the run had scheduled
-but never got a real answer from. Only the outcomes whose verdict still stands after that
-withdrawal are handed to `NewRecord()`.
+but never got a real answer from, deciding what to withdraw from the row a gating run would have
+rendered (`outcomeRow(o, false)`) rather than from the row this run displays, so `--no-gate`
+withdraws exactly what a gating run would. Only the outcomes whose verdict still stands after
+that withdrawal are handed to `NewRecord()`.
 
 A lifecycle helper `lydite test` and `lydite mutation` share — `prepare`, `runCommands`,
 `startServices`, each returning a decided `(ui.Row, bool)` (or, for the last, `(func(), ui.Row,

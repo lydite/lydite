@@ -79,9 +79,10 @@ flow gets from the engine.
 - `Scheduled` and `Interrupted` are facts `RunMutants` states about what it did — which
   components it handed to the scheduler, and whether cancellation cut the run short — not a
   verdict on whether that outcome counts. Deciding which interrupted verdicts to withdraw stays
-  with the CLI's `withdrawInterrupted`, because withdrawal depends on the row a component earned
-  (a survivor withdraws; `KindMutationOff` does not), and a stage that decided withdrawal would
-  need to know the row it was never given.
+  with the CLI's `withdrawInterrupted`, because withdrawal depends on the row a gating run would
+  have rendered for the component (a survivor withdraws; `KindMutationOff` does not) rather than
+  on the row this run actually displays, so that `--no-gate` withdraws exactly what a gating run
+  would — and a stage that decided withdrawal would need to know a row it was never given.
 - `mutationflow.NewRecord` holds `RecordMutants` alone, in a flow of its own rather than as
   `New`'s seventh stage, because `flow.Run` checks `ctx.Err()` before every stage: a flow that
   ran `RecordMutants` as part of `New` would skip it on the same interrupt that cut `RunMutants`

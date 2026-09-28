@@ -131,6 +131,31 @@ func TestTheRenderedReportCarriesNothingOfTheCounts(t *testing.T) {
 	}
 }
 
+// writeMutants shares the reports directory with saveDocument and every other
+// writer under it, so it must leave the same `.gitignore` behind: a report
+// directory only writeMutants ever populates (a shard scoped to no other
+// document) would otherwise reach git with nothing keeping it out.
+func TestWriteMutantsIgnoresTheDirectoryItCreates(t *testing.T) {
+	root := t.TempDir()
+	doc := mutantsDoc{Tree: strings.Repeat("a", 12), Components: map[string]mutantCounts{"app": {Killed: 1}}}
+	if err := writeMutants(root, doc); err != nil {
+		t.Fatalf("writeMutants failed: %v", err)
+	}
+
+	gitignore, err := os.ReadFile(filepath.Join(reportsDir(root), ".gitignore")) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatalf("writeMutants left no %s: %v", ".gitignore", err)
+	}
+	if string(gitignore) != "*\n" {
+		t.Errorf("the reports directory's .gitignore is %q, want %q", gitignore, "*\n")
+	}
+
+	written := readCountsFrom(t, root)
+	if written.Tree != doc.Tree {
+		t.Errorf("writeMutants wrote tree %q, want %q", written.Tree, doc.Tree)
+	}
+}
+
 // The counts share the report directory and the extension and are not a
 // report. readDocuments refuses anything with no command, so a reader that did
 // not skip this by name would take the whole pull-request comment down with it.
