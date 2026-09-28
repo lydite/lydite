@@ -1,8 +1,12 @@
+---
+description: "A gate that could not run, or a measurement taken ungated, has its own status and never renders as a pass."
+---
+
 # A gate that could not run never renders as one that passed
 
 Nor does a measurement taken without being gated. Both are their own status in the report and
 in `--json`, because a workflow that forgot to ask for a gate otherwise reports exactly the
-green of one that ran it — the failure wardnet/wardnet#957 shipped. The same rule governs a
+green of one that ran it, and nothing downstream can tell the two apart. The same rule governs a
 surface: a section that quietly disappears is indistinguishable from a concern that passed, so
 a missing input renders as a section saying so.
 

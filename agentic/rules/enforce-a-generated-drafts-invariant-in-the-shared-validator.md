@@ -1,3 +1,7 @@
+---
+description: "A generated draft's placeholder invariant is enforced by the shared file parser every route passes through, not by the generator."
+---
+
 # Enforce a generated draft's invariant in the shared validator, not in the generator
 
 A draft `.lydite/exemptions.yml` entry lydite proposes in a comment is only "not yet landable"

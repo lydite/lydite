@@ -1,3 +1,7 @@
+---
+description: "Ask scanlang.Scanned before scanlang.Enabled, so a language lydite cannot scan never reads as switched off."
+---
+
 # Check `scanlang.Scanned` before `scanlang.Enabled`, never the reverse
 
 `scanlang.Enabled` answers `false` for every language it has no key for — the same answer it

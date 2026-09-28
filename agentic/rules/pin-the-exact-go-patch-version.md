@@ -1,9 +1,13 @@
+---
+description: "Workflows pin the exact Go patch version, never a bare minor."
+---
+
 # Pin the exact Go patch version in workflows
 
 `go-version: "1.26.6"`, never a bare `"1.26"`. `actions/setup-go` resolves a bare minor to
 whatever patch it has, and `go install` of an external tool does not consult the current
-module's `toolchain` directive — which is how a govulncheck built by an older Go once passed
-locally and failed in CI. When `go.mod`'s `toolchain` line moves, every `go-version-file:`
+module's `toolchain` directive — so a govulncheck built by an older Go passes locally and fails
+in CI. When `go.mod`'s `toolchain` line moves, every `go-version-file:`
 reference and every literal `go-version:` moves in the same change.
 
 Reasoning: [`agentic/references/ci.md`](../references/ci.md) and

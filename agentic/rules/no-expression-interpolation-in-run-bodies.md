@@ -1,3 +1,7 @@
+---
+description: "Pass ${{ }} expressions into a workflow step through env:, never interpolated into a run: body."
+---
+
 # Never interpolate an expression into a `run:` body
 
 `${{ inputs.* }}` and `${{ steps.*.outputs.* }}` go into that step's `env:` block and are

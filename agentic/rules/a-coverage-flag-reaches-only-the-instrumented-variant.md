@@ -1,3 +1,7 @@
+---
+description: "A component's declared coverage flags reach only the instrumented runner variant, never Plain or BuildOnly."
+---
+
 # A declared coverage flag reaches only the instrumented variant
 
 `go test -coverpkg=X` instruments with no `-cover` of its own, so a component's declared

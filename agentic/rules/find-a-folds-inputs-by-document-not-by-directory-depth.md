@@ -1,3 +1,7 @@
+---
+description: "Find a fold's shard directories by the report document each wrote, never by a directory-depth glob."
+---
+
 # Find a fold's inputs by the document each shard wrote, not by directory depth
 
 `actions/download-artifact` gives a matched artifact its own subdirectory only when the pattern
@@ -11,9 +15,10 @@ returns — never the glob.
 
 ## Applies to
 
-Any step in `.github/workflows/lydite-pr.yml` or `lydite-baseline.yml` that folds shard or job
-artifacts after a `download-artifact` step, and the mirrored fold in `lydite/actions`'s reusable
-workflow (tracked there as lydite/actions#4 — not fixed in this repository).
+Any step that folds shard or job artifacts after a `download-artifact` step: the proving-ground
+folds in `.github/workflows/ci-end2end.yml`, and `lydite/actions`' shared
+`.github/actions/fold/fold.sh`, which its `merge` and `mutation-merge` actions run for every
+consumer — this repository's own `lydite` stage included.
 
 ## Example
 

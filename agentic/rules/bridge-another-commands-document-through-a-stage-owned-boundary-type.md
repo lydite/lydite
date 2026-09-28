@@ -1,3 +1,7 @@
+---
+description: "A stage reads another command's report document through a stage-owned interface and boundary types, never a package main import."
+---
+
 # Bridge another command's document through a stage-owned interface and boundary types, never a `package main` import
 
 A stage that folds a report document another command owns — `lydite test`'s measurements,

@@ -1,3 +1,7 @@
+---
+description: "A component that installs node dependencies goes through the single coalesced nodedeps.Install, never a package manager directly."
+---
+
 # A component that installs node dependencies goes through `nodedeps.Install`, never a package manager directly
 
 A package manager asked to run a script inside an uninstalled workspace installs that workspace
@@ -12,8 +16,8 @@ must route through the single coalesced `nodedeps.Install` call for that root, n
 
 ## Applies to
 
-`source/cli/cmd/lydite/test.go`'s `prepare`, `prepareCommand` and `installsNodeDeps`, and any
-future code path that decides whether a component's dependencies are lydite's to install.
+`source/cli/internal/test/run/prepare.go`'s `Prepare`, `prepareCommand` and `installsNodeDeps`,
+and any future code path that decides whether a component's dependencies are lydite's to install.
 
 ## Example
 

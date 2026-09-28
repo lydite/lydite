@@ -1,3 +1,7 @@
+---
+description: "An exemption's paths list only the lockfiles depdelta.Detect reads, never a Cargo.toml or package.json beside them."
+---
+
 # An exemption's `paths` list only the manifests `depdelta.Detect` actually reads
 
 `versionsPatchAndMinor` and the added-dependency disqualifier both read a path's comparison from

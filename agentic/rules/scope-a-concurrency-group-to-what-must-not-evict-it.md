@@ -1,3 +1,7 @@
+---
+description: "Scope a workflow's concurrency group to the key that must not lose a queued run."
+---
+
 # Scope a workflow's `concurrency.group` to the key that must not lose a run
 
 GitHub keeps only one pending run behind the one already executing in a `concurrency` group —

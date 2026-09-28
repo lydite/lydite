@@ -1,3 +1,7 @@
+---
+description: "Files rendered from .gt-repo.yaml are changed there and re-rendered with gt repo sync, never edited by hand."
+---
+
 # Never hand-edit a generated file
 
 `.github/dependabot.yml`, the gt workflows and the branch-protection rules are rendered from

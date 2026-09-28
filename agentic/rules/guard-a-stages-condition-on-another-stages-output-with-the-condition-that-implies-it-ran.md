@@ -1,3 +1,7 @@
+---
+description: "Before a condition reads another stage's output, declare first the condition that guarantees that stage ran."
+---
+
 # Guard a stage's condition on another stage's output with the condition that implies it ran, declared first
 
 `flow.Run` evaluates a stage's `When`/`Unless` conditions in the order `Builder.When`/`Unless`

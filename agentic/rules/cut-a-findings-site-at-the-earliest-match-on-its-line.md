@@ -1,3 +1,7 @@
+---
+description: "Cut every finding's Site on a line at that line's earliest match, so one claim's excerpt never carries another's secret."
+---
+
 # Cut a finding's `Site` at the earliest match on its line, not the claim's own column
 
 A line can carry more than one match — a chained `.env` export, two `-e` flags on one

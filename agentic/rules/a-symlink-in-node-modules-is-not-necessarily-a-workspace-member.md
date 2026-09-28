@@ -1,3 +1,7 @@
+---
+description: "Tell a workspace member from an installed package by where its node_modules symlink resolves, not by its being a symlink."
+---
+
 # A symlink in `node_modules` is not necessarily a workspace member
 
 Yarn and pnpm both link a workspace member back into the repository, the way npm marks one

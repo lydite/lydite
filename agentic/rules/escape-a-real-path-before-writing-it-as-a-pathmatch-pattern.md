@@ -1,3 +1,7 @@
+---
+description: "Escape glob metacharacters in a real path before writing it as a pathmatch pattern."
+---
+
 # Escape a real path before writing it as a `pathmatch` pattern
 
 `.lydite/exemptions.yml`'s `paths:` entries are `internal/pathmatch` patterns, and a real

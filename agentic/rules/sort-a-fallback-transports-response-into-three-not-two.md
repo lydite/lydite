@@ -1,3 +1,7 @@
+---
+description: "Sort a fallback transport's non-200 answer into three cases: silent fallback, warned fallback, and a failed step."
+---
+
 # Sort a fallback transport's response into three, not two
 
 A binary "200, or fall back" check cannot tell a transient outage from a permanent

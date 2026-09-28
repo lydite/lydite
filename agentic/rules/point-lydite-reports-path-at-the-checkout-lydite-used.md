@@ -1,3 +1,7 @@
+---
+description: "Set the lydite-reports composite's path input to the checkout lydite actually ran against."
+---
+
 # Point `lydite-reports`'s `path` input at the checkout `lydite` actually used
 
 The composite's `path` input defaults to `.`, the job's own working directory — right only when
@@ -7,9 +11,9 @@ writes `.lydite-reports` under that subdirectory, not the job's own working dire
 composite's existence check (`[ -d "$REPORTS" ]`) then finds nothing, uploads nothing, and the
 concern is silently absent from the published comment — not rendered as unmeasured, simply never
 there, because a directory that was never uploaded is a directory `lydite publish` was never told
-to look for. lydite/lydite#194 shipped exactly this and went unnoticed across four merged pull
-requests, because a missing artifact and a step that legitimately produced nothing look identical
-from the uploading job's own log.
+to look for. Nothing else catches it: a missing artifact and a step that legitimately produced
+nothing look identical from the uploading job's own log, so the gap survives any number of green
+runs.
 
 ## Applies to
 

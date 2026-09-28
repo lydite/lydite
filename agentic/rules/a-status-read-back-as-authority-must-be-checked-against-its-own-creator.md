@@ -1,12 +1,15 @@
+---
+description: "pr-relay trusts a standing commit status as authority only when this App's own bot identity posted it."
+---
+
 # A status read back as authority must be checked against its own creator, not just its context and state
 
 A context name is not evidence of who wrote it: any token holding `statuses: write` can post
 under `lydite/clearance`, and a fingerprint embedded in a description
 (`internal/clearance.WithFingerprint`) is a hash of the change's own diff that anybody can
-recompute and paste into their own status. Reading a status by `context` and `state` alone, the
-way `/status`'s `currentStatus` already did for `lydite/referral`, lets an author forge the
-status their own entry is then cleared by — exactly what an allowlisted `job_workflow_ref` exists
-to prevent for the *write* path, and nothing enforces for the *read* path unless the read checks
+recompute and paste into their own status. Reading a status by `context` and `state` alone
+lets an author forge the status their own entry is then cleared by — exactly what an
+allowlisted `job_workflow_ref` exists to prevent for the *write* path, and nothing enforces for the *read* path unless the read checks
 who posted the status being trusted. `/merge-group`'s `queueVerdict` requires
 `cleared.creator?.login === APP_STATUS_CREATOR` (`<app-slug>[bot]`) before treating a
 `lydite/clearance` status as carryable authority; a status any other identity wrote answers

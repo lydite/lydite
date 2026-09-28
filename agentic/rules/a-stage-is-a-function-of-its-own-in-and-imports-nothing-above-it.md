@@ -1,3 +1,7 @@
+---
+description: "A Flow stage reads only its own In, returns only its Out, and imports nothing from the flow, CLI or cobra layers above it."
+---
+
 # A stage is a function of its own `In`, and imports nothing above it
 
 A command built on Flow is four layers, and the dependency arrow points one way: CLI

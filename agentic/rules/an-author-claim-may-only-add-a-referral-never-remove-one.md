@@ -1,3 +1,7 @@
+---
+description: "Anything an author wrote (a title, commit message or marker) may add a referral, never clear one."
+---
+
 # An author-controlled claim may only ever add a referral, never remove one
 
 `internal/referral`'s own `Disqualifications` computes every ordinary disqualification from
@@ -5,10 +9,10 @@ diff evidence an author cannot rewrite by asserting something. A declaration —
 commit `!`, a `BREAKING CHANGE:` footer, or any future marker read from a title or commit
 message — is text the author wrote, not evidence off two trees, so honouring it as a bypass
 would let rewriting the text make a change greener than the diff underneath it. Conventional
-Commits' `!` was deliberately left unimplemented until this asymmetry could be enforced (see
+Commits' `!` is honoured only under this asymmetry (see
 [ADR 0014](../../docs/adr/0014-evidence-only-referral-matching.md)); the API-break declaration
 in [ADR 0040](../../docs/adr/0040-an-undeclared-go-api-break-fails-and-a-declared-one-is-referred.md)
-is the first thing built to the rule rather than merely stated by it.
+is built to it.
 
 ## Applies to
 

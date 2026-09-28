@@ -1,3 +1,7 @@
+---
+description: "lydite ships as one static binary with no cgo, and its module path stays lydite/lydite."
+---
+
 # No cgo, and the module path stays `lydite/lydite`
 
 lydite ships as one statically-linked binary (`CGO_ENABLED=0`) for linux/darwin × amd64/arm64,
