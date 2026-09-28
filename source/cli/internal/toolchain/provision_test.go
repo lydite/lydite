@@ -10,11 +10,16 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"lydite/lydite/internal/runner"
@@ -52,15 +57,169 @@ func tarball(t *testing.T, top string, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// pnpmTarball is a pnpm release whose entry point, run by the fake node below,
-// reports version.
+// pnpmVersion is the pnpm release the fixtures below publish.
+const pnpmVersion = "12.4.1"
+
+// glibcExes are the `@pnpm/exe` packages lydite provisions pnpm from, one per
+// platform it is built for.
+var glibcExes = []string{"@pnpm/exe.linux-x64", "@pnpm/exe.linux-arm64", "@pnpm/exe.darwin-x64", "@pnpm/exe.darwin-arm64"}
+
+// exeDeps pins every glibc exe package at version, as a pnpm release does.
+func exeDeps(version string) map[string]string {
+	deps := map[string]string{}
+	for _, exe := range glibcExes {
+		deps[exe] = version
+	}
+	return deps
+}
+
+// pnpmTarball is a pnpm release in its 12.x shape: its `bin` entry is a shell
+// placeholder at the package root, and its native binary is one of the exe
+// packages it names among optionalDependencies at its own version.
 func pnpmTarball(t *testing.T, version string) []byte {
 	t.Helper()
-	return tarball(t, "package", map[string]string{
-		"package.json": `{"name":"pnpm","bin":{"pnpm":"bin/pnpm.cjs","pnpx":"bin/pnpx.cjs"}}`,
-		"bin/pnpm.cjs": "#!/usr/bin/env node\necho " + version + "\n",
-		"bin/pnpx.cjs": "#!/usr/bin/env node\n",
+	return pnpmTarballDepending(t, version, exeDeps(version))
+}
+
+// pnpmTarballDepending is a pnpm release naming deps as its optional
+// dependencies.
+func pnpmTarballDepending(t *testing.T, version string, deps map[string]string) []byte {
+	t.Helper()
+	manifest, err := json.Marshal(map[string]any{
+		"name":                 "pnpm",
+		"version":              version,
+		"bin":                  map[string]string{"pn": "pnpm", "pnx": "pnx", "pnpm": "pnpm", "pnpx": "pnpx"},
+		"optionalDependencies": deps,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tarball(t, "package", map[string]string{
+		"package.json": string(manifest),
+		"pnpm":         "This file intentionally left blank; pnpm's preinstall replaces it.\n",
+	})
+}
+
+// pnpmExeScript is the fixture native binary: a script that answers
+// --version with version and needs nothing from PATH.
+func pnpmExeScript(version string) string {
+	return "#!/bin/sh\necho " + version + "\n"
+}
+
+// pnpmExeTarball is an `@pnpm/exe` package whose binary reports version.
+func pnpmExeTarball(t *testing.T, version string) []byte {
+	t.Helper()
+	return tarball(t, "package", map[string]string{
+		"package.json": `{"name":"@pnpm/exe.linux-x64","version":"` + version + `"}`,
+		"pnpm":         pnpmExeScript(version),
+		"LICENSE":      "MIT\n",
+	})
+}
+
+// yarnTarball is a yarn release whose entry point, run by the fake node below,
+// reports version.
+func yarnTarball(t *testing.T, version string) []byte {
+	t.Helper()
+	return tarball(t, "package", map[string]string{
+		"package.json": `{"name":"@yarnpkg/cli-dist","bin":{"yarn":"bin/yarn.js","yarnpkg":"bin/yarn.js"}}`,
+		"bin/yarn.js":  "#!/usr/bin/env node\necho " + version + "\n",
+	})
+}
+
+// hostExe is the exe package this machine provisions pnpm from; a test of
+// that chain has nothing to fetch on a platform with none.
+func hostExe(t *testing.T) string {
+	t.Helper()
+	exe, err := pnpmExePackage(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Skipf("no pnpm exe package for this platform: %v", err)
+	}
+	return exe
+}
+
+// fakeRegistry is an npm registry serving published documents and tarballs,
+// counting what was asked of it. It stands in for npmRegistry for the length
+// of the test.
+type fakeRegistry struct {
+	srv   *httptest.Server
+	mu    sync.Mutex
+	files map[string][]byte
+	hits  map[string]int
+}
+
+func newFakeRegistry(t *testing.T) *fakeRegistry {
+	t.Helper()
+	r := &fakeRegistry{files: map[string][]byte{}, hits: map[string]int{}}
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		p := req.URL.EscapedPath()
+		r.mu.Lock()
+		r.hits[p]++
+		body, ok := r.files[p]
+		r.mu.Unlock()
+		if !ok {
+			http.NotFound(w, req)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(r.srv.Close)
+	previous := npmRegistry
+	npmRegistry = r.srv.URL + "/"
+	t.Cleanup(func() { npmRegistry = previous })
+	return r
+}
+
+// publish serves data as pkg@version's tarball, under a document whose dist
+// the registry would publish for it, rewritten by edit when edit is non-nil.
+func (r *fakeRegistry) publish(t *testing.T, pkg, version string, data []byte, edit func(*registryDist)) {
+	t.Helper()
+	base := pkg[strings.LastIndex(pkg, "/")+1:]
+	tarPath := "/" + pkg + "/-/" + base + "-" + version + ".tgz"
+	s512 := sha512.Sum512(data)
+	s1 := sha1.Sum(data) // #nosec G401 -- the fixture's own legacy digest
+	dist := registryDist{
+		Tarball:   r.srv.URL + tarPath,
+		Integrity: "sha512-" + base64.StdEncoding.EncodeToString(s512[:]),
+		Shasum:    hex.EncodeToString(s1[:]),
+	}
+	if edit != nil {
+		edit(&dist)
+	}
+	doc, err := json.Marshal(map[string]any{"name": pkg, "version": version, "dist": dist})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.files[tarPath] = data
+	r.files["/"+strings.Replace(pkg, "/", "%2F", 1)+"/"+version] = doc
+}
+
+// requested is how many times anything under pkg — its document or its
+// tarball — was asked for.
+func (r *fakeRegistry) requested(pkg string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for p, hits := range r.hits {
+		if strings.HasPrefix(p, "/"+pkg+"/") || strings.HasPrefix(p, "/"+strings.Replace(pkg, "/", "%2F", 1)+"/") {
+			n += hits
+		}
+	}
+	return n
+}
+
+// publishPnpm serves a pnpm release and this platform's exe package for it.
+func publishPnpm(t *testing.T, r *fakeRegistry, release []byte, editExe func(*registryDist)) {
+	t.Helper()
+	r.publish(t, "pnpm", pnpmVersion, release, nil)
+	r.publish(t, hostExe(t), pnpmVersion, pnpmExeTarball(t, pnpmVersion), editExe)
+}
+
+// sha512Pin is the `+sha512.<hex>` a packageManager field pins data with.
+func sha512Pin(data []byte) string {
+	s := sha512.Sum512(data)
+	return "sha512." + hex.EncodeToString(s[:])
 }
 
 // fakeNode puts a node on PATH that identifies itself as version and otherwise
@@ -85,37 +244,43 @@ func isolatedCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 }
 
-// cachedManager unpacks a release into the cache directory provisioning would
-// download it into, so installOnce finds it finished and fetches nothing.
-func cachedManager(t *testing.T, manager, version string, data []byte) string {
+// cachedPnpm lays a pnpm install out in the cache directory provisioning
+// would install it into under hash, so installOnce finds it finished and
+// fetches nothing.
+func cachedPnpm(t *testing.T, version, hash string) string {
 	t.Helper()
-	dir, err := cacheRoot(manager + "-" + version)
+	declared, err := parseDeclaredHash(hash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := unpackManager(data, dir, manager); err != nil {
-		t.Fatalf("unpackManager: %v", err)
+	dir, err := cacheRoot(managerCacheKey("pnpm", version, declared))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, filepath.Join(dir, "bin", "pnpm"), pnpmExeScript(version))
 	return dir
 }
 
-// The wrapper is the whole of how a provisioned package manager becomes a
-// command: named for it, executable, and running the package's entry point
-// through whichever node the PATH offers.
+// The wrapper is the whole of how a provisioned yarn becomes a command: named
+// for it, executable, and running the package's entry point through whichever
+// node the PATH offers.
 func TestUnpackManagerWritesACommandThatRunsTheEntryUnderNode(t *testing.T) {
 	bin := fakeToolchainBin(t)
 	fakeNode(t, bin, "v22.0.0")
 	staging := t.TempDir()
 
-	if err := unpackManager(pnpmTarball(t, "8.15.4"), staging, "pnpm"); err != nil {
+	if err := unpackManager(yarnTarball(t, "4.1.0"), staging, "yarn"); err != nil {
 		t.Fatalf("unpackManager: %v", err)
 	}
-	out, err := exec.Command(filepath.Join(staging, "bin", "pnpm"), "--version").Output() // #nosec G204 -- a wrapper this test just wrote
+	out, err := exec.Command(filepath.Join(staging, "bin", "yarn"), "--version").Output() // #nosec G204 -- a wrapper this test just wrote
 	if err != nil {
 		t.Fatalf("running the wrapper: %v", err)
 	}
-	if got := strings.TrimSpace(string(out)); got != "8.15.4" {
-		t.Fatalf("pnpm --version = %q, want the entry point's own answer", got)
+	if got := strings.TrimSpace(string(out)); got != "4.1.0" {
+		t.Fatalf("yarn --version = %q, want the entry point's own answer", got)
 	}
 }
 
@@ -127,16 +292,16 @@ func TestTheWrapperSurvivesItsDirectoryBeingMoved(t *testing.T) {
 	fakeNode(t, bin, "v22.0.0")
 	staging := filepath.Join(t.TempDir(), "staging")
 
-	if err := unpackManager(pnpmTarball(t, "8.15.4"), staging, "pnpm"); err != nil {
+	if err := unpackManager(yarnTarball(t, "4.1.0"), staging, "yarn"); err != nil {
 		t.Fatalf("unpackManager: %v", err)
 	}
-	moved := filepath.Join(t.TempDir(), "pnpm-8.15.4")
+	moved := filepath.Join(t.TempDir(), "yarn-4.1.0")
 	if err := os.Rename(staging, moved); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(filepath.Join(moved, "bin", "pnpm"), "--version").Output() // #nosec G204 -- a wrapper this test just wrote
-	if err != nil || strings.TrimSpace(string(out)) != "8.15.4" {
-		t.Fatalf("the moved wrapper answered (%q, %v), want 8.15.4", out, err)
+	out, err := exec.Command(filepath.Join(moved, "bin", "yarn"), "--version").Output() // #nosec G204 -- a wrapper this test just wrote
+	if err != nil || strings.TrimSpace(string(out)) != "4.1.0" {
+		t.Fatalf("the moved wrapper answered (%q, %v), want 4.1.0", out, err)
 	}
 }
 
@@ -298,11 +463,11 @@ func TestParseDeclaredHash(t *testing.T) {
 func TestManagerCacheKey(t *testing.T) {
 	a, _ := parseDeclaredHash("sha512." + strings.Repeat("0", 128))
 	b, _ := parseDeclaredHash("sha512." + strings.Repeat("1", 128))
-	none := managerCacheKey("pnpm", "8.15.4", declaredHash{})
-	if none != "pnpm-8.15.4" {
-		t.Errorf("key without a declared hash = %q, want pnpm-8.15.4", none)
+	none := managerCacheKey("yarn", "4.1.0", declaredHash{})
+	if none != "yarn-4.1.0" {
+		t.Errorf("key without a declared hash = %q, want yarn-4.1.0", none)
 	}
-	keyA, keyB := managerCacheKey("pnpm", "8.15.4", a), managerCacheKey("pnpm", "8.15.4", b)
+	keyA, keyB := managerCacheKey("yarn", "4.1.0", a), managerCacheKey("yarn", "4.1.0", b)
 	if keyA == none || keyB == none || keyA == keyB {
 		t.Errorf("keys = none %q, a %q, b %q; want three distinct directories", none, keyA, keyB)
 	}
@@ -311,12 +476,34 @@ func TestManagerCacheKey(t *testing.T) {
 	}
 }
 
+// pnpm's cache holds its native binary for one platform, so its key names
+// both, and never matches the directory a pnpm release's placeholder `bin`
+// was unpacked into under the manager-and-version key.
+func TestManagerCacheKeyForPnpmNamesTheNativeBinaryAndPlatform(t *testing.T) {
+	a, _ := parseDeclaredHash("sha512." + strings.Repeat("0", 128))
+	none := managerCacheKey("pnpm", pnpmVersion, declaredHash{})
+	want := "pnpm-exe-" + pnpmVersion + "-" + runtime.GOOS + "-" + runtime.GOARCH
+	if none != want {
+		t.Errorf("key without a declared hash = %q, want %q", none, want)
+	}
+	if none == "pnpm-"+pnpmVersion {
+		t.Errorf("key %q is the placeholder release's directory", none)
+	}
+	hashed := managerCacheKey("pnpm", pnpmVersion, a)
+	if hashed != want+"+"+a.String() {
+		t.Errorf("key with a declared hash = %q, want %q", hashed, want+"+"+a.String())
+	}
+	if hashed == "pnpm-"+pnpmVersion+"+"+a.String() {
+		t.Errorf("key %q is the placeholder release's directory", hashed)
+	}
+}
+
 // A declared hash lydite cannot check stops provisioning before anything is
 // fetched or taken from the cache.
 func TestProvisionRefusesAnUncheckableHash(t *testing.T) {
 	isolatedCache(t)
-	cachedManager(t, "pnpm", "8.15.4", pnpmTarball(t, "8.15.4"))
-	req := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v8.15.4", Raw: "8.15.4",
+	cachedPnpm(t, pnpmVersion, "")
+	req := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v" + pnpmVersion, Raw: pnpmVersion,
 		Source: "package.json (packageManager)", Hash: "md5." + strings.Repeat("0", 32)}
 	if st, err := provisionPackageManager(context.Background(), req, "", false); err == nil {
 		t.Fatalf("provisionPackageManager = %+v, want a refusal of the md5 hash", st)
@@ -325,7 +512,7 @@ func TestProvisionRefusesAnUncheckableHash(t *testing.T) {
 
 func TestRegistryPackage(t *testing.T) {
 	for _, tc := range []struct{ manager, version, want string }{
-		{"pnpm", "8.15.4", "pnpm"},
+		{"pnpm", "12.4.1", "pnpm"},
 		{"yarn", "1.22.19", "yarn"},
 		{"yarn", "2.0.0", "@yarnpkg/cli-dist"},
 		{"yarn", "4.1.0", "@yarnpkg/cli-dist"},
@@ -352,12 +539,12 @@ func pnpmWorkspace(t *testing.T, version string) string {
 // baseline records.
 func TestEnsureProvisionsThePinnedManagerAlongsideNode(t *testing.T) {
 	isolatedCache(t)
-	dir := pnpmWorkspace(t, "8.15.4")
+	dir := pnpmWorkspace(t, pnpmVersion)
 	bin := fakeToolchainBin(t)
 	fakeNode(t, bin, "v22.0.0")
-	cache := cachedManager(t, "pnpm", "8.15.4", pnpmTarball(t, "8.15.4"))
+	cache := cachedPnpm(t, pnpmVersion, "")
 	// An ambient pnpm newer than the pin: a floor would accept it.
-	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 8.16.0\n")
+	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 12.5.0\n")
 
 	var log bytes.Buffer
 	env := ensureOne(t, dir, runner.TypeScript, Overrides{}, &log)
@@ -371,11 +558,11 @@ func TestEnsureProvisionsThePinnedManagerAlongsideNode(t *testing.T) {
 		t.Errorf("Version = %q, want the Node the component runs under", got)
 	}
 	out := log.String()
-	if !strings.Contains(out, "installed pnpm 8.15.4") || !strings.Contains(out, "ambient 8.16.0 is not the pinned release") {
+	if !strings.Contains(out, "installed pnpm "+pnpmVersion) || !strings.Contains(out, "ambient 12.5.0 is not the pinned release") {
 		t.Errorf("log should name the pinned install and why the ambient pnpm was passed over, got %q", out)
 	}
 	if strings.Contains(out, "could not confirm") {
-		t.Errorf("the installed pnpm should confirm its own version under the component's Node, got %q", out)
+		t.Errorf("the installed pnpm should confirm its own version, got %q", out)
 	}
 }
 
@@ -383,17 +570,17 @@ func TestEnsureProvisionsThePinnedManagerAlongsideNode(t *testing.T) {
 // installs nothing is the exact version.
 func TestEnsureUsesAnAmbientManagerOnlyAtTheExactPin(t *testing.T) {
 	isolatedCache(t)
-	dir := pnpmWorkspace(t, "8.15.4")
+	dir := pnpmWorkspace(t, pnpmVersion)
 	bin := fakeToolchainBin(t)
 	fakeNode(t, bin, "v22.0.0")
-	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 8.15.4\n")
+	writeScript(t, filepath.Join(bin, "pnpm"), pnpmExeScript(pnpmVersion))
 
 	var log bytes.Buffer
 	env := ensureOne(t, dir, runner.TypeScript, Overrides{}, &log)
 	if env == nil || len(env.PathDirs) != 0 {
 		t.Fatalf("an ambient pnpm at the pin must add nothing to PATH, got %+v; log was %q", env, log.String())
 	}
-	if !strings.Contains(log.String(), "using ambient pnpm 8.15.4 (matches 8.15.4 pinned in package.json (packageManager))") {
+	if !strings.Contains(log.String(), "using ambient pnpm 12.4.1 (matches 12.4.1 pinned in package.json (packageManager))") {
 		t.Errorf("log should say the ambient pnpm matched the pin, got %q", log.String())
 	}
 }
@@ -406,34 +593,14 @@ func TestEnsureVerifiesEachWorkspacesOwnDeclaredHash(t *testing.T) {
 	root := t.TempDir()
 	hashA := "sha512." + strings.Repeat("a", 128)
 	hashB := "sha512." + strings.Repeat("b", 128)
-	write(t, root, "a/package.json", `{"name":"a","packageManager":"pnpm@8.15.4+`+hashA+`"}`)
-	write(t, root, "a/pnpm-lock.yaml", "lockfileVersion: '6.0'\n")
-	write(t, root, "b/package.json", `{"name":"b","packageManager":"pnpm@8.15.4+`+hashB+`"}`)
-	write(t, root, "b/pnpm-lock.yaml", "lockfileVersion: '6.0'\n")
+	write(t, root, "a/package.json", `{"name":"a","packageManager":"pnpm@`+pnpmVersion+`+`+hashA+`"}`)
+	write(t, root, "a/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, root, "b/package.json", `{"name":"b","packageManager":"pnpm@`+pnpmVersion+`+`+hashB+`"}`)
+	write(t, root, "b/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
 	fakeNode(t, fakeToolchainBin(t), "v22.0.0")
 
-	declaredA, err := parseDeclaredHash(hashA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	declaredB, err := parseDeclaredHash(hashB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dirA, err := cacheRoot(managerCacheKey("pnpm", "8.15.4", declaredA))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unpackManager(pnpmTarball(t, "8.15.4"), dirA, "pnpm"); err != nil {
-		t.Fatal(err)
-	}
-	dirB, err := cacheRoot(managerCacheKey("pnpm", "8.15.4", declaredB))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unpackManager(pnpmTarball(t, "8.15.4"), dirB, "pnpm"); err != nil {
-		t.Fatal(err)
-	}
+	dirA := cachedPnpm(t, pnpmVersion, hashA)
+	dirB := cachedPnpm(t, pnpmVersion, hashB)
 
 	units := []Unit{
 		{Name: "a", Lang: runner.TypeScript, Dir: "a"},
@@ -460,14 +627,14 @@ func TestEnsureVerifiesEachWorkspacesOwnDeclaredHash(t *testing.T) {
 // does: a warning naming it, and the run continues with what is on PATH.
 func TestEnsureDisabledNamesTheUnpinnedManager(t *testing.T) {
 	isolatedCache(t)
-	dir := pnpmWorkspace(t, "8.15.4")
+	dir := pnpmWorkspace(t, pnpmVersion)
 	bin := fakeToolchainBin(t)
 	fakeNode(t, bin, "v22.0.0")
-	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 8.14.0\n")
+	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 12.3.0\n")
 
 	var log bytes.Buffer
 	ensureOne(t, dir, runner.TypeScript, Overrides{Disabled: true}, &log)
-	if want := "warning: pnpm toolchain is 8.14.0, not the pinned 8.15.4, and toolchain.enabled is false"; !strings.Contains(log.String(), want) {
+	if want := "warning: pnpm toolchain is 12.3.0, not the pinned 12.4.1, and toolchain.enabled is false"; !strings.Contains(log.String(), want) {
 		t.Errorf("log = %q, want it to contain %q", log.String(), want)
 	}
 }
@@ -477,7 +644,7 @@ func TestEnsureDisabledNamesTheUnpinnedManager(t *testing.T) {
 // not reach the other components holding the same Node.
 func TestAlongsideLeavesTheSharedRuntimeUntouched(t *testing.T) {
 	runtime := &Env{PathDirs: []string{"/node/bin"}, Vars: []string{"A=1"}, Resolved: "22.0.0"}
-	got := alongside(runtime, &Env{PathDirs: []string{"/pnpm/bin"}, Resolved: "8.15.4"})
+	got := alongside(runtime, &Env{PathDirs: []string{"/pnpm/bin"}, Resolved: "12.4.1"})
 
 	if !slices.Equal(got.PathDirs, []string{"/node/bin", "/pnpm/bin"}) || !slices.Equal(got.Vars, []string{"A=1"}) {
 		t.Fatalf("alongside = %+v, want the runtime's directories and variables followed by the manager's", got)
@@ -489,7 +656,7 @@ func TestAlongsideLeavesTheSharedRuntimeUntouched(t *testing.T) {
 		t.Errorf("the shared runtime environment was modified: %+v", runtime)
 	}
 
-	if alongside(runtime, nil) != runtime || alongside(runtime, &Env{Resolved: "8.15.4"}) != runtime {
+	if alongside(runtime, nil) != runtime || alongside(runtime, &Env{Resolved: "12.4.1"}) != runtime {
 		t.Error("a manager contributing nothing should leave the runtime's environment as it is")
 	}
 	if got := alongside(nil, &Env{PathDirs: []string{"/pnpm/bin"}}); got.Resolved != "" || !slices.Equal(got.PathDirs, []string{"/pnpm/bin"}) {
@@ -511,24 +678,248 @@ func TestPinnedKeepsThePreRelease(t *testing.T) {
 	}
 }
 
-// A provisioned package manager is run through the component's own resolved
-// Node, which exists only on the directories that runtime contributed.
+// A provisioned yarn is run through the component's own resolved Node, which
+// exists only on the directories that runtime contributed.
 func TestConfirmRunsTheManagerUnderTheComponentsRuntime(t *testing.T) {
 	fakeToolchainBin(t)
 	nodeDir := t.TempDir()
 	fakeNode(t, nodeDir, "v22.0.0")
 	staging := t.TempDir()
-	if err := unpackManager(pnpmTarball(t, "8.15.4"), staging, "pnpm"); err != nil {
+	if err := unpackManager(yarnTarball(t, "4.1.0"), staging, "yarn"); err != nil {
 		t.Fatal(err)
 	}
-	req := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v8.15.4", Raw: "8.15.4", Unit: Unit{Dir: "."}}
+	req := Requirement{Lang: runner.TypeScript, Manager: "yarn", Version: "v4.1.0", Raw: "4.1.0", Unit: Unit{Dir: "."}}
 	st := &step{pathDirs: []string{filepath.Join(staging, "bin")}}
 
 	got, err := confirm(context.Background(), t.TempDir(), req, st, &Env{PathDirs: []string{nodeDir}})
-	if err != nil || got != "8.15.4" {
-		t.Fatalf("confirm = (%q, %v), want the installed pnpm's own version", got, err)
+	if err != nil || got != "4.1.0" {
+		t.Fatalf("confirm = (%q, %v), want the installed yarn's own version", got, err)
 	}
 	if _, err := confirm(context.Background(), t.TempDir(), req, st, nil); err == nil {
-		t.Fatal("confirm found a node to run pnpm with although no runtime provided one")
+		t.Fatal("confirm found a node to run yarn with although no runtime provided one")
+	}
+}
+
+// provisionPnpm provisions pnpmVersion pinned under hash from whatever the
+// fake registry serves.
+func provisionPnpm(t *testing.T, hash string) (*step, error) {
+	t.Helper()
+	req := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v" + pnpmVersion, Raw: pnpmVersion,
+		Source: "package.json (packageManager)", Hash: hash}
+	return provisionPackageManager(context.Background(), req, "", false)
+}
+
+// pnpm is provisioned as its native binary, taken from the exe package its
+// verified release names, and put on PATH as it is: no wrapper, and nothing
+// asked of node.
+func TestEnsureProvisionsPnpmAsItsNativeBinary(t *testing.T) {
+	isolatedCache(t)
+	reg := newFakeRegistry(t)
+	release := pnpmTarball(t, pnpmVersion)
+	publishPnpm(t, reg, release, nil)
+	hash := sha512Pin(release)
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"name":"x","packageManager":"pnpm@`+pnpmVersion+`+`+hash+`"}`)
+	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	// Nothing on PATH at all — no node for a wrapper to run under.
+	fakeToolchainBin(t)
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.TypeScript, Overrides{}, &log)
+	declared, err := parseDeclaredHash(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := cacheRoot(managerCacheKey("pnpm", pnpmVersion, declared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(cache, "bin")
+	if env == nil || !slices.Contains(env.PathDirs, binDir) {
+		t.Fatalf("Ensure = %+v, want %q on PATH; log was %q", env, binDir, log.String())
+	}
+	pnpm := filepath.Join(binDir, "pnpm")
+	body, err := os.ReadFile(pnpm) // #nosec G304 -- a file this test's provisioning just installed
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != pnpmExeScript(pnpmVersion) {
+		t.Errorf("bin/pnpm = %q, want the exe package's own binary", body)
+	}
+	// The fixture archive carries it 0644; the install still has to run.
+	if info, err := os.Stat(pnpm); err != nil || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("bin/pnpm is not executable: %v, %v", info, err)
+	}
+	out, err := exec.Command(pnpm, "--version").Output() // #nosec G204 -- a binary this test's provisioning just installed
+	if err != nil || strings.TrimSpace(string(out)) != pnpmVersion {
+		t.Fatalf("pnpm --version with no node on PATH = (%q, %v), want %s", out, err, pnpmVersion)
+	}
+	if got := log.String(); !strings.Contains(got, "installed pnpm "+pnpmVersion) || strings.Contains(got, "could not confirm") {
+		t.Errorf("log should name the install and confirm its version, got %q", got)
+	}
+}
+
+// The exe package is trusted only because the release naming it matched the
+// repository's pin, so a release that does not match is refused before the
+// exe is ever asked for.
+func TestProvisionPnpmRefusesADeclaredHashMismatchBeforeFetchingTheExe(t *testing.T) {
+	isolatedCache(t)
+	reg := newFakeRegistry(t)
+	publishPnpm(t, reg, pnpmTarball(t, pnpmVersion), nil)
+
+	_, err := provisionPnpm(t, "sha512."+strings.Repeat("0", 128))
+	if err == nil || !strings.Contains(err.Error(), "packageManager pins") {
+		t.Fatalf("provisionPackageManager = %v, want the declared hash's mismatch", err)
+	}
+	if n := reg.requested("pnpm"); n != 2 {
+		t.Errorf("the release was asked for %d times, want its document and its tarball", n)
+	}
+	if n := reg.requested(hostExe(t)); n != 0 {
+		t.Errorf("the exe package was asked for %d times after the release failed its pin, want none", n)
+	}
+}
+
+// Every refusal along the chain from the release to its exe, each with the
+// reason it gives.
+func TestProvisionPnpmRefusesAnUnverifiableExe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release func(t *testing.T) []byte
+		editExe func(*registryDist)
+		want    string
+	}{
+		{"an exe tarball not matching its integrity",
+			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			func(d *registryDist) {
+				d.Integrity = "sha512-" + base64.StdEncoding.EncodeToString(make([]byte, 64))
+			},
+			"checksum mismatch"},
+		{"an exe with only a sha1 shasum",
+			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			func(d *registryDist) { d.Integrity = "" },
+			"publishes no sha512 integrity"},
+		{"an exe whose integrity names sha1 alone",
+			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			func(d *registryDist) { d.Integrity = "sha1-abc" },
+			"publishes no sha512 integrity"},
+		{"an exe tarball outside the registry",
+			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			func(d *registryDist) { d.Tarball = "https://example.com/pnpm.tgz" },
+			"outside"},
+		{"a release naming no exe for this platform",
+			func(t *testing.T) []byte {
+				deps := exeDeps(pnpmVersion)
+				delete(deps, hostExe(t))
+				return pnpmTarballDepending(t, pnpmVersion, deps)
+			},
+			nil, "names no @pnpm/exe."},
+		{"a release pinning its exe at another version",
+			func(t *testing.T) []byte {
+				deps := exeDeps(pnpmVersion)
+				deps[hostExe(t)] = "12.4.0"
+				return pnpmTarballDepending(t, pnpmVersion, deps)
+			},
+			nil, "not the same version"},
+		{"a release naming its exe by a range",
+			func(t *testing.T) []byte {
+				deps := exeDeps(pnpmVersion)
+				deps[hostExe(t)] = "^" + pnpmVersion
+				return pnpmTarballDepending(t, pnpmVersion, deps)
+			},
+			nil, "not an exact version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedCache(t)
+			reg := newFakeRegistry(t)
+			release := tc.release(t)
+			publishPnpm(t, reg, release, tc.editExe)
+
+			st, err := provisionPnpm(t, sha512Pin(release))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("provisionPackageManager = (%+v, %v), want a refusal containing %q", st, err, tc.want)
+			}
+		})
+	}
+}
+
+// A refusal is the provisioning warning every other toolchain gives, the
+// reason included, and the run carries on.
+func TestEnsureWarnsWhenThePnpmExeIsRefused(t *testing.T) {
+	isolatedCache(t)
+	reg := newFakeRegistry(t)
+	release := pnpmTarball(t, pnpmVersion)
+	publishPnpm(t, reg, release, func(d *registryDist) { d.Integrity = "" })
+	dir := pnpmWorkspace(t, pnpmVersion+"+"+sha512Pin(release))
+	fakeNode(t, fakeToolchainBin(t), "v22.0.0")
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.TypeScript, Overrides{}, &log)
+	got := log.String()
+	if !strings.Contains(got, "warning: could not provision the pnpm toolchain") ||
+		!strings.Contains(got, "publishes no sha512 integrity") {
+		t.Errorf("log = %q, want a provisioning warning naming the refused exe", got)
+	}
+	if env != nil && len(env.PathDirs) != 0 {
+		t.Errorf("a refused pnpm must add nothing to PATH, got %q", env.PathDirs)
+	}
+}
+
+// Only a platform an exe package is published for is provisioned, and a host
+// with none is refused before anything is fetched.
+func TestPnpmExePackage(t *testing.T) {
+	for _, tc := range []struct{ goos, goarch, want string }{
+		{"linux", "amd64", "@pnpm/exe.linux-x64"},
+		{"linux", "arm64", "@pnpm/exe.linux-arm64"},
+		{"darwin", "amd64", "@pnpm/exe.darwin-x64"},
+		{"darwin", "arm64", "@pnpm/exe.darwin-arm64"},
+		{"windows", "amd64", ""},
+		{"linux", "386", ""},
+		{"freebsd", "arm64", ""},
+	} {
+		got, err := pnpmExePackage(tc.goos, tc.goarch)
+		if got != tc.want || (err != nil) != (tc.want == "") {
+			t.Errorf("pnpmExePackage(%s, %s) = (%q, %v), want %q", tc.goos, tc.goarch, got, err, tc.want)
+		}
+	}
+}
+
+func TestDownloadPnpmRefusesAnUnsupportedPlatformBeforeFetching(t *testing.T) {
+	reg := newFakeRegistry(t)
+	release := pnpmTarball(t, pnpmVersion)
+	reg.publish(t, "pnpm", pnpmVersion, release, nil)
+
+	err := downloadPnpm(context.Background(), pnpmVersion, declaredHash{}, "windows", "amd64", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "windows/amd64") {
+		t.Fatalf("downloadPnpm = %v, want a refusal naming the platform", err)
+	}
+	if n := reg.requested("pnpm"); n != 0 {
+		t.Errorf("the registry was asked %d times for a platform with no exe package, want none", n)
+	}
+}
+
+// yarn keeps its node-run wrapper when fetched from the registry, verified the
+// same way as ever.
+func TestDownloadPackageManagerUnpacksYarnBehindAWrapper(t *testing.T) {
+	reg := newFakeRegistry(t)
+	release := yarnTarball(t, "4.1.0")
+	reg.publish(t, "@yarnpkg/cli-dist", "4.1.0", release, nil)
+	// The yarn document is fetched with its scope's slash as written.
+	reg.mu.Lock()
+	reg.files["/@yarnpkg/cli-dist/4.1.0"] = reg.files["/@yarnpkg%2Fcli-dist/4.1.0"]
+	reg.mu.Unlock()
+	declared, err := parseDeclaredHash(sha512Pin(release))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	if err := downloadPackageManager(context.Background(), "yarn", "4.1.0", declared, staging); err != nil {
+		t.Fatalf("downloadPackageManager: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(staging, "bin", "yarn")) // #nosec G304 -- a wrapper this test's download just wrote
+	if err != nil || !strings.Contains(string(body), "exec node") {
+		t.Fatalf("bin/yarn = (%q, %v), want the node wrapper", body, err)
+	}
+	if err := downloadPackageManager(context.Background(), "yarn", "4.1.0", declaredHash{algo: "sha512", sum: make([]byte, 64)}, t.TempDir()); err == nil {
+		t.Fatal("a yarn release not matching its pin was installed")
 	}
 }
