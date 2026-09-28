@@ -1,5 +1,5 @@
 ---
-about: migrating mutation/scan/review, publish/threads, status/mergequeue, and ledger onto Flow in parallel collides on two remaining shared seams — the SCMRepository interface plus its duplicated fakes, and the relay's write path being outside SCMRepository entirely — and publish itself does not fit the Flow shape at all; the third seam this note originally found (cmd-only toolchain/component helpers) was retired by #270's test migration
+about: migrating mutation/scan/review, publish/threads, status/mergequeue, and ledger onto Flow in parallel collides on the SCMRepository interface plus its duplicated fakes; the relay's write path stays outside SCMRepository by design (internal/relay, ADR 0075), publish runs as a flow despite no live platform I/O (ADR 0074), and the cmd-only toolchain/component helper seam was retired by #270's test migration
 saw:
   - source/cli/cmd/lydite/test.go
   - source/cli/cmd/lydite/toolchain.go
@@ -16,6 +16,9 @@ saw:
   - source/cli/internal/stages/scm/scm_test.go
   - source/cli/cmd/lydite/status.go
   - source/cli/cmd/lydite/mergequeue.go
+  - source/cli/internal/relay/relay.go
+  - docs/adr/0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md
+  - docs/adr/0074-publish-runs-as-a-flow-of-ordinary-stages.md
   - agentic/references/surface.md
   - agentic/references/architecture.md
   - source/cli/internal/stages/record/record.go
@@ -69,27 +72,21 @@ shared embedding between them). Two streams widening the interface concurrently 
 stream's review-thread stage, another's status stage) conflict on the same interface literal
 and on updating two duplicated fakes, not one.
 
-**Seam 3 — the merge-queue write path is a third transport `SCMRepository` does not cover at
-all.** `mergequeue.go`'s `queueDecision` posts to the `pr-relay` Worker over plain
-`http.DefaultClient` (`mergequeue.go:130`), never through `forge.Client`/`SCMRepository` — the
-relay is OIDC-authenticated app identity, a different credential model than the token
-`GitHubRepository` wraps. A Flow migration of the mergequeue/status stream needs either a new
-stage kind for "post via relay" or a decision that this path stays outside Flow, which is not
-something the SCMRepository-widening seam (seam 2) resolves for free. `status.go` also still
+**Seam 3 — the merge-queue write path is a transport `SCMRepository` does not cover, and is not
+meant to.** The queue flow (`internal/flows/queue`) submits through `internal/relay`, its own
+domain package over an injected `relay.Doer` — OIDC-authenticated app identity, a different
+credential model than the token `GitHubRepository` wraps. ADR 0075 records why it is neither an
+`SCMRepository` implementation nor a Sink: the job holds no token and no repository for
+`init-trust`/`init-scm` to model. `status.go` also still
 builds `*forge.Client`/`forge.Repo` directly (`status.go:17-18,55`) rather than through
 `NewGitHubRepository`/`trust.TrustedContext` — exactly the shape ADR 0060 rejected for stages
 ("stages taking `*forge.Client` and `forge.Repo` directly... nothing stops a future call site
 from constructing a `Repo` from a flag or a payload instead of from trust").
 
-**`publish` does not fit the Flow shape at all, so it isn't really a sixth thing to migrate
-onto it.** `agentic/references/surface.md` line 16-21: "`lydite publish` renders and posts
-nothing... No network, no token, no knowledge of a hosting platform." Flow exists for "a
-command that answers a webhook by reading a platform live, deciding something, and writing back
-to the platform" (architecture.md). `publish` reads report documents and renders; it has no
-live platform read and (ordinarily) no write. Grouping `publish`/`threads` with `review` in one
-stream should not default to wrapping `publish` in a Flow — only the pieces of that stream that
-actually read/write the platform live (review's own comparison, threads' posting) are
-candidates.
+**`publish` runs as a Flow of ordinary stages despite having no live platform read or write.**
+`internal/flows/publish` wires gather-reports, build-comment and write-comment; ADR 0074 records
+that it was put on the scaffold for structural consistency, and that no Source/Sink concept exists
+in the engine.
 
 **`internal/ledger` writes (the fifth stream, `record`) were isolated, as predicted — confirmed
 by its landed migration.** `lydite test record` now runs as `internal/flows/record` over stages in

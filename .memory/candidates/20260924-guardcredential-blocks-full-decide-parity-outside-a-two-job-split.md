@@ -10,6 +10,7 @@ saw:
   - source/cli/internal/flows/review/review.go
   - source/cli/cmd/lydite/clearance.go
   - source/cli/cmd/lydite/mergequeue.go
+  - source/cli/internal/stages/queue/decision.go
   - agentic/rules/guard-an-in-process-comparison-by-whether-a-credential-exists-not-by-a-flag.md
 ---
 
@@ -46,8 +47,9 @@ read through `reviewdecision.Surfaces` → `reconcileSurfaces` exactly as `revie
 The workflow-side split that produces that document (a credential-free computing job, a
 credentialed posting job) lives in `lydite/actions`' `lydite-clearance.yml`, not in this repo.
 
-**The queue path sidesteps the question.** `clearance queue`'s `queueDecision`
-(`cmd/lydite/mergequeue.go`) is now a one-line wrapper over `reviewdecision.DecideFromDiff`
+**The queue path sidesteps the question.** `clearance queue`'s `recompute-decision` stage
+(`queuestages.RecomputeDecision`, `internal/stages/queue/decision.go`; `cmd/lydite/mergequeue.go`'s
+`queueDecision` is a wrapper over that stage) calls `reviewdecision.DecideFromDiff`
 (`internal/reviewdecision/decide.go`), which passes the zero `referral.Evidence{}` and never
 calls `Surfaces`/`measureDependencies`. A clearance given for an API-surface or dependency
 disqualification therefore fingerprints differently at queue time and goes back to a person —

@@ -3,7 +3,8 @@ about: the silent-fallback mechanism the note describes is unchanged in action.y
 saw:
   - .github/actions/lydite-comment/action.yml
   - source/cloud-services/pr-relay/wrangler.toml
-  - source/cli/cmd/lydite/mergequeue.go
+  - source/cli/internal/relay/relay.go
+  - source/cli/internal/stages/queue/relay.go
 targets: relay-audience-mismatch-degrades-silently
 verdict: still-true
 ---
@@ -25,10 +26,11 @@ audience going unnoticed on a real PR comment in *this* repo's CI — has no liv
 today; the code exists but is dead weight from this repo's own runs. It's still relevant to
 anyone editing the composite for `lydite/actions`' benefit.
 
-**Mergequeue's own relay call (`cmd/lydite/mergequeue.go`'s `submitQueueComparison`) is a
-different code path, not subject to this gotcha.** It mints its own OIDC token in-process
-against `--relay`'s origin (`actionsIDToken`, not through `action.yml`'s script) and its own doc
-comment states the opposite policy: "Every answer but 200 fails the run, and nothing falls
+**The queue path's relay call (`internal/relay`'s `SubmitMergeGroup`, run by the queue flow's
+`submit-comparison` stage in `internal/stages/queue/relay.go`) is a different code path, not
+subject to this gotcha.** It mints its own OIDC token in-process against `--relay`'s origin
+(`relay.MintIDToken`, run by the `mint-token` stage, not through `action.yml`'s script) and
+`SubmitMergeGroup`'s doc comment states the opposite policy: "Every answer but 200 fails the run, and nothing falls
 back... this job holds no token that could publish anything — so an unreachable relay and a
 refused request are both 'no verdict was published', which has to be said out loud." So an
 audience mismatch on the queue route fails the job loudly (non-200), rather than falling back

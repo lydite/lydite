@@ -610,6 +610,32 @@ carries the shard's `ui.Document`, as input the same way. Neither builds a `ui.R
 what a report says, and every stage in this codebase does the first and never the second.
 Deciding a row, in every flow built so far, is the CLI's job alone.
 
+## The queue flow
+
+`internal/flows/queue` (`queueflow`) and `internal/stages/queue` (`queuestages`) put `lydite
+clearance queue` on the scaffold, over a new domain package, `internal/relay` — the pr-relay
+client, transport and protocol only, importing nothing above it. Five stages, none conditioned on
+another's output: `load-event` reads the entry the `merge_group` payload names; `resolve-base`
+resolves the commit the decision is recomputed against; `recompute-decision` recomputes and
+fingerprints that decision; `mint-token` mints the OIDC token the relay accepts, audienced to the
+relay's own origin; `submit-comparison` submits the fingerprint for the relay to compare and
+publish. `mint-token` is declared after `recompute-decision` so a run that cannot resolve the base
+or recompute the decision fails for that reason before it fails for a missing mint endpoint. The
+CLI reads `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` itself and passes them through as flow inputs,
+empty or not; no stage reads the environment, and `truststages.InitTrust` stays the only one that
+does anywhere in this codebase.
+
+The flow declares no `init-trust` and no `init-scm`: this job is built to hold no writing
+credential — `runQueue` refuses outright when `--relay` is empty, since there is no token to fall
+back to — so there is neither a `TrustedContext` nor an `SCMRepository` for those stages to build.
+That absence is why `load-event` reads the payload's `head_sha`, `head_ref` and `base_ref` as data
+rather than a pointer resolved live: "trust and the repository come first" (see above, and ADR
+0061) holds where a credential exists to resolve something live against, and this job has none.
+The relay is what performs that live resolution instead, from the verified OIDC claim, checking
+what this job submits against what it reads there itself. See
+[ADR 0075](../../docs/adr/0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for
+the full reasoning, including why this is not an `SCMRepository` implementation and not a
+`RelaySink`.
 ## The threads flow
 
 `threadsflow.New` (`internal/flows/threads`) declares `threads`'s stages in this order:
