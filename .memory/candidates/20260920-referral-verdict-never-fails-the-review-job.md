@@ -18,7 +18,7 @@ on the verdict at all — the job "succeeds" on both pass and refer.
 
 `agentic/references/referral-and-clearance.md` (Clearance section) confirms the intended gate
 is elsewhere: `review --publish` writes the **`lydite/referral` commit status** (`pending` for
-a referral, never `failure`, per `stateFor`), and a `/lydite clear` comment flips that status
+a referral, never `failure`, per `stateFor` in `internal/stages/review/compose_status.go`), and a `/lydite clear` comment flips that status
 directly — clearance never re-runs `review`, matching "the status is read before it is
 written."
 

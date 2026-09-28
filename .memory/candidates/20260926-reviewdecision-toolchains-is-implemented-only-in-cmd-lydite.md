@@ -1,8 +1,9 @@
 ---
-about: toolchain provisioning and environment composition are implemented only in cmd/lydite (ensureToolchains, childEnv), so every flow that needs them declares its own interface and takes the implementation as a flow input the CLI injects — clearance via reviewdecision.Toolchains, scan via scanstages.Toolchains/Environment
+about: toolchain provisioning and environment composition are implemented only in cmd/lydite (ensureToolchains, childEnv), so every flow that needs them declares its own interface and takes the implementation as a flow input the CLI injects — clearance and review via reviewdecision.Toolchains, scan via scanstages.Toolchains/Environment
 saw:
   - source/cli/internal/reviewdecision/surface.go
   - source/cli/cmd/lydite/review_apisurface.go
+  - source/cli/internal/flows/review/review.go
   - source/cli/cmd/lydite/toolchain.go
   - source/cli/cmd/lydite/test.go
   - source/cli/internal/flows/clearance/clearance.go
@@ -26,12 +27,14 @@ API-surface comparison provisions through: `Ensure(ctx, dir, cfg, components)` a
 
 `package main` cannot be imported, and the Flow layering forbids stages reaching into `cmd/`
 anyway, so a stage that needs provisioning declares an interface-typed field in its `In` and the
-flow binds it from an input the CLI supplies. Two flows do this, each with its own interface:
+flow binds it from an input the CLI supplies. Three flows do this, with two interfaces:
 
 - clearance: `InputToolchains` in `internal/flows/clearance/clearance.go` → `FingerprintIn.Toolchains`
   (`internal/stages/clearance/fingerprint.go`, type `reviewdecision.Toolchains`), set to
-  `commandToolchains{cmd}` by `runClearance` (`cmd/lydite/clearance.go`). `review.go` and
-  `review_compare.go` pass the same value directly.
+  `commandToolchains{cmd}` by `runClearance` (`cmd/lydite/clearance.go`).
+- review: `review.go` and `review_compare.go` set the same `commandToolchains{cmd}` as
+  `reviewflow.Params.Toolchains`/`CompareParams.Toolchains` (`internal/flows/review`), bound into
+  the `surfaces` and `compare-surfaces` stages (`internal/stages/review`).
 - scan: `scanstages.Toolchains` (only `Ensure`, taking `[]toolchain.Unit`) and
   `scanstages.Environment` (`Compose` and `Declared`) in `internal/stages/scan/toolchains.go`,
   bound from `InputToolchains`/`InputEnvironment` in `internal/flows/scan/scan.go`, implemented by

@@ -1683,34 +1683,6 @@ func TestPublishNeedsThePlatformsEnvironmentRatherThanSkipping(t *testing.T) {
 	}
 }
 
-func TestStateForKeepsAReferralDistinctFromAFailure(t *testing.T) {
-	if stateFor(ui.VerdictRefer) == stateFor(ui.VerdictFail) {
-		t.Fatal("a referral and a gate failure publish the same state, so a person cannot tell them apart")
-	}
-	if got := stateFor(ui.VerdictRefer); got != clearance.StatePending {
-		t.Fatalf("a referral publishes %q, want pending", got)
-	}
-}
-
-// A pending status renders as a yellow dot, which is what a job still
-// running looks like. The description is the only thing that separates them.
-func TestStatusDescriptionNamesTheWayForward(t *testing.T) {
-	got := describe(referral.Decision{Referred: true}, ui.VerdictRefer)
-	if !strings.Contains(got, "/lydite clear") {
-		t.Fatalf("description %q does not say what resolves it", got)
-	}
-}
-
-func TestPublishedDescriptionsFitThePlatformsLimit(t *testing.T) {
-	d := referral.Decision{Referred: true, Exemption: "readme-only"}
-	for _, verdict := range []ui.Verdict{ui.VerdictRefer, ui.VerdictFail, ui.VerdictPass} {
-		got := describe(d, verdict)
-		if n := len([]rune(got)); n == 0 || n > 140 {
-			t.Errorf("%s description is %d characters: %q", verdict, n, got)
-		}
-	}
-}
-
 // returns is a stage that answers out, whatever it is given.
 func returns[T any](out T) func(context.Context, struct{}) (T, error) {
 	return func(context.Context, struct{}) (T, error) { return out, nil }

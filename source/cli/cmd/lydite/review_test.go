@@ -691,32 +691,6 @@ func TestReviewErrorsOnAMalformedConfigFile(t *testing.T) {
 	}
 }
 
-// A payload that cannot be read is warned about and treated as no title,
-// never fatal — the title can only add a referral, so failing the whole run
-// over an unreadable one would turn an additive source into a blocker.
-func TestPullRequestTitleWarnsOnAMalformedEvent(t *testing.T) {
-	var warn bytes.Buffer
-	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
-	if got := pullRequestTitle(&warn, missing); got != "" {
-		t.Errorf("pullRequestTitle(missing) = %q, want empty", got)
-	}
-	if !strings.Contains(warn.String(), "warning:") {
-		t.Errorf("a missing event file must be warned about, got %q", warn.String())
-	}
-
-	warn.Reset()
-	malformed := filepath.Join(t.TempDir(), "event.json")
-	if err := os.WriteFile(malformed, []byte("not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := pullRequestTitle(&warn, malformed); got != "" {
-		t.Errorf("pullRequestTitle(malformed) = %q, want empty", got)
-	}
-	if !strings.Contains(warn.String(), "warning:") {
-		t.Errorf("a malformed event file must be warned about, got %q", warn.String())
-	}
-}
-
 // A Rust crate whose public API the gate compares, the declaration that opts
 // it in, and the config that keeps provisioning out of the run: the comparison
 // is the stub below, so nothing here needs a rustup channel and none is
@@ -1853,73 +1827,6 @@ func TestReviewRefersAVersionBumpWithADeclaredGoComponentMissingItsAdvisoryRow(t
 	}
 }
 
-// A components.yml that will not parse is review's to refuse elsewhere, but
-// dependencyGatesPassed must fail its own half closed rather than let a load
-// error read as evidence.
-func TestDependencyGatesPassedFailsClosedOnAnUnreadableComponentsFile(t *testing.T) {
-	dir, _ := reviewRepo(t,
-		map[string]string{"README.md": "hello"},
-		map[string]string{
-			component.FileName: "components:\n  - name: cli\n    dir: .\n    runner: go-test\n    not_a_real_key: true\n",
-			"README.md":        "hello",
-		},
-	)
-	var warn bytes.Buffer
-	if dependencyGatesPassed(dir, []string{cleanScan(t)}, &warn) {
-		t.Fatal("an unreadable components.yml must fail the condition, not satisfy it")
-	}
-	if warn.Len() == 0 {
-		t.Error("a load that failed should warn, not fail silently")
-	}
-}
-
-// Two report directories naming one gate keep the worse of the two answers,
-// whichever order they are given in: a pass a later job's failure overturns
-// must not be forgotten because it was seen first.
-func TestDependencyGatesPassedKeepsTheWorseOfTwoReportsForOneGate(t *testing.T) {
-	dir, _ := reviewRepo(t,
-		map[string]string{"README.md": "hello"},
-		map[string]string{component.FileName: cliComponent, "README.md": "hello again"},
-	)
-	passing := scanReports(t, map[string]ui.Status{
-		"gosec(cli)":       ui.StatusPass,
-		"govulncheck(cli)": ui.StatusPass,
-		"licence(cli)":     ui.StatusPass,
-	})
-	failing := scanReports(t, map[string]ui.Status{"licence(cli)": ui.StatusFail})
-
-	var warn bytes.Buffer
-	if dependencyGatesPassed(dir, []string{passing, failing}, &warn) {
-		t.Error("a passing report followed by a failing one for the same gate must not satisfy the condition")
-	}
-}
-
-// A label with no component at all — no "(" at all, or one opening at the
-// very first character, which names an empty gate rather than a missing
-// component — carries nothing this attributes, and is told apart from a
-// well-formed "gate(component)" label.
-func TestSplitGateLabel(t *testing.T) {
-	cases := []struct {
-		label           string
-		gate, component string
-		ok              bool
-	}{
-		{"licence(cli)", "licence", "cli", true},
-		{"cargo clippy(api)", "cargo clippy", "api", true},
-		{"scan", "", "", false},
-		{"(cli)", "", "", false},
-		{"licence()", "", "", false},
-		{"licence(cli", "", "", false},
-	}
-	for _, tc := range cases {
-		gate, component, ok := splitGateLabel(tc.label)
-		if gate != tc.gate || component != tc.component || ok != tc.ok {
-			t.Errorf("splitGateLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
-				tc.label, gate, component, ok, tc.gate, tc.component, tc.ok)
-		}
-	}
-}
-
 // A change patching one dependency and majoring another is not boring as a
 // whole, whatever the scan says about either.
 func TestReviewRefersAMajorBumpWithPassingRows(t *testing.T) {
@@ -1967,5 +1874,350 @@ func TestReviewRefersAnAddedDependencyDespiteTheCondition(t *testing.T) {
 	}
 	if !strings.Contains(out, referral.DisqualificationDependencyAdded) {
 		t.Errorf("expected the added-dependency veto, got:\n%s", out)
+	}
+}
+
+// reviewFlowVerdicts is the report's verdict for each verdict reviewdecision
+// decides. The two spell the same words, and the map says so rather than a
+// conversion assuming it.
+var reviewFlowVerdicts = map[reviewdecision.Verdict]ui.Verdict{
+	reviewdecision.VerdictPass:  ui.VerdictPass,
+	reviewdecision.VerdictRefer: ui.VerdictRefer,
+	reviewdecision.VerdictFail:  ui.VerdictFail,
+}
+
+// reviewFlowExitVerdicts is the report's verdict for each exit code a review
+// run returns, which is the verdict of the report the command itself built.
+var reviewFlowExitVerdicts = map[int]ui.Verdict{0: ui.VerdictPass, 1: ui.VerdictFail, 2: ui.VerdictRefer}
+
+// reviewFlowDecide decides a fixture's review the way the command does, and
+// renders its rows into a report of their own.
+func reviewFlowDecide(t *testing.T, dir, base string) (*ui.Report, reviewdecision.Result) {
+	t.Helper()
+	ctx := context.Background()
+	baseSHA, err := reviewdecision.ResolveBase(ctx, dir, base, "")
+	if err != nil {
+		t.Fatalf("ResolveBase: %v", err)
+	}
+	cmd := newReviewCmd()
+	var progress bytes.Buffer
+	cmd.SetErr(&progress)
+	surfaces, err := reviewdecision.Surfaces(ctx, dir, baseSHA, "", false, commandToolchains{cmd}, &progress)
+	if err != nil {
+		t.Fatalf("Surfaces: %v\n%s", err, progress.String())
+	}
+	result, err := reviewdecision.Decide(ctx, reviewdecision.Input{Dir: dir, Base: baseSHA, Surfaces: surfaces})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, result.Outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	return report, result
+}
+
+// The report's verdict and the decision's are one value: the rows are rendered
+// from the outcomes the decision's verdict is folded from, so no fixture's
+// report can say anything the decision did not — and the command's own exit
+// code agrees with both.
+func TestReviewReportVerdictIsTheDecisionsVerdict(t *testing.T) {
+	suppressed := "exemptions:\n  - name: go-source\n    reason: ordinary source edits\n    paths: [\"src/**\"]\n"
+	for _, tc := range []struct {
+		name    string
+		base    map[string]string
+		head    map[string]string
+		message string
+		want    ui.Verdict
+	}{
+		{
+			name: "exempt",
+			base: map[string]string{referral.FileName: "exemptions:\n  - name: readme-only\n    reason: r\n    paths: [\"README.md\"]\n", "README.md": "hello"},
+			head: map[string]string{"README.md": "hello again"},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "nothing declared",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{"README.md": "hello again"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a disqualifier vetoes a match",
+			base: map[string]string{referral.FileName: suppressed, "src/a.go": "package src\n"},
+			head: map[string]string{"src/a.go": "package src\n\nvar x = eval() // #nosec G204\n"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a bundled exemption change",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n", "src/app.go": "package src"},
+			want: ui.VerdictFail,
+		},
+		{
+			name: "an isolated exemption change",
+			base: map[string]string{"README.md": "hello"},
+			head: map[string]string{referral.FileName: "exemptions:\n  - name: wide\n    reason: r\n    paths: [\"**\"]\n"},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "an additive API change",
+			base: sdkBase(sdkOptIn),
+			head: map[string]string{"sdk/api.go": sdkAPI + "\n// Also runs the thing.\nfunc Also() {}\n"},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "an undeclared API break",
+			base: sdkBase(sdkOptIn),
+			head: map[string]string{"sdk/api.go": "package sdk\n"},
+			want: ui.VerdictFail,
+		},
+		{
+			name:    "a declared API break",
+			base:    sdkBase(sdkOptIn),
+			head:    map[string]string{"sdk/api.go": "package sdk\n"},
+			message: "feat(sdk)!: drop Do",
+			want:    ui.VerdictRefer,
+		},
+		{
+			name: "an API surface nothing could compare",
+			base: func() map[string]string {
+				b := sdkBase(sdkOptIn)
+				b["sdk/api.go"] = "package sdk\n\nfunc Do(n int) error { return \n"
+				return b
+			}(),
+			head: map[string]string{"sdk/api.go": sdkAPI},
+			want: ui.VerdictRefer,
+		},
+		{
+			name: "a manifest that added nothing",
+			base: map[string]string{
+				referral.FileName: dependencyExemption("go.sum"),
+				"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+			},
+			head: map[string]string{"go.sum": goSum(map[string]string{"github.com/spf13/cobra": "v1.10.2"})},
+			want: ui.VerdictPass,
+		},
+		{
+			name: "an added dependency",
+			base: map[string]string{
+				referral.FileName: dependencyExemption("go.sum"),
+				"go.sum":          goSum(map[string]string{"github.com/spf13/cobra": "v1.10.1"}),
+			},
+			head: map[string]string{"go.sum": goSum(map[string]string{
+				"github.com/spf13/cobra":         "v1.10.1",
+				"github.com/google/licensecheck": "v0.3.1",
+			})},
+			want: ui.VerdictRefer,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := tc.message
+			if message == "" {
+				message = "head"
+			}
+			dir, base := reviewRepoSaying(t, tc.base, tc.head, message)
+
+			report, result := reviewFlowDecide(t, dir, base)
+			if got := reviewFlowVerdicts[result.Verdict]; report.Verdict() != got {
+				t.Errorf("the report's verdict is %q and the decision's is %q (%q)", report.Verdict(), got, result.Verdict)
+			}
+			if report.Verdict() != tc.want {
+				t.Errorf("verdict = %q, want %q", report.Verdict(), tc.want)
+			}
+
+			out, err := runReview(t, dir, base)
+			code := 0
+			var exit ui.ExitError
+			if errors.As(err, &exit) {
+				code = exit.Code
+			} else if err != nil {
+				t.Fatalf("review: %v\n%s", err, out)
+			}
+			if got, ok := reviewFlowExitVerdicts[code]; !ok || got != reviewFlowVerdicts[result.Verdict] {
+				t.Errorf("the command exited %d and the decision is %q:\n%s", code, result.Verdict, out)
+			}
+		})
+	}
+}
+
+// Each status a decision reaches renders as exactly one row status, and one
+// that votes the same way: a pass as a pass, a referral as a referral, a
+// failure as a failure, and a concern that never votes as one that does not.
+func TestReviewRendersEachDecidedStatusAsOneRowStatus(t *testing.T) {
+	want := map[reviewdecision.Status]ui.Status{
+		reviewdecision.StatusPass:      ui.StatusPass,
+		reviewdecision.StatusRefer:     ui.StatusRefer,
+		reviewdecision.StatusFail:      ui.StatusFail,
+		reviewdecision.StatusNonVoting: ui.StatusUnmeasured,
+	}
+	if len(rowStatus) != len(want) {
+		t.Errorf("rowStatus = %v, want %v", rowStatus, want)
+	}
+	for status, row := range want {
+		if got := rowStatus[status]; got != row {
+			t.Errorf("rowStatus[%q] = %q, want %q", status, got, row)
+		}
+	}
+}
+
+// Showing only the first listCap disqualifications is presentation: the rest
+// become one count carrying their status, and the referral row after it still
+// refers, so the report's verdict is the decision's however much it shows.
+func TestReviewCapsDisqualificationsWithoutMovingTheVerdict(t *testing.T) {
+	var outcomes []reviewdecision.Outcome
+	var dqs []referral.Disqualification
+	for i := range listCap + 2 {
+		dq := referral.Disqualification{Kind: "suppression added", Path: fmt.Sprintf("src/a%d.go", i), Evidence: fmt.Sprintf("src/a%d.go introduces #nosec", i)}
+		dqs = append(dqs, dq)
+		outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindDisqualification, Status: reviewdecision.StatusRefer, Disqualification: dq})
+	}
+	d := referral.Decision{Referred: true, Exemption: "go-source", Disqualifications: dqs}
+	outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindReferral, Status: reviewdecision.StatusRefer, Decision: d, Exemptions: 1})
+
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	rows := report.Rows()
+	if len(rows) != listCap+2 {
+		t.Fatalf("rows = %+v, want %d disqualifications, a count and the referral", rows, listCap)
+	}
+	for i, row := range rows[:listCap] {
+		if row.Status != ui.StatusRefer || row.Label != "suppression added" || row.Value != dqs[i].Evidence {
+			t.Errorf("row %d = %+v, want disqualification %+v", i, row, dqs[i])
+		}
+	}
+	if more := rows[listCap]; more.Status != ui.StatusRefer || more.Label != "more disqualifiers" || more.Value != "2 not shown" {
+		t.Errorf("count row = %+v, want a referring count of the 2 not shown", more)
+	}
+	if last := rows[len(rows)-1]; last.Status != ui.StatusRefer || last.Label != "referral" || last.Value != "go-source matched, then disqualified" {
+		t.Errorf("referral row = %+v, want the vetoed match, referring", last)
+	}
+	if report.Verdict() != ui.VerdictRefer {
+		t.Errorf("verdict = %q, want %q", report.Verdict(), ui.VerdictRefer)
+	}
+}
+
+// A run of disqualifications no longer than listCap renders each one and no
+// count.
+func TestReviewShowsEveryDisqualificationUpToTheCap(t *testing.T) {
+	var outcomes []reviewdecision.Outcome
+	for i := range listCap {
+		outcomes = append(outcomes, reviewdecision.Outcome{Kind: reviewdecision.KindDisqualification, Status: reviewdecision.StatusRefer,
+			Disqualification: referral.Disqualification{Kind: "tests removed", Evidence: fmt.Sprintf("t%d deleted", i)}})
+	}
+	report := ui.NewReport("review")
+	if err := addOutcomeRows(report, outcomes); err != nil {
+		t.Fatalf("addOutcomeRows: %v", err)
+	}
+	if rows := report.Rows(); len(rows) != listCap || rows[len(rows)-1].Label != "tests removed" {
+		t.Errorf("rows = %+v, want exactly the %d disqualifications", rows, listCap)
+	}
+}
+
+// An outcome the report has no rendering for is an error, never a row: a
+// status rendered as nothing in particular would stop voting, and a concern
+// left out would read as one that passed. Nothing is rendered for either.
+func TestReviewRefusesAnOutcomeItCannotRender(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcomes []reviewdecision.Outcome
+		want     string
+	}{
+		{
+			name: "an unknown status",
+			outcomes: []reviewdecision.Outcome{
+				{Kind: reviewdecision.KindReferral, Status: reviewdecision.StatusPass},
+				{Kind: reviewdecision.KindReferral, Status: "maybe"},
+			},
+			want: `status "maybe"`,
+		},
+		{
+			name:     "an unknown kind",
+			outcomes: []reviewdecision.Outcome{{Kind: "mystery", Status: reviewdecision.StatusRefer}},
+			want:     `kind "mystery"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := ui.NewReport("review")
+			err := addOutcomeRows(report, tc.outcomes)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("addOutcomeRows = %v, want an error naming %s", err, tc.want)
+			}
+			if len(report.Rows()) != 0 {
+				t.Errorf("rows = %+v, want nothing rendered before the refusal", report.Rows())
+			}
+		})
+	}
+}
+
+// A review that publishes nothing needs nothing from the platform: no token,
+// no repository. Only a run that posts asks for either.
+func TestReviewPlainRunNeedsNoPlatformEnvironment(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: "exemptions:\n  - name: readme-only\n    reason: docs\n    paths: [\"README.md\"]\n",
+			"README.md":       "hello",
+		},
+		map[string]string{"README.md": "hello again"})
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_REPOSITORY", "")
+
+	out, err := runReview(t, dir, base)
+	if err != nil {
+		t.Fatalf("a plain review with no platform environment failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "exempt: readme-only") {
+		t.Errorf("the report does not state the exemption:\n%s", out)
+	}
+}
+
+// The decision's warnings reach the run's stderr: an event that cannot be read
+// is named there, so a break declared only in the title nobody read is not
+// dropped without a word.
+func TestReviewWritesTheDecisionsWarnings(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"README.md": "hello again"})
+	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
+
+	out, err := runReview(t, dir, base, "--event", missing)
+	var exit ui.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("review: %v\n%s", err, out)
+	}
+	if want := "warning: could not read the event at " + missing; !strings.Contains(out, want) {
+		t.Errorf("the run does not write the decision's warning %q:\n%s", want, out)
+	}
+}
+
+// A review that completes leaves its report behind as review.json, the
+// document publish folds into the comment: its referral row is the one the
+// terminal report states.
+func TestReviewWritesItsReportDocument(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{
+			referral.FileName: "exemptions:\n  - name: readme-only\n    reason: docs\n    paths: [\"README.md\"]\n",
+			"README.md":       "hello",
+		},
+		map[string]string{"README.md": "hello again"})
+
+	if out, err := runReview(t, dir, base); err != nil {
+		t.Fatalf("review: %v\n%s", err, out)
+	}
+	doc, err := readDocument(documentPath(reportsDir(dir), "review"))
+	if err != nil {
+		t.Fatalf("a completed review wrote no review.json: %v", err)
+	}
+	var referralRow *ui.Row
+	for i := range doc.Rows {
+		if doc.Rows[i].Label == "referral" {
+			referralRow = &doc.Rows[i]
+		}
+	}
+	if referralRow == nil || referralRow.Value != "exempt: readme-only" {
+		t.Errorf("review.json rows = %+v, want the referral row stating the exemption", doc.Rows)
 	}
 }

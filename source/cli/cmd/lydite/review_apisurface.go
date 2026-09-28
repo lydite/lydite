@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"path"
 
 	"github.com/spf13/cobra"
@@ -12,7 +10,6 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
 	"lydite/lydite/internal/finding"
-	"lydite/lydite/internal/forge"
 	"lydite/lydite/internal/reviewdecision"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
@@ -37,48 +34,42 @@ func (commandToolchains) CheckEnv(tc *toolchain.Env, c component.Component) []st
 	return childEnv(tc, c, runner.Invocation{})
 }
 
-// renderAPISurfaceRows renders what each comparison reviewdecision.Decide
-// already folded into the decision. It runs no comparison and decides
-// nothing: a declared break and a surface nothing could compare are
-// disqualifications in the decision, and reach the report through it.
-//
-// declared names where the change declares a breaking API change, and is
-// empty when nothing does. A component whose surface could not be compared
-// gets no row of its own, because its disqualification already names it and
-// why.
-func renderAPISurfaceRows(report *ui.Report, base, declared string, results []reviewdecision.SurfaceComparison) {
-	for _, res := range results {
-		skipped := detailOf(reviewdecision.SkippedNote(res.Skipped))
-		switch {
-		case res.Uncomputable != "":
-			continue
-		case len(res.Findings) == 0:
-			report.Add(ui.Row{
-				Status: ui.StatusPass,
-				Label:  gateAPISurface + "(" + res.Component + ")",
-				Value:  "no incompatible change against " + shortSHA(base),
-				Detail: skipped,
-			})
-		case declared != "":
-			// Declared, so the referral is the verdict and this row is what
-			// the reader needs to review: the break itself, not the claim
-			// that there is one.
-			report.Add(ui.Row{
-				Status: ui.StatusRefer,
-				Label:  gateAPISurface + "(" + res.Component + ")",
-				Value:  fmt.Sprintf("%s, declared", incompatible(len(res.Findings))),
-				Detail: append(capped(locate(res.Findings, res.Dir)), skipped...),
-			})
-		default:
-			detail := append(capped(locate(res.Findings, res.Dir)), skipped...)
-			detail = append(detail,
-				"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer")
-			report.Add(ui.Row{
-				Status: ui.StatusFail,
-				Label:  gateAPISurface + "(" + res.Component + ")",
-				Value:  fmt.Sprintf("%s, undeclared", incompatible(len(res.Findings))),
-				Detail: detail,
-			})
+// apiSurfaceRow renders one comparison reviewdecision.Decide already decided.
+// It runs no comparison and decides nothing: the outcome's status says whether
+// the surface held, broke under a declaration, or broke without one, and a
+// surface nothing could compare is a disqualification that names the
+// component and why, with no row of its own here.
+func apiSurfaceRow(o reviewdecision.Outcome, status ui.Status) ui.Row {
+	res := o.Surface
+	label := gateAPISurface + "(" + res.Component + ")"
+	skipped := detailOf(reviewdecision.SkippedNote(res.Skipped))
+	switch o.Status {
+	case reviewdecision.StatusPass:
+		return ui.Row{
+			Status: status,
+			Label:  label,
+			Value:  "no incompatible change against " + shortSHA(o.Base),
+			Detail: skipped,
+		}
+	case reviewdecision.StatusRefer:
+		// Declared, so the referral is the verdict and this row is what the
+		// reader needs to review: the break itself, not the claim that there
+		// is one.
+		return ui.Row{
+			Status: status,
+			Label:  label,
+			Value:  fmt.Sprintf("%s, declared", incompatible(len(res.Findings))),
+			Detail: append(capped(locate(res.Findings, res.Dir)), skipped...),
+		}
+	default:
+		detail := append(capped(locate(res.Findings, res.Dir)), skipped...)
+		detail = append(detail,
+			"restore the API, or declare the break with a `!` in the type of this change's title or a commit, or a BREAKING CHANGE: footer")
+		return ui.Row{
+			Status: status,
+			Label:  label,
+			Value:  fmt.Sprintf("%s, undeclared", incompatible(len(res.Findings))),
+			Detail: detail,
 		}
 	}
 }
@@ -124,25 +115,3 @@ func locate(findings []finding.Finding, dir string) []string {
 	return out
 }
 
-// pullRequestTitle reads the title out of the webhook payload, and is empty
-// wherever there is no payload to read.
-//
-// No flag is required and no environment is: a local review has no pull
-// request, and the commits carry the declaration there. A payload that exists
-// and cannot be read is warned about rather than fatal, for the same reason —
-// the title can only add a referral, so failing the run over an unreadable
-// one would turn an additive source into a blocker.
-func pullRequestTitle(warn io.Writer, eventPath string) string {
-	if eventPath == "" {
-		eventPath = os.Getenv("GITHUB_EVENT_PATH")
-	}
-	if eventPath == "" {
-		return ""
-	}
-	event, err := forge.LoadPullRequestEvent(eventPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(warn, "warning: could not read the event at %s (%v) — a break declared only in the pull request title is not seen\n", eventPath, err)
-		return ""
-	}
-	return event.PullRequest.Title
-}

@@ -36,7 +36,7 @@ the pointers moved, and two comments elsewhere now misdescribe it (below).
   stages later, after Fingerprint (which may run a comparison).
 
 **Two comments now misdescribe this.** `statuses.go`'s `RenderStatuses` doc (carried over from
-the deleted `status.go`) says "the relay admits a clearance ref to `lydite/clearance` alone: the
+`status.go`'s deleted `recordClearance`) says "the relay admits a clearance ref to `lydite/clearance` alone: the
 referral document is ... never relayed" — contradicted by `referralResolution`. And
 `index.ts`'s comment above the `standingStatus` read still names "`recordClearance` in
 `cmd/lydite/status.go`", which no longer exists, and says that route does "no live read at all"

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
-	"lydite/lydite/internal/reviewdecision"
+	"lydite/lydite/internal/flow"
+	reviewflow "lydite/lydite/internal/flows/review"
 )
 
 func newReviewCompareCmd() *cobra.Command {
@@ -28,18 +30,19 @@ need not, and never re-runs this comparison to reach it.`,
 			if surfacesPath == "" {
 				return fmt.Errorf("--write-surfaces names where to write the result")
 			}
-			ctx := cmd.Context()
-			baseSHA, err := reviewdecision.ResolveBase(ctx, dir, base, baseBranch)
+			compare, err := reviewflow.NewCompare()
 			if err != nil {
 				return err
 			}
-			// Never guarded: review compare never publishes, so there is no
-			// credential in this process for a Rust comparison to reach.
-			results, err := reviewdecision.CompareSurfaces(ctx, dir, baseSHA, false, commandToolchains{cmd}, cmd.ErrOrStderr())
-			if err != nil {
-				return err
-			}
-			return reviewdecision.WriteSurfaces(surfacesPath, baseSHA, results)
+			_, err = compare.Run(cmd.Context(), reviewflow.CompareParams{
+				Dir:        dir,
+				Base:       base,
+				BaseBranch: baseBranch,
+				Toolchains: commandToolchains{cmd},
+				Progress:   cmd.ErrOrStderr(),
+				Path:       surfacesPath,
+			}.Inputs())
+			return compareError(err)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", ".", "root directory whose .lydite/components.yml applies")
@@ -47,4 +50,14 @@ need not, and never re-runs this comparison to reach it.`,
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", baseBranchUsage)
 	cmd.Flags().StringVar(&surfacesPath, "write-surfaces", "", "write the raw comparison result to this path")
 	return cmd
+}
+
+// compareError is a comparison's failure as this command reports it: the
+// stage's own error, not the flow's framing of it.
+func compareError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
+	}
+	return err
 }

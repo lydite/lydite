@@ -256,3 +256,55 @@ func LoadPullRequestEvent(path string) (PullRequestEvent, error) {
 	}
 	return event, nil
 }
+
+// ErrNoEvent reports that no event payload path was given at all — there is
+// nowhere to read a pull request from, not even a path that turned out to be
+// wrong.
+var ErrNoEvent = errors.New("no event payload path given")
+
+// NotAPullRequestError reports that the event at Path parsed, but names no
+// pull request: it is a payload from some other trigger.
+type NotAPullRequestError struct {
+	Path string
+}
+
+func (e *NotAPullRequestError) Error() string {
+	return fmt.Sprintf("the event at %s names no pull request", e.Path)
+}
+
+// PullRequestRef is the pull request a pull_request payload points at: its
+// number, the revision measured as its head, and its title.
+//
+// It is the payload's own claim, not a live read. A review posts against the
+// revision it measured, and the title can only ever add a referral — see
+// docs/adr/0071-a-review-reads-its-pull-request-from-the-payload-and-posts-to-the-revision-it-measured.md.
+type PullRequestRef struct {
+	Number int
+	SHA    string
+	Title  string
+}
+
+// LoadPullRequestRef reads the pull request a pull_request event payload
+// points at.
+//
+// An empty eventPath is ErrNoEvent: there is no path to try reading. A
+// payload that loads but names no pull request — no head, no number — is a
+// *NotAPullRequestError naming the path that was read; any other read or
+// parse failure is returned as LoadPullRequestEvent reports it.
+func LoadPullRequestRef(eventPath string) (PullRequestRef, error) {
+	if eventPath == "" {
+		return PullRequestRef{}, ErrNoEvent
+	}
+	event, err := LoadPullRequestEvent(eventPath)
+	if err != nil {
+		return PullRequestRef{}, err
+	}
+	if event.PullRequest.Head.SHA == "" || event.Number == 0 {
+		return PullRequestRef{}, &NotAPullRequestError{Path: eventPath}
+	}
+	return PullRequestRef{
+		Number: event.Number,
+		SHA:    event.PullRequest.Head.SHA,
+		Title:  event.PullRequest.Title,
+	}, nil
+}

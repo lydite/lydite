@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,75 @@ func TestLoadPullRequestEventWithoutATitle(t *testing.T) {
 	}
 	if event.PullRequest.Title != "" || event.Number != 9 {
 		t.Errorf("event = %+v, want number 9 taken from the pull request and no title", event)
+	}
+}
+
+// An empty path names nowhere to read from, and is ErrNoEvent rather than a
+// read failure carrying an empty filename.
+func TestLoadPullRequestRefRefusesNoPath(t *testing.T) {
+	if _, err := LoadPullRequestRef(""); !errors.Is(err, ErrNoEvent) {
+		t.Errorf("err = %v, want ErrNoEvent", err)
+	}
+}
+
+// A payload naming no pull request — no head, no number — is a
+// *NotAPullRequestError naming the path that was read.
+func TestLoadPullRequestRefRefusesAPayloadNamingNoPullRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(`{"action":"checks_requested"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadPullRequestRef(path)
+	var notAPullRequest *NotAPullRequestError
+	if !errors.As(err, &notAPullRequest) {
+		t.Fatalf("err = %v, want *NotAPullRequestError", err)
+	}
+	if notAPullRequest.Path != path {
+		t.Errorf("Path = %q, want %q", notAPullRequest.Path, path)
+	}
+}
+
+// A file that cannot be read or a payload that cannot be parsed are neither
+// ErrNoEvent nor a *NotAPullRequestError: LoadPullRequestRef reports them as
+// LoadPullRequestEvent does.
+func TestLoadPullRequestRefRefusesAPayloadItCannotLoad(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	if _, err := LoadPullRequestRef(missing); err == nil || !strings.Contains(err.Error(), "reading the event payload") {
+		t.Errorf("err = %v, want a refusal naming the read", err)
+	}
+
+	malformed := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(malformed, []byte(`{"number":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPullRequestRef(malformed); err == nil || !strings.Contains(err.Error(), "parsing the event payload") {
+		t.Errorf("err = %v, want a refusal naming the parse", err)
+	}
+}
+
+// The success path reads the number, the head and the title together, the
+// same fields a review posts its status about and declares a break from.
+func TestLoadPullRequestRefReadsTheNumberTheHeadAndTheTitle(t *testing.T) {
+	payload := `{
+	  "number": 7,
+	  "pull_request": {
+	    "number": 7,
+	    "title": "feat!: drop the v1 client",
+	    "head": {"sha": "c0ffee"}
+	  }
+	}`
+	path := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadPullRequestRef(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (PullRequestRef{Number: 7, SHA: "c0ffee", Title: "feat!: drop the v1 client"}); got != want {
+		t.Errorf("LoadPullRequestRef = %+v, want %+v", got, want)
 	}
 }
 
