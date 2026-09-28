@@ -636,3 +636,49 @@ what this job submits against what it reads there itself. See
 [ADR 0075](../../docs/adr/0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for
 the full reasoning, including why this is not an `SCMRepository` implementation and not a
 `RelaySink`.
+## The threads flow
+
+`threadsflow.New` (`internal/flows/threads`) declares `threads`'s stages in this order:
+
+| Stage | Conditions |
+|---|---|
+| `init-trust` | none |
+| `init-scm` | none |
+| `load-pull-request` | none |
+| `read-findings` | none |
+| `list-threads` | none |
+| `plan` | none |
+| `write-ops` | none |
+| `take-down` | `.When(apply)` |
+| `answer` | `.When(apply)` |
+| `open` | `.When(apply)` |
+
+`init-trust` and `init-scm` are declared first, unconditionally — the opposite of the review
+flow's ordering above. A `threads` run needs its `SCMRepository` from its very first read:
+`list-threads` fetches the pull request's standing threads live even when `--apply` is not given,
+because `plan` computes a delta against them, not against nothing. There is no point in this
+flow's body where that need does not already hold, so trust is declared where the flow first
+needs it — the same rule the review flow's late, conditional declaration follows for its own
+premise. See [ADR 0073](../../docs/adr/0073-threads-declares-trust-first-and-writes-only-what-it-listed.md)
+for the full comparison and the failure precedence this ordering produces: repository
+(`init-trust`) → token (`init-scm`'s `scmstages.ErrNoCredential`) → event
+(`load-pull-request`) → everything else. The CLI reads the repository slug for its own rows off
+`init-trust`'s `Trusted.Repository()`, read from `flow.Output[truststages.Out](r,
+threadsflow.StageInitTrust)`, rather than off the payload or a flag.
+
+`read-findings`, `list-threads` and `plan` run unconditionally too: the plan and its warnings
+(a duplicate fingerprint dropped, a report directory that could not be read) are computed and
+written to `--ops` whether or not the caller asked to apply them, the same way `write-ops` always
+runs. `take-down`, `answer` and `open` are the flow's gated tail, run only `.When(apply)`, after
+the plan already exists — deleting the comments `Ops.Delete` names, replying to the ones
+`Ops.Reply` leaves standing, and opening the ones `Ops.Create` names as new. Every id those three
+stages write to comes from `Ops`, computed from `list-threads`'s own listing earlier in the same
+run; no stage lists the pull request's comments a second time before writing.
+
+`TakeDown` and `Open` each perform more than one write per call, and a `Result`'s `Out` is
+unavailable once a stage has failed, so the progress each made before failing travels in a typed
+error instead: `*threadsstages.TakeDownError{Answered []int64, Err error}` names every comment
+answered instead of deleted before the failure, which is why the CLI still prints a warning for
+each of those even when the run as a whole fails; `*threadsstages.OpenError{Lost, Posted int, Err
+error}`'s `Error()` reads `"<Lost> located finding(s) reached no surface: <Err>"`. Both implement
+`Unwrap`, so `errors.Is`/`errors.As` still reach the underlying cause.
