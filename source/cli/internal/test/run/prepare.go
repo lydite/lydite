@@ -31,6 +31,9 @@ func Prepare(ctx context.Context, inv runner.Invocation, dir, root, label string
 	// installed here: the repository's dependencies with what the repository
 	// declared, and lydite's pinned runners with lydite's toolchain alone.
 	env := executil.Env{Check: ChildEnv(tc, c, inv), Install: tc.Environ()}
+	if row, ok := refusedManager(dir, root, label, c, cfg, out); !ok {
+		return row, false
+	}
 	r, ok := runner.Lookup(c.Runner)
 	if !ok {
 		return prepareCommand(ctx, dir, root, label, c, cfg, env, out)
@@ -47,6 +50,29 @@ func Prepare(ctx context.Context, inv runner.Invocation, dir, root, label string
 	}
 	return ui.Row{}, true
 }
+
+// refusedManager fails a component whose node install would run under a
+// package manager lydite refuses (see nodedeps.Refusal), before any install
+// starts.
+//
+// The refusal is the component's own: nothing was provisioned for the pin, and
+// every other component in the run carries on. toolchain.enabled: false lifts
+// it, because provisioning is then the machine's to arrange and the install
+// runs whatever manager is on PATH.
+func refusedManager(dir, root, label string, c component.Component, cfg config.Config, out Output) (ui.Row, bool) {
+	if !cfg.Toolchain.Enabled || !installsNodeDeps(dir, c) {
+		return ui.Row{}, true
+	}
+	if err := nodedeps.Refusal(dir, root); err != nil {
+		row := Failure(label, out.Rel, err.Error(), "not prepared", "")
+		row.Detail = append(row.Detail, refusalHint)
+		return row, false
+	}
+	return ui.Row{}, true
+}
+
+// refusalHint is the way out of a refused package manager pin.
+const refusalHint = "Pin a supported release in packageManager, or set toolchain.enabled: false in " + config.FileName + " to install with the package manager on PATH."
 
 // prepareCommand installs the node dependencies of a component that names no
 // runner, so that its command runs over a workspace lydite installed.

@@ -54,9 +54,9 @@ func TestPackageManager(t *testing.T) {
 	}{
 		{
 			name:      "a pinned version",
-			manifest:  `{"packageManager":"pnpm@8.15.4"}`,
+			manifest:  `{"packageManager":"pnpm@12.4.1"}`,
 			lockfiles: []string{"pnpm-lock.yaml"},
-			want:      Declared{Name: "pnpm", Version: "8.15.4"},
+			want:      Declared{Name: "pnpm", Version: "12.4.1"},
 			wantOK:    true,
 		},
 		{
@@ -86,12 +86,12 @@ func TestPackageManager(t *testing.T) {
 			// The field only adds a version to a manager the lockfile names;
 			// with no lockfile there is no install for it to pin.
 			name:     "no lockfile",
-			manifest: `{"packageManager":"pnpm@8.15.4"}`,
+			manifest: `{"packageManager":"pnpm@12.4.1"}`,
 		},
 		{
 			// Ambiguity keeps the meaning Manager gives it.
 			name:      "ambiguous lockfiles",
-			manifest:  `{"packageManager":"pnpm@8.15.4"}`,
+			manifest:  `{"packageManager":"pnpm@12.4.1"}`,
 			lockfiles: []string{"pnpm-lock.yaml", "yarn.lock"},
 		},
 		{
@@ -114,19 +114,19 @@ func TestPackageManager(t *testing.T) {
 		},
 		{
 			name:      "a range is not a pin",
-			manifest:  `{"packageManager":"pnpm@^8.15.4"}`,
+			manifest:  `{"packageManager":"pnpm@^12.4.1"}`,
 			lockfiles: []string{"pnpm-lock.yaml"},
 			wantErr:   true,
 		},
 		{
 			name:      "a partial version is not a pin",
-			manifest:  `{"packageManager":"pnpm@8"}`,
+			manifest:  `{"packageManager":"pnpm@12"}`,
 			lockfiles: []string{"pnpm-lock.yaml"},
 			wantErr:   true,
 		},
 		{
 			name:      "no name",
-			manifest:  `{"packageManager":"@8.15.4"}`,
+			manifest:  `{"packageManager":"@12.4.1"}`,
 			lockfiles: []string{"pnpm-lock.yaml"},
 			wantErr:   true,
 		},
@@ -157,6 +157,90 @@ func TestPackageManager(t *testing.T) {
 			}
 			if ok != tc.wantOK || got != want {
 				t.Fatalf("PackageManager = (%+v, %v), want (%+v, %v)", got, ok, want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// pnpm's floor is its major alone, so a 12 prerelease — which orders below
+// 12.0.0 as semver — is a 12 release, and no other manager has a floor.
+func TestSupportedIsPnpmsMajorAlone(t *testing.T) {
+	for _, tc := range []struct {
+		declared Declared
+		want     bool
+	}{
+		{Declared{Name: "pnpm", Version: "8.15.4"}, false},
+		{Declared{Name: "pnpm", Version: "10.18.3"}, false},
+		{Declared{Name: "pnpm", Version: "11.9.0"}, false},
+		{Declared{Name: "pnpm", Version: "11.9.0", Hash: "sha512.abc"}, false},
+		{Declared{Name: "pnpm", Version: "12.0.0-rc.1"}, true},
+		{Declared{Name: "pnpm", Version: "12.0.0"}, true},
+		{Declared{Name: "pnpm", Version: "12.4.1", Hash: "sha512.abc"}, true},
+		{Declared{Name: "pnpm", Version: "13.0.0"}, true},
+		{Declared{Name: "yarn", Version: "1.22.19"}, true},
+		{Declared{Name: "yarn", Version: "4.1.0"}, true},
+		{Declared{Name: "npm", Version: "10.2.0"}, true},
+	} {
+		if got := tc.declared.Supported(); got != tc.want {
+			t.Errorf("%+v.Supported() = %v, want %v", tc.declared, got, tc.want)
+		}
+	}
+}
+
+// A pnpm pin below the floor is refused for the component whose workspace
+// root carries it, naming the file relative to the scan root and the pin.
+func TestRefusalNamesTheFileAndThePin(t *testing.T) {
+	hash := "+sha512." + strings.Repeat("a", 128)
+	for _, version := range []string{"8.15.4", "10.18.3", "11.9.0"} {
+		for _, suffix := range []string{"", hash} {
+			t.Run(version+suffix, func(t *testing.T) {
+				root := t.TempDir()
+				ws := mkdir(t, root, "web")
+				write(t, ws, "pnpm-lock.yaml")
+				manifest := `{"packageManager":"pnpm@` + version + suffix + `"}`
+				if err := os.WriteFile(filepath.Join(ws, "package.json"), []byte(manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				pkg := mkdir(t, ws, "packages", "ui")
+				err := Refusal(pkg, root)
+				if err == nil {
+					t.Fatal("Refusal accepted a pnpm pin below 12")
+				}
+				want := "lydite requires pnpm ≥ 12; web/package.json pins pnpm@" + version
+				if err.Error() != want {
+					t.Errorf("Refusal = %q, want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+// Only a refused pin is refused: a supported pnpm, any yarn, no field, no
+// workspace root and a field PackageManager cannot read all answer nil.
+func TestRefusalAcceptsEverythingElse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		manifest string
+		lockfile string
+	}{
+		{"pnpm 12", `{"packageManager":"pnpm@12.0.0"}`, "pnpm-lock.yaml"},
+		{"pnpm 12.4.1", `{"packageManager":"pnpm@12.4.1+sha512.abc"}`, "pnpm-lock.yaml"},
+		{"a pnpm 12 prerelease", `{"packageManager":"pnpm@12.0.0-rc.1"}`, "pnpm-lock.yaml"},
+		{"yarn 1", `{"packageManager":"yarn@1.22.19"}`, "yarn.lock"},
+		{"no field", `{"name":"web"}`, "pnpm-lock.yaml"},
+		{"no lockfile", `{"packageManager":"pnpm@10.18.3"}`, ""},
+		{"unreadable", `{"packageManager":"pnpm@^10"}`, "pnpm-lock.yaml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.lockfile != "" {
+				write(t, root, tc.lockfile)
+			}
+			if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(tc.manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Refusal(root, root); err != nil {
+				t.Errorf("Refusal = %v, want nil", err)
 			}
 		})
 	}
