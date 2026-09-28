@@ -35,8 +35,11 @@ The state is valid only under its **fingerprint**, which is a hash of:
   plus the untracked files git is not ignoring — the same list `mutation.Tree` copies);
 - the component's runner argv;
 - the toolchain versions lydite provisioned;
-- lydite's own version;
-- the `--timeout` and `--memory` settings.
+- lydite's own version (for an unreleased build, a hash of the binary itself);
+- the `--timeout` and `--memory` settings;
+- the operating system and architecture, since whether memory can be bounded at all depends on
+  them;
+- the environment composed for the suite, hashed rather than recorded.
 
 A mutant is identified by its path, operator, byte offset and length, and its original and
 mutated text.
@@ -46,8 +49,8 @@ exactly. Uncommitted edits are part of what a local run measured. A SHA would re
 across an edit the SHA does not see.
 
 When a run starts, a matching fingerprint makes it reuse the recorded baseline and every
-recorded verdict: killed, survived, unviable, timed out, out of memory, and acknowledged. Only
-the mutants with no recorded verdict are run. Timed-out and out-of-memory verdicts are reused as
+recorded verdict: killed, survived, unviable, timed out, out of memory, and acknowledged. A mutant cut short because the run was cancelled has no verdict, and nothing is recorded
+for it. Only the mutants with no recorded verdict are run. Timed-out and out-of-memory verdicts are reused as
 well. They were measured against a budget derived from the baseline, and the resumed run reuses
 that same baseline, so its budget is identical. The only thing that differs is machine load,
 and a fresh run is exposed to that noise too.
@@ -99,6 +102,35 @@ This is still not a runtime budget in 0027's sense. Nothing is capped and then p
 nothing is failed for its size. The deadline only moves where the run stops, from a job timeout
 that keeps nothing to a point where the run can keep what it measured. A rerun resumes from
 there, and the amber row lasts only until then.
+
+## Only mutation reuses its verdicts
+
+A fingerprinted state earns its place only where a gate has two properties at once:
+
+- it outruns the job;
+- its verdicts depend on nothing but the tree it measured.
+
+Mutation is the one gate that has both. It is thousands of independent units, each a function of
+source, suite and budget, and it runs for hours on a large change.
+
+Every other gate lacks at least one of these properties:
+
+- **Scanners that consult an advisory database** — `govulncheck`, `cargo-audit`, `cargo-deny`,
+  the licence gate — must never reuse a verdict. Their answer changes when the database does,
+  while the tree stays the same, so a cached clean result would hide an advisory published since
+  it was recorded. Adding the database's version to the fingerprint would miss on nearly every
+  run, leaving nothing to reuse.
+- **Scanners that depend only on the tree** — gosec, clippy, Biome, shellcheck, gitleaks, Semgrep
+  under pinned rules, the CRAP gate — could be fingerprinted exactly. They finish in seconds to
+  minutes, though, and a cache over each one's own result shape would cost more than it saves.
+- **A component's test suite** is the only other gate whose cost can approach mutation's. Its
+  outcome is not a function of the tree alone, however: a suite reaching a declared service is
+  not hermetic, and a cached flaky pass is a pass nothing measured. It adopts a state only if
+  one component's suite comes to outrun the job the way mutation does.
+
+The digest over the tree's contents is shared by any future adopter, because that is the part a
+second gate would need exactly as mutation does. The state that reuses verdicts stays
+mutation's own.
 
 ## A scheduled sweep of the default branch clears files, and only ever advises
 
