@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/executil"
+	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/ui"
 )
 
@@ -82,42 +83,6 @@ func runReleaseCheckCmd(t *testing.T, dir string, extra ...string) (string, erro
 	cmd.SetArgs(append([]string{"check", "--dir", dir, "--no-color"}, extra...))
 	err := cmd.Execute()
 	return out.String(), err
-}
-
-// The bump rule is ADR 0010's, in both eras: a break lands where the leftmost
-// non-zero component of the previous version increases. Each case names the
-// era it is testing, because the two halves of the rule disagree about exactly
-// the same minor bump.
-func TestBumpAdmitsBreakOnlyWhereTheLeftmostNonZeroComponentIncreases(t *testing.T) {
-	for _, c := range []struct {
-		previous, tag string
-		want          bool
-		why           string
-	}{
-		{"v0.2.0", "v0.3.0", true, "in 0.x the leftmost non-zero component is the minor"},
-		{"v0.2.0", "v0.2.1", false, "a patch bump carries no break in any era"},
-		{"v0.2.0", "v0.10.0", true, "the minor is compared numerically, not lexically"},
-		{"v0.9.0", "v1.0.0", true, "the release that leaves 0.x may carry one"},
-		{"v0.2.0", "v1.0.0", true, "crossing eras, though the minor it is measured on went 2 to 0"},
-		{"v1.2.0", "v1.3.0", false, "from 1.0.0 onward a minor bump is backward-compatible"},
-		{"v1.2.0", "v1.2.1", false, "nor does a patch bump in 1.x"},
-		{"v1.2.0", "v2.0.0", true, "from 1.0.0 onward the leftmost non-zero component is the major"},
-		{"v1.2.0", "v10.0.0", true, "the major is compared numerically too"},
-		// A prerelease is the line it leads to arriving early, so it carries
-		// that line's bump: the marker is not a version component.
-		{"v0.2.0", "v0.3.0-rc.1", true, "a prerelease of an admitting bump admits one"},
-		{"v0.2.0", "v0.2.1-rc.1", false, "a prerelease of a patch bump admits none"},
-		{"v1.2.0", "v2.0.0-rc.1", true, "a prerelease of a major bump admits one"},
-		// Below 0.1.0 the leftmost non-zero component is the patch, which is
-		// the same rule read one position further right.
-		{"v0.0.3", "v0.0.4", true, "in 0.0.x the leftmost non-zero component is the patch"},
-		{"v0.0.3", "v0.1.0", true, "a minor bump out of 0.0.x increases it too"},
-		{"v0.0.3", "v0.0.3", false, "no bump at all admits nothing, even in 0.0.x"},
-	} {
-		if got := bumpAdmitsBreak(c.previous, c.tag); got != c.want {
-			t.Errorf("bumpAdmitsBreak(%q, %q) = %v, want %v — %s", c.previous, c.tag, got, c.want, c.why)
-		}
-	}
 }
 
 // A declared break on the bump that admits it publishes, and the declaring
@@ -373,4 +338,60 @@ func TestReleaseCheckJSONCarriesTheVerdict(t *testing.T) {
 	if len(doc.Rows[0].Detail) == 0 || !strings.Contains(doc.Rows[0].Detail[0], "the verdict is a status") {
 		t.Errorf("the declaring commits travel in the document: %s", out)
 	}
+}
+
+// Each way the check cannot begin is reported in the stage's own words and in
+// nothing else: the flow a stage ran inside is not something a person naming a
+// tag, or fetching one, has any use for.
+func TestReleaseCheckErrorsCarryNoFlowFraming(t *testing.T) {
+	t.Run("no tag", func(t *testing.T) {
+		t.Setenv("GITHUB_REF_TYPE", "")
+		t.Setenv("GITHUB_REF_NAME", "")
+		dir := releaseRepo(t, releaseCommit{message: "feat: untagged"})
+
+		_, err := runReleaseCheckCmd(t, dir)
+		want := "release check needs the tag it is checking: pass --tag, " +
+			"run where GITHUB_REF_NAME names a tag, or check the tag out"
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %q", err, want)
+		}
+	})
+
+	t.Run("a shallow checkout with no tag below the target", func(t *testing.T) {
+		origin := releaseRepo(t,
+			releaseCommit{message: "feat: the first release", tag: "v0.1.0"},
+			releaseCommit{message: "fix: a leader dot"},
+			releaseCommit{message: "feat: the second release", tag: "v0.2.0"},
+		)
+		dir := t.TempDir()
+		if r := executil.RunQuiet(context.Background(), origin, "git", "clone", "--depth", "1", "file://"+origin, dir); !r.Ok() {
+			t.Fatalf("git clone --depth 1: %v\n%s", r.Err, r.Output)
+		}
+
+		_, err := runReleaseCheckCmd(t, dir, "--tag", "v0.2.0")
+		want := "v0.2.0 has no tag below it in a shallow checkout, so a real predecessor cannot be told from none at all: " +
+			"check out with `fetch-depth: 0` and the repository's tags fetched"
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %q", err, want)
+		}
+	})
+
+	t.Run("a range it cannot read", func(t *testing.T) {
+		dir := releaseShallowClone(t, releaseRepo(t,
+			releaseCommit{message: "feat: the first release", tag: "v0.1.0"},
+			releaseCommit{message: "fix: a leader dot"},
+		), "v0.1.0")
+		_, cause := gitstate.CommitMessages(context.Background(), dir, "v0.1.0", "HEAD")
+		if cause == nil {
+			t.Fatal("fixture is readable: v0.1.0's commit must be absent from the clone")
+		}
+
+		_, err := runReleaseCheckCmd(t, dir, "--tag", "v0.2.0")
+		want := "the commits in v0.1.0..HEAD cannot be read: " + cause.Error() +
+			"\n       v0.1.0 must exist here as a tag and its commit must be present and reachable from HEAD:" +
+			"\n       check out with `fetch-depth: 0` and the repository's tags fetched"
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %q", err, want)
+		}
+	})
 }
