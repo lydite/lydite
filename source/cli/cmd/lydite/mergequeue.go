@@ -14,7 +14,6 @@ import (
 	queueflow "lydite/lydite/internal/flows/queue"
 	"lydite/lydite/internal/referral"
 	"lydite/lydite/internal/relay"
-	"lydite/lydite/internal/reviewdecision"
 	queuestages "lydite/lydite/internal/stages/queue"
 	"lydite/lydite/internal/ui"
 )
@@ -185,17 +184,12 @@ func queueRows(r *flow.Result) ([]ui.Row, error) {
 	}, queueRow(submitted.Answer)}, nil
 }
 
-// queueDecision recomputes the decision this entry renders:
-// reviewdecision.DecideFromDiff, over the diff and the base commit's
-// exemptions alone.
-//
-// The base is the base branch's current tip at queue time, so the exemptions
-// are the ones in force now: a clearance carried forward under rules that have
-// since moved would be a clearance issued under rules that no longer apply. If
-// the file moved in a way that changes the recomputed set, the fingerprint
-// legitimately differs and the entry re-refers.
+// queueDecision is the decision the queue flow's recompute-decision stage
+// renders for dir against baseSHA, so a caller asserting on it asserts on the
+// stage the command runs.
 func queueDecision(ctx context.Context, dir, baseSHA string) (referral.Decision, error) {
-	return reviewdecision.DecideFromDiff(ctx, dir, baseSHA)
+	out, err := queuestages.RecomputeDecision(ctx, queuestages.RecomputeDecisionIn{Dir: dir, BaseSHA: baseSHA})
+	return out.Decision, err
 }
 
 // queueReasons says what the fingerprint was taken over, so a log reading
