@@ -563,10 +563,13 @@ var coverageFlags = map[string]bool{
 }
 
 // goBuildRejected is the coverage flags plus the `go test` flags `go build` does
-// not define: the ones that select, repeat, time or shuffle a test run, and the
-// benchmark and fuzz flags. Boolean ones (-failfast, -short, -benchmem) are
-// named too, and stay out of goTestValueFlags so they never take the argument
-// behind them.
+// not define: the ones that select, repeat, time or shuffle a test run, the
+// benchmark and fuzz flags, the profiling and trace outputs (-cpuprofile,
+// -memprofile, -blockprofile, -mutexprofile and their rates, -trace,
+// -outputdir), and the test binary's own controls (-c, -exec, -vet, -fullpath,
+// -artifacts, -gocoverdir). Boolean ones (-failfast, -short, -benchmem, -c,
+// -fullpath, -artifacts) are named too, and stay out of goTestValueFlags so
+// they never take the argument behind them.
 var goBuildRejected = func() map[string]bool {
 	m := map[string]bool{}
 	for name := range coverageFlags {
@@ -576,6 +579,9 @@ var goBuildRejected = func() map[string]bool {
 		"timeout", "run", "skip", "count", "failfast", "short", "parallel", "cpu",
 		"bench", "benchtime", "benchmem", "fuzz", "fuzztime", "fuzzminimizetime",
 		"fuzzcachedir", "shuffle", "list",
+		"cpuprofile", "memprofile", "memprofilerate", "blockprofile", "blockprofilerate",
+		"mutexprofile", "mutexprofilefraction", "outputdir", "trace",
+		"c", "exec", "vet", "fullpath", "artifacts", "gocoverdir",
 	} {
 		m[name] = true
 	}
@@ -596,6 +602,7 @@ var goTestValueFlags = map[string]bool{
 	"mutexprofile": true, "mutexprofilefraction": true, "outputdir": true,
 	"overlay": true, "p": true, "parallel": true, "run": true, "shuffle": true,
 	"skip": true, "tags": true, "timeout": true, "toolexec": true, "trace": true,
+	"vet": true,
 }
 
 // nextestJUnit is where cargo-nextest writes JUnit under the default profile.
