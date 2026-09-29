@@ -8,8 +8,8 @@ saw:
   - source/cli/internal/flows/mutation/mutation.go
 ---
 
-Checked 2026-09-29, after the resume slice landed.
+Checked 2026-09-29, after the deadline slice landed on its branch.
 
 - The plan's line numbers predate the Flow migration; find symbols, not lines. Flow inputs are `Input*` constants plus `Params.Inputs()` in `internal/flows/mutation/mutation.go`.
 - The tree digest is computed inside `ScopeChange` (`declaration.go`) from its own `gitdiff.Tracked` listing, made when a worker directory is needed or resume is on; `TreeDigest` is `""` when resume is off or the state cannot be prepared, and `RunMutants` resumes only when both `StateDir` and `TreeDigest` are non-empty.
-- `run.go` still comments that ADR 0027 refuses a runtime budget at the `costProjection` write; that stays until `--deadline` lands.
+- The `costProjection` comments in `run.go` and `budget.go` describe a projection that caps nothing, with `--deadline` as what stops a run.
