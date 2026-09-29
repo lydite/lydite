@@ -56,6 +56,9 @@ const (
 	// bound; zero asks for the derivation from the component's baseline.
 	InputTimeout = "Timeout"
 	InputMemory  = "Memory"
+	// InputDeadline is the time.Time the run stops dispatching at and
+	// cancels what is in flight, and zero for a run with none.
+	InputDeadline = "Deadline"
 	// InputStream mirrors each component's log as it is written.
 	InputStream = "Stream"
 	// InputDiagnostics is the io.Writer a declaration that matched no mutant
@@ -113,8 +116,11 @@ type Params struct {
 	Limit        int
 	Timeout      time.Duration
 	Memory       int64
-	Stream       bool
-	Diagnostics  io.Writer
+	// Deadline is when the run stops, as an instant rather than a duration so
+	// that whatever ran before the flow counts against it.
+	Deadline    time.Time
+	Stream      bool
+	Diagnostics io.Writer
 	// StateDir is the resume state root, empty when resume is off.
 	StateDir      string
 	Fresh         bool
@@ -136,6 +142,7 @@ func (p Params) Inputs() flow.Inputs {
 		InputLimit:         p.Limit,
 		InputTimeout:       p.Timeout,
 		InputMemory:        p.Memory,
+		InputDeadline:      p.Deadline,
 		InputStream:        p.Stream,
 		InputDiagnostics:   p.Diagnostics,
 		InputStateDir:      p.StateDir,
@@ -233,6 +240,7 @@ func New() (*flow.Flow, error) {
 		With("Limit", flow.FromInput(InputLimit)).
 		With("Timeout", flow.FromInput(InputTimeout)).
 		With("Memory", flow.FromInput(InputMemory)).
+		With("Deadline", flow.FromInput(InputDeadline)).
 		With("Stream", flow.FromInput(InputStream)).
 		With("Diagnostics", flow.FromInput(InputDiagnostics)).
 		With("StateDir", stateDir).

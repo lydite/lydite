@@ -53,7 +53,7 @@ func newMutationCmd() *cobra.Command {
 	var components []string
 	var asJSON, noColor, stream, onlyAffected, declined, noGate, fresh bool
 	var concurrency, baseBranch, baseSHA, memory, stateDir string
-	var timeout time.Duration
+	var timeout, deadline time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
 		SilenceUsage:  true,
@@ -114,6 +114,9 @@ same token as a suppression, declaring one refers the change to a human.`,
 			if timeout < 0 {
 				return fmt.Errorf("--timeout must not be negative, got %s", timeout)
 			}
+			if deadline < 0 {
+				return fmt.Errorf("--deadline must not be negative, got %s", deadline)
+			}
 			maxMemory, err := parseBytes(memory)
 			if err != nil {
 				return fmt.Errorf("--memory: %w", err)
@@ -150,6 +153,7 @@ same token as a suppression, declaring one refers the change to a human.`,
 				Limit:         limit,
 				Timeout:       timeout,
 				Memory:        maxMemory,
+				Deadline:      deadlineAt(processStart, deadline),
 				StateDir:      resolvedState,
 				LyditeVersion: build,
 				Fresh:         fresh,
@@ -229,6 +233,13 @@ same token as a suppression, declaring one refers the change to a human.`,
 	// component unmeasured rather than reporting every mutant as killed.
 	cmd.Flags().StringVar(&memory, "memory", "",
 		"how much memory one mutant's suite may hold before it counts as killed, e.g. 4GiB; derived from the component's own baseline by default")
+	// Measured from the process's start rather than from the first mutant, so
+	// provisioning, the base, the baselines and the setup all count against it:
+	// set below a job's own timeout, it is the point a run stops and keeps what
+	// it measured rather than being killed and keeping nothing. See ADR 0075.
+	cmd.Flags().DurationVar(&deadline, "deadline", 0,
+		"how long after lydite starts to stop dispatching mutants and cancel those in flight, "+
+			"keeping every verdict reached for a rerun to resume from; no deadline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	cmd.Flags().BoolVar(&declined, "declined", false,
 		"write a report saying this repository declined mutation testing for this run, and do nothing else")
@@ -248,6 +259,19 @@ same token as a suppression, declaring one refers the change to a human.`,
 	cmd.Flags().BoolVar(&fresh, "fresh", false,
 		"discard the recorded state of each component and measure every mutant again")
 	return cmd
+}
+
+// processStart is when this process started, as near as the process can tell:
+// the origin --deadline is measured from.
+var processStart = time.Now()
+
+// deadlineAt is the instant a run given d from start stops, and zero for no
+// deadline at all.
+func deadlineAt(start time.Time, d time.Duration) time.Time {
+	if d == 0 {
+		return time.Time{}
+	}
+	return start.Add(d)
 }
 
 // mutationStateEnv names the state root when --state-dir is not given.

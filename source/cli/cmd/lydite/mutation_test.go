@@ -920,6 +920,7 @@ func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {
 		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}, `--concurrency`},
 		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}, "at least 1"},
 		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}, "--timeout must not be negative"},
+		{"a negative deadline", []string{"--dir", root, "--deadline", "-5s"}, "--deadline must not be negative"},
 		{"a memory bound that is not a size", []string{"--dir", root, "--memory", "lots"}, "--memory"},
 		{"a negative memory bound", []string{"--dir", root, "--memory", "-1GiB"}, "--memory"},
 		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}, "nope"},
@@ -2624,6 +2625,11 @@ func TestEachOutcomeKindIsItsOwnRow(t *testing.T) {
 			want: ui.Row{Status: ui.StatusPass, Label: "mutation(app)", Value: "3 of 3 mutant(s) killed in 12s",
 				Log: logRel},
 		},
+		mutationstages.KindIncomplete: {
+			outcome: mutationstages.ComponentOutcome{Summary: mutation.Summary{Killed: 1}, Measured: 1, Wanted: 3},
+			want: ui.Row{Status: ui.StatusFail, Label: "mutation(app)", Value: "not runnable",
+				Detail: []string{"lydite has no account of a incomplete outcome"}},
+		},
 	}
 	for k := mutationstages.KindNotRun; !strings.HasPrefix(k.String(), "OutcomeKind("); k++ {
 		c, ok := cases[k]
@@ -2700,5 +2706,20 @@ func TestResumeInputsSwitchResumingOffWithALineSayingWhy(t *testing.T) {
 	if dir, _ := resumeInputs("/scan", "", "", "v1.2.3", noCache, noExe, open, &w); dir != "" ||
 		!strings.Contains(w.String(), "no user cache directory") {
 		t.Errorf("no cache directory resolved to dir %q, said %q", dir, w.String())
+	}
+}
+
+// A deadline is an instant measured from the process's start, so whatever ran
+// before the mutants counts against it; no duration is no deadline at all.
+func TestADeadlineIsMeasuredFromTheProcessStart(t *testing.T) {
+	start := time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	if got := deadlineAt(start, 90*time.Minute); !got.Equal(start.Add(90 * time.Minute)) {
+		t.Errorf("deadline = %s, want 90m after the start", got)
+	}
+	if got := deadlineAt(start, 0); !got.IsZero() {
+		t.Errorf("no duration gave the deadline %s, want none", got)
+	}
+	if processStart.IsZero() || processStart.After(time.Now()) {
+		t.Errorf("the process start is %s, want an instant already past", processStart)
 	}
 }
