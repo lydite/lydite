@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path"
@@ -138,22 +139,28 @@ same token as a suppression, declaring one refers the change to a human.`,
 			if stateNote != "" {
 				fmt.Fprintln(os.Stderr, stateNote)
 			}
+			build, err := lyditeVersion(version, os.Executable, func(p string) (io.ReadCloser, error) { return os.Open(p) })
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
+				resolvedState = ""
+			}
 			r, err := mutate.Run(ctx, mutationflow.Params{
-				Dir:          dir,
-				Components:   components,
-				Toolchains:   commandToolchains{cmd},
-				BaseBranch:   baseBranch,
-				BaseSHA:      baseSHA,
-				OnlyAffected: onlyAffected,
-				Affected:     affectedFrom,
-				Shape:        mutationShape{},
-				Lifecycle:    &mutationLifecycle{},
-				Limit:        limit,
-				Timeout:      timeout,
-				Memory:       maxMemory,
-				StateDir:     resolvedState,
-				Fresh:        fresh,
-				Stream:       stream,
+				Dir:           dir,
+				Components:    components,
+				Toolchains:    commandToolchains{cmd},
+				BaseBranch:    baseBranch,
+				BaseSHA:       baseSHA,
+				OnlyAffected:  onlyAffected,
+				Affected:      affectedFrom,
+				Shape:         mutationShape{},
+				Lifecycle:     &mutationLifecycle{},
+				Limit:         limit,
+				Timeout:       timeout,
+				Memory:        maxMemory,
+				StateDir:      resolvedState,
+				LyditeVersion: build,
+				Fresh:         fresh,
+				Stream:        stream,
 				// The process's own stderr, where a declaration that matched
 				// no mutant is named beside the per-component mirror.
 				Diagnostics: os.Stderr,
@@ -276,6 +283,31 @@ func resolveStateDir(flag, env, scanRoot string, userCacheDir func() (string, er
 	}
 	sum := sha256.Sum256([]byte(scanRoot))
 	return filepath.Join(cache, "lydite", "mutation", hex.EncodeToString(sum[:])), ""
+}
+
+// lyditeVersion names the lydite whose verdicts a resumed run would reuse. A
+// release is its tag. A dev build is "dev" for every local build, so it is
+// named by the hash of the executable itself: two builds never share resume
+// state. An executable that cannot be found or read is an error, because any
+// fixed stand-in would be shared by every build that fails the same way.
+func lyditeVersion(version string, executable func() (string, error), open func(string) (io.ReadCloser, error)) (string, error) {
+	if version != "dev" {
+		return version, nil
+	}
+	path, err := executable()
+	if err != nil {
+		return "", fmt.Errorf("locating the running executable: %w", err)
+	}
+	f, err := open(path)
+	if err != nil {
+		return "", fmt.Errorf("reading the running executable: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("reading the running executable: %w", err)
+	}
+	return "dev+" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // annotationMarker is the declaration an author writes to say no test could

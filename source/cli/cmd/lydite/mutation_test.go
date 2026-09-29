@@ -31,6 +31,58 @@ func cacheAt(dir string) func() (string, error) {
 	return func() (string, error) { return dir, nil }
 }
 
+func executableWith(path string, content string) (func() (string, error), func(string) (io.ReadCloser, error)) {
+	return func() (string, error) { return path, nil },
+		func(p string) (io.ReadCloser, error) {
+			if p != path {
+				return nil, fmt.Errorf("unexpected path %s", p)
+			}
+			return io.NopCloser(strings.NewReader(content)), nil
+		}
+}
+
+func TestAReleaseVersionIsUsedAsIsWithoutTouchingTheExecutable(t *testing.T) {
+	executable := func() (string, error) { t.Fatal("executable consulted"); return "", nil }
+	open := func(string) (io.ReadCloser, error) { t.Fatal("executable opened"); return nil, nil }
+	got, err := lyditeVersion("v1.2.3", executable, open)
+	if err != nil || got != "v1.2.3" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestADevVersionIsNamedByTheExecutablesContents(t *testing.T) {
+	exeA, openA := executableWith("/bin/a", "one")
+	exeA2, openA2 := executableWith("/bin/other", "one")
+	exeB, openB := executableWith("/bin/a", "two")
+	a, errA := lyditeVersion("dev", exeA, openA)
+	a2, _ := lyditeVersion("dev", exeA2, openA2)
+	b, _ := lyditeVersion("dev", exeB, openB)
+	if errA != nil {
+		t.Fatal(errA)
+	}
+	if len(a) != len("dev+")+64 || !strings.HasPrefix(a, "dev+") {
+		t.Fatalf("got %q, want dev+<64 hex>", a)
+	}
+	if a != a2 {
+		t.Errorf("the same contents gave %q and %q", a, a2)
+	}
+	if a == b {
+		t.Errorf("different contents shared %q", a)
+	}
+}
+
+func TestADevBuildWhoseExecutableCannotBeReadHasNoVersion(t *testing.T) {
+	missing := func() (string, error) { return "", errors.New("no executable") }
+	if got, err := lyditeVersion("dev", missing, nil); err == nil || got != "" {
+		t.Errorf("unlocatable executable: got %q, %v", got, err)
+	}
+	exe, _ := executableWith("/bin/a", "")
+	unreadable := func(string) (io.ReadCloser, error) { return nil, os.ErrPermission }
+	if got, err := lyditeVersion("dev", exe, unreadable); err == nil || got != "" {
+		t.Errorf("unreadable executable: got %q, %v", got, err)
+	}
+}
+
 func TestTheStateRootIsTheFlagThenTheEnvironmentThenTheCache(t *testing.T) {
 	flagDir, envDir := t.TempDir(), t.TempDir()
 	if got, note := resolveStateDir(flagDir, envDir, "/repo", cacheAt("/cache")); got != flagDir || note != "" {
