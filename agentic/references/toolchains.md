@@ -75,10 +75,21 @@ directories in front, its variables applied, the component's directory as the wo
 directory for Rust — after installation succeeds, rather than recording the manifest's raw
 `"stable"` or `"1.26"`, which would describe every release that ever satisfied it and give
 the same toolchain a different identity on every runner that installed it versus every
-runner that already had it. If that re-probe itself fails, the environment provisioning
-produced is still applied — the install worked, only confirming its version didn't —
-`Resolved` falls back to the raw declaration, and the provisioning note carries a `warning:`
-clause naming the failure once, so the fallback is visible rather than read as a measurement.
+runner that already had it. If that re-probe itself fails, the provision has failed: the
+environment is dropped (nil), and the component continues with what is on `PATH`, with a
+`could not provision … installed, but its version could not be confirmed: <err> — continuing
+with what is on PATH` warning printed once per component sharing the key. `Resolved` is never a
+declaration, and no `Env` carries one. Three consequences follow from the nil environment:
+
+- `Env.Key()` on it answers `ambient`, so a tool cache keys as though nothing was provisioned.
+- `Version()` is empty, so the baseline producer string carries no toolchain half and a
+  measurement taken this way compares against nothing — the producer-mismatch semantics of
+  [ADR 0025](../../docs/adr/0025-a-baseline-records-its-producer-and-only-record-writes-it.md).
+- A Rust override's `RUSTUP_TOOLCHAIN` is dropped with the rest, so `cargo` runs under the
+  directory's own channel rather than the one the override named.
+
+A package manager (yarn or pnpm) whose probe fails does not do this: the component's runtime
+environment, Node included, stays intact.
 
 Each language provisions differently, and only one of the three downloads anything:
 
