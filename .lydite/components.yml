@@ -19,7 +19,10 @@ components:
   - name: cli
     dir: source/cli
     runner: go-test
-    args: ["-race", "./..."]
+    # -timeout raises the bound the baseline run is held to; go test's default
+    # of 10m is shorter than the instrumented suite takes. BuildOnly never
+    # receives it: the mutation `go build` drops the go-test-only flags.
+    args: ["-race", "-timeout", "30m", "./..."]
 
   - name: cloud-services
     dir: source/cloud-services
