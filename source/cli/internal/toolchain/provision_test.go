@@ -873,6 +873,97 @@ func TestProvisionPnpmRefusesAnUnverifiableExe(t *testing.T) {
 	}
 }
 
+// Every point downloadPnpm reads or unpacks something can itself fail — a
+// document or tarball the registry does not serve, bytes that are not a
+// valid archive, an unpacked release missing the manifest pinnedExe reads —
+// and each one is reported as a refusal, not left to panic or hang.
+func TestDownloadPnpmRefusesAFetchOrUnpackFailure(t *testing.T) {
+	garbage := []byte("not a tar.gz")
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, reg *fakeRegistry) []byte // publishes what the case needs; returns the bytes provisionPnpm pins against
+		want  string
+	}{
+		{"the pnpm release itself is not published",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				return pnpmTarball(t, pnpmVersion) // never given to reg.publish
+			},
+			"404 Not Found"},
+		{"the pnpm document is not valid JSON",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := pnpmTarball(t, pnpmVersion)
+				reg.publish(t, "pnpm", pnpmVersion, release, nil)
+				reg.mu.Lock()
+				reg.files["/pnpm/"+pnpmVersion] = []byte("{not json")
+				reg.mu.Unlock()
+				return release
+			},
+			"pnpm@" + pnpmVersion},
+		{"the pnpm document names a tarball nothing serves",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := pnpmTarball(t, pnpmVersion)
+				reg.publish(t, "pnpm", pnpmVersion, release, func(d *registryDist) {
+					d.Tarball = reg.srv.URL + "/pnpm/-/does-not-exist.tgz"
+				})
+				return release
+			},
+			"404 Not Found"},
+		{"the pnpm tarball is not a valid archive",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				reg.publish(t, "pnpm", pnpmVersion, garbage, nil)
+				return garbage
+			},
+			"gzip"},
+		{"the pnpm tarball carries no package.json",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := tarball(t, "package", map[string]string{"pnpm": "placeholder\n"})
+				reg.publish(t, "pnpm", pnpmVersion, release, nil)
+				return release
+			},
+			"package.json"},
+		{"the pnpm tarball's package.json is not valid JSON",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := tarball(t, "package", map[string]string{
+					"package.json": "{not json",
+					"pnpm":         "placeholder\n",
+				})
+				reg.publish(t, "pnpm", pnpmVersion, release, nil)
+				return release
+			},
+			"pnpm@" + pnpmVersion + "'s package.json"},
+		{"the exe tarball is not a valid archive",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := pnpmTarball(t, pnpmVersion)
+				reg.publish(t, "pnpm", pnpmVersion, release, nil)
+				reg.publish(t, hostExe(t), pnpmVersion, garbage, nil)
+				return release
+			},
+			"gzip"},
+		{"the exe document names a tarball nothing serves",
+			func(t *testing.T, reg *fakeRegistry) []byte {
+				release := pnpmTarball(t, pnpmVersion)
+				reg.publish(t, "pnpm", pnpmVersion, release, nil)
+				reg.publish(t, hostExe(t), pnpmVersion, pnpmExeTarball(t, pnpmVersion), func(d *registryDist) {
+					d.Tarball = reg.srv.URL + "/exe/-/does-not-exist.tgz"
+				})
+				return release
+			},
+			"404 Not Found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedCache(t)
+			reg := newFakeRegistry(t)
+			release := tc.setup(t, reg)
+
+			st, err := provisionPnpm(t, sha512Pin(release))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("provisionPackageManager = (%+v, %v), want a refusal containing %q", st, err, tc.want)
+			}
+		})
+	}
+}
+
 // A refusal is the provisioning warning every other toolchain gives, the
 // reason included, and the run carries on.
 func TestEnsureWarnsWhenThePnpmExeIsRefused(t *testing.T) {
