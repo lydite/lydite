@@ -157,18 +157,12 @@ func OpenState(dir, fingerprint string) (*State, error) {
 // reading skips.
 func terminateTornLine(f *os.File) error {
 	info, err := f.Stat()
-	if err != nil {
+	if err != nil || info.Size() == 0 {
 		return err
-	}
-	if info.Size() == 0 {
-		return nil
 	}
 	last := make([]byte, 1)
-	if _, err := f.ReadAt(last, info.Size()-1); err != nil {
+	if _, err := f.ReadAt(last, info.Size()-1); err != nil || last[0] == '\n' {
 		return err
-	}
-	if last[0] == '\n' {
-		return nil
 	}
 	_, err = f.Write([]byte{'\n'})
 	return err
@@ -327,24 +321,20 @@ func (s *State) Close() error {
 
 // writeReplacing writes data to a temporary file beside path and renames it
 // over path.
-func writeReplacing(path string, data []byte) error {
+func writeReplacing(path string, data []byte) (err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
 	name := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
+	defer func() {
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	_, writeErr := tmp.Write(data)
+	if err = errors.Join(writeErr, tmp.Close()); err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	return nil
+	return os.Rename(name, path)
 }

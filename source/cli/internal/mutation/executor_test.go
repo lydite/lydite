@@ -842,3 +842,28 @@ func TestTheTailIsTheEndOfTheOutputAndNothingIsLostAtItsLength(t *testing.T) {
 		t.Error("the first line of an over-long output survived, so the tail is not the end")
 	}
 }
+
+// A run that ends while a mutant's suite is running cuts that mutant short as
+// it does one still building: the interruption says nothing about the tests, so
+// nothing is recorded for it.
+func TestARunEndedDuringASuiteCutsThatMutantShortAndRecordsNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	f := &fake{plan: func(Mutant) Staged {
+		time.AfterFunc(300*time.Millisecond, cancel)
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("sleep 30")}}
+	}}
+	var rec recorder
+	results, err := Execute(ctx, f, []Mutant{mutantOn(1)}, Options{Workers: 1, Timeout: time.Minute, Record: rec.record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].CutShort || results[0].Outcome != Unviable {
+		t.Fatalf("results = %+v, want the one mutant cut short", results)
+	}
+	if !strings.Contains(results[0].Detail, "before this mutant finished") {
+		t.Errorf("detail = %q, want it to say the suite was interrupted", results[0].Detail)
+	}
+	if len(rec.seen) != 0 {
+		t.Errorf("recorded %v for a mutant whose suite was interrupted", rec.seen)
+	}
+}

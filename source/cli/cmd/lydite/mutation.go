@@ -135,15 +135,8 @@ same token as a suppression, declaring one refers the change to a human.`,
 			if err != nil {
 				return err
 			}
-			resolvedState, stateNote := resolveStateDir(stateDir, os.Getenv(mutationStateEnv), scanRoot, os.UserCacheDir)
-			if stateNote != "" {
-				fmt.Fprintln(os.Stderr, stateNote)
-			}
-			build, err := lyditeVersion(version, os.Executable, func(p string) (io.ReadCloser, error) { return os.Open(p) })
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
-				resolvedState = ""
-			}
+			resolvedState, build := resumeInputs(scanRoot, stateDir, os.Getenv(mutationStateEnv), version,
+				os.UserCacheDir, os.Executable, func(p string) (io.ReadCloser, error) { return os.Open(p) }, os.Stderr)
 			r, err := mutate.Run(ctx, mutationflow.Params{
 				Dir:           dir,
 				Components:    components,
@@ -259,6 +252,24 @@ same token as a suppression, declaring one refers the change to a human.`,
 
 // mutationStateEnv names the state root when --state-dir is not given.
 const mutationStateEnv = "LYDITE_MUTATION_STATE"
+
+// resumeInputs resolves what a resumed run is rooted and keyed by: the state
+// root, and the name of the lydite whose verdicts it would reuse. What cannot
+// be resolved switches resuming off, with a line on w saying why, and never
+// fails the run.
+func resumeInputs(scanRoot, flag, env, version string, userCacheDir, executable func() (string, error),
+	open func(string) (io.ReadCloser, error), w io.Writer) (stateDir, build string) {
+	stateDir, note := resolveStateDir(flag, env, scanRoot, userCacheDir)
+	if note != "" {
+		fmt.Fprintln(w, note)
+	}
+	build, err := lyditeVersion(version, executable, open)
+	if err != nil {
+		fmt.Fprintln(w, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
+		return "", ""
+	}
+	return stateDir, build
+}
 
 // resolveStateDir picks the root under which a mutation run keeps its resumable
 // verdicts: the flag, then the environment, then a directory in the user cache

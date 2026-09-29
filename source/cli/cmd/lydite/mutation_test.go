@@ -331,7 +331,7 @@ func TestARowSaysWhenAMutantsOutputWasHeldOpen(t *testing.T) {
 // the denominator being zero does not mean nothing was observed.
 func TestAnUnmeasuredRowStillSaysWhenAMutantHeldOutputOpen(t *testing.T) {
 	results := []mutation.Result{{
-		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
 		Outcome: mutation.Unviable, Detail: "the run was interrupted before this mutant finished",
 		OutputHeldOpen: true,
 	}}
@@ -380,7 +380,7 @@ func TestAnUnmeasuredRowSaysWhenADeclarationIsUnmatchedOrMemoryWasNotBounded(t *
 // survivor's own detail must not crowd it out.
 func TestAFailingRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
 	survivor := []mutation.Result{{
-		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
 		Outcome: mutation.Survived,
 	}}
 	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
@@ -2642,5 +2642,63 @@ func TestEachOutcomeKindIsItsOwnRow(t *testing.T) {
 				t.Errorf("counted as having run = %v", out.ran)
 			}
 		})
+	}
+}
+
+// failingReader is an executable whose bytes cannot be read to the end.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("disk gone") }
+func (failingReader) Close() error             { return nil }
+
+func TestADevBuildWhoseExecutableFailsMidReadHasNoVersion(t *testing.T) {
+	exe, _ := executableWith("/bin/a", "")
+	broken := func(string) (io.ReadCloser, error) { return failingReader{}, nil }
+	if got, err := lyditeVersion("dev", exe, broken); err == nil || got != "" {
+		t.Errorf("an executable that fails mid-read: got %q, %v", got, err)
+	}
+}
+
+// A relative state root that cannot be made absolute switches resuming off
+// with a note, and never fails the run.
+func TestAStateRootThatCannotBeMadeAbsoluteSwitchesResumingOff(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("the working directory cannot be removed here: %v", err)
+	}
+	dir, note := resolveStateDir("state", "", "/scan", func() (string, error) { return "/cache", nil })
+	if dir != "" || !strings.HasPrefix(note, "mutation state is off: cannot resolve state") {
+		t.Errorf("got dir %q, note %q, want resuming off with a note naming the root", dir, note)
+	}
+}
+
+// A run that cannot be told apart from another build, or that has nowhere to
+// keep its state, resumes nothing and says why on the writer it is given.
+func TestResumeInputsSwitchResumingOffWithALineSayingWhy(t *testing.T) {
+	cache := func() (string, error) { return "/cache", nil }
+	noCache := func() (string, error) { return "", errors.New("no HOME") }
+	noExe := func() (string, error) { return "", errors.New("no executable") }
+	open := func(string) (io.ReadCloser, error) { return nil, os.ErrPermission }
+
+	var w strings.Builder
+	dir, build := resumeInputs("/scan", "", "", "v1.2.3", cache, noExe, open, &w)
+	if !strings.HasPrefix(dir, filepath.Join("/cache", "lydite", "mutation")) || build != "v1.2.3" || w.Len() != 0 {
+		t.Errorf("a release resolved to dir %q, build %q, said %q", dir, build, w.String())
+	}
+
+	w.Reset()
+	if dir, build := resumeInputs("/scan", "", "", "dev", cache, noExe, open, &w); dir != "" || build != "" ||
+		!strings.Contains(w.String(), "cannot be told apart from another") {
+		t.Errorf("a dev build with no executable resolved to dir %q, build %q, said %q", dir, build, w.String())
+	}
+
+	w.Reset()
+	if dir, _ := resumeInputs("/scan", "", "", "v1.2.3", noCache, noExe, open, &w); dir != "" ||
+		!strings.Contains(w.String(), "no user cache directory") {
+		t.Errorf("no cache directory resolved to dir %q, said %q", dir, w.String())
 	}
 }

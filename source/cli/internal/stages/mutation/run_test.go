@@ -1084,6 +1084,71 @@ func closedState(t *testing.T) *mutation.State {
 	return s
 }
 
+// Each way a component's state can fail while it is used is named once, with
+// what the run does instead, and is never an error the run has to handle.
+func TestAComponentStateThatFailsNamesItAndFallsBack(t *testing.T) {
+	newState := func(t *testing.T) (*componentState, string, *lockedBuffer) {
+		t.Helper()
+		dir := t.TempDir()
+		st, err := mutation.OpenState(dir, "fp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		diag := &lockedBuffer{}
+		return &componentState{state: st, name: "web", diagnostics: diag}, dir, diag
+	}
+	occupy := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, path, "occupant", "x")
+	}
+	wantWarning := func(t *testing.T, diag *lockedBuffer) {
+		t.Helper()
+		if got := diag.String(); !strings.HasPrefix(got, "warning: web's mutation state: ") || strings.Count(got, "\n") != 1 {
+			t.Errorf("diagnostics = %q, want one warning naming the component's state", got)
+		}
+	}
+
+	t.Run("a baseline that cannot be read", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		occupy(t, filepath.Join(dir, "baseline.json"))
+		if _, ok := s.baseline(); ok {
+			t.Error("an unreadable baseline was reused")
+		}
+		wantWarning(t, diag)
+	})
+	t.Run("a baseline that cannot be saved", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		occupy(t, filepath.Join(dir, "baseline.json"))
+		s.saveBaseline(mutation.Baseline{Passed: true})
+		wantWarning(t, diag)
+	})
+	t.Run("verdicts that cannot be read", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		if err := os.Remove(filepath.Join(dir, "verdicts.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		if known := s.verdicts(); known != nil {
+			t.Errorf("verdicts = %v, want none", known)
+		}
+		wantWarning(t, diag)
+	})
+	t.Run("a state with none to use", func(t *testing.T) {
+		var none *componentState
+		if _, ok := none.baseline(); ok {
+			t.Error("a run without state reused a baseline")
+		}
+		none.saveBaseline(mutation.Baseline{})
+		if none.verdicts() != nil || none.recorder() != nil {
+			t.Error("a run without state answered from one")
+		}
+		none.close()
+	})
+}
+
 // Fresh discards what was recorded, so a run asking for it measures
 // everything again.
 func TestAFreshRunDiscardsTheState(t *testing.T) {
