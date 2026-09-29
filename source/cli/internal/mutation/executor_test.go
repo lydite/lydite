@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,6 +386,181 @@ func TestAnInterruptedRunReportsEveryMutantItDidNotReach(t *testing.T) {
 	}
 	if s.Denominator() != 0 {
 		t.Errorf("a cancelled run put %d mutant(s) in the denominator", s.Denominator())
+	}
+	for i, r := range results {
+		if !r.CutShort {
+			t.Errorf("mutant %d (%q, %q) is not marked cut short — a resumed run would reuse it as a verdict", i, r.Outcome, r.Detail)
+		}
+	}
+}
+
+// passingBuild stages a mutant that builds and whose suite exits with code.
+func passingBuild(code int) *fake {
+	return &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell(fmt.Sprintf("exit %d", code))}}
+	}}
+}
+
+// recorder collects what Options.Record is handed, from every worker at once.
+type recorder struct {
+	mu   sync.Mutex
+	seen []Result
+}
+
+func (r *recorder) record(res Result) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, res)
+}
+
+func (r *recorder) known() map[string]Result {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]Result{}
+	for _, res := range r.seen {
+		out[MutantID(res.Mutant)] = res
+	}
+	return out
+}
+
+func stagedLines(f *fake) []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lines := make([]int, 0, len(f.staged))
+	for _, m := range f.staged {
+		lines = append(lines, m.Line)
+	}
+	slices.Sort(lines)
+	return lines
+}
+
+// mutantOn is a mutant whose identity differs by its offset, since MutantID
+// leaves the line out: two mutants distinguished only by line are one mutant.
+func mutantOn(line int) Mutant {
+	m := mutantAt(line)
+	m.Offset = line * 10
+	m.Length = 1
+	return m
+}
+
+func TestAMutantWithAKnownVerdictIsNeverDispatched(t *testing.T) {
+	f := passingBuild(1)
+	mutants := []Mutant{mutantOn(1), mutantOn(2), mutantOn(3)}
+	known := map[string]Result{}
+	for _, m := range mutants {
+		recorded := m
+		// A recorded mutant carries whatever line it had when it was
+		// recorded; the answer is about the mutant this run was given.
+		recorded.Line = 99
+		known[MutantID(m)] = Result{Mutant: recorded, Outcome: Survived}
+	}
+	results, err := Execute(t.Context(), f, mutants, Options{Workers: 4, Known: known})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.workers != 0 || len(f.staged) != 0 {
+		t.Errorf("%d worker(s) opened and %d mutant(s) staged, though every mutant had a verdict", f.workers, len(f.staged))
+	}
+	for i, r := range results {
+		if r.Outcome != Survived {
+			t.Errorf("mutant %d = %q, want the known %q", i, r.Outcome, Survived)
+		}
+		if r.Mutant != mutants[i] {
+			t.Errorf("mutant %d is reported as %+v, want the mutant it was given %+v", i, r.Mutant, mutants[i])
+		}
+	}
+}
+
+func TestOnlyTheMutantsWithNoKnownVerdictAreDispatched(t *testing.T) {
+	f := passingBuild(1)
+	mutants := []Mutant{mutantOn(1), mutantOn(2), mutantOn(3), mutantOn(4)}
+	known := map[string]Result{
+		MutantID(mutants[0]): {Mutant: mutants[0], Outcome: Survived},
+		MutantID(mutants[2]): {Mutant: mutants[2], Outcome: TimedOut},
+	}
+	results, err := Execute(t.Context(), f, mutants, Options{Workers: 2, Known: known})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedLines(f); !slices.Equal(got, []int{2, 4}) {
+		t.Errorf("staged lines %v, want only the two with no known verdict [2 4]", got)
+	}
+	if got, want := outcomes(results), []Outcome{Survived, Killed, TimedOut, Killed}; !slices.Equal(got, want) {
+		t.Errorf("outcomes = %v, want %v in the order given", got, want)
+	}
+}
+
+func TestRecordSeesOnlyTheVerdictsThisRunDecided(t *testing.T) {
+	f := &fake{plan: func(m Mutant) Staged {
+		if m.Line == 3 {
+			return Staged{Build: shell("echo 'a.go:3:2: undefined: x' >&2; exit 1")}
+		}
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 1")}}
+	}}
+	acknowledged := mutantOn(1)
+	acknowledged.Reason = "the branch is unreachable by construction"
+	mutants := []Mutant{acknowledged, mutantOn(2), mutantOn(3), mutantOn(4)}
+	known := map[string]Result{MutantID(mutants[3]): {Mutant: mutants[3], Outcome: Survived}}
+	var rec recorder
+	if _, err := Execute(t.Context(), f, mutants, Options{Workers: 2, Known: known, Record: rec.record}); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]Outcome{}
+	for _, r := range rec.seen {
+		got[r.Mutant.Line] = r.Outcome
+	}
+	// A mutant that would not build is a verdict as much as a kill is: the
+	// same tree fails to compile it again.
+	want := map[int]Outcome{2: Killed, 3: Unviable}
+	if !maps.Equal(got, want) {
+		t.Errorf("recorded %v, want only the fresh verdicts %v", got, want)
+	}
+}
+
+func TestACancelledRunRecordsNothingItCutShortAndAResumeMeasuresExactlyThat(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var stages atomic.Int32
+	interrupted := &fake{plan: func(Mutant) Staged {
+		// The second mutant staged is in flight when the run ends, and the
+		// third is never reached — or reached with the run already over.
+		if stages.Add(1) == 2 {
+			cancel()
+		}
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 1")}}
+	}}
+	mutants := []Mutant{mutantOn(1), mutantOn(2), mutantOn(3)}
+	var rec recorder
+	first, err := Execute(ctx, interrupted, mutants, Options{Workers: 1, Record: rec.record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0].Outcome != Killed || first[0].CutShort {
+		t.Fatalf("the first mutant = %q (cut short %v), want a kill decided before the run ended", first[0].Outcome, first[0].CutShort)
+	}
+	for i, r := range first[1:] {
+		if !r.CutShort {
+			t.Errorf("mutant %d = %q, want it cut short", i+2, r.Outcome)
+		}
+	}
+	if len(rec.seen) != 1 || rec.seen[0].Mutant.Line != 1 {
+		t.Fatalf("recorded %v, want only the kill decided before the run ended", rec.seen)
+	}
+
+	resumed := passingBuild(1)
+	second, err := Execute(t.Context(), resumed, mutants, Options{Workers: 1, Known: rec.known(), Record: rec.record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedLines(resumed); !slices.Equal(got, []int{2, 3}) {
+		t.Errorf("the resumed run staged lines %v, want exactly the cut-short ones [2 3]", got)
+	}
+	if got, want := outcomes(second), []Outcome{Killed, Killed, Killed}; !slices.Equal(got, want) {
+		t.Errorf("resumed outcomes = %v, want %v", got, want)
+	}
+	for i, r := range second {
+		if r.CutShort {
+			t.Errorf("mutant %d is still cut short after a run that finished", i+1)
+		}
 	}
 }
 

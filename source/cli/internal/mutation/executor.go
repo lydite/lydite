@@ -113,6 +113,20 @@ type Options struct {
 	// Log is where each mutant's line goes, and the compiler output of one
 	// that did not build. Nil discards.
 	Log io.Writer
+	// Known is every verdict a previous run under the same fingerprint
+	// decided, keyed by MutantID. A mutant found in it is answered from it,
+	// in its own position, and never staged; the rest are dispatched in the
+	// order they were given. An acknowledged mutant is answered by its
+	// declaration whatever Known holds, since MutantID leaves the reason out
+	// and a recorded survivor must not outrank the claim made about it.
+	Known map[string]Result
+	// Record receives each verdict this run decides, the moment it is
+	// decided — never a Known one, an acknowledged one, or one that is
+	// CutShort, since none of those is a measurement this run made. It is
+	// called from every worker goroutine at once, so it must be safe for
+	// concurrent use; the executor serialises nothing around it. Nil records
+	// nothing.
+	Record func(Result)
 }
 
 // Slots bounds how many suite executions are in flight.
@@ -190,7 +204,12 @@ func (s *Slots) release() {
 // A cancelled run reports every mutant it did not reach as unviable with the
 // reason said out loud, rather than dropping it: a truncated run that omitted
 // mutants reads as a complete run over fewer of them, and the denominator
-// would shrink to whatever the run got through.
+// would shrink to whatever the run got through. Each of those is CutShort, as
+// is every mutant in flight when the run ended, so a resumed run measures
+// exactly them again.
+//
+// A mutant opts.Known holds a verdict for is answered from it and never
+// staged either; see Options.Known.
 func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]Result, error) {
 	results := make([]Result, len(mutants))
 	var pending []int
@@ -199,7 +218,12 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 			results[i] = Result{Mutant: m, Outcome: Acknowledged, Detail: m.Reason}
 			continue
 		}
-		results[i] = Result{Mutant: m, Outcome: Unviable, Detail: "the run ended before this mutant was built"}
+		if known, ok := opts.Known[MutantID(m)]; ok {
+			known.Mutant = m
+			results[i] = known
+			continue
+		}
+		results[i] = Result{Mutant: m, Outcome: Unviable, Detail: "the run ended before this mutant was built", CutShort: true}
 		pending = append(pending, i)
 	}
 	if len(pending) == 0 {
@@ -239,7 +263,11 @@ func Execute(ctx context.Context, b Backend, mutants []Mutant, opts Options) ([]
 		go func(w Worker) {
 			defer wg.Done()
 			for i := range queue {
-				results[i] = run(ctx, w, mutants[i], opts)
+				r := run(ctx, w, mutants[i], opts)
+				results[i] = r
+				if !r.CutShort && opts.Record != nil {
+					opts.Record(r)
+				}
 			}
 		}(w)
 	}
@@ -299,7 +327,7 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 	case cutShort:
 		// An interrupted build is not a mutant that would not compile, and
 		// reporting it as one blames the generator for a CI job timeout.
-		return finish(Result{Mutant: m, Outcome: Unviable,
+		return finish(Result{Mutant: m, Outcome: Unviable, CutShort: true,
 			Detail: "the run was interrupted before this mutant was built"})
 	case exceeded:
 		// A compilation that outran the budget says nothing about the tests
@@ -339,7 +367,7 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 				Detail: fmt.Sprintf("the suite reached its %d byte memory bound, holding %d byte(s)",
 					res.MemoryLimit, res.MaxRSS)})
 		case cutShort:
-			return finish(Result{Mutant: m, Outcome: Unviable,
+			return finish(Result{Mutant: m, Outcome: Unviable, CutShort: true,
 				Detail: "the run was interrupted before this mutant finished"})
 		default:
 			return finish(Result{Mutant: m, Outcome: Killed})
