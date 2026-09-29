@@ -58,6 +58,9 @@ There is no whole-repo mode. It would run for hours on any mature codebase,
 which makes it a mode nobody runs, and it would give the operator catalogue and
 the gate a second scope to be reasoned about against.
 
+[ADR 0075](0075-a-mutation-run-resumes-and-stops-at-a-deadline.md) revises this
+position: a run that resumes makes a scheduled, advisory sweep affordable.
+
 A run with nothing to mutate — the default branch, where HEAD is its own
 merge-base, or a commit whose tree matches its base — reports `unmeasured` and
 passes. It must not report a pass: a green row from a gate that examined nothing
@@ -194,6 +197,11 @@ and one declaring none runs them concurrently. The rule is derived from
 implementation.
 
 ## No runtime budget
+
+[ADR 0075](0075-a-mutation-run-resumes-and-stops-at-a-deadline.md) revises this
+position: a run can stop at `--deadline` and keep its verdicts. That is not a
+budget in the sense below, since nothing is capped and passed and nothing is
+failed for its size.
 
 Each component's row carries its mutant count and elapsed time, and nothing caps
 either. A budget shipped now would be an invented number, and every way of

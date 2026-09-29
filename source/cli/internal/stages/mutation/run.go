@@ -539,8 +539,8 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	// Into the live stream, where the per-mutant lines go: a run too large to
 	// finish is killed by its job timeout and writes no document at all, so a
 	// projection only a document carried is one the reader who needs it never
-	// sees. ADR 0027 refuses a runtime budget, and this is not one — nothing
-	// here stops a run.
+	// sees. The line is a projection and caps nothing; a --deadline is what
+	// stops a run.
 	_, _ = fmt.Fprintln(p.Log, costProjection(len(mutants), workers, timeout))
 
 	known := st.verdicts()

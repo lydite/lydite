@@ -47,7 +47,7 @@ func TestTheBudgetIsAMultipleOfTheMeasuredBaseline(t *testing.T) {
 
 // A run says what it is about to cost before it pays it, and the ceiling is
 // every mutant taking its whole budget with no worker idle. It is a projection
-// and not a cap: ADR 0027 refuses a runtime budget, and nothing reads this.
+// and not a cap: nothing reads it to stop a run, which only a --deadline does.
 func TestARunProjectsItsCeilingFromTheBudgetAndTheWorkers(t *testing.T) {
 	const timeout = 60 * time.Second
 	for _, c := range []struct {

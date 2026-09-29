@@ -33,8 +33,11 @@ matrix and duplicates one instrumented run per component, which on a matrix cost
 nothing and machine time once.
 
 **Mutants come from the change, and only from lines coverage reports as executed.** There is no
-whole-repository mode: it would run for hours on any mature codebase, which makes it a mode nobody
-runs, and it would give the catalogue and the gate a second scope to be reasoned about against. A
+whole-repository mode today: it would run for hours on any mature codebase, and it would give the
+catalogue and the gate a second scope to be reasoned about against. A run that resumes and stops at
+`--deadline` is what makes one affordable, and [ADR
+0075](../../docs/adr/0075-a-mutation-run-resumes-and-stops-at-a-deadline.md) decides a scheduled
+default-branch sweep that only ever advises. That sweep is decided and not built. A
 mutant on an uncovered line cannot be killed by construction, and reporting one restates what patch
 coverage already said about the same line. Half of that bound is knowable before anything runs, so
 a component the change does not touch pays for no baseline, no compose stack and no setup command —
@@ -378,18 +381,22 @@ of the port list directly, so the predicate that decides what may run beside wha
 implementation: they carry the component's published ports so they conflict exactly when it
 publishes one, and they carry no directory, because a mutant is not a second tree.
 
-## The timeout and the memory ceiling are both derived, and there is no runtime budget
+## The timeout and the memory ceiling are both derived, and a deadline is not a runtime budget
 
-Nothing caps how long a run takes. A budget shipped now would be an invented number and every way
-of exceeding one is bad: capping and passing is a gate that silently checked less, capping and
-failing punishes a change for its size, and capping to `unmeasured` gives a busy repository a
-permanently amber row. A run genuinely too large dies as a CI job timeout, the shard produces no
-document, and the fold already fails a declared component with no row.
+Nothing caps how long a run takes, and nothing is failed for its size. A budget would be an
+invented number and every way of exceeding one is bad: capping and passing is a gate that silently
+checked less, capping and failing punishes a change for its size, and capping to `unmeasured` gives
+a busy repository a permanently amber row. `--deadline` is a different thing: measured from the
+process's start and set below the job timeout, it stops dispatch, cancels the mutants in flight and
+keeps every verdict already recorded, so a rerun resumes from them and the amber row lasts only
+until then. A run with no `--deadline` that is too large dies as a CI job timeout, the shard
+produces no document, and the fold already fails a declared component with no row.
 
 What a run does instead is state its cost before paying it. Once mutants are generated it writes
 one line to the component's live log, mirrored to stderr under `--stream`: `N mutant(s), budget Xs
 each, W worker(s): at most Ys` (`costProjection` in `cmd/lydite/mutation.go`). It is a worst case,
-`ceil(mutants/workers)` times the per-mutant budget, and a projection rather than a cap. It survives
+`ceil(mutants/workers)` times the per-mutant budget, and a projection rather than a cap: it tells the
+reader what the run would cost, and only `--deadline` stops one. It survives
 a killed job because the log does and the final document does not. Elapsed time (baseline plus
 every mutant) is recorded afterwards as `elapsed_seconds` in each component's entry in
 `mutants.json`.
