@@ -887,6 +887,40 @@ func TestASecondRunOverTheSameTreeMeasuresNothingAgain(t *testing.T) {
 	}
 }
 
+// Reused counts the results a resumed run answered from what was recorded: none
+// on the run that measured them, and every one the second run had a verdict for.
+func TestAResumedRunCountsWhatItReused(t *testing.T) {
+	f := newWebFixture(t)
+	in, _ := f.resumable(t, t.TempDir(), nil)
+
+	first := runToSummary(t, in)
+	if first.Reused != 0 {
+		t.Errorf("the run that measured everything reused %d verdict(s)", first.Reused)
+	}
+	second := runToSummary(t, in)
+	if second.Reused != len(second.Results) || second.Reused == 0 {
+		t.Errorf("the second run reused %d of %d verdict(s), want all of them", second.Reused, len(second.Results))
+	}
+}
+
+// An acknowledged mutant is answered by its declaration whatever a recorded
+// verdict says, so it is never counted as reused.
+func TestAnAcknowledgedMutantIsNeverCountedAsReused(t *testing.T) {
+	plain := mutation.Mutant{Path: "a.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}
+	declared := mutation.Mutant{Path: "b.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">=", Reason: "equivalent"}
+	unrecorded := mutation.Mutant{Path: "c.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}
+	known := map[string]mutation.Result{
+		mutation.MutantID(plain):    {Outcome: mutation.Killed},
+		mutation.MutantID(declared): {Outcome: mutation.Survived},
+	}
+	if got := reusedCount([]mutation.Mutant{plain, declared, unrecorded}, known); got != 1 {
+		t.Errorf("reused = %d, want only the unacknowledged mutant with a recorded verdict", got)
+	}
+	if got := reusedCount([]mutation.Mutant{plain}, nil); got != 0 {
+		t.Errorf("reused = %d with nothing recorded", got)
+	}
+}
+
 // A recorded baseline saves the suite and nothing around it: the second run
 // still prepares the component, brings its services up and runs its setup and
 // teardown, because every mutant it dispatches needs them.

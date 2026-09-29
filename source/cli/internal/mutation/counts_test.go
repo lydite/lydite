@@ -98,6 +98,37 @@ func TestTheStoredCountsRoundTripThroughTheSummary(t *testing.T) {
 	}
 }
 
+// The reused count is an optional field: a run that measured everything writes
+// no key for it, a document without one reads as nought, and a shard's count
+// survives the fold.
+func TestTheReusedCountIsOptionalAndSurvivesTheFold(t *testing.T) {
+	data, err := json.Marshal(ComponentCounts{Killed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "reused") {
+		t.Errorf("a component that reused nothing wrote a reused key: %s", data)
+	}
+	var older ComponentCounts
+	if err := json.Unmarshal([]byte(`{"killed":2}`), &older); err != nil || older.Reused != 0 {
+		t.Errorf("a document with no reused key read as %+v, %v", older, err)
+	}
+	folded, err := FoldCounts([]CountsDocument{
+		{Tree: "abc", Components: map[string]ComponentCounts{"a": {Killed: 4, Reused: 3}}},
+		{Tree: "abc", Components: map[string]ComponentCounts{"b": {Killed: 2}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folded.Components["a"].Reused != 3 || folded.Components["b"].Reused != 0 {
+		t.Errorf("the fold holds %+v, want each shard's reused count kept", folded.Components)
+	}
+	out, err := json.Marshal(ComponentCounts{Killed: 1, Reused: 2})
+	if err != nil || !strings.Contains(string(out), `"reused":2`) {
+		t.Errorf("the stored shape has no reused key: %s, %v", out, err)
+	}
+}
+
 // The elapsed time is data in the document, not a sentence a reader has to
 // parse back: a run's own span reaches a fold and the ledger through this field
 // and through nothing else. Sub-second precision survives it, because the span

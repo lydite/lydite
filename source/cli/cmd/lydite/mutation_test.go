@@ -239,6 +239,31 @@ func TestTheMemoryOverrideIsReadAsASize(t *testing.T) {
 	}
 }
 
+// A completed row says how many of its verdicts were reused, only when some
+// were, and a reused verdict that carries MemoryUnbounded still puts the
+// unbounded note on the row.
+func TestARowSaysHowManyVerdictsWereReused(t *testing.T) {
+	results := []mutation.Result{
+		{Mutant: mutation.Mutant{Path: "a.go", Line: 3}, Outcome: mutation.Killed, MemoryUnbounded: true},
+		{Mutant: mutation.Mutant{Path: "a.go", Line: 4}, Outcome: mutation.Killed},
+	}
+	o := mutationCompleted("app", mutation.Summary{Killed: 2}, results, time.Second)
+
+	fresh, _ := kindRow(o, false)
+	if detailSaying(fresh, "reused") {
+		t.Errorf("a run that reused nothing says %v", fresh.Detail)
+	}
+
+	o.Reused = 1
+	row, _ := kindRow(o, false)
+	if !detailSaying(row, "1 of 2 verdicts reused") {
+		t.Errorf("a resumed row says %v", row.Detail)
+	}
+	if !detailSaying(row, "memory was not bounded") {
+		t.Errorf("a reused unbounded verdict lost its note: %v", row.Detail)
+	}
+}
+
 // A bound the platform had none to set is on the row, never silent: a mutant
 // that could allocate without stopping was held to nothing, and reporting that
 // as the green of a bound that held is the failure the amber tag exists for.

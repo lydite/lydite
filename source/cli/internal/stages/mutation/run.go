@@ -150,6 +150,10 @@ type ComponentOutcome struct {
 	Results []mutation.Result
 	Scoped  map[string][]int
 	Elapsed time.Duration
+	// Reused is how many of a completed component's results were answered from
+	// verdicts a previous run recorded. An acknowledged mutant is answered by
+	// its declaration and is never one of them.
+	Reused int
 	// TeardownErr is the Lifecycle's error from the component's teardown
 	// commands, which run whatever became of it once its services started.
 	TeardownErr error
@@ -484,6 +488,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	// here stops a run.
 	_, _ = fmt.Fprintln(p.Log, costProjection(len(mutants), workers, timeout))
 
+	known := st.verdicts()
 	results, err := mutation.Execute(ctx, t.backend, mutants, mutation.Options{
 		Env:       suiteEnv,
 		Timeout:   timeout,
@@ -491,7 +496,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		Workers:   workers,
 		Slots:     slots,
 		Log:       p.Log,
-		Known:     st.verdicts(),
+		Known:     known,
 		Record:    st.recorder(),
 	})
 	if err != nil {
@@ -502,8 +507,25 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		s.Add(r)
 	}
 	out.Summary, out.Results, out.Scoped = s, results, t.scoped
+	out.Reused = reusedCount(mutants, known)
 	out.Elapsed = time.Since(baselineStarted)
 	return finish(KindCompleted, nil)
+}
+
+// reusedCount is how many of mutants Execute answers from known: those it holds
+// a verdict for, less the acknowledged ones, which Execute answers by their
+// declaration whatever known holds.
+func reusedCount(mutants []mutation.Mutant, known map[string]mutation.Result) int {
+	n := 0
+	for _, m := range mutants {
+		if m.Acknowledged() {
+			continue
+		}
+		if _, ok := known[mutation.MutantID(m)]; ok {
+			n++
+		}
+	}
+	return n
 }
 
 // platform is the operating system and architecture verdicts are measured on.

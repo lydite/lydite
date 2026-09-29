@@ -704,6 +704,9 @@ func kindRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentM
 		out := componentMutation{summary: o.Summary, elapsed: o.Elapsed, ran: true}
 		row, findings := mutationRow(label, c.Name, c.Dir, log, o.Summary, o.Results, o.Scoped, o.Elapsed)
 		out.findings = findings
+		if o.Reused > 0 {
+			row.Detail = append(row.Detail, reusedNote(o.Reused, o.Summary.Total()))
+		}
 		return completedRow(row, noGate), out
 	default:
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable",
@@ -964,6 +967,13 @@ func unmatchedNote(s mutation.Summary) string {
 		return ""
 	}
 	return fmt.Sprintf("%d declaration(s) cover no mutant", s.Unmatched)
+}
+
+// reusedNote says on the row that some of its verdicts were recorded by a
+// previous run rather than measured by this one, so a score built partly from
+// them is not read as wholly fresh.
+func reusedNote(reused, total int) string {
+	return fmt.Sprintf("%d of %d verdicts reused", reused, total)
 }
 
 // unboundedNote says on the row that the memory bound did not reach the
