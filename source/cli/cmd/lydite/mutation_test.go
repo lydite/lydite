@@ -27,6 +27,63 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
+func cacheAt(dir string) func() (string, error) {
+	return func() (string, error) { return dir, nil }
+}
+
+func TestTheStateRootIsTheFlagThenTheEnvironmentThenTheCache(t *testing.T) {
+	flagDir, envDir := t.TempDir(), t.TempDir()
+	if got, note := resolveStateDir(flagDir, envDir, "/repo", cacheAt("/cache")); got != flagDir || note != "" {
+		t.Fatalf("flag: got %q, %q", got, note)
+	}
+	if got, note := resolveStateDir("", envDir, "/repo", cacheAt("/cache")); got != envDir || note != "" {
+		t.Fatalf("env: got %q, %q", got, note)
+	}
+	got, note := resolveStateDir("", "", "/repo", cacheAt("/cache"))
+	if note != "" || !strings.HasPrefix(got, filepath.Join("/cache", "lydite", "mutation")+string(filepath.Separator)) {
+		t.Fatalf("default: got %q, %q", got, note)
+	}
+}
+
+func TestTheDefaultStateRootIsKeyedByTheScanRoot(t *testing.T) {
+	a, _ := resolveStateDir("", "", "/repo/a", cacheAt("/cache"))
+	a2, _ := resolveStateDir("", "", "/repo/a", cacheAt("/cache"))
+	b, _ := resolveStateDir("", "", "/repo/b", cacheAt("/cache"))
+	if a != a2 || a == b {
+		t.Fatalf("a=%q a2=%q b=%q", a, a2, b)
+	}
+	if base := filepath.Base(a); len(base) != 64 {
+		t.Fatalf("last element %q is not a hex sha256", base)
+	}
+}
+
+func TestNoCacheDirectorySwitchesResumingOffWithANote(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("$HOME is not defined") }
+	got, note := resolveStateDir("", "", "/repo", failing)
+	if got != "" || !strings.Contains(note, "$HOME is not defined") || strings.Contains(note, "\n") {
+		t.Fatalf("got %q, %q", got, note)
+	}
+	if got, note := resolveStateDir("state", "", "/repo", failing); got == "" || note != "" {
+		t.Fatalf("an explicit root needs no cache directory: %q, %q", got, note)
+	}
+}
+
+func TestARelativeStateRootBecomesAbsolute(t *testing.T) {
+	got, _ := resolveStateDir("rel/state", "", "/repo", cacheAt("/cache"))
+	if !filepath.IsAbs(got) || !strings.HasSuffix(got, filepath.Join("rel", "state")) {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestTheMutationCommandRegistersTheStateFlags(t *testing.T) {
+	cmd := newMutationCmd()
+	for _, name := range []string{"state-dir", "fresh"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("--%s is not registered", name)
+		}
+	}
+}
+
 func testLog(t *testing.T) *componentLog {
 	t.Helper()
 	log := openLog(t.TempDir(), "app", "mutation.log", false, 3)

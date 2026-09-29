@@ -1,12 +1,16 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,8 +50,8 @@ import (
 func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected, declined, noGate bool
-	var concurrency, baseBranch, baseSHA, memory string
+	var asJSON, noColor, stream, onlyAffected, declined, noGate, fresh bool
+	var concurrency, baseBranch, baseSHA, memory, stateDir string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
@@ -124,6 +128,16 @@ same token as a suppression, declaring one refers the change to a human.`,
 			if err != nil {
 				return err
 			}
+			// The environment is read here and nowhere below: the stages
+			// receive the resolved root as a field.
+			scanRoot, err := filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+			resolvedState, stateNote := resolveStateDir(stateDir, os.Getenv(mutationStateEnv), scanRoot, os.UserCacheDir)
+			if stateNote != "" {
+				fmt.Fprintln(os.Stderr, stateNote)
+			}
 			r, err := mutate.Run(ctx, mutationflow.Params{
 				Dir:          dir,
 				Components:   components,
@@ -137,6 +151,8 @@ same token as a suppression, declaring one refers the change to a human.`,
 				Limit:        limit,
 				Timeout:      timeout,
 				Memory:       maxMemory,
+				StateDir:     resolvedState,
+				Fresh:        fresh,
 				Stream:       stream,
 				// The process's own stderr, where a declaration that matched
 				// no mutant is named beside the per-component mirror.
@@ -226,7 +242,40 @@ same token as a suppression, declaring one refers the change to a human.`,
 	// `lydite test`'s --no-coverage is. See ADR 0048.
 	cmd.Flags().BoolVar(&noGate, "no-gate", false,
 		"measure and record every mutant as usual, and let no survivor fail the command")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "",
+		"root under which each component's resumable verdicts are kept, also named by $"+mutationStateEnv+
+			"; a cache directory keyed by the scan root by default")
+	cmd.Flags().BoolVar(&fresh, "fresh", false,
+		"discard the recorded state of each component and measure every mutant again")
 	return cmd
+}
+
+// mutationStateEnv names the state root when --state-dir is not given.
+const mutationStateEnv = "LYDITE_MUTATION_STATE"
+
+// resolveStateDir picks the root under which a mutation run keeps its resumable
+// verdicts: the flag, then the environment, then a directory in the user cache
+// keyed by the hash of the absolute scan root, so two checkouts never share
+// state. A relative choice is made absolute.
+//
+// An empty dir switches resuming off, and note says why; a machine with no
+// resolvable cache directory (no HOME, no XDG_CACHE_HOME) measures everything
+// rather than failing the run.
+func resolveStateDir(flag, env, scanRoot string, userCacheDir func() (string, error)) (dir, note string) {
+	if chosen := cmp.Or(flag, env); chosen != "" {
+		abs, err := filepath.Abs(chosen)
+		if err != nil {
+			return "", "mutation state is off: cannot resolve " + chosen + ": " + err.Error()
+		}
+		return abs, ""
+	}
+	cache, err := userCacheDir()
+	if err != nil {
+		return "", "mutation state is off: no user cache directory (" + err.Error() +
+			"); name one with --state-dir or " + mutationStateEnv
+	}
+	sum := sha256.Sum256([]byte(scanRoot))
+	return filepath.Join(cache, "lydite", "mutation", hex.EncodeToString(sum[:])), ""
 }
 
 // annotationMarker is the declaration an author writes to say no test could
