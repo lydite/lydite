@@ -50,7 +50,7 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 		// diff and the coverage report are both scan-root relative.
 		rel, err := componentRelative(c.Dir, file)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		// Joined onto the scan root, which is what a component's dir is
 		// relative to. Resolving it against this process's working directory
@@ -68,7 +68,7 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 		}
 		mutants, unmatched, err := mutation.Generate(lang, rel, src, lines)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		// Named, because their author believes they have answered a survivor
 		// and nothing they can see says otherwise: the comment is well
