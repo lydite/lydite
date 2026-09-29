@@ -80,6 +80,11 @@ type ComponentCounts struct {
 	// the two as the same answer, and must not report nought as a run that
 	// took no time.
 	ElapsedSeconds float64 `json:"elapsed_seconds,omitempty"`
+	// Reused is how many of those mutants were answered from verdicts a
+	// previous run recorded rather than measured by this one, so a folded
+	// report can say a resume happened. Nought is a run that measured every
+	// mutant, and a document an older lydite wrote.
+	Reused int `json:"reused,omitempty"`
 }
 
 // Elapsed is the stored seconds back as a duration, and false where the

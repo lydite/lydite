@@ -38,5 +38,5 @@ if _, err := verifySHA512(exeData, dist); err != nil {
 }
 ```
 
-Reasoning: [ADR 0075](../../docs/adr/0075-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
+Reasoning: [ADR 0077](../../docs/adr/0077-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
 and [`agentic/references/toolchains.md`](../references/toolchains.md).

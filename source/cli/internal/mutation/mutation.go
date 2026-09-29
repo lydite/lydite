@@ -239,6 +239,14 @@ type Result struct {
 	// this way passed only because lydite stopped waiting for what it left
 	// running, not because nothing was left running.
 	OutputHeldOpen bool
+	// CutShort reports that the run was cancelled before this mutant had a
+	// verdict: it was never reached, or it was in flight when the run ended.
+	// Its Outcome is Unviable so it stays out of the denominator, and this
+	// field is what separates it from a mutant that genuinely would not build
+	// — a verdict worth keeping for a resumed run, where a cut-short one must
+	// be measured again. It never leaves the process: a document carrying it
+	// would describe this run's cancellation, not the mutant.
+	CutShort bool `json:"-"`
 }
 
 // Summary counts one component's results.

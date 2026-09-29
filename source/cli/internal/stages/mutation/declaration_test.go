@@ -3,7 +3,10 @@ package mutationstages
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -375,5 +378,232 @@ func TestOnlyALanguageWithNoOverlayNeedsAWorkerDirectory(t *testing.T) {
 	}
 	if tree.Component != "." {
 		t.Errorf("a component declared at %q became %q", ".", tree.Component)
+	}
+}
+
+func stateScope(t *testing.T, root, stateDir string, comps ...component.Component) ScopeChangeOut {
+	t.Helper()
+	out, err := ScopeChange(t.Context(), ScopeChangeIn{Shape: &fakeShape{t: t, lang: runnerLang}, Dir: root,
+		Base: git(t, root, "rev-parse", "main"), Selected: comps, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A Go-only run has no worker directory to copy and still digests the tree
+// when resume is on; with resume off it computes none.
+func TestScopeChangeDigestsTheTreeOfAGoOnlyRunWhenResumeIsOn(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n"})
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+
+	off := stateScope(t, root, "", app)
+	if off.TreeDigest != "" {
+		t.Errorf("digest = %q with resume off, want none", off.TreeDigest)
+	}
+	on := stateScope(t, root, filepath.Join(root, ".lydite-state"), app)
+	if on.TreeDigest == "" {
+		t.Fatal("a Go-only run with resume on computed no digest")
+	}
+	if on.Files != nil {
+		t.Errorf("a Go-only run handed on %v, want no listing", on.Files)
+	}
+	writeFile(t, root, "app/a.go", "package a\n\nvar X = 2\n")
+	if changed := stateScope(t, root, filepath.Join(root, ".lydite-state"), app); changed.TreeDigest == on.TreeDigest {
+		t.Error("editing a file left the digest unchanged")
+	}
+}
+
+// A tracked file deleted from the worktree is an ordinary dirty tree: the digest
+// is still computed, and it moves.
+func TestScopeChangeDigestsATreeWithADeletedTrackedFile(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n", "app/b.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n"})
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	state := filepath.Join(root, ".lydite-state")
+
+	before := stateScope(t, root, state, app)
+	if err := os.Remove(filepath.Join(root, "app", "b.go")); err != nil {
+		t.Fatal(err)
+	}
+	after := stateScope(t, root, state, app)
+	if after.TreeDigest == "" || after.TreeDigest == before.TreeDigest {
+		t.Errorf("digest = %q after a deletion, want one different from %q", after.TreeDigest, before.TreeDigest)
+	}
+}
+
+// A listed entry that is a directory, as a symlink to one is, is skipped rather
+// than failing the digest.
+func TestScopeChangeSkipsAListedDirectory(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n"})
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	if err := os.Symlink("app", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "add", "link")
+
+	if out := stateScope(t, root, filepath.Join(root, ".lydite-state"), app); out.TreeDigest == "" {
+		t.Error("a directory in the listing left no digest")
+	}
+}
+
+// A state root that cannot be created switches resume off with one diagnostic
+// line and never fails the run; a worker directory's listing is still handed on.
+func TestScopeChangeSwitchesResumeOffWhenTheStateRootCannotBeCreated(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n", "web/a.ts": "export const x = 1;\n"})
+	blocker := filepath.Join(root, "blocker")
+	writeFile(t, root, "blocker", "a file\n")
+	state := filepath.Join(blocker, "state")
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	web := component.Component{Name: "web", Dir: "web", Runner: "vitest"}
+
+	for _, c := range []struct {
+		name      string
+		selected  []component.Component
+		wantFiles bool
+	}{
+		{"go only", []component.Component{app}, false},
+		{"with a worker directory", []component.Component{app, web}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var diag strings.Builder
+			out, err := ScopeChange(t.Context(), ScopeChangeIn{Shape: &fakeShape{t: t, lang: runnerLang}, Dir: root,
+				Base: git(t, root, "rev-parse", "main"), Selected: c.selected, StateDir: state, Diagnostics: &diag})
+			if err != nil {
+				t.Fatalf("an unusable state root failed the run: %v", err)
+			}
+			if out.TreeDigest != "" {
+				t.Errorf("digest = %q, want none with resume off", out.TreeDigest)
+			}
+			if (out.Files != nil) != c.wantFiles {
+				t.Errorf("files = %v, want listed = %v", out.Files, c.wantFiles)
+			}
+			if _, ok := out.Changed["app/a.go"]; !ok {
+				t.Errorf("changed = %v, want the change still read", out.Changed)
+			}
+			got := diag.String()
+			if strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, "warning: mutation state is off: ") ||
+				!strings.HasSuffix(got, "; every mutant is measured\n") {
+				t.Errorf("diagnostics = %q, want one state-off line", got)
+			}
+		})
+	}
+}
+
+// A listing the digest cannot read is a cache that is not there: the run loses
+// its resume, says so once, and is not failed.
+func TestScopeChangeSwitchesResumeOffWhenTheTreeCannotBeDigested(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n", "dir/inner.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n"})
+	// The listing names dir/inner.go, and a file where its directory was makes
+	// stat answer something other than "not there".
+	if err := os.RemoveAll(filepath.Join(root, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "dir", "now a file\n")
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+
+	var diag strings.Builder
+	out, err := ScopeChange(t.Context(), ScopeChangeIn{Shape: &fakeShape{t: t, lang: runnerLang}, Dir: root,
+		Base: git(t, root, "rev-parse", "main"), Selected: []component.Component{app},
+		StateDir: filepath.Join(root, ".lydite-state"), Diagnostics: &diag})
+	if err != nil {
+		t.Fatalf("an undigestable tree failed the run: %v", err)
+	}
+	if out.TreeDigest != "" {
+		t.Errorf("digest = %q, want none", out.TreeDigest)
+	}
+	if got := diag.String(); strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, "warning: mutation state is off: ") {
+		t.Errorf("diagnostics = %q, want one state-off line", got)
+	}
+}
+
+// The state root is ignored by git, kept out of the digest and out of the
+// listing a worker directory is copied from.
+func TestScopeChangeKeepsTheStateRootOutOfTheTree(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n", "web/a.ts": "export const x = 1;\n"})
+	state := filepath.Join(root, ".lydite-state")
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	web := component.Component{Name: "web", Dir: "web", Runner: "vitest"}
+
+	first := stateScope(t, root, state, app, web)
+	ignore, err := os.ReadFile(filepath.Join(state, ".gitignore"))
+	if err != nil || string(ignore) != "*\n" {
+		t.Fatalf(".gitignore = %q, %v, want %q", ignore, err, "*\n")
+	}
+	writeFile(t, state, "ledger.jsonl", "one\n")
+	writeFile(t, state, "sub/more.jsonl", "two\n")
+	second := stateScope(t, root, state, app, web)
+
+	if first.TreeDigest != second.TreeDigest {
+		t.Error("writing into the state root changed the digest")
+	}
+	for _, f := range second.Files {
+		if strings.HasPrefix(f, ".lydite-state/") {
+			t.Errorf("files hold %s from the state root", f)
+		}
+	}
+	if !reflect.DeepEqual(second.Files, []string{"app/a.go", "web/a.ts"}) {
+		t.Errorf("files = %v, want the tree without the state root", second.Files)
+	}
+}
+
+// A state root whose ignore file cannot be written switches resume off instead
+// of leaving state git would list as part of the tree.
+func TestIgnoreStateReportsAnIgnoreFileItCannotWrite(t *testing.T) {
+	state := t.TempDir()
+	// Stat on a dangling link finds nothing and a write through it fails.
+	if err := os.Symlink(filepath.Join(state, "missing", "target"), filepath.Join(state, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ignoreState(state); err == nil {
+		t.Error("an ignore file that could not be written was reported as written")
+	}
+}
+
+// withoutState drops what lies under the state root and leaves the listing
+// alone wherever the root is none, is the scan root itself, or is outside it.
+func TestWithoutStateDropsOnlyWhatLiesUnderTheStateRoot(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"a.go", ".lydite-state/verdicts.jsonl", ".lydite-state-other/x", "b/c.go"}
+	for name, c := range map[string]struct {
+		stateDir string
+		want     []string
+	}{
+		"none":            {"", files},
+		"under the root":  {filepath.Join(root, ".lydite-state"), []string{"a.go", ".lydite-state-other/x", "b/c.go"}},
+		"the root itself": {root, files},
+		"outside":         {filepath.Join(filepath.Dir(root), "elsewhere"), files},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := withoutState(files, root, c.stateDir); !slices.Equal(got, c.want) {
+				t.Errorf("withoutState = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A working directory that has gone cannot make a relative path absolute, and
+// the listing is then left as it is.
+func TestWithoutStateLeavesTheListingAloneWhenPathsCannotBeResolved(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("the working directory cannot be removed here: %v", err)
+	}
+	files := []string{"a.go", "state/x"}
+	abs := t.TempDir()
+	if got := withoutState(files, ".", "state"); !slices.Equal(got, files) {
+		t.Errorf("a relative scan root: got %v, want the listing unchanged", got)
+	}
+	if got := withoutState(files, abs, "state"); !slices.Equal(got, files) {
+		t.Errorf("a relative state root: got %v, want the listing unchanged", got)
 	}
 }

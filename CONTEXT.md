@@ -81,6 +81,17 @@ A measurement record that cannot be recomputed after the fact — the toolchain 
 **Cache**:
 Derived data that can be regenerated on demand by re-running the tool that produced it. Losing a cache entry costs time, not information, so cache writes are best-effort and non-fatal. The per-tree **Baseline** is a cache; **Quality history** is a **Ledger**. The distinction is not stylistic: it dictates whether a failed write may be ignored.
 
+**Mutation state**:
+One **Component**'s recorded **Mutant** verdicts and the baseline they were measured against, kept under a **Fingerprint** so a rerun measures only the mutants that have no verdict yet. It is a **Cache**: losing it costs the time spent measuring what it held, so a state that cannot be read or written is reported and the run measures everything. Only a verdict the run itself decided is recorded; a mutant its declaration acknowledges is answered from the declaration and never enters it.
+_Avoid_: "checkpoint", "session" — nothing here is a place to return to, only verdicts a rerun does not need to reproduce.
+
+**Fingerprint**:
+The hash under which a **Mutation state** is valid: the contents of every file the mutants are built from, the component's runner, the provisioned toolchains, lydite's own version, the timeout and memory settings, the platform and the environment the suite runs under. Any other fingerprint discards the state. The base a change is diffed against is deliberately not part of it, because it decides which mutants are wanted and never what one of them answers.
+_Note_: it covers file contents rather than a commit, so an uncommitted edit is part of what a local run measured.
+
+**Incomplete run**:
+A run that stopped before every mutant had a verdict. Nothing about it is a pass: the mutants without a verdict were never asked about, so it renders as unmeasured rather than as a result.
+
 **Projection**:
 A pre-computed rollup derived from the **Ledger**, existing so the dashboard reads one small file instead of walking every partition. Regenerable by definition, so it is a **Cache** in every respect except that its source is the ledger rather than a scanner.
 

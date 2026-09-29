@@ -2,9 +2,17 @@ package mutationstages
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"lydite/lydite/internal/component"
@@ -142,6 +150,10 @@ type ComponentOutcome struct {
 	Results []mutation.Result
 	Scoped  map[string][]int
 	Elapsed time.Duration
+	// Reused is how many of a completed component's results were answered from
+	// verdicts a previous run recorded. An acknowledged mutant is answered by
+	// its declaration and is never one of them.
+	Reused int
 	// TeardownErr is the Lifecycle's error from the component's teardown
 	// commands, which run whatever became of it once its services started.
 	TeardownErr error
@@ -181,6 +193,14 @@ type RunMutantsIn struct {
 	Stream bool
 	// Diagnostics is where a declaration that matched no mutant is named.
 	Diagnostics io.Writer
+	// StateDir is the resume state root, and empty when resume is off. Fresh
+	// asks for what it holds to be ignored, LyditeVersion is the lydite that
+	// wrote what is recorded, and TreeDigest is the digest of the tree the
+	// run mutates.
+	StateDir      string
+	Fresh         bool
+	LyditeVersion string
+	TreeDigest    string
 }
 
 // RunMutantsOut is what became of every selected component, and of the run.
@@ -260,6 +280,7 @@ func RunMutants(ctx context.Context, in RunMutantsIn) (RunMutantsOut, error) {
 type target struct {
 	lang    runner.Lang
 	inv     runner.Invocation
+	build   runner.Invocation
 	suite   runner.Invocation
 	backend mutation.Backend
 	scoped  map[string][]int
@@ -293,13 +314,12 @@ func prepareTarget(in RunMutantsIn, p Planned, tc *toolchain.Env) (target, Compo
 	// All three variants of one declaration, derived together: mutation needs
 	// every one of them, and a component that cannot produce one can produce
 	// no mutant at all.
-	var build runner.Invocation
 	for _, want := range []struct {
 		variant runner.Variant
 		into    *runner.Invocation
 	}{
 		{runner.Instrumented, &t.inv},
-		{runner.BuildOnly, &build},
+		{runner.BuildOnly, &t.build},
 		{runner.Plain, &t.suite},
 	} {
 		inv, err := in.Shape.Invocation(c, want.variant)
@@ -310,7 +330,7 @@ func prepareTarget(in RunMutantsIn, p Planned, tc *toolchain.Env) (target, Compo
 	}
 
 	suite := t.suite
-	backend, err := backendFor(t.lang, in.Dir, c.Dir, build, suite, in.Files,
+	backend, err := backendFor(t.lang, in.Dir, c.Dir, t.build, suite, in.Files,
 		func(ctx context.Context, dir string) error {
 			// The runner's own preparation, in the worker rather than in the
 			// component: a JavaScript workspace copied without its
@@ -356,6 +376,11 @@ func prepareTarget(in RunMutantsIn, p Planned, tc *toolchain.Env) (target, Compo
 // component whose baseline fails is KindBaselineFailed rather than a verdict —
 // nothing can be concluded about tests that were not passing before the
 // mutation.
+//
+// With resume on, a baseline and every verdict recorded under the component's
+// fingerprint are reused rather than measured again, and each verdict this run
+// decides is recorded the moment it is decided; see stateFingerprint for what
+// that fingerprint covers.
 func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolchain.Env, slots *mutation.Slots) (out ComponentOutcome) {
 	c := p.Component
 	out = ComponentOutcome{Component: c, LogRel: p.LogRel}
@@ -390,40 +415,59 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	}
 
 	env := in.Shape.Env(tc, c, t.inv)
+	suiteEnv := in.Shape.Env(tc, c, t.suite)
+	// Opened only once the component's preparation, services and setup have
+	// run, so a recorded baseline saves the suite and nothing around it: a
+	// mutant's suite needs its services up and its setup done whether or not
+	// the baseline is measured again.
+	st := openComponentState(in, c, stateFingerprint(in, c, t, tc, env, suiteEnv))
+	defer st.close()
+
 	baselineStarted := time.Now()
-	// Under the run's slots, because a baseline is a suite execution exactly
-	// as a mutant is. Counting only mutants would let three components in
-	// their baseline run beside a fourth executing four mutants — seven
-	// suites in flight under a limit of four, which is what one bound exists
-	// to prevent.
-	var res executil.Result
-	if !slots.Run(ctx, func() {
-		res = executil.RunOutput(ctx, t.dir, env, p.Log, t.inv.Name, t.inv.Args...)
-	}) {
-		return finish(KindBaselineInterrupted, nil)
+	recorded, hit := st.baseline()
+	if !hit {
+		// Under the run's slots, because a baseline is a suite execution
+		// exactly as a mutant is. Counting only mutants would let three
+		// components in their baseline run beside a fourth executing four
+		// mutants — seven suites in flight under a limit of four, which is
+		// what one bound exists to prevent.
+		var res executil.Result
+		if !slots.Run(ctx, func() {
+			res = executil.RunOutput(ctx, t.dir, env, p.Log, t.inv.Name, t.inv.Args...)
+		}) {
+			return finish(KindBaselineInterrupted, nil)
+		}
+		if !res.Ok() {
+			out.Output = res.Output
+			return finish(KindBaselineFailed, nil)
+		}
+		// Both halves of what bounds a mutant come off the same run: the
+		// elapsed time and the peak the kernel reported for it. The baseline
+		// itself runs under no ceiling, because deriving one needs the
+		// measurement first.
+		recorded = mutation.Baseline{Passed: true, Elapsed: time.Since(baselineStarted), MaxRSS: res.MaxRSS}
 	}
-	if !res.Ok() {
-		out.Output = res.Output
-		return finish(KindBaselineFailed, nil)
-	}
-	baseline := time.Since(baselineStarted)
-	// Both halves of what bounds a mutant come off the same run: the elapsed
-	// time and the peak the kernel reported for it. The baseline itself runs
-	// under no ceiling, because deriving one needs the measurement first.
-	maxMemory := memoryBudget(res.MaxRSS, in.Memory)
-	if !memoryFits(res.MaxRSS, maxMemory) {
+	maxMemory := memoryBudget(recorded.MaxRSS, in.Memory)
+	if !memoryFits(recorded.MaxRSS, maxMemory) {
 		// Gating nothing rather than reporting a component whose suite kills
 		// everything: under a ceiling the baseline alone already fills, every
 		// mutant dies of the bound rather than of a test.
-		out.Peak, out.Bound = res.MaxRSS, maxMemory
+		out.Peak, out.Bound = recorded.MaxRSS, maxMemory
 		return finish(KindBaselineTooLarge, nil)
 	}
-
-	report, err := coverage.Measure(ctx, in.Dir, c.Dir, t.inv.CoverageReport, t.lang, in.Shape.Env(tc, c, runner.Invocation{}))
-	if err != nil {
-		return finish(KindMeasureFailed, err)
+	if !hit {
+		report, err := coverage.Measure(ctx, in.Dir, c.Dir, t.inv.CoverageReport, t.lang, in.Shape.Env(tc, c, runner.Invocation{}))
+		if err != nil {
+			return finish(KindMeasureFailed, err)
+		}
+		recorded.Executed = report.Executed
+		// Only once the executed lines are read: a recorded baseline is
+		// everything a resumed run derives its mutants and their budget
+		// from, and one missing its lines would generate none.
+		st.saveBaseline(recorded)
 	}
-	mutants, unmatched, err := generate(in.Dir, c, t.lang, report.Executed, t.scoped, in.Diagnostics)
+
+	mutants, unmatched, err := generate(in.Dir, c, t.lang, coverage.LineHits(recorded.Executed), t.scoped, in.Diagnostics)
 	if err != nil {
 		return finish(KindGenerateFailed, err)
 	}
@@ -436,7 +480,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		return finish(KindNothingToMutate, nil)
 	}
 
-	timeout, workers := budget(baseline, in.Timeout), workersFor(p.Ports, in.Limit)
+	timeout, workers := budget(recorded.Elapsed, in.Timeout), workersFor(p.Ports, in.Limit)
 	// Into the live stream, where the per-mutant lines go: a run too large to
 	// finish is killed by its job timeout and writes no document at all, so a
 	// projection only a document carried is one the reader who needs it never
@@ -444,13 +488,16 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	// here stops a run.
 	_, _ = fmt.Fprintln(p.Log, costProjection(len(mutants), workers, timeout))
 
+	known := st.verdicts()
 	results, err := mutation.Execute(ctx, t.backend, mutants, mutation.Options{
-		Env:       in.Shape.Env(tc, c, t.suite),
+		Env:       suiteEnv,
 		Timeout:   timeout,
 		MaxMemory: maxMemory,
 		Workers:   workers,
 		Slots:     slots,
 		Log:       p.Log,
+		Known:     known,
+		Record:    st.recorder(),
 	})
 	if err != nil {
 		return finish(KindExecuteFailed, err)
@@ -460,6 +507,196 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		s.Add(r)
 	}
 	out.Summary, out.Results, out.Scoped = s, results, t.scoped
+	out.Reused = reusedCount(mutants, known)
 	out.Elapsed = time.Since(baselineStarted)
 	return finish(KindCompleted, nil)
+}
+
+// reusedCount is how many of mutants Execute answers from known: those it holds
+// a verdict for, less the acknowledged ones, which Execute answers by their
+// declaration whatever known holds.
+func reusedCount(mutants []mutation.Mutant, known map[string]mutation.Result) int {
+	n := 0
+	for _, m := range mutants {
+		if m.Acknowledged() {
+			continue
+		}
+		if _, ok := known[mutation.MutantID(m)]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+// platform is the operating system and architecture verdicts are measured on.
+// Whether a mutant's memory can be bounded at all depends on it, so a verdict
+// recorded on one is never reused on another.
+var platform = runtime.GOOS + "/" + runtime.GOARCH
+
+// stateFingerprint is what one component's recorded baseline and verdicts are
+// valid under: everything a verdict depends on — the source mutated, the suite
+// judging it, and the budget it is judged against.
+//
+// The tree's digest, the component, all three of its variants, its toolchain,
+// lydite itself, the --timeout and --memory overrides, the platform, and the
+// environment the baseline and the mutants run under. The environment is
+// hashed before it joins the rest and never written anywhere on its own: a
+// component's declared variables are where a repository keeps a token. The
+// base the change is diffed against is left out, because it decides which
+// mutants are wanted and never what any one of them answers.
+//
+// Every field is framed by its length, so no two different inputs concatenate
+// to the same bytes.
+func stateFingerprint(in RunMutantsIn, c component.Component, t target, tc *toolchain.Env, baselineEnv, suiteEnv []string) string {
+	h := sha256.New()
+	field := func(v string) { _, _ = fmt.Fprintf(h, "%d:%s", len(v), v) } // a hash.Hash's Write never fails
+	invocation := func(inv runner.Invocation) {
+		field(inv.Name)
+		field(inv.CoverageReport)
+		field(strconv.Itoa(len(inv.Args)))
+		for _, a := range inv.Args {
+			field(a)
+		}
+	}
+	field("lydite-mutation-state-v1")
+	field(in.TreeDigest)
+	field(c.Name)
+	field(c.Dir)
+	invocation(t.inv)
+	invocation(t.build)
+	invocation(t.suite)
+	field(tc.Key())
+	field(in.LyditeVersion)
+	field(strconv.FormatInt(int64(in.Timeout), 10))
+	field(strconv.FormatInt(in.Memory, 10))
+	field(platform)
+	field(envDigest(baselineEnv))
+	field(envDigest(suiteEnv))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// envDigest is a hash of the environment a command runs under, as the child
+// reads it: where a key occurs twice the last occurrence wins, so the entries
+// are reduced to that before they are sorted, and two lists a child would read
+// identically hash identically.
+func envDigest(env []string) string {
+	last := map[string]string{}
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		last[k] = kv
+	}
+	entries := make([]string, 0, len(last))
+	for _, kv := range last {
+		entries = append(entries, kv)
+	}
+	sort.Strings(entries)
+	h := sha256.New()
+	for _, kv := range entries {
+		_, _ = fmt.Fprintf(h, "%d:%s", len(kv), kv)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// componentState is one component's resume state as a run uses it. Nil is a
+// run with resume off, or with a state that could not be opened, and every
+// method on it answers as though nothing were recorded.
+//
+// The state is a cache: every failure to read or write it is one line on the
+// run's diagnostics, written as it arises, and the component is measured as
+// it would be without one. None of them fails the run or reaches its outcome.
+type componentState struct {
+	state       *mutation.State
+	name        string
+	diagnostics io.Writer
+	// recordFailed reports that a verdict could not be recorded. Only the
+	// first failure is written: a state that refuses one write most likely
+	// refuses every one after it, and a line per mutant buries the log.
+	recordFailed sync.Once
+}
+
+// openComponentState opens c's state under fingerprint, discarding it first
+// when the run asks for a fresh one.
+func openComponentState(in RunMutantsIn, c component.Component, fingerprint string) *componentState {
+	if in.StateDir == "" || in.TreeDigest == "" {
+		return nil
+	}
+	dir := mutation.StateDir(in.StateDir, c.Name)
+	if in.Fresh {
+		if err := os.RemoveAll(dir); err != nil {
+			warnState(in.Diagnostics, c.Name, fmt.Errorf("discarding the mutation state %s: %w", dir, err))
+			return nil
+		}
+	}
+	s, err := mutation.OpenState(dir, fingerprint)
+	if err != nil {
+		warnState(in.Diagnostics, c.Name, err)
+		return nil
+	}
+	return &componentState{state: s, name: c.Name, diagnostics: in.Diagnostics}
+}
+
+// warnState writes one line naming a failure of c's state and what the run
+// does instead.
+func warnState(w io.Writer, name string, err error) {
+	_, _ = fmt.Fprintf(w, "warning: %s's mutation state: %v; what it would have held is measured instead\n", name, err)
+}
+
+// baseline is the recorded baseline, and false where there is none to reuse.
+// A baseline that did not pass is never reused: its failing output is what a
+// report shows, and only the suite itself can print it again.
+func (s *componentState) baseline() (mutation.Baseline, bool) {
+	if s == nil {
+		return mutation.Baseline{}, false
+	}
+	b, ok, err := s.state.Baseline()
+	if err != nil {
+		warnState(s.diagnostics, s.name, err)
+		return mutation.Baseline{}, false
+	}
+	return b, ok && b.Passed
+}
+
+func (s *componentState) saveBaseline(b mutation.Baseline) {
+	if s == nil {
+		return
+	}
+	if err := s.state.SaveBaseline(b); err != nil {
+		warnState(s.diagnostics, s.name, err)
+	}
+}
+
+// verdicts is every verdict recorded under the state's fingerprint, and nil
+// where none can be read.
+func (s *componentState) verdicts() map[string]mutation.Result {
+	if s == nil {
+		return nil
+	}
+	known, err := s.state.Verdicts()
+	if err != nil {
+		warnState(s.diagnostics, s.name, err)
+		return nil
+	}
+	return known
+}
+
+// recorder is the executor's Record: each verdict appended as it is decided,
+// from every worker at once.
+func (s *componentState) recorder() func(mutation.Result) {
+	if s == nil {
+		return nil
+	}
+	return func(r mutation.Result) {
+		if err := s.state.Record(r); err != nil {
+			s.recordFailed.Do(func() { warnState(s.diagnostics, s.name, err) })
+		}
+	}
+}
+
+func (s *componentState) close() {
+	if s == nil {
+		return
+	}
+	if err := s.state.Close(); err != nil {
+		warnState(s.diagnostics, s.name, err)
+	}
 }

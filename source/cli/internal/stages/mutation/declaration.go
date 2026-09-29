@@ -2,7 +2,12 @@ package mutationstages
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"lydite/lydite/internal/affected"
 	"lydite/lydite/internal/component"
@@ -12,6 +17,7 @@ import (
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/toolchain"
+	"lydite/lydite/internal/treedigest"
 )
 
 // LoadDeclarationIn is the scan root, and the components this run is
@@ -209,39 +215,168 @@ type ScopeChangeIn struct {
 	Dir      string
 	Base     string
 	Selected []component.Component
+	// StateDir is the resume state root, and empty when resume is off. A root
+	// inside Dir is kept out of every listing this stage makes.
+	StateDir string
+	// Diagnostics is where a failure touching the resume state is named, as it
+	// arises. Nil discards.
+	Diagnostics io.Writer
 }
 
-// ScopeChangeOut is every line the change added, and every file a worker
-// directory would be copied from.
+// ScopeChangeOut is every line the change added, every file a worker
+// directory would be copied from, and the digest of the tree.
 type ScopeChangeOut struct {
 	// Changed is every line the diff added, repository-wide, keyed by a path
 	// relative to the scan root.
 	Changed map[string][]int
 	// Files is every path git knows about under the scan root — tracked, plus
-	// untracked ones it is not ignoring — and empty when no selected
-	// component's mutants run in a worker directory.
+	// untracked ones it is not ignoring — minus the state root, and empty when
+	// no selected component's mutants run in a worker directory.
 	Files []string
+	// TreeDigest is the digest of every path git knows about under the scan
+	// root, minus the state root, and empty when resume is off.
+	TreeDigest string
 }
 
 // ScopeChange reads the change once for the whole run.
 //
 // Every changed line in one call, partitioned per component later: they all
 // measure the same range, and asking git once per component is the same answer
-// computed N times. The file listing is read only for a language whose mutants
-// need a worker directory, so a repository of Go components pays no git walk
-// for a copy it never makes.
+// computed N times. The file listing is read once, when a language whose
+// mutants need a worker directory is selected or when resume needs the tree
+// digest, so a Go-only run with resume off pays no git walk for a copy it
+// never makes.
+//
+// The state root is dropped from the listing before it is digested or handed
+// on: its files are appended to on every run, so a digest that covered them
+// would change each time and nothing recorded would ever be reused. A
+// `.gitignore` ignoring everything is written into it, so git does not list
+// its files as untracked either.
 func ScopeChange(ctx context.Context, in ScopeChangeIn) (ScopeChangeOut, error) {
 	changed, err := coverage.ChangedLines(ctx, in.Dir, in.Base)
 	if err != nil {
 		return ScopeChangeOut{}, err
 	}
-	var files []string
-	if needsWorktree(in.Shape, in.Selected) {
-		if files, err = gitdiff.Tracked(ctx, in.Dir); err != nil {
-			return ScopeChangeOut{}, err
+	out := ScopeChangeOut{Changed: changed}
+	diagnostics := in.Diagnostics
+	if diagnostics == nil {
+		diagnostics = io.Discard
+	}
+	worktree := needsWorktree(in.Shape, in.Selected)
+	resume := in.StateDir != ""
+	if resume {
+		if err := ignoreState(in.StateDir); err != nil {
+			warnStateOff(diagnostics, err)
+			resume = false
 		}
 	}
-	return ScopeChangeOut{Changed: changed, Files: files}, nil
+	if !worktree && !resume {
+		return out, nil
+	}
+	files, err := gitdiff.Tracked(ctx, in.Dir)
+	if err != nil {
+		if worktree {
+			return ScopeChangeOut{}, err
+		}
+		warnStateOff(diagnostics, err)
+		return out, nil
+	}
+	files = withoutState(files, in.Dir, in.StateDir)
+	if worktree {
+		out.Files = files
+	}
+	if resume {
+		digest, err := digestTree(in.Dir, files)
+		if err != nil {
+			warnStateOff(diagnostics, err)
+			return out, nil
+		}
+		out.TreeDigest = digest
+	}
+	return out, nil
+}
+
+// digestTree is the digest of the regular files among files, relative to dir.
+func digestTree(dir string, files []string) (string, error) {
+	present, err := regularFiles(dir, files)
+	if err != nil {
+		return "", err
+	}
+	return treedigest.Digest(dir, present)
+}
+
+// warnStateOff says resume is off for the run. The state is a cache, so a
+// failure touching it costs the reuse of recorded verdicts and nothing else.
+func warnStateOff(w io.Writer, err error) {
+	_, _ = fmt.Fprintf(w, "warning: mutation state is off: %v; every mutant is measured\n", err)
+}
+
+// regularFiles keeps the entries of files, relative to dir, that are regular
+// files, or symlinks to one. The listing names a tracked file deleted from the
+// worktree, a submodule's directory and a symlink to a directory, none of which
+// can be hashed, and the digest is a cache key that must not fail a run over a
+// dirty tree. A deleted file still changes the digest, by dropping out of the
+// list.
+func regularFiles(dir string, files []string) ([]string, error) {
+	kept := make([]string, 0, len(files))
+	for _, f := range files {
+		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(f)))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode().IsRegular() {
+			kept = append(kept, f)
+		}
+	}
+	return kept, nil
+}
+
+// ignoreState creates the state root and writes into it a `.gitignore`
+// ignoring everything, itself included, so the state is never part of the tree
+// it describes. An existing one is left as it is.
+func ignoreState(stateDir string) error {
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return fmt.Errorf("creating the mutation state directory: %w", err)
+	}
+	path := filepath.Join(stateDir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte("*\n"), 0o600); err != nil {
+		return fmt.Errorf("ignoring the mutation state directory: %w", err)
+	}
+	return nil
+}
+
+// withoutState drops every path under stateDir from files, which are relative
+// to dir. A state root outside dir, or none, leaves files as they are.
+func withoutState(files []string, dir, stateDir string) []string {
+	if stateDir == "" {
+		return files
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return files
+	}
+	absState, err := filepath.Abs(stateDir)
+	if err != nil {
+		return files
+	}
+	rel, err := filepath.Rel(absDir, absState)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return files
+	}
+	prefix := filepath.ToSlash(rel) + "/"
+	kept := make([]string, 0, len(files))
+	for _, f := range files {
+		if !strings.HasPrefix(f, prefix) {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // needsWorktree reports whether any selected component's mutants are run in a

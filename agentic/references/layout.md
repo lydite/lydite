@@ -81,6 +81,8 @@ source/cli/internal/coverage/     # reads a component's coverage report (see cov
 source/cli/internal/crap/         # the CRAP index per function, Go, Rust and TypeScript alike (see crap.md)
 source/cli/internal/mutation/     # the mutants, the isolation strategies, and what became of each
                                   #   (see mutation.md)
+source/cli/internal/treedigest/   # the content digest of a source tree, part of the fingerprint
+                                  #   a resumable mutation run keys its state on (see mutation.md)
 source/cli/internal/treesitter/   # the shared grammar tables crap and mutation both read: function
                                   #   spans, test-code classification, and which tests a file
                                   #   declares (see crap.md and mutation.md; coverage.md for

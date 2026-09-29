@@ -1,12 +1,17 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,8 +51,8 @@ import (
 func newMutationCmd() *cobra.Command {
 	var dir string
 	var components []string
-	var asJSON, noColor, stream, onlyAffected, declined, noGate bool
-	var concurrency, baseBranch, baseSHA, memory string
+	var asJSON, noColor, stream, onlyAffected, declined, noGate, fresh bool
+	var concurrency, baseBranch, baseSHA, memory, stateDir string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:           "mutation",
@@ -124,20 +129,31 @@ same token as a suppression, declaring one refers the change to a human.`,
 			if err != nil {
 				return err
 			}
+			// The environment is read here and nowhere below: the stages
+			// receive the resolved root as a field.
+			scanRoot, err := filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+			resolvedState, build := resumeInputs(scanRoot, stateDir, os.Getenv(mutationStateEnv), version,
+				os.UserCacheDir, os.Executable, openExecutable, os.Stderr)
 			r, err := mutate.Run(ctx, mutationflow.Params{
-				Dir:          dir,
-				Components:   components,
-				Toolchains:   commandToolchains{cmd},
-				BaseBranch:   baseBranch,
-				BaseSHA:      baseSHA,
-				OnlyAffected: onlyAffected,
-				Affected:     affectedFrom,
-				Shape:        mutationShape{},
-				Lifecycle:    &mutationLifecycle{},
-				Limit:        limit,
-				Timeout:      timeout,
-				Memory:       maxMemory,
-				Stream:       stream,
+				Dir:           dir,
+				Components:    components,
+				Toolchains:    commandToolchains{cmd},
+				BaseBranch:    baseBranch,
+				BaseSHA:       baseSHA,
+				OnlyAffected:  onlyAffected,
+				Affected:      affectedFrom,
+				Shape:         mutationShape{},
+				Lifecycle:     &mutationLifecycle{},
+				Limit:         limit,
+				Timeout:       timeout,
+				Memory:        maxMemory,
+				StateDir:      resolvedState,
+				LyditeVersion: build,
+				Fresh:         fresh,
+				Stream:        stream,
 				// The process's own stderr, where a declaration that matched
 				// no mutant is named beside the per-component mirror.
 				Diagnostics: os.Stderr,
@@ -226,7 +242,88 @@ same token as a suppression, declaring one refers the change to a human.`,
 	// `lydite test`'s --no-coverage is. See ADR 0048.
 	cmd.Flags().BoolVar(&noGate, "no-gate", false,
 		"measure and record every mutant as usual, and let no survivor fail the command")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "",
+		"root under which each component's resumable verdicts are kept, also named by $"+mutationStateEnv+
+			"; a cache directory keyed by the scan root by default")
+	cmd.Flags().BoolVar(&fresh, "fresh", false,
+		"discard the recorded state of each component and measure every mutant again")
 	return cmd
+}
+
+// mutationStateEnv names the state root when --state-dir is not given.
+const mutationStateEnv = "LYDITE_MUTATION_STATE"
+
+// openExecutable opens the running executable, whose bytes name a dev build.
+func openExecutable(path string) (io.ReadCloser, error) {
+	return os.Open(path) // #nosec G304 -- the path is the running executable's own, from os.Executable
+}
+
+// resumeInputs resolves what a resumed run is rooted and keyed by: the state
+// root, and the name of the lydite whose verdicts it would reuse. What cannot
+// be resolved switches resuming off, with a line on w saying why, and never
+// fails the run.
+func resumeInputs(scanRoot, flag, env, version string, userCacheDir, executable func() (string, error),
+	open func(string) (io.ReadCloser, error), w io.Writer) (stateDir, build string) {
+	stateDir, note := resolveStateDir(flag, env, scanRoot, userCacheDir)
+	if note != "" {
+		_, _ = fmt.Fprintln(w, note)
+	}
+	build, err := lyditeVersion(version, executable, open)
+	if err != nil {
+		_, _ = fmt.Fprintln(w, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
+		return "", ""
+	}
+	return stateDir, build
+}
+
+// resolveStateDir picks the root under which a mutation run keeps its resumable
+// verdicts: the flag, then the environment, then a directory in the user cache
+// keyed by the hash of the absolute scan root, so two checkouts never share
+// state. A relative choice is made absolute.
+//
+// An empty dir switches resuming off, and note says why; a machine with no
+// resolvable cache directory (no HOME, no XDG_CACHE_HOME) measures everything
+// rather than failing the run.
+func resolveStateDir(flag, env, scanRoot string, userCacheDir func() (string, error)) (dir, note string) {
+	if chosen := cmp.Or(flag, env); chosen != "" {
+		abs, err := filepath.Abs(chosen)
+		if err != nil {
+			return "", "mutation state is off: cannot resolve " + chosen + ": " + err.Error()
+		}
+		return abs, ""
+	}
+	cache, err := userCacheDir()
+	if err != nil {
+		return "", "mutation state is off: no user cache directory (" + err.Error() +
+			"); name one with --state-dir or " + mutationStateEnv
+	}
+	sum := sha256.Sum256([]byte(scanRoot))
+	return filepath.Join(cache, "lydite", "mutation", hex.EncodeToString(sum[:])), ""
+}
+
+// lyditeVersion names the lydite whose verdicts a resumed run would reuse. A
+// release is its tag. A dev build is "dev" for every local build, so it is
+// named by the hash of the executable itself: two builds never share resume
+// state. An executable that cannot be found or read is an error, because any
+// fixed stand-in would be shared by every build that fails the same way.
+func lyditeVersion(version string, executable func() (string, error), open func(string) (io.ReadCloser, error)) (string, error) {
+	if version != "dev" {
+		return version, nil
+	}
+	path, err := executable()
+	if err != nil {
+		return "", fmt.Errorf("locating the running executable: %w", err)
+	}
+	f, err := open(path)
+	if err != nil {
+		return "", fmt.Errorf("reading the running executable: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("reading the running executable: %w", err)
+	}
+	return "dev+" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // annotationMarker is the declaration an author writes to say no test could
@@ -623,6 +720,9 @@ func kindRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentM
 		out := componentMutation{summary: o.Summary, elapsed: o.Elapsed, ran: true}
 		row, findings := mutationRow(label, c.Name, c.Dir, log, o.Summary, o.Results, o.Scoped, o.Elapsed)
 		out.findings = findings
+		if o.Reused > 0 {
+			row.Detail = append(row.Detail, reusedNote(o.Reused, o.Summary.Total()))
+		}
 		return completedRow(row, noGate), out
 	default:
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable",
@@ -883,6 +983,13 @@ func unmatchedNote(s mutation.Summary) string {
 		return ""
 	}
 	return fmt.Sprintf("%d declaration(s) cover no mutant", s.Unmatched)
+}
+
+// reusedNote says on the row that some of its verdicts were recorded by a
+// previous run rather than measured by this one, so a score built partly from
+// them is not read as wholly fresh.
+func reusedNote(reused, total int) string {
+	return fmt.Sprintf("%d of %d verdicts reused", reused, total)
 }
 
 // unboundedNote says on the row that the memory bound did not reach the

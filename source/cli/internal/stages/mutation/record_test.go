@@ -2,6 +2,7 @@ package mutationstages
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -73,6 +74,36 @@ func TestExactlyTheOutcomesThatRanAreRecorded(t *testing.T) {
 	}
 	if !reflect.DeepEqual(doc.Components, want) {
 		t.Errorf("components = %+v, want app and api alone", doc.Components)
+	}
+}
+
+// The reused count of a component travels into the document it hands on, and a
+// component that reused nothing leaves the field out of the JSON entirely.
+func TestAComponentsReusedCountIsCarriedIntoTheDocument(t *testing.T) {
+	reusing := completed("app", mutation.Summary{Killed: 3, Survived: 1}, time.Second)
+	reusing.Reused = 3
+	fresh := completed("api", mutation.Summary{Survived: 2}, time.Second)
+
+	doc := countsOf("tree", []ComponentOutcome{reusing, fresh})
+	if got := doc.Components["app"].Reused; got != 3 {
+		t.Errorf("app reused = %d, want 3", got)
+	}
+	if got := doc.Components["api"].Reused; got != 0 {
+		t.Errorf("api reused = %d, want 0", got)
+	}
+	app, err := json.Marshal(doc.Components["app"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(app), `"reused":3`) {
+		t.Errorf("app = %s, want reused present", app)
+	}
+	api, err := json.Marshal(doc.Components["api"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(api), "reused") {
+		t.Errorf("api = %s, want reused absent", api)
 	}
 }
 

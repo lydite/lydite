@@ -27,6 +27,115 @@ import (
 	"lydite/lydite/internal/ui"
 )
 
+func cacheAt(dir string) func() (string, error) {
+	return func() (string, error) { return dir, nil }
+}
+
+func executableWith(path string, content string) (func() (string, error), func(string) (io.ReadCloser, error)) {
+	return func() (string, error) { return path, nil },
+		func(p string) (io.ReadCloser, error) {
+			if p != path {
+				return nil, fmt.Errorf("unexpected path %s", p)
+			}
+			return io.NopCloser(strings.NewReader(content)), nil
+		}
+}
+
+func TestAReleaseVersionIsUsedAsIsWithoutTouchingTheExecutable(t *testing.T) {
+	executable := func() (string, error) { t.Fatal("executable consulted"); return "", nil }
+	open := func(string) (io.ReadCloser, error) { t.Fatal("executable opened"); return nil, nil }
+	got, err := lyditeVersion("v1.2.3", executable, open)
+	if err != nil || got != "v1.2.3" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestADevVersionIsNamedByTheExecutablesContents(t *testing.T) {
+	exeA, openA := executableWith("/bin/a", "one")
+	exeA2, openA2 := executableWith("/bin/other", "one")
+	exeB, openB := executableWith("/bin/a", "two")
+	a, errA := lyditeVersion("dev", exeA, openA)
+	a2, _ := lyditeVersion("dev", exeA2, openA2)
+	b, _ := lyditeVersion("dev", exeB, openB)
+	if errA != nil {
+		t.Fatal(errA)
+	}
+	if len(a) != len("dev+")+64 || !strings.HasPrefix(a, "dev+") {
+		t.Fatalf("got %q, want dev+<64 hex>", a)
+	}
+	if a != a2 {
+		t.Errorf("the same contents gave %q and %q", a, a2)
+	}
+	if a == b {
+		t.Errorf("different contents shared %q", a)
+	}
+}
+
+func TestADevBuildWhoseExecutableCannotBeReadHasNoVersion(t *testing.T) {
+	missing := func() (string, error) { return "", errors.New("no executable") }
+	if got, err := lyditeVersion("dev", missing, nil); err == nil || got != "" {
+		t.Errorf("unlocatable executable: got %q, %v", got, err)
+	}
+	exe, _ := executableWith("/bin/a", "")
+	unreadable := func(string) (io.ReadCloser, error) { return nil, os.ErrPermission }
+	if got, err := lyditeVersion("dev", exe, unreadable); err == nil || got != "" {
+		t.Errorf("unreadable executable: got %q, %v", got, err)
+	}
+}
+
+func TestTheStateRootIsTheFlagThenTheEnvironmentThenTheCache(t *testing.T) {
+	flagDir, envDir := t.TempDir(), t.TempDir()
+	if got, note := resolveStateDir(flagDir, envDir, "/repo", cacheAt("/cache")); got != flagDir || note != "" {
+		t.Fatalf("flag: got %q, %q", got, note)
+	}
+	if got, note := resolveStateDir("", envDir, "/repo", cacheAt("/cache")); got != envDir || note != "" {
+		t.Fatalf("env: got %q, %q", got, note)
+	}
+	got, note := resolveStateDir("", "", "/repo", cacheAt("/cache"))
+	if note != "" || !strings.HasPrefix(got, filepath.Join("/cache", "lydite", "mutation")+string(filepath.Separator)) {
+		t.Fatalf("default: got %q, %q", got, note)
+	}
+}
+
+func TestTheDefaultStateRootIsKeyedByTheScanRoot(t *testing.T) {
+	a, _ := resolveStateDir("", "", "/repo/a", cacheAt("/cache"))
+	a2, _ := resolveStateDir("", "", "/repo/a", cacheAt("/cache"))
+	b, _ := resolveStateDir("", "", "/repo/b", cacheAt("/cache"))
+	if a != a2 || a == b {
+		t.Fatalf("a=%q a2=%q b=%q", a, a2, b)
+	}
+	if base := filepath.Base(a); len(base) != 64 {
+		t.Fatalf("last element %q is not a hex sha256", base)
+	}
+}
+
+func TestNoCacheDirectorySwitchesResumingOffWithANote(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("$HOME is not defined") }
+	got, note := resolveStateDir("", "", "/repo", failing)
+	if got != "" || !strings.Contains(note, "$HOME is not defined") || strings.Contains(note, "\n") {
+		t.Fatalf("got %q, %q", got, note)
+	}
+	if got, note := resolveStateDir("state", "", "/repo", failing); got == "" || note != "" {
+		t.Fatalf("an explicit root needs no cache directory: %q, %q", got, note)
+	}
+}
+
+func TestARelativeStateRootBecomesAbsolute(t *testing.T) {
+	got, _ := resolveStateDir("rel/state", "", "/repo", cacheAt("/cache"))
+	if !filepath.IsAbs(got) || !strings.HasSuffix(got, filepath.Join("rel", "state")) {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestTheMutationCommandRegistersTheStateFlags(t *testing.T) {
+	cmd := newMutationCmd()
+	for _, name := range []string{"state-dir", "fresh"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("--%s is not registered", name)
+		}
+	}
+}
+
 func testLog(t *testing.T) *componentLog {
 	t.Helper()
 	log := openLog(t.TempDir(), "app", "mutation.log", false, 3)
@@ -130,6 +239,31 @@ func TestTheMemoryOverrideIsReadAsASize(t *testing.T) {
 	}
 }
 
+// A completed row says how many of its verdicts were reused, only when some
+// were, and a reused verdict that carries MemoryUnbounded still puts the
+// unbounded note on the row.
+func TestARowSaysHowManyVerdictsWereReused(t *testing.T) {
+	results := []mutation.Result{
+		{Mutant: mutation.Mutant{Path: "a.go", Line: 3}, Outcome: mutation.Killed, MemoryUnbounded: true},
+		{Mutant: mutation.Mutant{Path: "a.go", Line: 4}, Outcome: mutation.Killed},
+	}
+	o := mutationCompleted("app", mutation.Summary{Killed: 2}, results, time.Second)
+
+	fresh, _ := kindRow(o, false)
+	if detailSaying(fresh, "reused") {
+		t.Errorf("a run that reused nothing says %v", fresh.Detail)
+	}
+
+	o.Reused = 1
+	row, _ := kindRow(o, false)
+	if !detailSaying(row, "1 of 2 verdicts reused") {
+		t.Errorf("a resumed row says %v", row.Detail)
+	}
+	if !detailSaying(row, "memory was not bounded") {
+		t.Errorf("a reused unbounded verdict lost its note: %v", row.Detail)
+	}
+}
+
 // A bound the platform had none to set is on the row, never silent: a mutant
 // that could allocate without stopping was held to nothing, and reporting that
 // as the green of a bound that held is the failure the amber tag exists for.
@@ -197,7 +331,7 @@ func TestARowSaysWhenAMutantsOutputWasHeldOpen(t *testing.T) {
 // the denominator being zero does not mean nothing was observed.
 func TestAnUnmeasuredRowStillSaysWhenAMutantHeldOutputOpen(t *testing.T) {
 	results := []mutation.Result{{
-		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
 		Outcome: mutation.Unviable, Detail: "the run was interrupted before this mutant finished",
 		OutputHeldOpen: true,
 	}}
@@ -246,7 +380,7 @@ func TestAnUnmeasuredRowSaysWhenADeclarationIsUnmatchedOrMemoryWasNotBounded(t *
 // survivor's own detail must not crowd it out.
 func TestAFailingRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
 	survivor := []mutation.Result{{
-		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
 		Outcome: mutation.Survived,
 	}}
 	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
@@ -2508,5 +2642,63 @@ func TestEachOutcomeKindIsItsOwnRow(t *testing.T) {
 				t.Errorf("counted as having run = %v", out.ran)
 			}
 		})
+	}
+}
+
+// failingReader is an executable whose bytes cannot be read to the end.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("disk gone") }
+func (failingReader) Close() error             { return nil }
+
+func TestADevBuildWhoseExecutableFailsMidReadHasNoVersion(t *testing.T) {
+	exe, _ := executableWith("/bin/a", "")
+	broken := func(string) (io.ReadCloser, error) { return failingReader{}, nil }
+	if got, err := lyditeVersion("dev", exe, broken); err == nil || got != "" {
+		t.Errorf("an executable that fails mid-read: got %q, %v", got, err)
+	}
+}
+
+// A relative state root that cannot be made absolute switches resuming off
+// with a note, and never fails the run.
+func TestAStateRootThatCannotBeMadeAbsoluteSwitchesResumingOff(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("the working directory cannot be removed here: %v", err)
+	}
+	dir, note := resolveStateDir("state", "", "/scan", func() (string, error) { return "/cache", nil })
+	if dir != "" || !strings.HasPrefix(note, "mutation state is off: cannot resolve state") {
+		t.Errorf("got dir %q, note %q, want resuming off with a note naming the root", dir, note)
+	}
+}
+
+// A run that cannot be told apart from another build, or that has nowhere to
+// keep its state, resumes nothing and says why on the writer it is given.
+func TestResumeInputsSwitchResumingOffWithALineSayingWhy(t *testing.T) {
+	cache := func() (string, error) { return "/cache", nil }
+	noCache := func() (string, error) { return "", errors.New("no HOME") }
+	noExe := func() (string, error) { return "", errors.New("no executable") }
+	open := func(string) (io.ReadCloser, error) { return nil, os.ErrPermission }
+
+	var w strings.Builder
+	dir, build := resumeInputs("/scan", "", "", "v1.2.3", cache, noExe, open, &w)
+	if !strings.HasPrefix(dir, filepath.Join("/cache", "lydite", "mutation")) || build != "v1.2.3" || w.Len() != 0 {
+		t.Errorf("a release resolved to dir %q, build %q, said %q", dir, build, w.String())
+	}
+
+	w.Reset()
+	if dir, build := resumeInputs("/scan", "", "", "dev", cache, noExe, open, &w); dir != "" || build != "" ||
+		!strings.Contains(w.String(), "cannot be told apart from another") {
+		t.Errorf("a dev build with no executable resolved to dir %q, build %q, said %q", dir, build, w.String())
+	}
+
+	w.Reset()
+	if dir, _ := resumeInputs("/scan", "", "", "v1.2.3", noCache, noExe, open, &w); dir != "" ||
+		!strings.Contains(w.String(), "no user cache directory") {
+		t.Errorf("no cache directory resolved to dir %q, said %q", dir, w.String())
 	}
 }

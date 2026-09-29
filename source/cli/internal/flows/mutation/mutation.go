@@ -61,6 +61,12 @@ const (
 	// InputDiagnostics is the io.Writer a declaration that matched no mutant
 	// is named on.
 	InputDiagnostics = "Diagnostics"
+	// InputStateDir is the resume state root, and is empty when resume is
+	// off. InputFresh asks for what it holds to be ignored, and
+	// InputLyditeVersion is the lydite that writes what it records.
+	InputStateDir      = "StateDir"
+	InputFresh         = "Fresh"
+	InputLyditeVersion = "LyditeVersion"
 )
 
 // The keys of the flow.Inputs NewRecord's flow is run with.
@@ -109,25 +115,32 @@ type Params struct {
 	Memory       int64
 	Stream       bool
 	Diagnostics  io.Writer
+	// StateDir is the resume state root, empty when resume is off.
+	StateDir      string
+	Fresh         bool
+	LyditeVersion string
 }
 
 // Inputs are p as New's flow is run with them.
 func (p Params) Inputs() flow.Inputs {
 	return flow.Inputs{
-		InputDir:          p.Dir,
-		InputComponents:   p.Components,
-		InputToolchains:   p.Toolchains,
-		InputBaseBranch:   p.BaseBranch,
-		InputBaseSHA:      p.BaseSHA,
-		InputOnlyAffected: p.OnlyAffected,
-		InputAffected:     p.Affected,
-		InputShape:        p.Shape,
-		InputLifecycle:    p.Lifecycle,
-		InputLimit:        p.Limit,
-		InputTimeout:      p.Timeout,
-		InputMemory:       p.Memory,
-		InputStream:       p.Stream,
-		InputDiagnostics:  p.Diagnostics,
+		InputDir:           p.Dir,
+		InputComponents:    p.Components,
+		InputToolchains:    p.Toolchains,
+		InputBaseBranch:    p.BaseBranch,
+		InputBaseSHA:       p.BaseSHA,
+		InputOnlyAffected:  p.OnlyAffected,
+		InputAffected:      p.Affected,
+		InputShape:         p.Shape,
+		InputLifecycle:     p.Lifecycle,
+		InputLimit:         p.Limit,
+		InputTimeout:       p.Timeout,
+		InputMemory:        p.Memory,
+		InputStream:        p.Stream,
+		InputDiagnostics:   p.Diagnostics,
+		InputStateDir:      p.StateDir,
+		InputFresh:         p.Fresh,
+		InputLyditeVersion: p.LyditeVersion,
 	}
 }
 
@@ -174,6 +187,7 @@ func New() (*flow.Flow, error) {
 	own := flow.FromStage(StageLoadDeclaration, "Own")
 	base := flow.FromStage(StageResolveBase, "Base")
 	selected := flow.FromStage(StageSelectAffected, "Selected")
+	stateDir := flow.FromInput(InputStateDir)
 
 	return flow.New(Name).
 		Stage(StageLoadDeclaration, mutationstages.LoadDeclaration).
@@ -204,6 +218,8 @@ func New() (*flow.Flow, error) {
 		With("Dir", dir).
 		With("Base", base).
 		With("Selected", selected).
+		With("StateDir", stateDir).
+		With("Diagnostics", flow.FromInput(InputDiagnostics)).
 		Stage(StageRunMutants, mutationstages.RunMutants).
 		When(declared).
 		With("Shape", shape).
@@ -219,6 +235,10 @@ func New() (*flow.Flow, error) {
 		With("Memory", flow.FromInput(InputMemory)).
 		With("Stream", flow.FromInput(InputStream)).
 		With("Diagnostics", flow.FromInput(InputDiagnostics)).
+		With("StateDir", stateDir).
+		With("Fresh", flow.FromInput(InputFresh)).
+		With("LyditeVersion", flow.FromInput(InputLyditeVersion)).
+		With("TreeDigest", flow.FromStage(StageScopeChange, "TreeDigest")).
 		Build()
 }
 

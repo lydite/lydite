@@ -178,7 +178,7 @@ Each language provisions differently, and only one of the three downloads anythi
   fetches the exe package's verified tarball itself, along a chain that starts at the repository's
   declared hash (checked against the pnpm tarball only) and, from the exe package onward, is
   anchored in the registry's own live SHA-512 digest rather than in anything the repository
-  committed to for the executed binary itself — see [ADR 0075](../../docs/adr/0075-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
+  committed to for the executed binary itself — see [ADR 0077](../../docs/adr/0077-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
   for the full chain, what the declared hash does and does not cover, and why a GitHub-releases
   binary, `bin/pnpm.mjs`, and Corepack were all rejected. **A `packageManager` pin below pnpm major 12 is refused per component**, naming the
   manifest and the pin, rather than provisioned: nothing below 12 carries the exe-package split

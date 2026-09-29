@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
@@ -820,5 +822,361 @@ func TestEachOutcomeKindsNameIsPinned(t *testing.T) {
 		if got := kind.String(); got != want {
 			t.Errorf("kind %d is named %q, want %q", int(kind), got, want)
 		}
+	}
+}
+
+// resumable is the fixture's run with resume on over stateDir, whose baseline
+// and suite each append a line to a counter file per execution, and whose
+// suite kills every mutant. env is what the fake Shape composes for every
+// command.
+func (f *webFixture) resumable(t *testing.T, stateDir string, env []string) (RunMutantsIn, func() (baselines, suites int)) {
+	t.Helper()
+	counters := t.TempDir()
+	baselineCount := filepath.Join(counters, "baseline")
+	suiteCount := filepath.Join(counters, "suite")
+	shape := f.shape(t, "echo x >> '"+baselineCount+"' && "+lcovExecuting, "true", "echo x >> '"+suiteCount+"'; exit 1")
+	shape.env = func(*toolchain.Env, component.Component, runner.Invocation) []string { return env }
+	in := f.in(shape, f.lifecycle(t))
+	in.StateDir, in.TreeDigest, in.LyditeVersion = stateDir, "tree-a", "v1.2.3"
+	lines := func(path string) int {
+		data, err := os.ReadFile(path) // #nosec G304 -- a counter inside the test's own temporary directory
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(data), "\n")
+	}
+	return in, func() (int, int) { return lines(baselineCount), lines(suiteCount) }
+}
+
+// runToSummary runs in and returns its one outcome, failing the test unless its
+// mutants ran to a summary.
+func runToSummary(t *testing.T, in RunMutantsIn) ComponentOutcome {
+	t.Helper()
+	o := only(t, in)
+	if o.Kind != KindCompleted {
+		t.Fatalf("kind = %s (%v), want completed", o.Kind, o.Err)
+	}
+	return o
+}
+
+// A second run over the same tree answers every mutant from what the first
+// recorded: no baseline and no suite runs again, and the counts are the ones
+// the first run measured.
+func TestASecondRunOverTheSameTreeMeasuresNothingAgain(t *testing.T) {
+	f := newWebFixture(t)
+	in, counts := f.resumable(t, t.TempDir(), []string{"TOKEN=a"})
+
+	first := runToSummary(t, in)
+	baselines, suites := counts()
+	if baselines != 1 || suites == 0 {
+		t.Fatalf("the first run ran %d baseline(s) and %d suite(s), want one and at least one", baselines, suites)
+	}
+
+	second := runToSummary(t, in)
+	if b, s := counts(); b != baselines || s != suites {
+		t.Errorf("the second run ran %d baseline(s) and %d suite(s) more, want none", b-baselines, s-suites)
+	}
+	if second.Summary != first.Summary {
+		t.Errorf("summary = %+v, want the first run's %+v", second.Summary, first.Summary)
+	}
+	if !reflect.DeepEqual(second.Results, first.Results) {
+		t.Errorf("results =\n  %+v\nwant the first run's\n  %+v", second.Results, first.Results)
+	}
+}
+
+// Reused counts the results a resumed run answered from what was recorded: none
+// on the run that measured them, and every one the second run had a verdict for.
+func TestAResumedRunCountsWhatItReused(t *testing.T) {
+	f := newWebFixture(t)
+	in, _ := f.resumable(t, t.TempDir(), nil)
+
+	first := runToSummary(t, in)
+	if first.Reused != 0 {
+		t.Errorf("the run that measured everything reused %d verdict(s)", first.Reused)
+	}
+	second := runToSummary(t, in)
+	if second.Reused != len(second.Results) || second.Reused == 0 {
+		t.Errorf("the second run reused %d of %d verdict(s), want all of them", second.Reused, len(second.Results))
+	}
+}
+
+// An acknowledged mutant is answered by its declaration whatever a recorded
+// verdict says, so it is never counted as reused.
+func TestAnAcknowledgedMutantIsNeverCountedAsReused(t *testing.T) {
+	plain := mutation.Mutant{Path: "a.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}
+	declared := mutation.Mutant{Path: "b.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">=", Reason: "equivalent"}
+	unrecorded := mutation.Mutant{Path: "c.go", Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}
+	known := map[string]mutation.Result{
+		mutation.MutantID(plain):    {Outcome: mutation.Killed},
+		mutation.MutantID(declared): {Outcome: mutation.Survived},
+	}
+	if got := reusedCount([]mutation.Mutant{plain, declared, unrecorded}, known); got != 1 {
+		t.Errorf("reused = %d, want only the unacknowledged mutant with a recorded verdict", got)
+	}
+	if got := reusedCount([]mutation.Mutant{plain}, nil); got != 0 {
+		t.Errorf("reused = %d with nothing recorded", got)
+	}
+}
+
+// A recorded baseline saves the suite and nothing around it: the second run
+// still prepares the component, brings its services up and runs its setup and
+// teardown, because every mutant it dispatches needs them.
+func TestABaselineHitStillPreparesTheComponent(t *testing.T) {
+	f := newWebFixture(t)
+	in, counts := f.resumable(t, t.TempDir(), nil)
+	runToSummary(t, in)
+	before := len(f.calls.list())
+
+	runToSummary(t, in)
+	if b, _ := counts(); b != 1 {
+		t.Fatalf("%d baseline(s) ran over two runs, want the second to reuse the first's", b)
+	}
+	second := f.calls.list()[before:]
+	for _, want := range []string{"clear coverage/lcov.info", "prepare web root=" + f.root, "services web", "setup web", "teardown web", "stop web"} {
+		if !contains(second, want) {
+			t.Errorf("the second run's calls %q lack %q", second, want)
+		}
+	}
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// Anything a verdict depends on changing re-runs everything: the tree, the
+// platform, and the value of a variable the suite runs under.
+func TestAChangedInputToAVerdictMeasuresEverythingAgain(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(t *testing.T, in *RunMutantsIn, env []string)
+	}{
+		{"tree", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.TreeDigest = "tree-b" }},
+		{"platform", func(t *testing.T, _ *RunMutantsIn, _ []string) {
+			was := platform
+			platform = "plan9/mips"
+			t.Cleanup(func() { platform = was })
+		}},
+		{"environment", func(_ *testing.T, _ *RunMutantsIn, env []string) { env[0] = "TOKEN=b" }},
+		{"lydite", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.LyditeVersion = "v1.2.4" }},
+		{"timeout", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.Timeout = time.Minute }},
+		{"memory", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.Memory = 1 << 30 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newWebFixture(t)
+			env := []string{"TOKEN=a"}
+			in, counts := f.resumable(t, t.TempDir(), env)
+			first := runToSummary(t, in)
+			baselines, suites := counts()
+
+			c.change(t, &in, env)
+			second := runToSummary(t, in)
+			if b, s := counts(); b != 2*baselines || s != 2*suites {
+				t.Errorf("the second run ran %d baseline(s) and %d suite(s), want %d and %d", b-baselines, s-suites, baselines, suites)
+			}
+			if second.Summary != first.Summary {
+				t.Errorf("summary = %+v, want %+v", second.Summary, first.Summary)
+			}
+		})
+	}
+}
+
+// A declared variable's value moves the fingerprint and is never written
+// anywhere the state keeps.
+func TestTheComposedEnvironmentIsKeptOnlyAsAHash(t *testing.T) {
+	f := newWebFixture(t)
+	stateDir := t.TempDir()
+	in, _ := f.resumable(t, stateDir, []string{"TOKEN=s3cr3t-value"})
+	runToSummary(t, in)
+	err := filepath.WalkDir(stateDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path) // #nosec G304 -- a file inside the test's own temporary directory
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), "s3cr3t-value") {
+			t.Errorf("%s carries the declared value", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The environment's digest reads the list the way a child does: the last
+// occurrence of a key wins, and order is otherwise irrelevant.
+func TestTheEnvironmentDigestReadsTheListAsAChildDoes(t *testing.T) {
+	if envDigest([]string{"A=1", "B=2"}) != envDigest([]string{"B=2", "A=1"}) {
+		t.Error("two orders of the same variables hash differently")
+	}
+	if envDigest([]string{"A=1", "A=2"}) == envDigest([]string{"A=2", "A=1"}) {
+		t.Error("two lists a child reads differently hash the same")
+	}
+	if envDigest([]string{"A=1", "A=2"}) != envDigest([]string{"A=2"}) {
+		t.Error("a shadowed occurrence moves the digest")
+	}
+}
+
+// A state that cannot be written is a cache that is not there: the run
+// measures everything, completes, and says so once.
+func TestAnUnwritableStateMeasuresEverythingAndWarnsOnce(t *testing.T) {
+	f := newWebFixture(t)
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	writeFile(t, filepath.Dir(blocked), "blocked", "")
+	var diagnostics lockedBuffer
+	in, counts := f.resumable(t, filepath.Join(blocked, "state"), nil)
+	in.Diagnostics = &diagnostics
+
+	first := runToSummary(t, in)
+	runToSummary(t, in)
+	if b, s := counts(); b != 2 || s != 2*first.Summary.Killed {
+		t.Errorf("ran %d baseline(s) and %d suite(s) over two runs, want every one measured twice", b, s)
+	}
+	lines := strings.Split(strings.TrimSpace(diagnostics.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("diagnostics = %q, want one line per run", diagnostics.String())
+	}
+	if !strings.HasPrefix(lines[0], "warning: web's mutation state: ") {
+		t.Errorf("diagnostic = %q", lines[0])
+	}
+}
+
+// A verdict that cannot be recorded is named once however many mutants fail
+// to record, and costs the run nothing.
+func TestAVerdictThatCannotBeRecordedIsNamedOnce(t *testing.T) {
+	var diagnostics lockedBuffer
+	s := &componentState{state: closedState(t), name: "web", diagnostics: &diagnostics}
+	record := s.recorder()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			record(mutation.Result{Mutant: mutation.Mutant{Path: "a.ts"}, Outcome: mutation.Killed})
+		}()
+	}
+	wg.Wait()
+	if n := strings.Count(diagnostics.String(), "\n"); n != 1 {
+		t.Errorf("diagnostics = %q, want one line", diagnostics.String())
+	}
+}
+
+// closedState is a state every Record refuses.
+func closedState(t *testing.T) *mutation.State {
+	t.Helper()
+	s, err := mutation.OpenState(t.TempDir(), "fingerprint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// Each way a component's state can fail while it is used is named once, with
+// what the run does instead, and is never an error the run has to handle.
+func TestAComponentStateThatFailsNamesItAndFallsBack(t *testing.T) {
+	newState := func(t *testing.T) (*componentState, string, *lockedBuffer) {
+		t.Helper()
+		dir := t.TempDir()
+		st, err := mutation.OpenState(dir, "fp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		diag := &lockedBuffer{}
+		return &componentState{state: st, name: "web", diagnostics: diag}, dir, diag
+	}
+	occupy := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, path, "occupant", "x")
+	}
+	wantWarning := func(t *testing.T, diag *lockedBuffer) {
+		t.Helper()
+		if got := diag.String(); !strings.HasPrefix(got, "warning: web's mutation state: ") || strings.Count(got, "\n") != 1 {
+			t.Errorf("diagnostics = %q, want one warning naming the component's state", got)
+		}
+	}
+
+	t.Run("a baseline that cannot be read", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		occupy(t, filepath.Join(dir, "baseline.json"))
+		if _, ok := s.baseline(); ok {
+			t.Error("an unreadable baseline was reused")
+		}
+		wantWarning(t, diag)
+	})
+	t.Run("a baseline that cannot be saved", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		occupy(t, filepath.Join(dir, "baseline.json"))
+		s.saveBaseline(mutation.Baseline{Passed: true})
+		wantWarning(t, diag)
+	})
+	t.Run("verdicts that cannot be read", func(t *testing.T) {
+		s, dir, diag := newState(t)
+		if err := os.Remove(filepath.Join(dir, "verdicts.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		if known := s.verdicts(); known != nil {
+			t.Errorf("verdicts = %v, want none", known)
+		}
+		wantWarning(t, diag)
+	})
+	t.Run("a state with none to use", func(t *testing.T) {
+		var none *componentState
+		if _, ok := none.baseline(); ok {
+			t.Error("a run without state reused a baseline")
+		}
+		none.saveBaseline(mutation.Baseline{})
+		if none.verdicts() != nil || none.recorder() != nil {
+			t.Error("a run without state answered from one")
+		}
+		none.close()
+	})
+}
+
+// Fresh discards what was recorded, so a run asking for it measures
+// everything again.
+func TestAFreshRunDiscardsTheState(t *testing.T) {
+	f := newWebFixture(t)
+	in, counts := f.resumable(t, t.TempDir(), nil)
+	runToSummary(t, in)
+	baselines, suites := counts()
+
+	in.Fresh = true
+	runToSummary(t, in)
+	if b, s := counts(); b != 2*baselines || s != 2*suites {
+		t.Errorf("the fresh run ran %d baseline(s) and %d suite(s), want %d and %d", b-baselines, s-suites, baselines, suites)
+	}
+}
+
+// Resume is off without a tree digest: nothing is recorded, and a second run
+// measures everything.
+func TestWithoutATreeDigestNothingIsResumed(t *testing.T) {
+	f := newWebFixture(t)
+	stateDir := t.TempDir()
+	in, counts := f.resumable(t, stateDir, nil)
+	in.TreeDigest = ""
+	runToSummary(t, in)
+	runToSummary(t, in)
+	if b, _ := counts(); b != 2 {
+		t.Errorf("%d baseline(s) over two runs, want two", b)
+	}
+	if entries, err := os.ReadDir(stateDir); err != nil || len(entries) != 0 {
+		t.Errorf("the state root holds %d entr(ies) (%v), want none", len(entries), err)
 	}
 }

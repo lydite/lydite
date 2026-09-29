@@ -71,7 +71,9 @@ func countsOf(tree string, outcomes []ComponentOutcome) mutation.CountsDocument 
 		if doc.Components == nil {
 			doc.Components = map[string]mutation.ComponentCounts{}
 		}
-		doc.Components[o.Component.Name] = mutation.CountsOf(o.Summary, o.Elapsed)
+		counts := mutation.CountsOf(o.Summary, o.Elapsed)
+		counts.Reused = o.Reused
+		doc.Components[o.Component.Name] = counts
 	}
 	return doc
 }
