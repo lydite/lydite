@@ -457,6 +457,12 @@ environment the baseline and the suite run under, hashed and never written. Ever
 length-framed. The base is left out: it decides which mutants are wanted, never what one answers.
 A component keeps only its latest fingerprint, so a state never needs pruning.
 
+**The tree digest's scope is deliberate.** It covers every file git lists under the scan root —
+tracked plus untracked-and-not-ignored, minus the state root — not only the selected components'
+directories, because a verdict can depend on any file the suite reads, and a narrower key would
+reuse a verdict after a file outside the component changed. The cost is one listing and one hash
+of the tree per run: tens of milliseconds for a thousand files, small next to one suite execution.
+
 **What is recorded.** Only a fresh verdict the run decided itself, and never a mutant cut short by
 cancellation (`Result.CutShort`). A recorded baseline is reused, so the per-mutant budget a
 resumed run derives is the one the recorded verdicts were judged against. An **acknowledged**

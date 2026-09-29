@@ -967,6 +967,7 @@ func TestAChangedInputToAVerdictMeasuresEverythingAgain(t *testing.T) {
 		{"environment", func(_ *testing.T, _ *RunMutantsIn, env []string) { env[0] = "TOKEN=b" }},
 		{"lydite", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.LyditeVersion = "v1.2.4" }},
 		{"timeout", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.Timeout = time.Minute }},
+		{"memory", func(_ *testing.T, in *RunMutantsIn, _ []string) { in.Memory = 1 << 30 }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newWebFixture(t)
