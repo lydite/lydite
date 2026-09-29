@@ -77,8 +77,13 @@ func TestADeclarationCoversEveryMutantNoOtherNestsInside(t *testing.T) {
 			declared: []int{1, 2},
 		},
 		{
-			name:     "a range sharing one end with the range it encloses",
+			name:     "a range sharing its start with the range it encloses",
 			mutants:  []span{{RemoveStatement, 0, 13}, {ReplaceReturn, 0, 6}},
+			declared: []int{1},
+		},
+		{
+			name:     "a range sharing its end with the range it encloses",
+			mutants:  []span{{RemoveStatement, 0, 13}, {ReplaceReturn, 7, 13}},
 			declared: []int{1},
 		},
 	} {

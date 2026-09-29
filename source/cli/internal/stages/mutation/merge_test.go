@@ -311,6 +311,42 @@ func TestTheProjectionIsFoundBelowALineLongerThanTheDefaultLimit(t *testing.T) {
 	}
 }
 
+// The first projection line a log carries is the one quoted, not the last: a
+// run that wrote a second one — a worker restarting the count mid-run — does
+// not retroactively change what the fold already said about this component.
+func TestShardProjectionTakesTheFirstProjectionLineInOneLog(t *testing.T) {
+	dir := t.TempDir()
+	first := costProjection(9, 2, budget(time.Minute, 0))
+	second := costProjection(41, 4, budget(2*time.Minute, 0))
+	mergeLog(t, dir, "b", first, second)
+
+	got, ok := shardProjection(dir, "b", mergeLogName)
+	if !ok || got != first {
+		t.Errorf("shardProjection with two projection lines answered %q, %v; want the first, %q", got, ok, first)
+	}
+}
+
+// scanLog's own return distinguishes a visit that stopped itself from one
+// that ran the log to its end: a caller that reads scanLog's return value
+// alongside its own state — shardProgress guards a partial read with it —
+// needs the two told apart.
+func TestScanLogReportsThatItStoppedWhereVisitDid(t *testing.T) {
+	dir := t.TempDir()
+	mergeLog(t, dir, "b", "first", "second", "third")
+
+	var seen []string
+	ok := scanLog(dir, "b", mergeLogName, func(line string) bool {
+		seen = append(seen, line)
+		return line != "second"
+	})
+	if !ok {
+		t.Errorf("scanLog whose visit stopped itself answered %v, want true", ok)
+	}
+	if want := []string{"first", "second"}; !reflect.DeepEqual(seen, want) {
+		t.Errorf("visit saw %v, want %v — the scan kept going past where it stopped", seen, want)
+	}
+}
+
 // The scanner's ceiling is a mebibyte, and a line past it ends the scan where
 // it stands: a projection below such a line is not found, and the answer is
 // no line at all rather than an error.

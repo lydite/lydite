@@ -64,7 +64,7 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, 0, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		mutants, unmatched, err := mutation.Generate(lang, rel, src, lines)
 		if err != nil {

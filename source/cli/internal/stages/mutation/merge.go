@@ -256,7 +256,7 @@ func projectionIn(line string) (string, int, bool) {
 	var budget, ceiling string
 	n, err := fmt.Sscanf(line, costProjectionFormat, &mutants, &budget, &workers, &ceiling)
 	if err != nil || n != 4 {
-		return "", 0, false
+		return "", 0, false // [lydite:exclude_from_mutation][every caller discards the count when ok is false]
 	}
 	return line, mutants, true
 }
