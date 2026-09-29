@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,6 +218,9 @@ type ScopeChangeIn struct {
 	// StateDir is the resume state root, and empty when resume is off. A root
 	// inside Dir is kept out of every listing this stage makes.
 	StateDir string
+	// Diagnostics is where a failure touching the resume state is named, as it
+	// arises. Nil discards.
+	Diagnostics io.Writer
 }
 
 // ScopeChangeOut is every line the change added, every file a worker
@@ -254,33 +258,57 @@ func ScopeChange(ctx context.Context, in ScopeChangeIn) (ScopeChangeOut, error) 
 		return ScopeChangeOut{}, err
 	}
 	out := ScopeChangeOut{Changed: changed}
-	worktree := needsWorktree(in.Shape, in.Selected)
-	if !worktree && in.StateDir == "" {
-		return out, nil
+	diagnostics := in.Diagnostics
+	if diagnostics == nil {
+		diagnostics = io.Discard
 	}
-	if in.StateDir != "" {
+	worktree := needsWorktree(in.Shape, in.Selected)
+	resume := in.StateDir != ""
+	if resume {
 		if err := ignoreState(in.StateDir); err != nil {
-			return ScopeChangeOut{}, err
+			warnStateOff(diagnostics, err)
+			resume = false
 		}
+	}
+	if !worktree && !resume {
+		return out, nil
 	}
 	files, err := gitdiff.Tracked(ctx, in.Dir)
 	if err != nil {
-		return ScopeChangeOut{}, err
+		if worktree {
+			return ScopeChangeOut{}, err
+		}
+		warnStateOff(diagnostics, err)
+		return out, nil
 	}
 	files = withoutState(files, in.Dir, in.StateDir)
 	if worktree {
 		out.Files = files
 	}
-	if in.StateDir != "" {
-		present, err := regularFiles(in.Dir, files)
+	if resume {
+		digest, err := digestTree(in.Dir, files)
 		if err != nil {
-			return ScopeChangeOut{}, err
+			warnStateOff(diagnostics, err)
+			return out, nil
 		}
-		if out.TreeDigest, err = treedigest.Digest(in.Dir, present); err != nil {
-			return ScopeChangeOut{}, err
-		}
+		out.TreeDigest = digest
 	}
 	return out, nil
+}
+
+// digestTree is the digest of the regular files among files, relative to dir.
+func digestTree(dir string, files []string) (string, error) {
+	present, err := regularFiles(dir, files)
+	if err != nil {
+		return "", err
+	}
+	return treedigest.Digest(dir, present)
+}
+
+// warnStateOff says resume is off for the run. The state is a cache, so a
+// failure touching it costs the reuse of recorded verdicts and nothing else.
+func warnStateOff(w io.Writer, err error) {
+	_, _ = fmt.Fprintf(w, "warning: mutation state is off: %v; every mutant is measured\n", err)
 }
 
 // regularFiles keeps the entries of files, relative to dir, that are regular

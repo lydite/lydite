@@ -448,6 +448,50 @@ func TestScopeChangeSkipsAListedDirectory(t *testing.T) {
 	}
 }
 
+// A state root that cannot be created switches resume off with one diagnostic
+// line and never fails the run; a worker directory's listing is still handed on.
+func TestScopeChangeSwitchesResumeOffWhenTheStateRootCannotBeCreated(t *testing.T) {
+	root := mutationRepoWithOrigin(t, map[string]string{"app/a.go": "package a\n"},
+		map[string]string{"app/a.go": "package a\n\nvar X = 1\n", "web/a.ts": "export const x = 1;\n"})
+	blocker := filepath.Join(root, "blocker")
+	writeFile(t, root, "blocker", "a file\n")
+	state := filepath.Join(blocker, "state")
+	app := component.Component{Name: "app", Dir: "app", Runner: "go-test"}
+	web := component.Component{Name: "web", Dir: "web", Runner: "vitest"}
+
+	for _, c := range []struct {
+		name      string
+		selected  []component.Component
+		wantFiles bool
+	}{
+		{"go only", []component.Component{app}, false},
+		{"with a worker directory", []component.Component{app, web}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var diag strings.Builder
+			out, err := ScopeChange(t.Context(), ScopeChangeIn{Shape: &fakeShape{t: t, lang: runnerLang}, Dir: root,
+				Base: git(t, root, "rev-parse", "main"), Selected: c.selected, StateDir: state, Diagnostics: &diag})
+			if err != nil {
+				t.Fatalf("an unusable state root failed the run: %v", err)
+			}
+			if out.TreeDigest != "" {
+				t.Errorf("digest = %q, want none with resume off", out.TreeDigest)
+			}
+			if (out.Files != nil) != c.wantFiles {
+				t.Errorf("files = %v, want listed = %v", out.Files, c.wantFiles)
+			}
+			if _, ok := out.Changed["app/a.go"]; !ok {
+				t.Errorf("changed = %v, want the change still read", out.Changed)
+			}
+			got := diag.String()
+			if strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, "warning: mutation state is off: ") ||
+				!strings.HasSuffix(got, "; every mutant is measured\n") {
+				t.Errorf("diagnostics = %q, want one state-off line", got)
+			}
+		})
+	}
+}
+
 // The state root is ignored by git, kept out of the digest and out of the
 // listing a worker directory is copied from.
 func TestScopeChangeKeepsTheStateRootOutOfTheTree(t *testing.T) {

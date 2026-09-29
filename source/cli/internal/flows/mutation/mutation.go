@@ -219,6 +219,7 @@ func New() (*flow.Flow, error) {
 		With("Base", base).
 		With("Selected", selected).
 		With("StateDir", stateDir).
+		With("Diagnostics", flow.FromInput(InputDiagnostics)).
 		Stage(StageRunMutants, mutationstages.RunMutants).
 		When(declared).
 		With("Shape", shape).
