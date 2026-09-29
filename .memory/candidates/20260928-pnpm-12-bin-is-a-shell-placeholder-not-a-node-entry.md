@@ -1,5 +1,5 @@
 ---
-about: pnpm's npm package only started shipping a bin-through-node placeholder needing a native binary at pnpm 12; provisionPackageManager's confirm step detects the resulting breakage but still leaves the broken wrapper on PATH
+about: pnpm's npm package only started shipping a bin-through-node placeholder needing a native binary at pnpm 12 — why lydite provisions pnpm >= 12 as its native @pnpm/exe binary rather than through the node wrapper every other package manager uses (see ADR 0075)
 saw:
   - source/cli/internal/toolchain/provision.go
   - source/cli/internal/toolchain/toolchain.go
@@ -53,25 +53,29 @@ verified by fetching each package's registry document and tarball:
   to this class of bug at all; it is a pnpm-specific consequence of pnpm's Rust rewrite (the
   package.json even lists "rust" as a keyword from pnpm 12 on).
 
-Separately: `resolveOne` (toolchain.go:445-490 area) already runs a real post-install smoke
-check — `confirm` (toolchain.go, called after `provision`) re-probes the just-installed
-manager with `probeUnder`, which execs the wrapper with `--version` under the composed
-environment. Against a real pnpm≥12 tarball this exec fails (the SyntaxError), `confirm`
-returns an error, and `resolveOne` does NOT fail the provisioning step: it falls back to
-`resolved = displayRaw(req)`, appends `"; warning: could not confirm ...'s installed version
-(...) — recording %q"` to the diagnostic note, and still returns `r.env = &Env{PathDirs:
-st.pathDirs, ...}` — i.e. the broken wrapper's directory is still put on PATH and the step is
+Separately, at the time this was explored: `resolveOne` (toolchain.go:445-490 area) already ran
+a real post-install smoke check — `confirm` (toolchain.go, called after `provision`) re-probes
+the just-installed manager with `probeUnder`, which execs the wrapper with `--version` under the
+composed environment. Against a real pnpm≥12 tarball this exec failed (the SyntaxError),
+`confirm` returned an error, and `resolveOne` did NOT fail the provisioning step: it fell back to
+`resolved = displayRaw(req)`, appended `"; warning: could not confirm ...'s installed version
+(...) — recording %q"` to the diagnostic note, and still returned `r.env = &Env{PathDirs:
+st.pathDirs, ...}` — i.e. the broken wrapper's directory was still put on PATH and the step was
 reported (`resolutionProvisioned`) as if it succeeded, just with a stderr warning attached. This
-matches `agentic/references/toolchains.md`'s stated doctrine "provisioning failures warn; they
-do not fail the scan" (deliberate, for network blips) but this is a different case — the
-download succeeded and was hash-verified; it's the *shape of the installed artifact* that
-confirm's own probe already proved is broken, and the run proceeds to hand a component this
-wrapper anyway. The actual failure then surfaces later and far away, inside
-`internal/nodedeps.Install`'s `pnpm install` invocation, as a raw Node SyntaxError with no
-connection to the warning line that already diagnosed it.
+matched `agentic/references/toolchains.md`'s stated doctrine "provisioning failures warn; they
+do not fail the scan" (deliberate, for network blips) but was a different case — the download
+succeeded and was hash-verified; it was the *shape of the installed artifact* that confirm's own
+probe already proved was broken, and the run proceeded to hand a component this wrapper anyway.
 
-`provision_test.go`'s `pnpmTarball` fixture (provision_test.go:53-61) models exactly the ≤10.x
-shape (`bin: {"pnpm": "bin/pnpm.cjs"}`, a real node-runnable `.cjs`) — no test in this package
-exercises the bare-filename-shell-script shape pnpm ships at 12.x, so `confirm`'s real-world
-catch of this breakage has no test coverage; the suite's model of "a pnpm release" predates the
-bug entirely.
+**Fixed by ADR 0075** (this branch): pnpm ≥ 12 is no longer unpacked through the node wrapper at
+all — `downloadPnpm` installs its `@pnpm/exe.<os>-<arch>` native binary directly, so there is no
+placeholder for `confirm`'s probe to fail against in the first place. `confirm`'s general
+"a failed post-install probe still puts the toolchain on PATH" behavior is untouched for every
+*other* toolchain (Go, Rust, Node, yarn) — that is a separate, still-open gap, deliberately
+deferred to a follow-up slice on top of this ADR rather than fixed here.
+
+`provision_test.go`'s `pnpmTarball` fixture used to model only the ≤10.x shape
+(`bin: {"pnpm": "bin/pnpm.cjs"}`); this branch rewrote it to the ≥12 placeholder shape and added
+`TestEnsureProvisionsPnpmAsItsNativeBinary` plus the `TestProvisionPnpmRefusesAnUnverifiableExe`
+table, so the gap this note originally flagged ("no test exercises the bare-shell-script shape")
+no longer holds either.
