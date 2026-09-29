@@ -14,8 +14,9 @@ suite needed.
 
 ## Decision
 
-Provision pnpm as its native binary directly, verified along an unbroken chain rooted at the
-one hash the repository itself declares:
+Provision pnpm as its native binary directly, verified along a chain that starts at the
+repository's own declaration and, from the exe package onward, is anchored in the registry's own
+live digest rather than in anything the repository committed to in advance:
 
 1. `packageManager` in the workspace root's `package.json` names the pnpm version and,
    optionally, its integrity hash (`pnpm@<version>+<algo>.<hash>`, the field Corepack itself
@@ -41,6 +42,24 @@ one hash the repository itself declares:
 exact version equal to the pnpm release itself — a range, or a mismatched version, breaks the
 chain at the one point a malformed or tampered manifest could otherwise substitute an
 unverified exe release for a verified one.
+
+### What the declared hash does and does not cover
+
+The repository's own `packageManager` hash, when it declares one, is checked against the pnpm
+tarball only — step 2. It does not reach the exe tarball that step 4 installs and runs: nothing
+the repository writes down names, in advance, the bytes of the platform binary that ends up on
+PATH. Those bytes are trusted on the registry's own SHA-512 digest, fetched in the same run that
+fetches the tarball it describes — the same trust a plain `npm install` places in the registry
+for any package with no lockfile-recorded integrity, and no stronger. Steps 3 and 5 chain the exe
+package's *identity* (which package, which version) back to the verified pnpm tarball, so a
+tampered manifest cannot substitute a different release; they do not chain its *content* back to
+anything the repository committed to ahead of time. A registry response able to serve a
+different exe tarball whose `dist.integrity` matches its own bytes passes every check here,
+exactly as it would defeat the trust model of an unpinned `npm install` of any other package.
+Closing that would mean the repository (or lydite, on its behalf) recording a digest for each
+platform's exe binary somewhere Dependabot can bump it — not attempted here, since it adds a
+maintenance surface with no analogue elsewhere in `internal/toolchain`'s package-manager
+provisioning.
 
 ### glibc only
 

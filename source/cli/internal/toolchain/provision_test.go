@@ -116,6 +116,16 @@ func pnpmExeTarball(t *testing.T, version string) []byte {
 	})
 }
 
+// pnpmExeTarballMissingBinary is an `@pnpm/exe` package with no `pnpm` entry
+// at all — the shape a truncated or malformed publish could produce.
+func pnpmExeTarballMissingBinary(t *testing.T, version string) []byte {
+	t.Helper()
+	return tarball(t, "package", map[string]string{
+		"package.json": `{"name":"@pnpm/exe.linux-x64","version":"` + version + `"}`,
+		"LICENSE":      "MIT\n",
+	})
+}
+
 // yarnTarball is a yarn release whose entry point, run by the fake node below,
 // reports version.
 func yarnTarball(t *testing.T, version string) []byte {
@@ -785,25 +795,30 @@ func TestProvisionPnpmRefusesAnUnverifiableExe(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		release func(t *testing.T) []byte
+		exe     func(t *testing.T, version string) []byte
 		editExe func(*registryDist)
 		want    string
 	}{
 		{"an exe tarball not matching its integrity",
 			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			nil,
 			func(d *registryDist) {
 				d.Integrity = "sha512-" + base64.StdEncoding.EncodeToString(make([]byte, 64))
 			},
 			"checksum mismatch"},
 		{"an exe with only a sha1 shasum",
 			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			nil,
 			func(d *registryDist) { d.Integrity = "" },
 			"publishes no sha512 integrity"},
 		{"an exe whose integrity names sha1 alone",
 			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			nil,
 			func(d *registryDist) { d.Integrity = "sha1-abc" },
 			"publishes no sha512 integrity"},
 		{"an exe tarball outside the registry",
 			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			nil,
 			func(d *registryDist) { d.Tarball = "https://example.com/pnpm.tgz" },
 			"outside"},
 		{"a release naming no exe for this platform",
@@ -812,27 +827,36 @@ func TestProvisionPnpmRefusesAnUnverifiableExe(t *testing.T) {
 				delete(deps, hostExe(t))
 				return pnpmTarballDepending(t, pnpmVersion, deps)
 			},
-			nil, "names no @pnpm/exe."},
+			nil, nil, "names no @pnpm/exe."},
 		{"a release pinning its exe at another version",
 			func(t *testing.T) []byte {
 				deps := exeDeps(pnpmVersion)
 				deps[hostExe(t)] = "12.4.0"
 				return pnpmTarballDepending(t, pnpmVersion, deps)
 			},
-			nil, "not the same version"},
+			nil, nil, "not the same version"},
 		{"a release naming its exe by a range",
 			func(t *testing.T) []byte {
 				deps := exeDeps(pnpmVersion)
 				deps[hostExe(t)] = "^" + pnpmVersion
 				return pnpmTarballDepending(t, pnpmVersion, deps)
 			},
-			nil, "not an exact version"},
+			nil, nil, "not an exact version"},
+		{"an exe tarball carrying no pnpm binary",
+			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
+			pnpmExeTarballMissingBinary,
+			nil, "carries no pnpm binary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolatedCache(t)
 			reg := newFakeRegistry(t)
 			release := tc.release(t)
-			publishPnpm(t, reg, release, tc.editExe)
+			exeTarball := pnpmExeTarball
+			if tc.exe != nil {
+				exeTarball = tc.exe
+			}
+			reg.publish(t, "pnpm", pnpmVersion, release, nil)
+			reg.publish(t, hostExe(t), pnpmVersion, exeTarball(t, pnpmVersion), tc.editExe)
 
 			st, err := provisionPnpm(t, sha512Pin(release))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -164,10 +164,12 @@ Each language provisions differently, and only one of the three downloads anythi
   amd64/arm64, the same libc lydite's own Node provisioning assumes. Its pnpm registry package
   ships a shell placeholder at `bin/pnpm`, meant to be overwritten at install time by that
   package's own `preinstall` lifecycle script; lydite runs no lifecycle scripts, so `downloadPnpm`
-  fetches the exe package's verified tarball itself, along a chain rooted at the pnpm tarball's
-  own registry digest and the repository's declared hash — see [ADR 0075](../../docs/adr/0075-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
-  for the full chain and why a GitHub-releases binary, `bin/pnpm.mjs`, and Corepack were all
-  rejected. **A `packageManager` pin below pnpm major 12 is refused per component**, naming the
+  fetches the exe package's verified tarball itself, along a chain that starts at the repository's
+  declared hash (checked against the pnpm tarball only) and, from the exe package onward, is
+  anchored in the registry's own live SHA-512 digest rather than in anything the repository
+  committed to for the executed binary itself — see [ADR 0075](../../docs/adr/0075-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
+  for the full chain, what the declared hash does and does not cover, and why a GitHub-releases
+  binary, `bin/pnpm.mjs`, and Corepack were all rejected. **A `packageManager` pin below pnpm major 12 is refused per component**, naming the
   manifest and the pin, rather than provisioned: nothing below 12 carries the exe-package split
   this provisions against. `toolchain.enabled: false` lifts the refusal, the same escape hatch
   every other toolchain override already has, letting the install run whatever pnpm is on PATH.
