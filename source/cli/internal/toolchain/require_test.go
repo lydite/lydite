@@ -449,7 +449,7 @@ func TestGoRequirementDoesNotClimbAboveTheScanRoot(t *testing.T) {
 // package of the workspace installs from.
 func TestAPinnedPackageManagerIsASecondRequirement(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "package.json", `{"name":"root","packageManager":"pnpm@9.0.0-rc.1+sha512.abc"}`)
+	write(t, dir, "package.json", `{"name":"root","packageManager":"pnpm@12.0.0-rc.1+sha512.abc"}`)
 	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
 	write(t, filepath.Join(dir, "packages", "ui"), "package.json", `{"name":"ui","engines":{"node":">=22"}}`)
 
@@ -466,7 +466,7 @@ func TestAPinnedPackageManagerIsASecondRequirement(t *testing.T) {
 	}
 	want := Requirement{
 		Unit: unit, Lang: runner.TypeScript, Manager: "pnpm",
-		Version: "v9.0.0-rc.1", Raw: "9.0.0-rc.1", Source: "package.json (packageManager)",
+		Version: "v12.0.0-rc.1", Raw: "12.0.0-rc.1", Source: "package.json (packageManager)",
 		Hash: "sha512.abc",
 	}
 	if reqs[1] != want {
@@ -485,7 +485,7 @@ func TestOnlyAProvisionedManagerIsRequired(t *testing.T) {
 			"package.json":      `{"packageManager":"npm@10.2.0"}`,
 			"package-lock.json": "{}",
 		}},
-		{"no lockfile", map[string]string{"package.json": `{"packageManager":"pnpm@8.15.4"}`}},
+		{"no lockfile", map[string]string{"package.json": `{"packageManager":"pnpm@12.4.1"}`}},
 		{"no packageManager", map[string]string{"package.json": `{}`, "yarn.lock": ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -510,7 +510,7 @@ func TestAnUnreadablePackageManagerIsAnError(t *testing.T) {
 		files map[string]string
 	}{
 		{"malformed", map[string]string{
-			"package.json":   `{"packageManager":"pnpm@^8"}`,
+			"package.json":   `{"packageManager":"pnpm@^12"}`,
 			"pnpm-lock.yaml": "",
 		}},
 		{"contradicted by the lockfile", map[string]string{
@@ -528,4 +528,71 @@ func TestAnUnreadablePackageManagerIsAnError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pnpm pin below 12 is refused per component, at its install, so it makes
+// no requirement and nothing is provisioned for it — and it is no error here
+// either, because an error would abort every component in the run.
+func TestAPnpmPinBelowTwelveMakesNoRequirement(t *testing.T) {
+	hash := "+sha512." + strings.Repeat("a", 128)
+	for _, version := range []string{"8.15.4", "10.18.3", "11.9.0"} {
+		for _, suffix := range []string{"", hash} {
+			t.Run(version+suffix, func(t *testing.T) {
+				dir := t.TempDir()
+				write(t, dir, "package.json", `{"packageManager":"pnpm@`+version+suffix+`"}`)
+				write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+				if req := requireOne(t, dir, runner.TypeScript, Overrides{}); req.Manager != "" {
+					t.Fatalf("got %+v, want only the Node requirement", req)
+				}
+			})
+		}
+	}
+}
+
+// The floor is pnpm's major alone: a 12 prerelease orders below 12.0.0 and
+// is still a 12 release.
+func TestAPnpmPinAtTwelveOrLaterIsRequired(t *testing.T) {
+	for _, version := range []string{"12.0.0", "12.4.1", "12.0.0-rc.1"} {
+		t.Run(version, func(t *testing.T) {
+			if req := managerAt(t, "pnpm", version, "pnpm-lock.yaml", Overrides{}); req.Version != "v"+version {
+				t.Fatalf("got %+v, want pnpm pinned at %s", req, version)
+			}
+		})
+	}
+}
+
+// toolchain.enabled: false leaves the install to whatever is on PATH, so the
+// refusal does not apply and the pin stays a requirement for its diagnostic.
+func TestAPnpmPinBelowTwelveIsRequiredWithProvisioningDisabled(t *testing.T) {
+	if req := managerAt(t, "pnpm", "10.18.3", "pnpm-lock.yaml", Overrides{Disabled: true}); req.Version != "v10.18.3" {
+		t.Fatalf("got %+v, want pnpm pinned at 10.18.3", req)
+	}
+}
+
+// yarn has no floor: every major lydite provisions is still required.
+func TestAYarnPinIsRequiredAtAnyMajor(t *testing.T) {
+	for _, version := range []string{"1.22.19", "4.1.0"} {
+		t.Run(version, func(t *testing.T) {
+			if req := managerAt(t, "yarn", version, "yarn.lock", Overrides{}); req.Version != "v"+version {
+				t.Fatalf("got %+v, want yarn pinned at %s", req, version)
+			}
+		})
+	}
+}
+
+// managerAt resolves a workspace pinning manager@version beside lockfile and
+// returns its package-manager requirement, failing unless there is exactly one.
+func managerAt(t *testing.T, manager, version, lockfile string, ov Overrides) Requirement {
+	t.Helper()
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"packageManager":"`+manager+`@`+version+`"}`)
+	write(t, dir, lockfile, "")
+	reqs, err := Requirements(dir, []Unit{{Name: "c", Lang: runner.TypeScript, Dir: "."}}, ov)
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 2 || reqs[1].Manager != manager {
+		t.Fatalf("got %+v, want the Node and %s", reqs, manager)
+	}
+	return reqs[1]
 }

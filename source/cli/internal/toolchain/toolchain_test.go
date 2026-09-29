@@ -19,7 +19,7 @@ import (
 func TestSatisfied(t *testing.T) {
 	pinned := Requirement{Lang: runner.Go, Version: "v1.26.4", Raw: "1.26.4"}
 	unpinned := Requirement{Lang: runner.Rust, Raw: "stable"}
-	manager := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v8.15.4", Raw: "8.15.4"}
+	manager := Requirement{Lang: runner.TypeScript, Manager: "pnpm", Version: "v12.4.1", Raw: "12.4.1"}
 
 	for _, tc := range []struct {
 		name    string
@@ -41,10 +41,10 @@ func TestSatisfied(t *testing.T) {
 		{"unidentifiable ambient clears no pin", unpinned, "", true, true},
 		// A package manager's version is a pin, not a floor: Corepack runs that
 		// release and no other, so a newer ambient one is as wrong as an older.
-		{"a manager at its pin is satisfied", manager, "v8.15.4", true, true},
-		{"a newer manager is not", manager, "v8.16.0", true, false},
-		{"an older manager is not", manager, "v8.14.0", true, false},
-		{"a pre-release of the pinned manager is not", manager, "v8.15.4-rc.1", true, false},
+		{"a manager at its pin is satisfied", manager, "v12.4.1", true, true},
+		{"a newer manager is not", manager, "v12.5.0", true, false},
+		{"an older manager is not", manager, "v12.3.0", true, false},
+		{"a pre-release of the pinned manager is not", manager, "v12.4.1-rc.1", true, false},
 		{"an unidentifiable manager is not", manager, "", true, false},
 		{"an absent manager is not", manager, "", false, false},
 	} {
@@ -589,5 +589,37 @@ func TestProbeUnderRejectsAToolchainThatWillNotIdentifyItself(t *testing.T) {
 		&step{pathDirs: []string{unpacked}}, t.TempDir())
 	if err == nil {
 		t.Fatalf("probeUnder = %q, want an error from a toolchain that names no version", got)
+	}
+}
+
+// A pnpm pin below 12 is its own component's failure, at install, and never
+// Ensure's: an error here would abort every component in the run. Nothing is
+// provisioned or probed for it, while a sibling pinning a supported pnpm
+// resolves exactly as it would alone.
+func TestEnsureCarriesOnPastAPnpmPinBelowTwelve(t *testing.T) {
+	isolatedCache(t)
+	root := t.TempDir()
+	write(t, root, "old/package.json", `{"name":"old","packageManager":"pnpm@10.18.3+sha512.`+strings.Repeat("a", 128)+`"}`)
+	write(t, root, "old/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, root, "new/package.json", `{"name":"new","packageManager":"pnpm@12.4.1"}`)
+	write(t, root, "new/pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	bin := fakeToolchainBin(t)
+	fakeNode(t, bin, "v22.0.0")
+	writeScript(t, filepath.Join(bin, "pnpm"), "#!/bin/sh\necho 12.4.1\n")
+
+	var log bytes.Buffer
+	_, err := Ensure(context.Background(), root, []Unit{
+		{Name: "old", Lang: runner.TypeScript, Dir: "old"},
+		{Name: "new", Lang: runner.TypeScript, Dir: "new"},
+	}, Overrides{}, &log)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	out := log.String()
+	if strings.Contains(out, "10.18.3") {
+		t.Errorf("nothing should be resolved for a pnpm pin below 12, got %q", out)
+	}
+	if !strings.Contains(out, "using ambient pnpm 12.4.1") {
+		t.Errorf("the supported pin should resolve as it would alone, got %q", out)
 	}
 }

@@ -366,8 +366,10 @@ func nodeArch() string {
 }
 
 // npmRegistry is where a package manager's pinned release is fetched from,
-// and the only host its tarball may be fetched from.
-const npmRegistry = "https://registry.npmjs.org/"
+// and the only host its tarball — or, for pnpm, its native binary's tarball —
+// may be fetched from. A variable so a test can stand a local registry in for
+// it; nothing else assigns it.
+var npmRegistry = "https://registry.npmjs.org/"
 
 // provisionPackageManager makes the pnpm or yarn release a workspace pins in
 // `packageManager` available as a command.
@@ -378,6 +380,10 @@ const npmRegistry = "https://registry.npmjs.org/"
 // and what it fetches is the same registry tarball this fetches. The hash a
 // pin declares is checked the way Corepack checks it, and keys the cache
 // alongside the version.
+//
+// yarn is a node script, run through a wrapper under the component's Node.
+// pnpm is its native `@pnpm/exe` binary for this platform, put on PATH as it
+// is and needing no node at all — see downloadPnpm.
 //
 // satisfied has already established that the ambient release is absent or is
 // not the pinned one, so there is no "already good enough" check here.
@@ -434,34 +440,154 @@ type registryDist struct {
 	Shasum string `json:"shasum"`
 }
 
-// downloadPackageManager fetches a package manager's release tarball into
-// staging, taking its digest from the registry's own document for that
-// version rather than from anything alongside the tarball.
-//
-// [lydite:exclude_from_coverage][reached only when the pinned release is not
-// already on PATH or in the cache; exercising it means downloading a package
-// manager, and a test that did would measure registry.npmjs.org]
+// downloadPackageManager fetches a package manager's release into staging,
+// taking every digest from the registry's own document for that version
+// rather than from anything alongside the tarball.
 func downloadPackageManager(ctx context.Context, manager, version string, declared declaredHash, staging string) error {
-	pkg := registryPackage(manager, version)
-	doc, err := download.Fetch(ctx, npmRegistry+pkg+"/"+version)
+	if manager == "pnpm" {
+		return downloadPnpm(ctx, version, declared, runtime.GOOS, runtime.GOARCH, staging)
+	}
+	data, err := fetchRelease(ctx, registryPackage(manager, version), version, declared)
 	if err != nil {
-		return err
-	}
-	var meta registryVersion
-	if err := json.Unmarshal(doc, &meta); err != nil {
-		return fmt.Errorf("%s@%s: %w", pkg, version, err)
-	}
-	if !strings.HasPrefix(meta.Dist.Tarball, npmRegistry) {
-		return fmt.Errorf("%s@%s names its tarball at %q, outside %s", pkg, version, meta.Dist.Tarball, npmRegistry)
-	}
-	data, err := download.Fetch(ctx, meta.Dist.Tarball)
-	if err != nil {
-		return err
-	}
-	if err := verifyTarball(data, meta.Dist, declared); err != nil {
 		return err
 	}
 	return unpackManager(data, staging, manager)
+}
+
+// fetchRelease fetches a manager's release tarball, verified against both the
+// registry's digest and the hash the repository declares.
+func fetchRelease(ctx context.Context, pkg, version string, declared declaredHash) ([]byte, error) {
+	dist, err := registryDocument(ctx, pkg, pkg, version)
+	if err != nil {
+		return nil, err
+	}
+	data, err := download.Fetch(ctx, dist.Tarball)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyTarball(data, dist, declared); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// registryDocument reads where one published version's tarball is and what it
+// hashes to, refusing a tarball named anywhere but npmRegistry. docPath is pkg
+// as it is spelled in the document's URL.
+func registryDocument(ctx context.Context, pkg, docPath, version string) (registryDist, error) {
+	doc, err := download.Fetch(ctx, npmRegistry+docPath+"/"+version)
+	if err != nil {
+		return registryDist{}, err
+	}
+	var meta registryVersion
+	if err := json.Unmarshal(doc, &meta); err != nil {
+		return registryDist{}, fmt.Errorf("%s@%s: %w", pkg, version, err)
+	}
+	if !strings.HasPrefix(meta.Dist.Tarball, npmRegistry) {
+		return registryDist{}, fmt.Errorf("%s@%s names its tarball at %q, outside %s", pkg, version, meta.Dist.Tarball, npmRegistry)
+	}
+	return meta.Dist, nil
+}
+
+// pnpmExePackage is the `@pnpm/exe` package carrying pnpm's native binary for
+// a Go platform. glibc builds only, the libc lydite's own Node provisioning
+// assumes; any platform outside linux/darwin × amd64/arm64 has none.
+func pnpmExePackage(goos, goarch string) (string, error) {
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[goarch]
+	if (goos != "linux" && goos != "darwin") || arch == "" {
+		return "", fmt.Errorf("lydite provisions pnpm only on linux and darwin, amd64 and arm64, not %s/%s", goos, goarch)
+	}
+	return "@pnpm/exe." + goos + "-" + arch, nil
+}
+
+// downloadPnpm installs pnpm's native binary into staging as bin/pnpm.
+//
+// pnpm's own package is a shell placeholder at its `bin` entry, replaced by the
+// binary from one of its `@pnpm/exe.*` optional dependencies when its
+// `preinstall` script runs — and lydite runs no lifecycle script, because that
+// is arbitrary code. So the binary is fetched here instead, along a chain that
+// ends at the hash the repository declared: the pnpm tarball is verified
+// against that hash and the registry's digest; the exe package's name and
+// exact version are read from that verified tarball's `optionalDependencies`;
+// and the exe tarball is verified against the SHA-512 the registry publishes
+// for that version. SHA-512 only — the binary is put on PATH as it is, and the
+// SHA-1 fallback verifyDist allows a legacy release is not strength enough
+// for it.
+//
+// The platform is resolved before anything is fetched, so a host no exe
+// package exists for costs no download.
+func downloadPnpm(ctx context.Context, version string, declared declaredHash, goos, goarch, staging string) error {
+	exe, err := pnpmExePackage(goos, goarch)
+	if err != nil {
+		return err
+	}
+	data, err := fetchRelease(ctx, "pnpm", version, declared)
+	if err != nil {
+		return err
+	}
+	pkgDir := filepath.Join(staging, "package")
+	if err := download.ExtractTarGz(data, pkgDir, 1); err != nil {
+		return err
+	}
+	if err := pinnedExe(pkgDir, exe, version); err != nil {
+		return err
+	}
+
+	// The scoped name's slash is escaped in the document's URL, as npm spells it.
+	dist, err := registryDocument(ctx, exe, strings.Replace(exe, "/", "%2F", 1), version)
+	if err != nil {
+		return err
+	}
+	if !hasSHA512(dist.Integrity) {
+		return fmt.Errorf("%s@%s publishes no sha512 integrity to verify its binary against", exe, version)
+	}
+	exeData, err := download.Fetch(ctx, dist.Tarball)
+	if err != nil {
+		return err
+	}
+	if _, err := verifySHA512(exeData, dist); err != nil {
+		return err
+	}
+	exeDir := filepath.Join(staging, "exe")
+	if err := download.ExtractTarGz(exeData, exeDir, 1); err != nil {
+		return err
+	}
+	binary := filepath.Join(exeDir, "pnpm")
+	if info, err := os.Lstat(binary); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s@%s carries no pnpm binary", exe, version)
+	}
+	binDir := filepath.Join(staging, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		return err
+	}
+	return os.Rename(binary, filepath.Join(binDir, "pnpm"))
+}
+
+// pinnedExe checks that the pnpm release unpacked at pkgDir pins exe, as an
+// optional dependency, at exactly its own version. A range, or any other
+// version, is refused: the exe's digest is trusted only because the verified
+// release names that exact version of it.
+func pinnedExe(pkgDir, exe, version string) error {
+	data, err := os.ReadFile(filepath.Join(pkgDir, "package.json")) // #nosec G304 -- pkgDir is a staging directory this package just unpacked a verified archive into
+	if err != nil {
+		return err
+	}
+	var manifest struct {
+		OptionalDependencies map[string]string `json:"optionalDependencies"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("pnpm@%s's package.json: %w", version, err)
+	}
+	want, ok := manifest.OptionalDependencies[exe]
+	switch {
+	case !ok:
+		return fmt.Errorf("pnpm@%s names no %s among its optionalDependencies", version, exe)
+	case pinned(want) == "":
+		return fmt.Errorf("pnpm@%s depends on %s at %q, not an exact version", version, exe, want)
+	case want != version:
+		return fmt.Errorf("pnpm@%s depends on %s@%s, not the same version", version, exe, want)
+	}
+	return nil
 }
 
 // declaredHash is a `packageManager` pin's integrity hash, parsed: the
@@ -540,8 +666,15 @@ func (d declaredHash) verify(data []byte, what string) error {
 // the same version to different bytes must not be handed an unpack checked
 // against the old ones. With no hash declared the key is the manager and
 // version alone.
+//
+// pnpm's key names what is unpacked there, its native binary, and the platform
+// that binary is built for; the placeholder its own tarball carries at the
+// same `bin` entry is never read from a pnpm cache directory.
 func managerCacheKey(manager, version string, declared declaredHash) string {
 	key := manager + "-" + version
+	if manager == "pnpm" {
+		key = "pnpm-exe-" + version + "-" + runtime.GOOS + "-" + runtime.GOARCH
+	}
 	if h := declared.String(); h != "" {
 		key += "+" + h
 	}
@@ -569,21 +702,8 @@ func verifyTarball(data []byte, dist registryDist, declared declaredHash) error 
 // refused rather than trusted, for the reason download.Verified gives: this
 // archive is about to be put on PATH and executed.
 func verifyDist(data []byte, dist registryDist) error {
-	for field := range strings.FieldsSeq(dist.Integrity) {
-		encoded, ok := strings.CutPrefix(field, "sha512-")
-		if !ok {
-			continue
-		}
-		want, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return fmt.Errorf("%s publishes an unreadable integrity %q: %w", dist.Tarball, field, err)
-		}
-		got := sha512.Sum512(data)
-		if !bytes.Equal(got[:], want) {
-			return fmt.Errorf("checksum mismatch for %s: got sha512-%s, want %s",
-				dist.Tarball, base64.StdEncoding.EncodeToString(got[:]), field)
-		}
-		return nil
+	if found, err := verifySHA512(data, dist); found {
+		return err
 	}
 	if dist.Shasum == "" {
 		return fmt.Errorf("%s publishes no digest to verify it against", dist.Tarball)
@@ -595,13 +715,46 @@ func verifyDist(data []byte, dist registryDist) error {
 	return nil
 }
 
+// hasSHA512 reports whether an integrity string carries a SHA-512 digest.
+func hasSHA512(integrity string) bool {
+	for field := range strings.FieldsSeq(integrity) {
+		if strings.HasPrefix(field, "sha512-") {
+			return true
+		}
+	}
+	return false
+}
+
+// verifySHA512 checks data against the first SHA-512 digest in the registry's
+// integrity field, and reports whether there was one to check it against.
+func verifySHA512(data []byte, dist registryDist) (bool, error) {
+	for field := range strings.FieldsSeq(dist.Integrity) {
+		encoded, ok := strings.CutPrefix(field, "sha512-")
+		if !ok {
+			continue
+		}
+		want, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return true, fmt.Errorf("%s publishes an unreadable integrity %q: %w", dist.Tarball, field, err)
+		}
+		got := sha512.Sum512(data)
+		if !bytes.Equal(got[:], want) {
+			return true, fmt.Errorf("checksum mismatch for %s: got sha512-%s, want %s",
+				dist.Tarball, base64.StdEncoding.EncodeToString(got[:]), field)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // unpackManager lays a verified package manager tarball out in staging: the
 // package itself under package/, and under bin/ an executable named for the
 // command that runs its entry point with node.
 //
-// A wrapper rather than the entry point itself on PATH. The entry is a
-// `#!/usr/bin/env node` script whose name is not the command's ("pnpm.cjs",
-// "yarn.js"), and running it through node explicitly resolves node the way
+// This is yarn's layout; pnpm is a native binary and has none (see
+// downloadPnpm). A wrapper rather than the entry point itself on PATH. The
+// entry is a `#!/usr/bin/env node` script whose name is not the command's
+// ("yarn.js"), and running it through node explicitly resolves node the way
 // every other command in the component's environment does — from the PATH
 // that environment composes, where a provisioned Node comes first.
 //

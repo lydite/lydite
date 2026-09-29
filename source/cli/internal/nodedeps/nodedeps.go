@@ -24,8 +24,11 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/mod/semver"
 
 	"lydite/lydite/internal/executil"
 )
@@ -126,8 +129,12 @@ type Declared struct {
 }
 
 // exactVersion is the only version form `packageManager` admits: Corepack
-// installs exactly what it names, so a range there is not a pin.
-var exactVersion = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+// installs exactly what it names, so a range there is not a pin. Each
+// numeric component follows semver's own grammar — no leading zero unless
+// the component is "0" — so a version this regex accepts is always one
+// golang.org/x/mod/semver parses too; Supported reads the major off exactly
+// that parse.
+var exactVersion = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
 
 // PackageManager reads the `packageManager` field of root's package.json —
 // the field Corepack itself reads — and reports false with no error when the
@@ -181,6 +188,58 @@ func PackageManager(root string) (Declared, bool, error) {
 		return Declared{}, false, fmt.Errorf("%s: packageManager names %s, but the lockfile beside it is %s's", source, name, detected)
 	}
 	return Declared{Name: name, Version: version, Hash: hash, Source: source}, true, nil
+}
+
+// MinimumPnpmMajor is the oldest pnpm major lydite installs a workspace with.
+// internal/toolchain provisions pnpm as the native binary its registry
+// package names for the host, the shape pnpm's registry package takes from 12
+// on; an earlier major is a package lydite provisions nothing for.
+const MinimumPnpmMajor = 12
+
+// Supported reports whether lydite installs with the manager d pins. Only
+// pnpm has a floor, and it is on the major alone: a 12 prerelease orders below
+// 12.0.0 as semver, and is still a 12 release in the shape lydite provisions.
+//
+// A version Supported cannot parse as semver is unsupported, not exempt from
+// the floor: PackageManager's own exactVersion already refuses that shape for
+// a field it read itself, so the only way here is a Declared some other
+// caller built directly, and a floor a bad version can walk past is not one.
+func (d Declared) Supported() bool {
+	if d.Name != "pnpm" {
+		return true
+	}
+	major, err := strconv.Atoi(strings.TrimPrefix(semver.Major("v"+d.Version), "v"))
+	return err == nil && major >= MinimumPnpmMajor
+}
+
+// Refusal is the error a component under dir fails its install with when the
+// workspace root WorkspaceRoot resolves for it pins a manager lydite does not
+// install with, and nil otherwise.
+//
+// It is per component on purpose. internal/toolchain makes no requirement for
+// such a pin, so nothing is provisioned and the run carries on; without this,
+// the install would run whatever pnpm happens to be on PATH — an ambient
+// release older than the floor passes managerOnPath exactly as a provisioned
+// one does, and installs with a manager nobody chose.
+//
+// A field PackageManager cannot read answers nil here: it already fails
+// internal/toolchain's requirement resolution, which runs before any install.
+func Refusal(dir, scanRoot string) error {
+	root, ok := WorkspaceRoot(dir, scanRoot)
+	if !ok {
+		return nil
+	}
+	declared, ok, err := PackageManager(root)
+	if err != nil || !ok || declared.Supported() {
+		return nil
+	}
+	source := declared.Source
+	if within(root, scanRoot) {
+		if rel, err := filepath.Rel(filepath.Clean(scanRoot), source); err == nil {
+			source = filepath.ToSlash(rel)
+		}
+	}
+	return fmt.Errorf("lydite requires pnpm ≥ %d; %s pins pnpm@%s", MinimumPnpmMajor, source, declared.Version)
 }
 
 // within reports whether dir is root or lies below it.

@@ -138,9 +138,10 @@ Each language provisions differently, and only one of the three downloads anythi
   read from that release's `SHASUMS256.txt`. There is no assumable equivalent of GOTOOLCHAIN or
   rustup — nvm/fnm/volta are all optional and mutually exclusive. The `.tar.gz` is taken over the
   `.tar.xz` purely because Go's standard library decompresses gzip and not xz.
-- **pnpm and yarn** are provisioned the same way Node is: downloaded, from `registry.npmjs.org`
-  rather than `nodejs.org`, into the same version-keyed `~/.cache/lydite` layout, checksum-verified
-  before a byte is unpacked. `internal/nodedeps.PackageManager` reads a TypeScript workspace root's
+- **pnpm and yarn** are both downloaded from `registry.npmjs.org` rather than `nodejs.org`, into
+  the same version-keyed `~/.cache/lydite` layout, checksum-verified before a byte is unpacked —
+  but they are placed on PATH differently, because pnpm's own registry package is not a runnable
+  script from major 12 on. `internal/nodedeps.PackageManager` reads a TypeScript workspace root's
   `package.json` for `packageManager` (`<name>@<exact version>[+<hash>]`, the field Corepack itself
   reads), and a component whose workspace names pnpm or yarn there gets a second
   `toolchain.Requirement` — carried on `Requirement.Manager`, since a TypeScript component can need
@@ -150,17 +151,33 @@ Each language provisions differently, and only one of the three downloads anythi
   installed at all, and a runner with no ambient pnpm reaches the exact release a workspace pins
   the same way it reaches the exact Node that workspace pins.
 
-  Corepack is not the mechanism, for the same reason Node itself is not assumed present: Corepack's
-  shims live inside Node's own install directory, which on a runner is not lydite's to write into,
-  and fetching the registry tarball directly is no less reliable than asking Corepack to fetch the
-  same tarball on lydite's behalf. `internal/toolchain.downloadPackageManager` resolves the pinned
-  version's document from the registry (`@yarnpkg/cli-dist` rather than the `yarn` package, for a
-  Yarn 2+ pin — the package Corepack itself resolves it to), verifies the tarball against the
-  registry's own digest for that version — SHA-512 from `dist.integrity` when the version publishes
-  one, the SHA-1 `dist.shasum` every version carries otherwise — and unpacks it behind a wrapper
-  script that execs the package's own entry point under `node`, so it resolves the same provisioned
-  Node the rest of the component's environment does rather than whatever `node` happens to be on
-  the ambient PATH.
+  **yarn** is unpacked behind a wrapper script that execs the package's own entry point under
+  `node`, so it resolves the same provisioned Node the rest of the component's environment does
+  rather than whatever `node` happens to be on the ambient PATH. `internal/toolchain.downloadPackageManager`
+  resolves the pinned version's document from the registry (`@yarnpkg/cli-dist` rather than the
+  `yarn` package, for a Yarn 2+ pin — the package Corepack itself resolves it to), and verifies the
+  tarball against the registry's own digest for that version — SHA-512 from `dist.integrity` when
+  the version publishes one, the SHA-1 `dist.shasum` every version carries otherwise.
+
+  **pnpm ≥ 12** is provisioned as its own native `@pnpm/exe.<os>-<arch>` binary, installed
+  directly as `bin/pnpm` with no node wrapper at all — glibc builds only, linux/darwin ×
+  amd64/arm64, the same libc lydite's own Node provisioning assumes. Its pnpm registry package
+  ships a shell placeholder at `bin/pnpm`, meant to be overwritten at install time by that
+  package's own `preinstall` lifecycle script; lydite runs no lifecycle scripts, so `downloadPnpm`
+  fetches the exe package's verified tarball itself, along a chain that starts at the repository's
+  declared hash (checked against the pnpm tarball only) and, from the exe package onward, is
+  anchored in the registry's own live SHA-512 digest rather than in anything the repository
+  committed to for the executed binary itself — see [ADR 0075](../../docs/adr/0075-pnpm-is-provisioned-as-its-native-binary-and-a-pin-below-12-is-refused.md)
+  for the full chain, what the declared hash does and does not cover, and why a GitHub-releases
+  binary, `bin/pnpm.mjs`, and Corepack were all rejected. **A `packageManager` pin below pnpm major 12 is refused per component**, naming the
+  manifest and the pin, rather than provisioned: nothing below 12 carries the exe-package split
+  this provisions against. `toolchain.enabled: false` lifts the refusal, the same escape hatch
+  every other toolchain override already has, letting the install run whatever pnpm is on PATH.
+
+  Corepack is not the mechanism for either manager, for the same reason Node itself is not
+  assumed present: Corepack's shims live inside Node's own install directory, which on a runner is
+  not lydite's to write into, and fetching the registry tarball directly is no less reliable than
+  asking Corepack to fetch the same tarball on lydite's behalf.
 
   **A package manager's declared version is an exact pin, never a floor.** Everywhere else in this
   file "satisfied" means "at least the declared version" — an ambient Go 1.26.6 satisfies a

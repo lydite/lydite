@@ -168,7 +168,7 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 		if u.Lang != runner.TypeScript {
 			continue
 		}
-		pm, ok, err := managerRequirement(root, dir)
+		pm, ok, err := managerRequirement(root, dir, cfg.Disabled)
 		if err != nil {
 			return nil, err
 		}
@@ -191,7 +191,14 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 // Only a manager lydite provisions yields a requirement. npm ships inside
 // every Node, so an npm pin is decided by the Node requirement beside it and
 // there is nothing further to install.
-func managerRequirement(root, dir string) (Requirement, bool, error) {
+//
+// A pin lydite refuses (see nodedeps.Declared.Supported) yields none either,
+// and is not an error here: an error aborts Ensure, and with it every
+// component in the run. The component pinning it fails its own install
+// instead, through nodedeps.Refusal. With provisioning disabled the refusal
+// does not apply — the install runs whatever is on PATH — so the requirement
+// stands, for the diagnostic comparing that manager against the pin.
+func managerRequirement(root, dir string, disabled bool) (Requirement, bool, error) {
 	ws, ok := nodedeps.WorkspaceRoot(dir, root)
 	if !ok {
 		return Requirement{}, false, nil
@@ -201,6 +208,9 @@ func managerRequirement(root, dir string) (Requirement, bool, error) {
 		return Requirement{}, false, err
 	}
 	if _, provisioned := managerProbes[declared.Name]; !provisioned {
+		return Requirement{}, false, nil
+	}
+	if !disabled && !declared.Supported() {
 		return Requirement{}, false, nil
 	}
 	return Requirement{
