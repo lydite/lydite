@@ -41,7 +41,7 @@ func Digest(root string, files []string) (string, error) {
 // then read, and a file whose size differs from the bytes read is an error, so the framing
 // cannot be desynchronised by a concurrent write.
 func addFile(h hash.Hash, root, rel string) error {
-	f, err := os.Open(filepath.Join(root, rel))
+	f, err := os.Open(filepath.Join(root, rel)) // #nosec G304 -- rel is a path git listed under the scan root the caller named
 	if err != nil {
 		return fmt.Errorf("digesting %s: %w", rel, err)
 	}
@@ -58,7 +58,7 @@ func addFile(h hash.Hash, root, rel string) error {
 	writeLen(h, uint64(len(rel)))
 	_, _ = io.WriteString(h, rel)
 	size := info.Size()
-	writeLen(h, uint64(size))
+	writeLen(h, uint64(size)) // #nosec G115 -- a regular file's size is never negative
 	n, err := io.Copy(h, io.LimitReader(f, size))
 	if err != nil {
 		return fmt.Errorf("digesting %s: %w", rel, err)

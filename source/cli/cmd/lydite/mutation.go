@@ -136,7 +136,7 @@ same token as a suppression, declaring one refers the change to a human.`,
 				return err
 			}
 			resolvedState, build := resumeInputs(scanRoot, stateDir, os.Getenv(mutationStateEnv), version,
-				os.UserCacheDir, os.Executable, func(p string) (io.ReadCloser, error) { return os.Open(p) }, os.Stderr)
+				os.UserCacheDir, os.Executable, openExecutable, os.Stderr)
 			r, err := mutate.Run(ctx, mutationflow.Params{
 				Dir:           dir,
 				Components:    components,
@@ -252,6 +252,11 @@ same token as a suppression, declaring one refers the change to a human.`,
 
 // mutationStateEnv names the state root when --state-dir is not given.
 const mutationStateEnv = "LYDITE_MUTATION_STATE"
+
+// openExecutable opens the running executable, whose bytes name a dev build.
+func openExecutable(path string) (io.ReadCloser, error) {
+	return os.Open(path) // #nosec G304 -- the path is the running executable's own, from os.Executable
+}
 
 // resumeInputs resolves what a resumed run is rooted and keyed by: the state
 // root, and the name of the lydite whose verdicts it would reuse. What cannot
