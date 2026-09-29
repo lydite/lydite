@@ -757,6 +757,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	if n := unboundedNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
 	}
+	if n := heldOpenNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
 	survivors := mutation.Survivors(results)
 	if len(survivors) == 0 {
 		return row, nil
@@ -778,6 +781,9 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 		row.Detail = append(row.Detail, n)
 	}
 	if n := unboundedNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
+	if n := heldOpenNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
 	}
 	row.Detail = append(row.Detail,
@@ -885,6 +891,20 @@ func unboundedNote(results []mutation.Result) string {
 		return ""
 	}
 	return "memory was not bounded: this platform has no limit to set, so a mutant that allocates without stopping was held to nothing"
+}
+
+// heldOpenNote says on the row that a mutant's own process group had to be
+// killed at the wait delay because something it started was still holding
+// its output open when the suite itself had already exited.
+//
+// Said out loud rather than left out, because a mutant reporting killed or
+// survived this way exited clean only because lydite stopped waiting for
+// what it left running, not because nothing was left running.
+func heldOpenNote(results []mutation.Result) string {
+	if !mutation.HeldOutputOpen(results) {
+		return ""
+	}
+	return "a mutant exited while something it started was still running: its process group was killed after lydite stopped waiting for it"
 }
 
 // parseBytes reads a byte quantity as a flag spells one: a plain number of

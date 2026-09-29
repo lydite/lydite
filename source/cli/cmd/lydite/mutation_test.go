@@ -160,6 +160,37 @@ func TestARowSaysWhenMemoryWasNotBounded(t *testing.T) {
 	}
 }
 
+// A mutant whose process group was killed at the wait delay is on the row,
+// never silent: it exited clean only because lydite stopped waiting for
+// what it left running, and reporting that as the green of a suite that
+// left nothing behind is the failure the amber tag exists for.
+func TestARowSaysWhenAMutantsOutputWasHeldOpen(t *testing.T) {
+	heldOpen := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		// A mutant that survived, so the note is proven on the failing row as
+		// well as on the passing one.
+		Outcome: mutation.Survived, OutputHeldOpen: true,
+	}}
+	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1, Survived: 1}, heldOpen, nil, time.Second)
+	if !detailSaying(failing, "still running") {
+		t.Errorf("a failing row from a run that held output open says %v", failing.Detail)
+	}
+
+	clean := []mutation.Result{{Outcome: mutation.Killed}}
+	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, clean, nil, time.Second)
+	if detailSaying(passing, "still running") {
+		t.Errorf("a row from a clean run says something was still running: %v", passing.Detail)
+	}
+	heldOpenAndKilled := []mutation.Result{{Outcome: mutation.Killed, OutputHeldOpen: true}}
+	passing, _ = mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, heldOpenAndKilled, nil, time.Second)
+	if !detailSaying(passing, "still running") {
+		t.Errorf("a passing row from a run that held output open says %v", passing.Detail)
+	}
+}
+
 func detailSaying(row ui.Row, want string) bool {
 	for _, d := range row.Detail {
 		if strings.Contains(d, want) {

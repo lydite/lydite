@@ -268,8 +268,14 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 	// execution reports it: one execution the platform could not bound is a
 	// mutant that was held to nothing, whatever the others managed.
 	unbounded := false
+	// Whether an execution's own process group was killed at the wait delay
+	// because something it started was still holding its output open: a
+	// suite that exits zero this way is not evidence its tests ran clean —
+	// it is evidence something it started outlived it.
+	heldOpen := false
 	finish := func(r Result) Result {
 		r.MemoryUnbounded = unbounded
+		r.OutputHeldOpen = heldOpen
 		return log(opts, m, r, started)
 	}
 	staged, err := w.Stage(m)
@@ -288,6 +294,7 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 
 	res, v := execute(ctx, staged.Dir, staged.Build, opts)
 	unbounded = unbounded || res.MemoryLimit > 0 && !res.MemoryBounded
+	heldOpen = heldOpen || res.OutputHeldOpen
 	switch v {
 	case cutShort:
 		// An interrupted build is not a mutant that would not compile, and
@@ -312,6 +319,7 @@ func run(ctx context.Context, w Worker, m Mutant, opts Options) Result {
 	for _, phase := range staged.Phases {
 		res, v := execute(ctx, staged.Dir, phase, opts)
 		unbounded = unbounded || res.MemoryLimit > 0 && !res.MemoryBounded
+		heldOpen = heldOpen || res.OutputHeldOpen
 		switch v {
 		case passed:
 			continue

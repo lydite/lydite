@@ -260,6 +260,31 @@ func TestASuiteThatAllocatesWithoutStoppingIsKilledByItsMemoryBound(t *testing.T
 	}
 }
 
+// A phase that exits zero while something it started still holds its output
+// open is reported alongside its outcome, never silently: the executor's own
+// process-group kill is what let the run finish at all, and that is not the
+// same thing as nothing having been left running.
+func TestAPhaseThatExitsCleanWhileHoldingOutputOpenIsReportedOnTheResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	staged := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{
+			shell("sleep 300 & exit 0"),
+		}}
+	}}
+	results, err := Execute(t.Context(), staged, []Mutant{mutantAt(1)}, Options{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Survived {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, Survived, results[0].Detail)
+	}
+	if !results[0].OutputHeldOpen {
+		t.Error("the mutant reports nothing was left running, though its phase's grandchild held output open past the wait delay")
+	}
+}
+
 // A mutant whose compilation reached the ceiling is unviable rather than
 // killed: nothing ran, so nothing observed the change, and what the bound
 // caught there is the compiler's appetite.
