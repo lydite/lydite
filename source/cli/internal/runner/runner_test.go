@@ -129,7 +129,11 @@ func TestTheUninstrumentedVariantsCarryNoCoverageFlag(t *testing.T) {
 		if !slices.Contains(inv.Args, "./internal/...") {
 			t.Errorf("%s go-test = %v, want the declared package pattern", variant, inv.Args)
 		}
-		for _, want := range []string{"-race", "-timeout", "5m"} {
+		kept := []string{"-race", "-timeout", "5m"}
+		if variant == BuildOnly {
+			kept = []string{"-race"}
+		}
+		for _, want := range kept {
 			if !slices.Contains(inv.Args, want) {
 				t.Errorf("%s go-test = %v, want %q kept", variant, inv.Args, want)
 			}
@@ -143,6 +147,66 @@ func TestTheUninstrumentedVariantsCarryNoCoverageFlag(t *testing.T) {
 	}
 	if i := slices.Index(inv.Args, "-coverpkg=./..."); i < 0 || i > slices.Index(inv.Args, "-coverpkg=./internal/...") {
 		t.Errorf("instrumented go-test = %v, want lydite's -coverpkg ahead of the declared one", inv.Args)
+	}
+}
+
+// The build-only variant runs `go build`, which rejects every flag that only
+// means something to a test binary. A declared -timeout or -run carried across
+// makes the build fail with a usage error, which reads as every mutant being
+// unviable. The plain and instrumented variants run the tests and keep them.
+func TestBuildOnlyDropsTheFlagsGoBuildRejects(t *testing.T) {
+	declared := []string{
+		"-timeout", "30m", "-run", "X", "-count=1", "-race", "./...",
+	}
+	inv := argv(t, GoTest, BuildOnly, declared...)
+	if got, want := line(inv), "go build -race ./..."; got != want {
+		t.Errorf("build-only go-test = %q, want %q", got, want)
+	}
+	for _, variant := range []Variant{Plain, Instrumented} {
+		inv := argv(t, GoTest, variant, declared...)
+		for _, want := range []string{"-timeout", "30m", "-run", "X", "-count=1"} {
+			if !slices.Contains(inv.Args, want) {
+				t.Errorf("%s go-test = %v, want %q kept", variant, inv.Args, want)
+			}
+		}
+	}
+}
+
+func TestBuildOnlyDropFilterKeepsWhatGoBuildAccepts(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []string
+		want     string
+	}{
+		{"boolean flags leave the next argument alone",
+			[]string{"-failfast", "-short", "-benchmem", "-race", "./a", "./b"},
+			"go build -race ./a ./b"},
+		{"a boolean spelled with a value",
+			[]string{"-short=false", "-failfast=true", "./a"},
+			"go build ./a"},
+		{"equals forms",
+			[]string{"-timeout=5m", "-run=X", "-skip=Y", "-parallel=4", "-cpu=1,2", "-shuffle=on", "./a"},
+			"go build ./a"},
+		{"separate values",
+			[]string{"-skip", "Y", "-parallel", "4", "-cpu", "1,2", "-shuffle", "on", "-list", "T", "./a"},
+			"go build ./a"},
+		{"bench and fuzz flags",
+			[]string{"-bench", ".", "-benchtime", "1s", "-fuzz", "F", "-fuzztime", "5s",
+				"-fuzzminimizetime=1s", "-fuzzcachedir", "c", "./a"},
+			"go build ./a"},
+		{"double-dash spelling",
+			[]string{"--timeout", "5m", "--count=1", "./a"},
+			"go build ./a"},
+		{"flags go build accepts",
+			[]string{"-race", "-tags", "integration", "-v", "-json", "-ldflags", "-s", "./a"},
+			"go build -race -tags integration -v -json -ldflags -s ./a"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := line(argv(t, GoTest, BuildOnly, c.declared...)); got != c.want {
+				t.Errorf("build-only go-test = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 

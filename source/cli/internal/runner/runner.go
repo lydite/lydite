@@ -398,7 +398,7 @@ func buildGoTest(variant Variant, args []string) (Invocation, bool) {
 			PathDirs:       []string{gotestsumBinDir()},
 		}, true
 	case BuildOnly:
-		return Invocation{Name: "go", Args: append([]string{"build"}, goTestUninstrumented(pkgs)...)}, true
+		return Invocation{Name: "go", Args: append([]string{"build"}, goBuildArgs(pkgs)...)}, true
 	default:
 		return Invocation{}, false
 	}
@@ -503,20 +503,27 @@ func RunPattern(names []string) string {
 // package, and dropping `5m` out of `-timeout 5m` leaves a flag with no value.
 // A flag that table does not name is taken to carry its value inline, which is
 // the spelling that is unambiguous for every flag there is.
-func goTestFlags(args []string) []string { return dropCoverage(args, false) }
+func goTestFlags(args []string) []string { return dropFlags(args, false, coverageFlags) }
 
 // goTestUninstrumented is the declared arguments with the coverage flags
 // removed and everything else — the package patterns included — kept, which is
 // what a variant that supplies its own packages cannot use goTestFlags for: a
 // run narrowed to the component directory tests almost nothing and still
 // reports a pass.
-func goTestUninstrumented(args []string) []string { return dropCoverage(args, true) }
+func goTestUninstrumented(args []string) []string { return dropFlags(args, true, coverageFlags) }
 
-// dropCoverage is the scan both spellings share: one pass, because deciding
+// goBuildArgs is goTestUninstrumented for `go build`, which rejects every flag
+// that only means something to a test binary: a -timeout or -run carried across
+// fails the build with a usage error, which reads as every mutant being
+// unviable. -race, -tags and the other build flags stay.
+func goBuildArgs(args []string) []string { return dropFlags(args, true, goBuildRejected) }
+
+// dropFlags is the scan every spelling shares: one pass, because deciding
 // what a package pattern is has to happen in the same pass that pairs a flag
 // with the value behind it. `-timeout 5m` spells its value as a bare word, and
 // a second pass over the survivors could not tell that word from a package.
-func dropCoverage(args []string, keepPackages bool) []string {
+// drop names the flags to remove, with their separately passed values.
+func dropFlags(args []string, keepPackages bool, drop map[string]bool) []string {
 	out := []string{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -532,7 +539,7 @@ func dropCoverage(args []string, keepPackages bool) []string {
 			value, separate = args[i+1], true
 			i++
 		}
-		if coverageFlags[name] {
+		if drop[name] {
 			continue
 		}
 		out = append(out, a)
@@ -555,6 +562,26 @@ var coverageFlags = map[string]bool{
 	"covermode":    true,
 }
 
+// goBuildRejected is the coverage flags plus the `go test` flags `go build` does
+// not define: the ones that select, repeat, time or shuffle a test run, and the
+// benchmark and fuzz flags. Boolean ones (-failfast, -short, -benchmem) are
+// named too, and stay out of goTestValueFlags so they never take the argument
+// behind them.
+var goBuildRejected = func() map[string]bool {
+	m := map[string]bool{}
+	for name := range coverageFlags {
+		m[name] = true
+	}
+	for _, name := range []string{
+		"timeout", "run", "skip", "count", "failfast", "short", "parallel", "cpu",
+		"bench", "benchtime", "benchmem", "fuzz", "fuzztime", "fuzzminimizetime",
+		"fuzzcachedir", "shuffle", "list",
+	} {
+		m[name] = true
+	}
+	return m
+}()
+
 // goTestValueFlags is the `go test` and build flags whose value may be the
 // argument after them. It is what keeps a flag and its value together when the
 // rerun copies run 1's argv, and a boolean flag left out of it is right: only
@@ -563,9 +590,9 @@ var goTestValueFlags = map[string]bool{
 	"asmflags": true, "bench": true, "benchtime": true, "blockprofile": true,
 	"blockprofilerate": true, "buildmode": true, "buildvcs": true, "count": true,
 	"covermode": true, "coverpkg": true, "coverprofile": true, "cpu": true,
-	"cpuprofile": true, "exec": true, "fuzz": true, "fuzzminimizetime": true,
+	"cpuprofile": true, "exec": true, "fuzz": true, "fuzzcachedir": true, "fuzzminimizetime": true,
 	"fuzztime": true, "gcflags": true, "gocoverdir": true, "ldflags": true,
-	"memprofile": true, "memprofilerate": true, "mod": true, "modfile": true,
+	"list": true, "memprofile": true, "memprofilerate": true, "mod": true, "modfile": true,
 	"mutexprofile": true, "mutexprofilefraction": true, "outputdir": true,
 	"overlay": true, "p": true, "parallel": true, "run": true, "shuffle": true,
 	"skip": true, "tags": true, "timeout": true, "toolexec": true, "trace": true,
