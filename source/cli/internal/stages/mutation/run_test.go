@@ -164,6 +164,9 @@ func only(t *testing.T, in RunMutantsIn) ComponentOutcome {
 	if out.Interrupted {
 		t.Error("a run nothing cancelled reports itself interrupted")
 	}
+	if out.DeadlineReached {
+		t.Error("a run with no deadline reports reaching one")
+	}
 	return out.Components[0]
 }
 
@@ -781,7 +784,7 @@ func TestAComponentThatCanBeMutatedIsPreparedWithItsOwnDirectory(t *testing.T) {
 // is never an anonymous number.
 func TestEveryOutcomeKindIsNamed(t *testing.T) {
 	seen := map[string]OutcomeKind{}
-	for k := KindNotRun; k <= KindCompleted; k++ {
+	for k := KindNotRun; k <= KindIncomplete; k++ {
 		name := k.String()
 		if strings.HasPrefix(name, "OutcomeKind(") {
 			t.Errorf("kind %d has no name", int(k))
@@ -818,6 +821,7 @@ func TestEachOutcomeKindsNameIsPinned(t *testing.T) {
 		KindNothingToMutate:     "nothing-to-mutate",
 		KindExecuteFailed:       "execute-failed",
 		KindCompleted:           "completed",
+		KindIncomplete:          "incomplete",
 	} {
 		if got := kind.String(); got != want {
 			t.Errorf("kind %d is named %q, want %q", int(kind), got, want)
@@ -1178,5 +1182,262 @@ func TestWithoutATreeDigestNothingIsResumed(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(stateDir); err != nil || len(entries) != 0 {
 		t.Errorf("the state root holds %d entr(ies) (%v), want none", len(entries), err)
+	}
+}
+
+// countingSuite is a suite that appends a line to count on every execution
+// and kills the mutant, except on every even-numbered execution, where it
+// hangs until something kills it.
+func countingSuite(count string) string {
+	return "echo x >> '" + count + "'; n=$(wc -l < '" + count + "'); " +
+		"if [ $((n % 2)) -eq 0 ]; then sleep 30; fi; exit 1"
+}
+
+// twoComparisons rewrites the fixture's source to hold a comparison on each of
+// two changed, executed lines, which is more mutants than one line yields.
+func (f *webFixture) twoComparisons(t *testing.T) {
+	t.Helper()
+	writeFile(t, f.root, "web/src/a.ts", webSource+"export function more(x: number, y: number): boolean {\n  return x > y;\n}\n")
+	f.changed = map[string][]int{"web/src/a.ts": {2, 5}}
+}
+
+// lcovBothExecuting is the baseline reporting both of twoComparisons' lines
+// executed.
+const lcovBothExecuting = `mkdir -p coverage && printf 'SF:src/a.ts\nDA:2,1\nDA:5,1\nLF:2\nLH:2\nend_of_record\n' > coverage/lcov.info`
+
+// deadlineFixture is the fixture's run with resume on, a suite that decides
+// one mutant and hangs on the next, and a per-mutant budget no hang reaches
+// before the deadline does.
+func (f *webFixture) deadlineFixture(t *testing.T) RunMutantsIn {
+	t.Helper()
+	in := f.in(f.shape(t, lcovBothExecuting, "true", countingSuite(filepath.Join(t.TempDir(), "suite"))), f.lifecycle(t))
+	in.StateDir, in.TreeDigest, in.LyditeVersion = t.TempDir(), "tree-a", "v1.2.3"
+	in.Timeout = time.Hour
+	return in
+}
+
+// runUntil runs in under a deadline d from now, and returns the run and its
+// one outcome.
+func runUntil(t *testing.T, ctx context.Context, in RunMutantsIn, d time.Duration) (RunMutantsOut, ComponentOutcome) {
+	t.Helper()
+	in.Deadline = time.Now().Add(d)
+	out, err := RunMutants(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Components) != 1 {
+		t.Fatalf("%d outcome(s), want one", len(out.Components))
+	}
+	return out, out.Components[0]
+}
+
+// A deadline that lands while a mutant is in flight cancels it, dispatches
+// nothing after it, and answers incomplete: measured counts every mutant with
+// a verdict — this run's and the ones reused from the last — and wanted every
+// mutant generated. What the deadline cut short is in neither the count, the
+// summary nor the results, and a rerun measures exactly it.
+func TestADeadlineMidRunIsIncompleteAndCountsWhatHasAVerdict(t *testing.T) {
+	f := newWebFixture(t)
+	f.twoComparisons(t)
+	in := f.deadlineFixture(t)
+
+	out, first := runUntil(t, t.Context(), in, 3*time.Second)
+	if first.Kind != KindIncomplete {
+		t.Fatalf("kind = %s (%v), want incomplete", first.Kind, first.Err)
+	}
+	if !out.DeadlineReached || out.Interrupted {
+		t.Errorf("deadline reached %v, interrupted %v, want only the deadline", out.DeadlineReached, out.Interrupted)
+	}
+	if first.Wanted < 3 {
+		t.Fatalf("wanted = %d, want at least three mutants for two runs to leave some unmeasured", first.Wanted)
+	}
+	if first.Measured != 1 || len(first.Results) != 1 || first.Summary.Killed != 1 || first.Summary.Total() != 1 {
+		t.Errorf("measured %d over %d result(s), summary %+v, want the one mutant killed before the hang",
+			first.Measured, len(first.Results), first.Summary)
+	}
+	for _, r := range first.Results {
+		if r.CutShort {
+			t.Errorf("a cut-short result is reported: %+v", r)
+		}
+	}
+	if first.Reused != 0 || !reflect.DeepEqual(first.Scoped, f.changed) || first.Elapsed <= 0 {
+		t.Errorf("reused %d, scoped %v, elapsed %v", first.Reused, first.Scoped, first.Elapsed)
+	}
+
+	_, second := runUntil(t, t.Context(), in, 3*time.Second)
+	if second.Kind != KindIncomplete {
+		t.Fatalf("kind = %s (%v), want incomplete", second.Kind, second.Err)
+	}
+	if second.Reused != 1 || second.Measured != 2 || second.Wanted != first.Wanted {
+		t.Errorf("reused %d, measured %d of %d, want the first run's verdict reused and one more decided of %d",
+			second.Reused, second.Measured, second.Wanted, first.Wanted)
+	}
+	if second.Summary.Killed != 2 || len(second.Results) != 2 {
+		t.Errorf("summary %+v over %d result(s), want the two verdicts", second.Summary, len(second.Results))
+	}
+}
+
+// A deadline the run finishes inside changes nothing: the component completes
+// with every verdict, and the run reports no deadline reached.
+func TestARunThatFinishesBeforeItsDeadlineCompletes(t *testing.T) {
+	f := newWebFixture(t)
+	out, o := runUntil(t, t.Context(), f.in(f.shape(t, lcovExecuting, "true", "exit 1"), f.lifecycle(t)), time.Hour)
+	if o.Kind != KindCompleted || !o.Ran() {
+		t.Fatalf("kind = %s (%v), want completed", o.Kind, o.Err)
+	}
+	if out.DeadlineReached || out.Interrupted {
+		t.Errorf("deadline reached %v, interrupted %v, want neither", out.DeadlineReached, out.Interrupted)
+	}
+	if o.Measured != 0 || o.Wanted != 0 || o.Summary.Killed == 0 || o.Summary.Killed != len(o.Results) {
+		t.Errorf("measured %d of %d, summary %+v over %d result(s), want every mutant killed and no incomplete counts",
+			o.Measured, o.Wanted, o.Summary, len(o.Results))
+	}
+}
+
+// An interrupt is not a deadline, even in a run that has one: the cut-short
+// mutants stay among the results for the caller to withdraw the run by, and
+// the component is completed rather than incomplete.
+func TestAnInterruptUnderADeadlineIsStillAnInterrupt(t *testing.T) {
+	f := newWebFixture(t)
+	count := filepath.Join(t.TempDir(), "suite")
+	in := f.in(f.shape(t, lcovExecuting, "true", countingSuite(count)), f.lifecycle(t))
+	in.Timeout = time.Hour
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		// Once the second mutant is in flight, which is the one that hangs.
+		for ctx.Err() == nil {
+			if data, err := os.ReadFile(count); err == nil && strings.Count(string(data), "\n") >= 2 { // #nosec G304 -- a counter inside the test's own temporary directory
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	out, o := runUntil(t, ctx, in, time.Hour)
+	if o.Kind != KindCompleted {
+		t.Fatalf("kind = %s (%v), want completed", o.Kind, o.Err)
+	}
+	if !out.Interrupted || out.DeadlineReached {
+		t.Errorf("interrupted %v, deadline reached %v, want only the interrupt", out.Interrupted, out.DeadlineReached)
+	}
+	cut := 0
+	for _, r := range o.Results {
+		if r.CutShort {
+			cut++
+		}
+	}
+	if cut == 0 || o.Measured != 0 || o.Wanted != 0 {
+		t.Errorf("%d cut-short result(s), measured %d of %d, want the cut-short ones kept and no incomplete counts",
+			cut, o.Measured, o.Wanted)
+	}
+}
+
+// A deadline that lands before a component's baseline has an answer leaves
+// the mutants uncounted, since none were generated: the component is the
+// baseline interrupted, whichever step the deadline killed — the setup, or the
+// baseline suite itself, which is not a baseline that failed.
+func TestADeadlineBeforeTheBaselineAnswersIsTheBaselineInterrupted(t *testing.T) {
+	t.Run("setup", func(t *testing.T) {
+		f := newWebFixture(t)
+		lifecycle := f.lifecycle(t)
+		lifecycle.runCommands = func(ctx context.Context, _, _, kind string, _ []string, _ *toolchain.Env) error {
+			if kind == "setup" {
+				<-ctx.Done()
+				return rowError{detail: []string{"setup killed"}}
+			}
+			return nil
+		}
+		out, o := runUntil(t, t.Context(), f.in(f.shape(t, lcovExecuting, "true", "true"), lifecycle), 200*time.Millisecond)
+		if o.Kind != KindBaselineInterrupted || o.Err != nil {
+			t.Fatalf("kind = %s (%v), want baseline-interrupted", o.Kind, o.Err)
+		}
+		if !out.DeadlineReached || out.Interrupted || !o.Scheduled {
+			t.Errorf("deadline reached %v, interrupted %v, scheduled %v", out.DeadlineReached, out.Interrupted, o.Scheduled)
+		}
+	})
+	t.Run("baseline", func(t *testing.T) {
+		f := newWebFixture(t)
+		_, o := runUntil(t, t.Context(), f.in(f.shape(t, "exec sleep 30", "true", "true"), f.lifecycle(t)), 500*time.Millisecond)
+		if o.Kind != KindBaselineInterrupted || o.Output != "" {
+			t.Fatalf("kind = %s, output %q, want baseline-interrupted with no failing output", o.Kind, o.Output)
+		}
+	})
+	t.Run("already passed", func(t *testing.T) {
+		f := newWebFixture(t)
+		out, o := runUntil(t, t.Context(), f.in(f.shape(t, lcovExecuting, "true", "true"), f.lifecycle(t)), -time.Second)
+		if o.Kind != KindNotRun || !out.DeadlineReached || out.Schedule.Started != 0 {
+			t.Errorf("kind = %s, deadline reached %v, started %d, want nothing started", o.Kind, out.DeadlineReached, out.Schedule.Started)
+		}
+	})
+}
+
+// A step before the mutants are known that fails on its own merits, with the
+// deadline still ahead, keeps its own kind.
+func TestAFailureBeforeTheDeadlineKeepsItsOwnKind(t *testing.T) {
+	f := newWebFixture(t)
+	lifecycle := f.lifecycle(t)
+	failed := errors.New("setup failed")
+	lifecycle.runCommands = func(_ context.Context, _, _, kind string, _ []string, _ *toolchain.Env) error {
+		if kind == "setup" {
+			return failed
+		}
+		return nil
+	}
+	_, o := runUntil(t, t.Context(), f.in(f.shape(t, lcovExecuting, "true", "true"), lifecycle), time.Hour)
+	if o.Kind != KindBlocked || !errors.Is(o.Err, failed) {
+		t.Errorf("kind = %s (%v), want blocked by the setup's own failure", o.Kind, o.Err)
+	}
+}
+
+// A deadline that stops a worker being prepared leaves nothing dispatched, and
+// the component is incomplete over what was answered without running: its
+// acknowledged mutants, whose declaration is their verdict.
+func TestADeadlineThatStopsAWorkerCountsWhatNeededNoRun(t *testing.T) {
+	f := newWebFixture(t)
+	f.twoComparisons(t)
+	writeFile(t, f.root, "web/src/a.ts", strings.Replace(webSource, "x < y;",
+		"x < y; // [lydite:exclude_from_mutation][the comparison is exercised by an integration suite]", 1)+
+		"export function more(x: number, y: number): boolean {\n  return x > y;\n}\n")
+	lifecycle := f.lifecycle(t)
+	lifecycle.prepare = func(ctx context.Context, _ string, _ runner.Invocation, _, root string, _ config.Config, _ *toolchain.Env) error {
+		if root == "" {
+			<-ctx.Done()
+			return rowError{detail: []string{"npm ci killed"}}
+		}
+		return nil
+	}
+	_, o := runUntil(t, t.Context(), f.in(f.shape(t, lcovBothExecuting, "true", "true"), lifecycle), time.Second)
+	if o.Kind != KindIncomplete {
+		t.Fatalf("kind = %s (%v), want incomplete", o.Kind, o.Err)
+	}
+	if o.Measured == 0 || o.Measured >= o.Wanted || o.Summary.Acknowledged != o.Measured || len(o.Results) != o.Measured {
+		t.Errorf("measured %d of %d, summary %+v over %d result(s), want only the acknowledged mutants measured",
+			o.Measured, o.Wanted, o.Summary, len(o.Results))
+	}
+}
+
+// What a worker the deadline stopped answers without running is the same
+// answer the executor gives: an acknowledged mutant by its declaration, one a
+// previous run recorded by its verdict with the mutant as generated, and no
+// other mutant at all.
+func TestWhatIsAnsweredWithoutRunningMatchesTheExecutor(t *testing.T) {
+	acknowledged := mutation.Mutant{Path: "a.go", Line: 1, Offset: 10, Length: 1, Operator: mutation.NegateConditional,
+		Original: "<", Mutated: ">=", Reason: "declared"}
+	recorded := mutation.Mutant{Path: "a.go", Line: 2, Offset: 20, Length: 1, Operator: mutation.NegateConditional,
+		Original: "<", Mutated: ">="}
+	pending := mutation.Mutant{Path: "a.go", Line: 3, Offset: 30, Length: 1, Operator: mutation.NegateConditional,
+		Original: "<", Mutated: ">="}
+	mutants := []mutation.Mutant{acknowledged, recorded, pending}
+	known := map[string]mutation.Result{mutation.MutantID(recorded): {Outcome: mutation.Killed}}
+
+	got := answeredWithoutRunning(mutants, known)
+	want, err := mutation.Execute(t.Context(), nil, mutants[:2], mutation.Options{Known: known})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("answered\n  %+v\nwant the executor's\n  %+v", got, want)
 	}
 }

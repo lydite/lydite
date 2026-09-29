@@ -33,8 +33,11 @@ matrix and duplicates one instrumented run per component, which on a matrix cost
 nothing and machine time once.
 
 **Mutants come from the change, and only from lines coverage reports as executed.** There is no
-whole-repository mode: it would run for hours on any mature codebase, which makes it a mode nobody
-runs, and it would give the catalogue and the gate a second scope to be reasoned about against. A
+whole-repository mode today: it would run for hours on any mature codebase, and it would give the
+catalogue and the gate a second scope to be reasoned about against. A run that resumes and stops at
+`--deadline` is what makes one affordable, and [ADR
+0075](../../docs/adr/0075-a-mutation-run-resumes-and-stops-at-a-deadline.md) decides a scheduled
+default-branch sweep that only ever advises. That sweep is decided and not built. A
 mutant on an uncovered line cannot be killed by construction, and reporting one restates what patch
 coverage already said about the same line. Half of that bound is knowable before anything runs, so
 a component the change does not touch pays for no baseline, no compose stack and no setup command —
@@ -378,18 +381,22 @@ of the port list directly, so the predicate that decides what may run beside wha
 implementation: they carry the component's published ports so they conflict exactly when it
 publishes one, and they carry no directory, because a mutant is not a second tree.
 
-## The timeout and the memory ceiling are both derived, and there is no runtime budget
+## The timeout and the memory ceiling are both derived, and a deadline is not a runtime budget
 
-Nothing caps how long a run takes. A budget shipped now would be an invented number and every way
-of exceeding one is bad: capping and passing is a gate that silently checked less, capping and
-failing punishes a change for its size, and capping to `unmeasured` gives a busy repository a
-permanently amber row. A run genuinely too large dies as a CI job timeout, the shard produces no
-document, and the fold already fails a declared component with no row.
+Nothing caps how long a run takes, and nothing is failed for its size. A budget would be an
+invented number and every way of exceeding one is bad: capping and passing is a gate that silently
+checked less, capping and failing punishes a change for its size, and capping to `unmeasured` gives
+a busy repository a permanently amber row. `--deadline` is a different thing: measured from the
+process's start and set below the job timeout, it stops dispatch, cancels the mutants in flight and
+keeps every verdict already recorded, so a rerun resumes from them and the amber row lasts only
+until then. A run with no `--deadline` that is too large dies as a CI job timeout, the shard
+produces no document, and the fold already fails a declared component with no row.
 
 What a run does instead is state its cost before paying it. Once mutants are generated it writes
 one line to the component's live log, mirrored to stderr under `--stream`: `N mutant(s), budget Xs
 each, W worker(s): at most Ys` (`costProjection` in `cmd/lydite/mutation.go`). It is a worst case,
-`ceil(mutants/workers)` times the per-mutant budget, and a projection rather than a cap. It survives
+`ceil(mutants/workers)` times the per-mutant budget, and a projection rather than a cap: it tells the
+reader what the run would cost, and only `--deadline` stops one. It survives
 a killed job because the log does and the final document does not. Elapsed time (baseline plus
 every mutant) is recorded afterwards as `elapsed_seconds` in each component's entry in
 `mutants.json`.
@@ -479,6 +486,16 @@ listing; a digest that included the state would change with every verdict record
 **A state failure is a diagnostic, never a failure.** A state that cannot be opened, read or
 written is reported and the component measures everything, as it would with no state.
 
+**An incomplete run exits 3.** A component `--deadline` stopped before every mutant had a verdict
+renders `unmeasured`, "N of M measured, rerun to resume", and so does one the deadline reached
+before its baseline or before it started. `unmeasured` does not vote, so `cmd/lydite` marks the
+report incomplete (`ui.Report.MarkIncomplete`) and the verdict becomes `ui.VerdictIncomplete`,
+exit `ui.ExitIncomplete` (3) — under `--no-gate` too, since that flag silences a survivor's vote,
+not a measurement that never finished. A failure outranks it: a survivor found before the deadline
+fails its row, is never withdrawn (a deadline is not an interrupt), and the run exits 1. Exit 3 is
+a public contract a workflow reads to tell a run cut short, which a rerun resumes, from one that
+failed.
+
 ## The fold
 
 `lydite mutation merge` folds a matrix of shards, through the same implementation `lydite test
@@ -508,4 +525,31 @@ rendered, the same trade `foldedScheduleRow` already makes for `max N concurrent
 `TestTheFoldReadsBackTheScoreARunRendered` is what holds that fallback's renderer and reader
 together, since a wording change would otherwise be a fold that silently stops counting a shard
 with no document to fall back on.
+
+**A component the deadline stopped is written apart from the complete ones.** `mutants.json` holds
+it under `incomplete_components`, never under `components`, with its counts over the verdicts it
+reached and `incomplete: {measured, wanted}` beside them. The separate key is the compatibility
+decision: every reader of the document ignores keys it does not know, so a marker alone on an entry
+under `components` would read, to a lydite older than the marker, as a complete score — folded into
+a total, or landed in the quality history for good. Under its own key the same reader finds the
+component absent, the answer it already gives a component nothing measured to completion.
+`ReadCounts` refuses a marked entry under `components`, an unmarked one under
+`incomplete_components`, and a component under both. A document with no such key is one where every
+component finished, which is every document an older lydite wrote.
+
+**Incomplete wins the fold.** `FoldCounts` folds a component any shard left incomplete into
+`incomplete_components` wherever a complete entry for it stands, keeping the first incomplete entry
+whole rather than summing a second — two entries for one component are the same mutants measured
+twice. The component's row is the one its shard rendered: `unmeasured` "N of M measured, rerun to
+resume", or `fail` on a survivor found before the deadline (context under that shard's
+`--no-gate`), with the progress beneath; a row reading `pass` beside counts saying the component did
+not finish is replaced by the unmeasured one. The `mutation` summary leaves every such component out
+of its total and says how many it left out. `mutation merge` marks its report incomplete —
+exit 3, or 1 when a survivor fails a row — whenever the folded counts hold an incomplete component,
+a shard's own report reads `incomplete` (which is how a component the deadline reached before its
+baseline is known, since it has no counts), or a component's row carries the progress line.
+That last is also what keeps the prose fallback honest: an incomplete row that found a survivor
+states its score in the words a complete one does, so `rowIncomplete` recognises the progress line
+and the fallback never reads that row back as a finished score. `recordedMutants` reads
+`components` alone, so `lydite test record` never lands an incomplete component's partial count.
 

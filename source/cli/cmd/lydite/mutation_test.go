@@ -920,6 +920,7 @@ func TestAFlagIsRefusedBeforeAnyWorkHappens(t *testing.T) {
 		{"a concurrency that is not a number", []string{"--dir", root, "--concurrency", "lots"}, `--concurrency`},
 		{"a concurrency below one", []string{"--dir", root, "--concurrency", "0"}, "at least 1"},
 		{"a negative timeout", []string{"--dir", root, "--timeout", "-5s"}, "--timeout must not be negative"},
+		{"a negative deadline", []string{"--dir", root, "--deadline", "-5s"}, "--deadline must not be negative"},
 		{"a memory bound that is not a size", []string{"--dir", root, "--memory", "lots"}, "--memory"},
 		{"a negative memory bound", []string{"--dir", root, "--memory", "-1GiB"}, "--memory"},
 		{"a component that is not declared", []string{"--dir", root, "--component", "nope"}, "nope"},
@@ -2109,18 +2110,27 @@ func TestAGatingRunKeepsTheRowItMeasured(t *testing.T) {
 // --no-gate does not excuse it: the flag is about what the mutants said, and a
 // teardown is a command that did not run. It still never masks a reason the
 // component could not be measured, nor a survivor a gating run is failing on.
+//
+// An incomplete component's unmeasured row is a measurement that found nothing
+// wrong before the deadline, so the teardown takes it over as it does a pass;
+// a survivor it found fails the row, and keeps it.
 func TestATeardownFailureTakesOverAMeasurementAndNothingElse(t *testing.T) {
 	for _, c := range []struct {
+		kind   mutationstages.OutcomeKind
 		status ui.Status
 		want   bool
 	}{
-		{ui.StatusPass, true},
-		{ui.StatusContext, true},
-		{ui.StatusFail, false},
-		{ui.StatusUnmeasured, false},
+		{mutationstages.KindCompleted, ui.StatusPass, true},
+		{mutationstages.KindCompleted, ui.StatusContext, true},
+		{mutationstages.KindCompleted, ui.StatusFail, false},
+		{mutationstages.KindCompleted, ui.StatusUnmeasured, false},
+		{mutationstages.KindBaselineFailed, ui.StatusUnmeasured, false},
+		{mutationstages.KindIncomplete, ui.StatusUnmeasured, true},
+		{mutationstages.KindIncomplete, ui.StatusContext, true},
+		{mutationstages.KindIncomplete, ui.StatusFail, false},
 	} {
-		if got := teardownFailureReplaces(c.status); got != c.want {
-			t.Errorf("a teardown failure over a %q row = %v, want %v", c.status, got, c.want)
+		if got := teardownFailureReplaces(c.kind, c.status); got != c.want {
+			t.Errorf("a teardown failure over a %s component's %q row = %v, want %v", c.kind, c.status, got, c.want)
 		}
 	}
 }
@@ -2624,6 +2634,11 @@ func TestEachOutcomeKindIsItsOwnRow(t *testing.T) {
 			want: ui.Row{Status: ui.StatusPass, Label: "mutation(app)", Value: "3 of 3 mutant(s) killed in 12s",
 				Log: logRel},
 		},
+		mutationstages.KindIncomplete: {
+			outcome: mutationstages.ComponentOutcome{Summary: mutation.Summary{Killed: 1}, Measured: 1, Wanted: 3},
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)", Value: "1 of 3 measured, rerun to resume",
+				Detail: []string{"the run reached its deadline before every mutant had a verdict", logged}, Log: logRel},
+		},
 	}
 	for k := mutationstages.KindNotRun; !strings.HasPrefix(k.String(), "OutcomeKind("); k++ {
 		c, ok := cases[k]
@@ -2700,5 +2715,278 @@ func TestResumeInputsSwitchResumingOffWithALineSayingWhy(t *testing.T) {
 	if dir, _ := resumeInputs("/scan", "", "", "v1.2.3", noCache, noExe, open, &w); dir != "" ||
 		!strings.Contains(w.String(), "no user cache directory") {
 		t.Errorf("no cache directory resolved to dir %q, said %q", dir, w.String())
+	}
+}
+
+// A deadline is an instant measured from the process's start, so whatever ran
+// before the mutants counts against it; no duration is no deadline at all.
+func TestADeadlineIsMeasuredFromTheProcessStart(t *testing.T) {
+	start := time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	if got := deadlineAt(start, 90*time.Minute); !got.Equal(start.Add(90 * time.Minute)) {
+		t.Errorf("deadline = %s, want 90m after the start", got)
+	}
+	if got := deadlineAt(start, 0); !got.IsZero() {
+		t.Errorf("no duration gave the deadline %s, want none", got)
+	}
+	if processStart.IsZero() || processStart.After(time.Now()) {
+		t.Errorf("the process start is %s, want an instant already past", processStart)
+	}
+}
+
+// mutationIncomplete is a component the deadline stopped with measured of
+// wanted mutants decided, s counting them.
+func mutationIncomplete(name string, s mutation.Summary, results []mutation.Result, measured, wanted int) mutationstages.ComponentOutcome {
+	o := mutationCompleted(name, s, results, 7*time.Second)
+	o.Kind, o.Measured, o.Wanted = mutationstages.KindIncomplete, measured, wanted
+	return o
+}
+
+// A component the deadline stopped says how far it got. With no survivor among
+// what it decided it is unmeasured, since what it did not reach may hold one;
+// a survivor it found fails it outright, and is context under --no-gate
+// exactly as a completed component's is. Verdicts a previous run recorded are
+// named either way.
+func TestAnIncompleteComponentSaysHowFarItGot(t *testing.T) {
+	survivor := mutationSurvivor()
+	logRel := mutationLogRel("app")
+	progress := "2 of 5 measured, rerun to resume"
+	for _, c := range []struct {
+		name         string
+		outcome      mutationstages.ComponentOutcome
+		noGate       bool
+		want         ui.Row
+		wantFindings int
+	}{
+		{
+			name: "nothing survived",
+			outcome: func() mutationstages.ComponentOutcome {
+				o := mutationIncomplete("app", mutation.Summary{Killed: 1, Unviable: 1, Unmatched: 1}, nil, 2, 5)
+				o.Reused = 1
+				return o
+			}(),
+			want: ui.Row{Status: ui.StatusUnmeasured, Label: "mutation(app)", Value: progress, Log: logRel,
+				Detail: []string{"the run reached its deadline before every mutant had a verdict",
+					"1 did not compile", "1 declaration(s) cover no mutant", "full output: " + logRel,
+					"1 of 2 verdicts reused"}},
+		},
+		{
+			name:    "a survivor was found",
+			outcome: mutationIncomplete("app", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 2, 5),
+			want: ui.Row{Status: ui.StatusFail, Label: "mutation(app)", Value: "1 of 2 mutant(s) survived in 7s", Log: logRel,
+				Detail: []string{progress, survivor.Mutant.String(), mutationRemedy, "full output: " + logRel}},
+			wantFindings: 1,
+		},
+		{
+			name: "a survivor was found, under --no-gate",
+			outcome: func() mutationstages.ComponentOutcome {
+				o := mutationIncomplete("app", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 2, 5)
+				o.Reused = 2
+				return o
+			}(),
+			noGate: true,
+			want: ui.Row{Status: ui.StatusContext, Label: "mutation(app)", Value: "1 of 2 mutant(s) survived in 7s", Log: logRel,
+				Detail: []string{progress, survivor.Mutant.String(), mutationRemedy, "full output: " + logRel,
+					"2 of 2 verdicts reused"}},
+			wantFindings: 1,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row, out := outcomeRow(c.outcome, c.noGate)
+			if !reflect.DeepEqual(row, c.want) {
+				t.Errorf("row = %#v\nwant  %#v", row, c.want)
+			}
+			if len(out.findings) != c.wantFindings {
+				t.Errorf("findings = %+v, want %d", out.findings, c.wantFindings)
+			}
+			if out.ran || !out.incomplete || !out.kept() {
+				t.Errorf("an incomplete component's result is %+v, want kept and not counted as having run", out)
+			}
+		})
+	}
+}
+
+// A teardown that failed after the deadline takes an incomplete component's
+// unmeasured row, and the row still says how far the run got.
+func TestATeardownFailureOverAnIncompleteComponentKeepsItsProgress(t *testing.T) {
+	teardown := mutationLifecycleFailure("app", "teardown failed", "docker compose down failed in app")
+	o := mutationIncomplete("app", mutation.Summary{Killed: 1}, nil, 1, 4)
+	o.TeardownErr = lifecycleRowError{teardown}
+	row, _ := outcomeRow(o, false)
+	want := teardown
+	want.Detail = append(append([]string(nil), teardown.Detail...), "1 of 4 measured, rerun to resume")
+	if !reflect.DeepEqual(row, want) {
+		t.Errorf("row = %#v\nwant  %#v", row, want)
+	}
+}
+
+// The exit code of a run the deadline may have stopped. Unmeasured does not
+// vote, so an incomplete run exits 3 — under --no-gate too, since the flag
+// silences a survivor's vote and not a measurement that never finished. A
+// survivor outranks it, and a complete run exits as it always has.
+func TestAnIncompleteRunExitsThreeAndASurvivorOutranksIt(t *testing.T) {
+	survivor := mutationSurvivor()
+	clean := mutationCompleted("a", mutation.Summary{Killed: 2}, nil, 4*time.Second)
+	survived := mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 4*time.Second)
+	cut := mutationIncomplete("b", mutation.Summary{Killed: 1}, nil, 1, 3)
+	cutSurvived := mutationIncomplete("b", mutation.Summary{Survived: 1}, []mutation.Result{survivor}, 1, 3)
+	notRun := mutationstages.ComponentOutcome{Component: component.Component{Name: "b", Dir: "b"},
+		Kind: mutationstages.KindNotRun, Scheduled: true}
+	beforeBaseline := mutationstages.ComponentOutcome{Component: component.Component{Name: "b", Dir: "b"},
+		Kind: mutationstages.KindBaselineInterrupted, Scheduled: true}
+	for _, c := range []struct {
+		name     string
+		outcomes []mutationstages.ComponentOutcome
+		deadline bool
+		noGate   bool
+		want     int
+	}{
+		{name: "complete and clean", outcomes: []mutationstages.ComponentOutcome{clean}, want: ui.ExitPass},
+		{name: "complete with a survivor", outcomes: []mutationstages.ComponentOutcome{survived}, want: ui.ExitFail},
+		{name: "incomplete only", outcomes: []mutationstages.ComponentOutcome{clean, cut}, deadline: true, want: ui.ExitIncomplete},
+		{name: "incomplete beside a survivor", outcomes: []mutationstages.ComponentOutcome{survived, cut}, deadline: true, want: ui.ExitFail},
+		{name: "incomplete with its own survivor", outcomes: []mutationstages.ComponentOutcome{clean, cutSurvived}, deadline: true, want: ui.ExitFail},
+		{name: "incomplete under --no-gate", outcomes: []mutationstages.ComponentOutcome{survived, cutSurvived}, deadline: true, noGate: true, want: ui.ExitIncomplete},
+		{name: "a survivor under --no-gate", outcomes: []mutationstages.ComponentOutcome{survived}, noGate: true, want: ui.ExitPass},
+		{name: "not started by the deadline", outcomes: []mutationstages.ComponentOutcome{clean, notRun}, deadline: true, want: ui.ExitIncomplete},
+		{name: "stopped before its baseline by the deadline", outcomes: []mutationstages.ComponentOutcome{clean, beforeBaseline}, deadline: true, noGate: true, want: ui.ExitIncomplete},
+		{name: "a deadline that stopped nothing", outcomes: []mutationstages.ComponentOutcome{clean}, deadline: true, want: ui.ExitPass},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var sel mutationstages.SelectAffectedOut
+			for _, o := range c.outcomes {
+				sel.Selected = append(sel.Selected, o.Component)
+			}
+			run := mutationstages.RunMutantsOut{Components: c.outcomes, Suites: len(c.outcomes),
+				Schedule: scheduler.Outcome{MaxConcurrent: 1, Started: len(c.outcomes)}, DeadlineReached: c.deadline}
+			rep := ui.NewReport("mutation")
+			addMutationRows(rep, sel, run, mutationReporting{limit: 2, noGate: c.noGate, summary: true})
+			if got := rep.ExitCode(); got != c.want {
+				t.Errorf("exit = %d, want %d; rows %+v", got, c.want, rep.Rows())
+			}
+		})
+	}
+}
+
+// A deadline is not an interrupt: a verdict decided before it was decided by
+// a suite nothing killed, so a survivor found by then keeps its row, its claim
+// and its record — whether its component finished or was itself cut short.
+// What the deadline stopped before it began renders unmeasured and names the
+// deadline, never a pass, and the schedule row does not read as a clean
+// finish.
+func TestADeadlineKeepsTheSurvivorsFoundBeforeIt(t *testing.T) {
+	survivor := mutationSurvivor()
+	run := mutationstages.RunMutantsOut{
+		Components: []mutationstages.ComponentOutcome{
+			mutationCompleted("a", mutation.Summary{Killed: 1, Survived: 1}, []mutation.Result{survivor}, 5*time.Second),
+			mutationIncomplete("b", mutation.Summary{Survived: 1}, []mutation.Result{survivor}, 1, 4),
+			{Component: component.Component{Name: "c", Dir: "c"}, LogRel: mutationLogRel("c"),
+				Kind: mutationstages.KindBaselineInterrupted, Scheduled: true},
+			{Component: component.Component{Name: "d", Dir: "d"}, LogRel: mutationLogRel("d"),
+				Kind: mutationstages.KindNotRun, Scheduled: true},
+		},
+		Schedule: scheduler.Outcome{MaxConcurrent: 2, Started: 3, Conflicts: []scheduler.Conflict{
+			{A: "a", B: "b", On: "port 5432"}}},
+		Suites:          4,
+		DeadlineReached: true,
+	}
+	sel := mutationstages.SelectAffectedOut{Selected: []component.Component{
+		{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}, {Name: "c", Dir: "c"}, {Name: "d", Dir: "d"}}}
+	rep := ui.NewReport("mutation")
+	kept := addMutationRows(rep, sel, run, mutationReporting{limit: 2, summary: true})
+	doc := documentOf(t, rep)
+
+	want := []ui.Row{
+		{Status: ui.StatusUnmeasured, Label: "schedule",
+			Value:  "reached the deadline with 3 of 4 component(s) started, 1 pair(s) serialised",
+			Detail: []string{"a and b serialised on port 5432"}},
+		{Status: ui.StatusFail, Label: "mutation(a)", Value: "1 of 2 mutant(s) survived in 5s",
+			Detail: []string{survivor.Mutant.String(), mutationRemedy, "full output: " + mutationLogRel("a")},
+			Log:    mutationLogRel("a")},
+		{Status: ui.StatusFail, Label: "mutation(b)", Value: "1 of 1 mutant(s) survived in 7s",
+			Detail: []string{"1 of 4 measured, rerun to resume", survivor.Mutant.String(), mutationRemedy,
+				"full output: " + mutationLogRel("b")},
+			Log: mutationLogRel("b")},
+		{Status: ui.StatusUnmeasured, Label: "mutation(c)",
+			Value: "not measured — the run reached its deadline before this component's baseline suite ran, rerun to resume"},
+		{Status: ui.StatusUnmeasured, Label: "mutation(d)", Value: "not run",
+			Detail: []string{"the run reached its deadline before this component started, rerun to resume"}},
+		{Status: ui.StatusContext, Label: "mutation", Value: "1 of 2 mutant(s) killed across 1 component(s) in 5s"},
+	}
+	if !reflect.DeepEqual(doc.Rows, want) {
+		got, _ := json.MarshalIndent(doc.Rows, "", "  ")
+		w, _ := json.MarshalIndent(want, "", "  ")
+		t.Errorf("rows are\n%s\nwant\n%s", got, w)
+	}
+	if len(doc.Findings) != 2 {
+		t.Errorf("findings are %+v, want both survivors found before the deadline", doc.Findings)
+	}
+	var names []string
+	for _, o := range kept {
+		names = append(names, o.Component.Name)
+	}
+	if !reflect.DeepEqual(names, []string{"a", "b"}) {
+		t.Errorf("the outcomes recorded are %v, want [a b]", names)
+	}
+	if doc.Exit != ui.ExitFail {
+		t.Errorf("exit = %d, want %d: a survivor outranks what the deadline left unmeasured", doc.Exit, ui.ExitFail)
+	}
+}
+
+// An interrupt that lands after the deadline is still an interrupt: every
+// failing verdict is withdrawn, the schedule row fails, and what the deadline
+// stopped before it began still names the deadline.
+func TestAnInterruptAfterTheDeadlineStillWithdraws(t *testing.T) {
+	survivor := mutationSurvivor()
+	run := mutationstages.RunMutantsOut{
+		Components: []mutationstages.ComponentOutcome{
+			mutationIncomplete("a", mutation.Summary{Survived: 1}, []mutation.Result{survivor}, 1, 4),
+			{Component: component.Component{Name: "b", Dir: "b"}, LogRel: mutationLogRel("b"),
+				Kind: mutationstages.KindNotRun, Scheduled: true},
+		},
+		Schedule:        scheduler.Outcome{MaxConcurrent: 1, Started: 1},
+		Suites:          2,
+		DeadlineReached: true,
+		Interrupted:     true,
+	}
+	sel := mutationstages.SelectAffectedOut{Selected: []component.Component{{Name: "a", Dir: "a"}, {Name: "b", Dir: "b"}}}
+	rep := ui.NewReport("mutation")
+	kept := addMutationRows(rep, sel, run, mutationReporting{limit: 2, noGate: true})
+	doc := documentOf(t, rep)
+
+	want := []ui.Row{
+		{Status: ui.StatusFail, Label: "schedule", Value: "interrupted after 1 of 2 component(s)"},
+		{Status: ui.StatusUnmeasured, Label: "mutation(a)", Value: "not completed",
+			Detail: []string{"the run was interrupted before this component finished"}, Log: mutationLogRel("a")},
+		{Status: ui.StatusUnmeasured, Label: "mutation(b)", Value: "not run",
+			Detail: []string{"the run reached its deadline before this component started, rerun to resume"}},
+	}
+	if !reflect.DeepEqual(doc.Rows, want) {
+		got, _ := json.MarshalIndent(doc.Rows, "", "  ")
+		w, _ := json.MarshalIndent(want, "", "  ")
+		t.Errorf("rows are\n%s\nwant\n%s", got, w)
+	}
+	if len(doc.Findings) != 0 || len(kept) != 0 {
+		t.Errorf("findings %+v and kept %d, want every claim withdrawn", doc.Findings, len(kept))
+	}
+}
+
+// `lydite test record` folds the counts and reads the complete components
+// alone, so a component any shard left incomplete reaches the quality history
+// by no route: not beside a shard that finished it, and not on its own.
+func TestARecordingNeverReceivesAnIncompleteCount(t *testing.T) {
+	cut := mutantCounts{Killed: 1, Survived: 1, Incomplete: &mutation.IncompleteCounts{Measured: 2, Wanted: 5}}
+	folded, err := foldMutants([]mutantsDoc{
+		{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 5}, "b": {Killed: 3}}},
+		{Tree: "abc", IncompleteComponents: map[string]mutantCounts{"a": cut, "c": cut}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := recordedMutants(folded)
+	if len(recorded.Components) != 1 {
+		t.Errorf("the recording received %+v, want b alone", recorded.Components)
+	}
+	if _, ok := recorded.Components["b"]; !ok {
+		t.Errorf("the recording received %+v, want the complete b", recorded.Components)
 	}
 }

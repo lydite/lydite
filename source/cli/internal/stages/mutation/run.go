@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -83,6 +84,10 @@ const (
 	KindExecuteFailed
 	// KindCompleted is a component whose mutants ran to a summary.
 	KindCompleted
+	// KindIncomplete is a component whose mutants were generated and the run
+	// reached its deadline before every one of them had a verdict. Measured of
+	// Wanted have one; Summary and Results are theirs alone.
+	KindIncomplete
 )
 
 func (k OutcomeKind) String() string {
@@ -121,6 +126,8 @@ func (k OutcomeKind) String() string {
 		return "execute-failed"
 	case KindCompleted:
 		return "completed"
+	case KindIncomplete:
+		return "incomplete"
 	default:
 		return fmt.Sprintf("OutcomeKind(%d)", int(k))
 	}
@@ -145,15 +152,21 @@ type ComponentOutcome struct {
 	// counts, what became of each mutant in generation order, the changed
 	// lines its mutants came from, and how long the baseline and the mutants
 	// took together. A KindNothingToMutate outcome carries Summary too, whose
-	// only fact is Unmatched.
+	// only fact is Unmatched. A KindIncomplete outcome carries all four, over
+	// the mutants that have a verdict: a mutant the deadline cut short is in
+	// neither its Summary nor its Results.
 	Summary mutation.Summary
 	Results []mutation.Result
 	Scoped  map[string][]int
 	Elapsed time.Duration
-	// Reused is how many of a completed component's results were answered from
-	// verdicts a previous run recorded. An acknowledged mutant is answered by
-	// its declaration and is never one of them.
+	// Reused is how many of a completed or incomplete component's results were
+	// answered from verdicts a previous run recorded. An acknowledged mutant is
+	// answered by its declaration and is never one of them.
 	Reused int
+	// Measured and Wanted are a KindIncomplete outcome's: how many mutants
+	// have a verdict — decided by this run, reused, acknowledged or unviable —
+	// of every mutant the run generated for the component.
+	Measured, Wanted int
 	// TeardownErr is the Lifecycle's error from the component's teardown
 	// commands, which run whatever became of it once its services started.
 	TeardownErr error
@@ -189,6 +202,9 @@ type RunMutantsIn struct {
 	// from each component's own baseline; zero asks for the derivation.
 	Timeout time.Duration
 	Memory  int64
+	// Deadline is when the run stops dispatching and cancels what is in
+	// flight, and zero for a run with none.
+	Deadline time.Time
 	// Stream mirrors each component's log as it is written.
 	Stream bool
 	// Diagnostics is where a declaration that matched no mutant is named.
@@ -217,6 +233,21 @@ type RunMutantsOut struct {
 	// caller's to decide, since it is the caller that decides which account of
 	// an outcome fails.
 	Interrupted bool
+	// DeadlineReached reports that the run's Deadline passed before the
+	// scheduler was done with every component, and before any interrupt. It
+	// is not an interrupt: a verdict decided before the deadline was decided
+	// by a suite nothing killed, and stands.
+	DeadlineReached bool
+}
+
+// ErrDeadline is the cause a run's context carries once its Deadline has
+// passed. It is what tells the deadline apart from an interrupt, which
+// cancels the same context with a cause of its own.
+var ErrDeadline = errors.New("the mutation run reached its deadline")
+
+// deadlineReached reports whether ctx ended because the run's deadline passed.
+func deadlineReached(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrDeadline)
 }
 
 // RunMutants plans every selected component, runs its mutants, and reports
@@ -258,11 +289,22 @@ func RunMutants(ctx context.Context, in RunMutantsIn) (RunMutantsOut, error) {
 		index = append(index, i)
 	}
 
+	// The deadline narrows the run's context and never the caller's, so
+	// Interrupted still answers only for an interrupt, and the cause is what a
+	// step that ended early asks to tell the two apart.
+	run := ctx
+	if !in.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		run, cancel = context.WithDeadlineCause(ctx, in.Deadline, ErrDeadline)
+		defer cancel()
+	}
+
 	slots := mutation.NewSlots(in.Limit)
-	out.Schedule = scheduler.Run(ctx, items, in.Limit, func(ctx context.Context, k int) {
+	out.Schedule = scheduler.Run(run, items, in.Limit, func(ctx context.Context, k int) {
 		i := index[k]
 		out.Components[i] = mutateComponent(ctx, in, plans[i], in.Envs.For(plans[i].Component.Name), slots)
 	})
+	out.DeadlineReached = deadlineReached(run)
 	in.Lifecycle.Close()
 
 	// After the run rather than before it, since a component the scheduler
@@ -392,16 +434,26 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		out.Kind, out.Err = kind, err
 		return out
 	}
+	// A step before the mutants are known that fails once the deadline has
+	// passed was most likely killed by it, and the failure says nothing about
+	// the component. It is reported as the baseline not reached, whose
+	// mutants nobody can count yet, rather than as a failure of its own.
+	beforeMutants := func(kind OutcomeKind, err error) ComponentOutcome {
+		if deadlineReached(ctx) {
+			return finish(KindBaselineInterrupted, nil)
+		}
+		return finish(kind, err)
+	}
 
 	if err := in.Lifecycle.ClearReport(t.dir, t.inv.CoverageReport); err != nil {
 		return finish(KindClearReportFailed, err)
 	}
 	if err := in.Lifecycle.Prepare(ctx, c.Name, t.inv, t.dir, in.Dir, in.Config, tc); err != nil {
-		return finish(KindBlocked, err)
+		return beforeMutants(KindBlocked, err)
 	}
 	down, err := in.Lifecycle.StartServices(ctx, c.Name)
 	if err != nil {
-		return finish(KindBlocked, err)
+		return beforeMutants(KindBlocked, err)
 	}
 	defer down()
 	// Out from under the run's cancellation, because a cancelled teardown is
@@ -411,7 +463,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		out.TeardownErr = in.Lifecycle.RunCommands(context.WithoutCancel(ctx), c.Name, t.dir, "teardown", c.Teardown, tc)
 	}()
 	if err := in.Lifecycle.RunCommands(ctx, c.Name, t.dir, "setup", c.Setup, tc); err != nil {
-		return finish(KindBlocked, err)
+		return beforeMutants(KindBlocked, err)
 	}
 
 	env := in.Shape.Env(tc, c, t.inv)
@@ -438,6 +490,9 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 			return finish(KindBaselineInterrupted, nil)
 		}
 		if !res.Ok() {
+			if deadlineReached(ctx) {
+				return finish(KindBaselineInterrupted, nil)
+			}
 			out.Output = res.Output
 			return finish(KindBaselineFailed, nil)
 		}
@@ -458,7 +513,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	if !hit {
 		report, err := coverage.Measure(ctx, in.Dir, c.Dir, t.inv.CoverageReport, t.lang, in.Shape.Env(tc, c, runner.Invocation{}))
 		if err != nil {
-			return finish(KindMeasureFailed, err)
+			return beforeMutants(KindMeasureFailed, err)
 		}
 		recorded.Executed = report.Executed
 		// Only once the executed lines are read: a recorded baseline is
@@ -484,8 +539,8 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	// Into the live stream, where the per-mutant lines go: a run too large to
 	// finish is killed by its job timeout and writes no document at all, so a
 	// projection only a document carried is one the reader who needs it never
-	// sees. ADR 0027 refuses a runtime budget, and this is not one — nothing
-	// here stops a run.
+	// sees. The line is a projection and caps nothing; a --deadline is what
+	// stops a run.
 	_, _ = fmt.Fprintln(p.Log, costProjection(len(mutants), workers, timeout))
 
 	known := st.verdicts()
@@ -499,8 +554,21 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 		Known:     known,
 		Record:    st.recorder(),
 	})
-	if err != nil {
+	kind := KindCompleted
+	switch {
+	case err != nil && deadlineReached(ctx):
+		// A worker the deadline stopped being opened or prepared: nothing
+		// was dispatched, and what the run already has a verdict for is
+		// what was answered without one.
+		results, kind = answeredWithoutRunning(mutants, known), KindIncomplete
+	case err != nil:
 		return finish(KindExecuteFailed, err)
+	case deadlineReached(ctx):
+		// Only a deadline takes the cut-short mutants out: an interrupt keeps
+		// them, as unviable, for the caller to withdraw the run by.
+		if decided := withVerdicts(results); len(decided) < len(results) {
+			results, kind = decided, KindIncomplete
+		}
 	}
 	s := mutation.Summary{Unmatched: unmatched}
 	for _, r := range results {
@@ -509,7 +577,40 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	out.Summary, out.Results, out.Scoped = s, results, t.scoped
 	out.Reused = reusedCount(mutants, known)
 	out.Elapsed = time.Since(baselineStarted)
-	return finish(KindCompleted, nil)
+	if kind == KindIncomplete {
+		out.Measured, out.Wanted = len(results), len(mutants)
+	}
+	return finish(kind, nil)
+}
+
+// withVerdicts is results less every one the run was cut short before
+// deciding, in the order given.
+func withVerdicts(results []mutation.Result) []mutation.Result {
+	decided := make([]mutation.Result, 0, len(results))
+	for _, r := range results {
+		if !r.CutShort {
+			decided = append(decided, r)
+		}
+	}
+	return decided
+}
+
+// answeredWithoutRunning is what Execute answers for mutants before it runs
+// any: an acknowledged mutant by its declaration, and one known holds a
+// verdict for by that verdict. Every other mutant has none, and is left out.
+func answeredWithoutRunning(mutants []mutation.Mutant, known map[string]mutation.Result) []mutation.Result {
+	var answered []mutation.Result
+	for _, m := range mutants {
+		if m.Acknowledged() {
+			answered = append(answered, mutation.Result{Mutant: m, Outcome: mutation.Acknowledged, Detail: m.Reason})
+			continue
+		}
+		if r, ok := known[mutation.MutantID(m)]; ok {
+			r.Mutant = m
+			answered = append(answered, r)
+		}
+	}
+	return answered
 }
 
 // reusedCount is how many of mutants Execute answers from known: those it holds

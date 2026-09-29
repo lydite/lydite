@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,5 +173,180 @@ func TestCountsWithNoElapsedTimeReadAsUnrecorded(t *testing.T) {
 	}
 	if d, ok := app.Elapsed(); ok || d != 0 {
 		t.Errorf("a document carrying no elapsed time reported %s, %v; want nought and unrecorded", d, ok)
+	}
+}
+
+// incompleteApp is a component the deadline stopped with two of five mutants
+// decided, one of them a survivor.
+func incompleteApp() ComponentCounts {
+	return ComponentCounts{Killed: 1, Survived: 1, ElapsedSeconds: 7, Reused: 1,
+		Incomplete: &IncompleteCounts{Measured: 2, Wanted: 5}}
+}
+
+// An incomplete component round-trips with its progress, under a key of its
+// own: a reader that knows nothing of the marker never finds its partial count
+// among the complete ones.
+func TestAnIncompleteComponentRoundTripsApartFromTheComplete(t *testing.T) {
+	dir := t.TempDir()
+	written := CountsDocument{Tree: "abc",
+		Components:           map[string]ComponentCounts{"lib": {Killed: 3}},
+		IncompleteComponents: map[string]ComponentCounts{"app": incompleteApp()}}
+	if err := WriteCounts(dir, written); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadCounts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read, written) {
+		t.Errorf("read back %+v, want %+v", read, written)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, CountsFileName)) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"incomplete_components"`, `"incomplete"`, `"measured": 2`, `"wanted": 5`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("the stored shape has no %s: %s", key, data)
+		}
+	}
+	// The shape a reader older than the marker decodes into: it sees the
+	// complete component and nothing of the incomplete one.
+	var older struct {
+		Components map[string]struct {
+			Killed   int `json:"killed"`
+			Survived int `json:"survived"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(data, &older); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := older.Components["app"]; ok || len(older.Components) != 1 {
+		t.Errorf("a reader unaware of the marker reads %+v, want only lib", older.Components)
+	}
+}
+
+// A document an older lydite wrote has no incomplete key anywhere, and every
+// component in it reads as complete.
+func TestAnOlderDocumentReadsComplete(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, CountsFileName),
+		[]byte(`{"tree":"abc","components":{"app":{"killed":4}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ReadCounts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.IncompleteComponents != nil || doc.Components["app"].Incomplete != nil {
+		t.Errorf("an older document read as %+v, want every component complete", doc)
+	}
+	data, err := json.Marshal(ComponentCounts{Killed: 1})
+	if err != nil || strings.Contains(string(data), "incomplete") {
+		t.Errorf("a complete component wrote %s, %v; want no incomplete key", data, err)
+	}
+}
+
+// A partial count where a reader would take it for a complete one, or one
+// that says nothing of how partial it is, is refused rather than read.
+func TestAMisplacedIncompleteEntryIsRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"marked among the complete":     `{"tree":"abc","components":{"app":{"killed":1,"incomplete":{"measured":1,"wanted":3}}}}`,
+		"unmarked among the incomplete": `{"tree":"abc","incomplete_components":{"app":{"killed":1}}}`,
+		"both complete and incomplete": `{"tree":"abc","components":{"app":{"killed":1}},` +
+			`"incomplete_components":{"app":{"killed":1,"incomplete":{"measured":1,"wanted":3}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, CountsFileName), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadCounts(dir); err == nil || !strings.Contains(err.Error(), "app") {
+				t.Errorf("read with %v, want a refusal naming the component", err)
+			}
+		})
+	}
+}
+
+// Incomplete wins the fold: a component any shard left incomplete folds
+// incomplete, wherever a complete entry for it stands, and the first
+// incomplete entry is kept whole rather than summed with a second — two
+// entries for one component are the same mutants measured twice.
+func TestAnIncompleteEntryWinsTheFold(t *testing.T) {
+	complete := ComponentCounts{Killed: 5}
+	app := incompleteApp()
+	later := ComponentCounts{Killed: 3, Incomplete: &IncompleteCounts{Measured: 3, Wanted: 5}}
+	for _, c := range []struct {
+		name           string
+		docs           []CountsDocument
+		wantComplete   map[string]ComponentCounts
+		wantIncomplete map[string]ComponentCounts
+	}{
+		{
+			name: "every shard complete",
+			docs: []CountsDocument{
+				{Tree: "abc", Components: map[string]ComponentCounts{"app": complete}},
+				{Tree: "abc", Components: map[string]ComponentCounts{"lib": complete}},
+			},
+			wantComplete: map[string]ComponentCounts{"app": complete, "lib": complete},
+		},
+		{
+			name: "one shard incomplete",
+			docs: []CountsDocument{
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": app}},
+				{Tree: "abc", Components: map[string]ComponentCounts{"lib": complete}},
+			},
+			wantComplete:   map[string]ComponentCounts{"lib": complete},
+			wantIncomplete: map[string]ComponentCounts{"app": app},
+		},
+		{
+			name: "complete in one shard and incomplete in a later one",
+			docs: []CountsDocument{
+				{Tree: "abc", Components: map[string]ComponentCounts{"app": complete}},
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": app}},
+			},
+			wantComplete:   map[string]ComponentCounts{},
+			wantIncomplete: map[string]ComponentCounts{"app": app},
+		},
+		{
+			name: "incomplete in one shard and complete in a later one",
+			docs: []CountsDocument{
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": app}},
+				{Tree: "abc", Components: map[string]ComponentCounts{"app": complete}},
+			},
+			wantComplete:   map[string]ComponentCounts{},
+			wantIncomplete: map[string]ComponentCounts{"app": app},
+		},
+		{
+			name: "incomplete in two shards",
+			docs: []CountsDocument{
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": app}},
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": later}},
+			},
+			wantComplete:   map[string]ComponentCounts{},
+			wantIncomplete: map[string]ComponentCounts{"app": app},
+		},
+		{
+			name: "an older shard beside an incomplete one",
+			docs: []CountsDocument{
+				{Tree: "abc", Components: map[string]ComponentCounts{"lib": {Killed: 2}}},
+				{Tree: "abc", IncompleteComponents: map[string]ComponentCounts{"app": app}},
+			},
+			wantComplete:   map[string]ComponentCounts{"lib": {Killed: 2}},
+			wantIncomplete: map[string]ComponentCounts{"app": app},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			folded, err := FoldCounts(c.docs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(folded.Components, c.wantComplete) {
+				t.Errorf("complete = %+v, want %+v", folded.Components, c.wantComplete)
+			}
+			if !reflect.DeepEqual(folded.IncompleteComponents, c.wantIncomplete) {
+				t.Errorf("incomplete = %+v, want %+v", folded.IncompleteComponents, c.wantIncomplete)
+			}
+		})
 	}
 }

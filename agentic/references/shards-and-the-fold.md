@@ -94,6 +94,11 @@ way `plan` and `scan` do rather than reporting that nought of nought components 
 over a repository it half tested. It is the same reason the `schedule` row fails an interrupted run
 instead of leaving it amber.
 
+**A component a mutation shard left incomplete still has exactly one row.** `lydite mutation merge`
+makes the incomplete entry win over a complete one for the same component and never sums two, so
+the one-row rule holds and the component is reported as unmeasured, not as a score. Its shard is the
+only one that owns it, so there is nothing to sum across shards. See [Mutation](mutation.md#the-fold).
+
 **A component declaring no suite** ([Components](components.md#what-a-lang-only-component-gets))
 is the one exception: `planItems` places it in no shard on purpose, so its absence from every
 shard's report is the plan working as declared, not a dead shard. `suiteRows`/`mutationRows` give

@@ -22,7 +22,8 @@ type RecordMutantsIn struct {
 	// Components is the outcomes whose verdict stands. After an interrupted
 	// run the caller passes only the outcomes that survived its own withdrawal
 	// of interrupted failures, since only the caller knows which verdicts it
-	// withdrew; every outcome here whose Ran is true is recorded.
+	// withdrew; every outcome here whose Ran is true is recorded, and so is
+	// every KindIncomplete one, as incomplete.
 	Components []ComponentOutcome
 	// Warnings is where a failure to record is said. Nil discards.
 	Warnings io.Writer
@@ -33,8 +34,9 @@ type RecordMutantsOut struct{}
 
 // RecordMutants writes what the run made of its mutants beside its report.
 //
-// Only the components whose mutants ran to a summary are in the document. A
-// component that did not run is absent rather than
+// Only the components whose mutants ran to a summary, or to the deadline, are in
+// the document, and one the deadline stopped is recorded as incomplete rather
+// than among the complete. A component that did not run is absent rather than
 // present with zeros, which is the distinction the document exists to carry: a
 // zeroed entry for a component nothing mutated reads, permanently, as a suite
 // that killed everything. A run that mutated no component still names its
@@ -60,22 +62,33 @@ func RecordMutants(ctx context.Context, in RecordMutantsIn) (RecordMutantsOut, e
 	return RecordMutantsOut{}, nil
 }
 
-// countsOf is the document one run hands on: the tree it mutated, and the
-// counts for exactly the components that ran.
+// countsOf is the document one run hands on: the tree it mutated, the counts
+// for exactly the components that ran, and those of the components the
+// deadline stopped, kept apart from them.
 func countsOf(tree string, outcomes []ComponentOutcome) mutation.CountsDocument {
 	doc := mutation.CountsDocument{Tree: tree}
 	for _, o := range outcomes {
-		if !o.Ran() {
-			continue
-		}
-		if doc.Components == nil {
-			doc.Components = map[string]mutation.ComponentCounts{}
-		}
 		counts := mutation.CountsOf(o.Summary, o.Elapsed)
 		counts.Reused = o.Reused
-		doc.Components[o.Component.Name] = counts
+		switch {
+		case o.Ran():
+			doc.Components = putCounts(doc.Components, o.Component.Name, counts)
+		case o.Kind == KindIncomplete:
+			counts.Incomplete = &mutation.IncompleteCounts{Measured: o.Measured, Wanted: o.Wanted}
+			doc.IncompleteComponents = putCounts(doc.IncompleteComponents, o.Component.Name, counts)
+		}
 	}
 	return doc
+}
+
+// putCounts adds one component's counts to m, making m where it is nil, so a
+// document with no such component leaves the key out.
+func putCounts(m map[string]mutation.ComponentCounts, name string, counts mutation.ComponentCounts) map[string]mutation.ComponentCounts {
+	if m == nil {
+		m = map[string]mutation.ComponentCounts{}
+	}
+	m[name] = counts
+	return m
 }
 
 // writeCounts creates the reports directory, keeps it out of git, and writes

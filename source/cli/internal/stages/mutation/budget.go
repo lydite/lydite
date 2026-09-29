@@ -99,8 +99,9 @@ func budget(baseline, override time.Duration) time.Duration {
 //
 // It is a worst case: every mutant running to the whole of its budget, with no
 // worker ever idle. A killed mutant costs a fraction of that, so a real run
-// lands well under. Stating the ceiling is not capping it — ADR 0027 refuses a
-// runtime budget, and nothing here stops a run.
+// lands well under. Stating the ceiling is not capping it: the projection only
+// tells the reader what a run would cost, and a --deadline is what stops one
+// and keeps its verdicts.
 func costProjection(mutants, workers int, timeout time.Duration) string {
 	return fmt.Sprintf(costProjectionFormat,
 		mutants, timeout.Round(time.Second), staged(mutants, workers),

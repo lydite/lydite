@@ -14,7 +14,10 @@ that verdict owns the exit code; a row's glyph only says how much attention the 
 `refer`, `unmeasured` and `dropped` all render amber `!`, and only `refer` votes. This is
 what lets an unmeasured gate be visibly distinct from a passing one — the wardnet#957
 failure — without a path-filtered coverage job starting to fail builds. `ui.Report.ExitCode`
-is the single place that mapping lives: `✗` anywhere is 1, else a referral is 2, else 0.
+is the single place that mapping lives: `✗` anywhere is 1, else a referral is 2, else a run the
+command marked incomplete (`ui.Report.MarkIncomplete`) is 3, else 0. An incomplete run is marked by
+the command because `unmeasured` rows do not vote, so no row could carry it; its verdict is
+`incomplete` in `--json`.
 
 **`StatusDeclined` shares the default glyph with `StatusNew` and `StatusContext`, not the amber
 `!`.** A concern the repository chose not to run at all is a decision stated on purpose, not a

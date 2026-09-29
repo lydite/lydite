@@ -95,8 +95,23 @@ that ran out of time stays red.
 The one exception is a survivor already found before the deadline. That row fails outright,
 because a known survivor fails whatever is still unmeasured.
 
-`lydite mutation merge` renders a shard's incomplete component the same way. `lydite test record`
-never writes a partial count to the quality history, just as it never writes an interrupted run's.
+The exit code is 3. A survivor wins over it: a run that found one exits 1, and `--no-gate` silences
+the survivor's vote but not the incomplete run's, so it still exits 3.
+
+The N in "N of M measured" counts every verdict the run decided, including reused and unviable
+ones, and excludes a mutant that was cut short.
+
+`lydite mutation merge` renders a shard's incomplete component the same way, and an incomplete
+component wins the fold over a complete one. Two entries for one component are never summed, since a
+component belongs to one shard and a second entry would be the same mutants measured twice.
+`lydite test record` never writes a partial count to the quality history, just as it never writes an
+interrupted run's.
+
+`mutants.json` carries an incomplete component under its own `incomplete_components` key, never
+under `components`. Readers ignore keys they do not know, so a marker on an entry under `components`
+would read to an older lydite as a complete score, folded into a total or recorded for good. Under
+its own key that reader finds the component absent, which is what it already answers for a
+component nothing measured to completion.
 
 This is still not a runtime budget in 0027's sense. Nothing is capped and then passed, and
 nothing is failed for its size. The deadline only moves where the run stops, from a job timeout

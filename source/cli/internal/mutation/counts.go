@@ -37,8 +37,9 @@ type CountsDocument struct {
 	// ledger is append-only — there is no later measurement of that commit's
 	// diff to correct it with, because after the merge the diff is gone.
 	Tree string `json:"tree"`
-	// Components is the counts for each component that ran, and presence in it
-	// is the whole "did this run at all" signal.
+	// Components is the counts for each component that ran to the end, and
+	// presence in it or in IncompleteComponents is the whole "did this run at
+	// all" signal.
 	//
 	// A component that did not run is absent, never present with zeros.
 	// Untouched by the diff, declared `mutation: false`, or in a shard that was
@@ -49,6 +50,19 @@ type CountsDocument struct {
 	// record a perfect suite into a permanent history, and win any fold they
 	// were part of.
 	Components map[string]ComponentCounts `json:"components,omitempty"`
+	// IncompleteComponents is the counts for each component a deadline stopped
+	// before every one of its mutants had a verdict: the verdicts it did reach,
+	// and how many of how many that was. A component is in this or in
+	// Components, never both.
+	//
+	// A key of its own rather than an entry under `components` carrying a
+	// marker, because every reader of this document ignores keys it does not
+	// know, and a reader older than the marker would read a partial count under
+	// `components` as a complete score — folding it into a total, or landing it
+	// in the quality history, where nothing ever corrects it. Under a key of its
+	// own the same reader finds the component absent, which is the answer it
+	// already gives a component nothing measured to completion.
+	IncompleteComponents map[string]ComponentCounts `json:"incomplete_components,omitempty"`
 }
 
 // ComponentCounts is what became of one component's mutants, and how long that
@@ -85,6 +99,20 @@ type ComponentCounts struct {
 	// report can say a resume happened. Nought is a run that measured every
 	// mutant, and a document an older lydite wrote.
 	Reused int `json:"reused,omitempty"`
+	// Incomplete is how far a component the deadline stopped got, and is set
+	// exactly on the entries under IncompleteComponents. Absent is a component
+	// whose every mutant has a verdict, which is also every entry an older
+	// lydite wrote, since no older lydite stopped a component part-way and kept
+	// what it measured.
+	Incomplete *IncompleteCounts `json:"incomplete,omitempty"`
+}
+
+// IncompleteCounts is how many of a component's mutants have a verdict, of how
+// many the run wanted one for. The counts beside it are over the Measured
+// alone.
+type IncompleteCounts struct {
+	Measured int `json:"measured"`
+	Wanted   int `json:"wanted"`
 }
 
 // Elapsed is the stored seconds back as a duration, and false where the
@@ -141,7 +169,32 @@ func ReadCounts(reportsDir string) (CountsDocument, error) {
 	if doc.Tree == "" {
 		return CountsDocument{}, fmt.Errorf("%s: names no tree, so there is nothing it can be recorded against", path)
 	}
+	if err := doc.validate(); err != nil {
+		return CountsDocument{}, fmt.Errorf("%s: %w", path, err)
+	}
 	return doc, nil
+}
+
+// validate refuses a document whose incomplete entries are not where a reader
+// unaware of them would miss them: a marked entry under `components` is a
+// partial count every such reader takes for a complete one, and an unmarked
+// entry under `incomplete_components` is a partial count that says nothing of
+// how partial it is.
+func (d CountsDocument) validate() error {
+	for name, c := range d.Components {
+		if c.Incomplete != nil {
+			return fmt.Errorf("%s is marked incomplete among the complete components", name)
+		}
+		if _, both := d.IncompleteComponents[name]; both {
+			return fmt.Errorf("%s is both complete and incomplete", name)
+		}
+	}
+	for name, c := range d.IncompleteComponents {
+		if c.Incomplete == nil {
+			return fmt.Errorf("%s is among the incomplete components and says nothing of how far it got", name)
+		}
+	}
+	return nil
 }
 
 // WriteCounts saves the document into a reports directory.
@@ -170,6 +223,13 @@ func WriteCounts(reportsDir string, doc CountsDocument) error {
 // does not pretend to arbitrate between them. A shard that ran nothing
 // contributes no entry rather than a zeroed one, so it cannot win that
 // arbitration for a component another shard actually mutated.
+//
+// The one exception is an incomplete entry, which wins over a complete one
+// wherever either shard stands: two jobs that disagree about whether a
+// component finished are a run that cannot claim it did. The first incomplete
+// entry is kept whole rather than summed with another, because two entries for
+// one component are the same mutants measured twice, and a sum would count
+// them twice.
 func FoldCounts(docs []CountsDocument) (CountsDocument, error) {
 	if len(docs) == 0 {
 		return CountsDocument{}, fmt.Errorf("no mutant counts were found in any of the named report directories")
@@ -181,8 +241,21 @@ func FoldCounts(docs []CountsDocument) (CountsDocument, error) {
 				"the mutant counts describe different trees (%s and %s), so they are not shards of one run",
 				shortSHA(out.Tree), shortSHA(doc.Tree))
 		}
+		for name, counts := range doc.IncompleteComponents {
+			if _, seen := out.IncompleteComponents[name]; seen {
+				continue
+			}
+			if out.IncompleteComponents == nil {
+				out.IncompleteComponents = map[string]ComponentCounts{}
+			}
+			out.IncompleteComponents[name] = counts
+			delete(out.Components, name)
+		}
 		for name, counts := range doc.Components {
 			if _, seen := out.Components[name]; seen {
+				continue
+			}
+			if _, cut := out.IncompleteComponents[name]; cut {
 				continue
 			}
 			out.Components[name] = counts

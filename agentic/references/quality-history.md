@@ -140,6 +140,10 @@ mutate. See [ADR 0043](../../docs/adr/0043-mutation-reaches-the-ledger-from-a-po
 resolving [#112](https://github.com/lydite/lydite/issues/112) and the shape [#49](https://github.com/lydite/lydite/issues/49)
 settled for it.
 
+**An incomplete component is never recorded.** A component a `--deadline` stopped lives in
+`mutants.json` under `incomplete_components`, which `lydite test record` does not read, so its
+partial count cannot land in the ledger and read as a finished score.
+
 **Recording never read the exit code, so `--no-gate` changes nothing about what reaches the
 ledger.** A `mutate` matrix job invoking `lydite mutation --no-gate` feeds its `mutants.json` to
 `lydite test record` exactly as it would bare — a survivor is recorded either way. What the flag

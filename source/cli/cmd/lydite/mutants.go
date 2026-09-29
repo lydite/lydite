@@ -40,6 +40,10 @@ func readMutants(dir string) (mutantsDoc, error) {
 }
 
 // foldMutants merges the documents of a sharded run into one.
+//
+// A component any shard left incomplete is folded into IncompleteComponents,
+// never into Components, and Components is all a recording reads: a partial
+// count reaches the quality history by no route, however many shards finished.
 func foldMutants(docs []mutantsDoc) (mutantsDoc, error) {
 	return mutation.FoldCounts(docs)
 }
