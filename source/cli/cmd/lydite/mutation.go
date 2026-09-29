@@ -266,11 +266,11 @@ func resumeInputs(scanRoot, flag, env, version string, userCacheDir, executable 
 	open func(string) (io.ReadCloser, error), w io.Writer) (stateDir, build string) {
 	stateDir, note := resolveStateDir(flag, env, scanRoot, userCacheDir)
 	if note != "" {
-		fmt.Fprintln(w, note)
+		_, _ = fmt.Fprintln(w, note)
 	}
 	build, err := lyditeVersion(version, executable, open)
 	if err != nil {
-		fmt.Fprintln(w, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
+		_, _ = fmt.Fprintln(w, "mutation state is off: this dev build cannot be told apart from another: "+err.Error())
 		return "", ""
 	}
 	return stateDir, build
