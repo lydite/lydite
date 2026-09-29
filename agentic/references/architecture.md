@@ -608,6 +608,10 @@ unmeasured row carrying the executor's text verbatim, never unwrapped with `erro
 and the rule it produced,
 [`a-row-a-shared-helper-already-decided-crosses-into-a-stage-as-an-opaque-error.md`](../rules/a-row-a-shared-helper-already-decided-crosses-into-a-stage-as-an-opaque-error.md).
 
+`ScopeChange`'s output carries the tree digest a resumable run fingerprints its state with (empty
+when resume is off), and `RunMutants` takes the state root, `--fresh` and lydite's version as
+inputs; see "Resume" in [`mutation.md`](mutation.md).
+
 `NewRecord()` holds one stage, `RecordMutants`, in a flow of its own rather than as `New()`'s
 seventh stage — `flow.Run` checks `ctx.Err()` before every stage it runs, and a flow that ran
 `RecordMutants` as `New()`'s last stage would skip it on the same interrupt that cut
@@ -676,7 +680,7 @@ rather than a pointer resolved live: "trust and the repository come first" (see 
 0061) holds where a credential exists to resolve something live against, and this job has none.
 The relay is what performs that live resolution instead, from the verified OIDC claim, checking
 what this job submits against what it reads there itself. See
-[ADR 0075](../../docs/adr/0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for
+[ADR 0078](../../docs/adr/0078-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for
 the full reasoning, including why this is not an `SCMRepository` implementation and not a
 `RelaySink`.
 ## The threads flow

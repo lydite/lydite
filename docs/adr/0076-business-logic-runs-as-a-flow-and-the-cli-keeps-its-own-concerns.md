@@ -6,7 +6,7 @@ keep, rather than treating adoption as a schedule every command eventually reach
 it names "a command that answers a webhook by reading a platform live, deciding something, and
 writing back to the platform" as the shape Flow exists for. `queue`, `publish` and `release check`
 do none of that — no webhook, no platform read for `publish`, no writing credential for `queue` —
-and each belongs on the scaffold nonetheless, for reasons ADR 0074 and ADR 0075 state and this
+and each belongs on the scaffold nonetheless, for reasons ADR 0074 and ADR 0078 state and this
 record does not repeat. The scope sentence answers the wrong question.
 
 ## Decision
@@ -24,7 +24,7 @@ future caller other than `cobra`.
 This settles the platform-reading premise `architecture.md`'s scope sentence states as the test:
 it is one example of business logic, not the definition of it. `publish` reads report documents
 rather than a platform (ADR 0074); `queue` writes through a relay while holding no credential
-(ADR 0075); `release check` reads only git tags and commit messages off a local checkout — no
+(ADR 0078); `release check` reads only git tags and commit messages off a local checkout — no
 platform, no credential, no webhook — and is exactly business logic by the definition above: it
 concludes a verdict about a repository's own tags and refuses one of them. The principle names
 why all three belong on the same scaffold as `clearance`, without needing a fourth ADR to state
@@ -101,5 +101,5 @@ the repository it is running against.
 See [`agentic/references/architecture.md`](../../agentic/references/architecture.md) for the
 layering this decision governs, [ADR 0059](0059-a-flow-is-a-hand-rolled-engine-of-typed-bindings-not-a-pipeline-library-or-a-shared-context.md)
 for the engine's own scope, and [ADR 0074](0074-publish-runs-as-a-flow-of-ordinary-stages.md) and
-[ADR 0075](0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for the two commands
+[ADR 0078](0078-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for the two commands
 whose own reasoning states this record's principle in full for the shape each of them is.

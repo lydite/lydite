@@ -432,6 +432,47 @@ refuses at any value with `EINVAL` — so on that platform a mutant still runs u
 under no memory bound at all, and the row says so with a note rather than staying silent about it:
 a bound quietly not applied would render exactly the green of one that held.
 
+## Resume
+
+A run keeps a **mutation state** per component and a rerun measures only what is missing. It is a
+**Cache**, never a **Ledger**: losing it costs time and nothing else. See
+[ADR 0075](../../docs/adr/0075-a-mutation-run-resumes-and-stops-at-a-deadline.md) and the rule
+[`a-state-consulted-to-skip-work-is-a-cache-never-a-ledger.md`](../rules/a-state-consulted-to-skip-work-is-a-cache-never-a-ledger.md).
+
+**What it holds.** The baseline (pass or fail, elapsed time, peak RSS, the executed lines that
+select where mutants go) and one line per mutant verdict, appended the moment it is decided
+(`internal/mutation/state.go`). A component's directory under the state root is its escaped name
+(`mutation.StateDir`), so a name containing `/` or `..` never escapes the root.
+
+**Where it lives.** The state root resolves flag, then environment, then the user cache:
+`--state-dir`, then `LYDITE_MUTATION_STATE`, then `os.UserCacheDir()/lydite/mutation/<sha256 of
+the absolute scan root>`, so two checkouts never share state. A machine with no resolvable cache
+directory runs with resume off and says so on stderr.
+
+**The fingerprint** (`stateFingerprint` in `internal/stages/mutation/run.go`) hashes the tree
+digest (`internal/treedigest`, the contents of every path git knows under the scan root), the
+component and its three runner variants, the provisioned toolchains' key, lydite's version (a
+dev build is named by a hash of its executable), `--timeout`, `--memory`, the platform, and the
+environment the baseline and the suite run under, hashed and never written. Every field is
+length-framed. The base is left out: it decides which mutants are wanted, never what one answers.
+A component keeps only its latest fingerprint, so a state never needs pruning.
+
+**What is recorded.** Only a fresh verdict the run decided itself, and never a mutant cut short by
+cancellation (`Result.CutShort`). A recorded baseline is reused, so the per-mutant budget a
+resumed run derives is the one the recorded verdicts were judged against. An **acknowledged**
+mutant is answered by its declaration (see "The acknowledgement lives in the source"): it is
+never recorded, and never counted among the reused verdicts, so removing an acknowledgement takes
+effect on the next run. The report says how many verdicts were reused.
+
+**`--fresh`** discards each component's state before it runs.
+
+**The state root is kept out of the tree digest.** The root can sit inside the scan root, so
+`ScopeChange` writes a `.gitignore` containing `*` into it and drops any path beneath it from the
+listing; a digest that included the state would change with every verdict recorded.
+
+**A state failure is a diagnostic, never a failure.** A state that cannot be opened, read or
+written is reported and the component measures everything, as it would with no state.
+
 ## The fold
 
 `lydite mutation merge` folds a matrix of shards, through the same implementation `lydite test
