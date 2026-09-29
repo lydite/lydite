@@ -8,8 +8,14 @@ description: "A component's declared coverage flags reach only the instrumented 
 `args:` cannot be handed to Plain or BuildOnly unfiltered — that silently turns on
 instrumentation nothing reads, and Plain runs once per mutant during mutation testing, where
 the cost is paid thousands of times. Any new runner variant that builds its argv from a
-component's declared args must route it through `dropCoverage` (via `goTestUninstrumented` or
+component's declared args must route it through `dropFlags` (via `goTestUninstrumented` or
 the language-appropriate equivalent) unless that variant is itself the one producing coverage.
+
+BuildOnly is stricter still: for Go it runs `go build`, which rejects every flag that only means
+something to a test binary. `goBuildArgs` therefore also drops `-timeout`, `-run`, `-count`, the
+profiling, benchmark and fuzz flags and the test binary's own controls (`goBuildRejected`), so a
+declared `-timeout 30m` reaches Plain and Instrumented but never BuildOnly. A carried-across flag
+fails the build with a usage error, which reads as every mutant being unviable.
 
 ## Applies to
 

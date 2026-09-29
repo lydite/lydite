@@ -12,8 +12,8 @@ narrowing than the coverage leak it would be fixing, and nothing in the existing
 would have caught it (no test at the time fed a package pattern through Plain and asserted it
 survives).
 
-The fix (lydite/lydite#212) factored the shared scan into `dropCoverage(args, keepPackages
-bool)`, with `goTestFlags` and the new `goTestUninstrumented` as named wrappers. It has to be
+The shared scan is `dropFlags(args, keepPackages bool, drop map[string]bool)`, with
+`goTestFlags`, `goTestUninstrumented` and `goBuildArgs` as named wrappers. It has to be
 one pass, not two: pairing a flag with the value behind it (`-timeout 5m`) requires the same
 pass that classifies a bare word, since a later pass over the survivors cannot tell `5m` from a
 package pattern.

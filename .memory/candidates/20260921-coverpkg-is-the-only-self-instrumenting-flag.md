@@ -6,7 +6,7 @@ saw:
 
 `go test -coverpkg=X` enables coverage instrumentation with no separate `-cover` needed, which
 is why a Go component's declared `args:` could silently instrument the Plain and BuildOnly
-variants (fixed by `dropCoverage`/`goTestUninstrumented` in `runner.go`, lydite/lydite#212).
+variants (stripped by `dropFlags`/`goTestUninstrumented` in `runner.go`).
 
 No equivalent exists in the other two runners: Vitest's `--coverage.include` and sibling
 sub-options are inert without the top-level `--coverage` flag, which lydite supplies only on
