@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,8 +10,12 @@ import (
 
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/config"
+	"lydite/lydite/internal/flow"
+	testflow "lydite/lydite/internal/flows/test"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/runner"
+	shardstages "lydite/lydite/internal/stages/shards"
+	teststages "lydite/lydite/internal/stages/test"
 	"lydite/lydite/internal/ui"
 )
 
@@ -53,24 +58,10 @@ carry everything the composition needs.`,
 				return errors.New("no report directories: pass --reports <dir>, once per directory")
 			}
 			streamDiagnostics(asJSON)
-			decl, err := component.Load(dir)
+			rep, err := mergeTestShards(cmd.Context(), dir, reports)
 			if err != nil {
 				return err
 			}
-			// A fold over no component cannot say a shard died: completeness
-			// is a question about the declaration, and an empty one answers
-			// every question with yes. `plan` refuses the same state for the
-			// same reason, and `scan` refuses it rather than emitting a row.
-			if len(decl.Components) == 0 {
-				return errors.New("no components declared in " + component.FileName +
-					"\n       there is nothing to fold, and a fold over no component cannot report a shard that died")
-			}
-			cfg, err := config.Load(dir)
-			if err != nil {
-				return err
-			}
-			rep := ui.NewReport("test")
-			mergeShards(rep, decl, cfg, reports)
 			return renderReport(cmd, rep, dir, asJSON, noColor)
 		},
 	}
@@ -86,9 +77,102 @@ carry everything the composition needs.`,
 // which every shard therefore answers identically.
 var testWholeTreeRows = []string{"orphans", "watch", "select"}
 
-// mergeShards builds the folded report.
-func mergeShards(rep *ui.Report, decl component.File, cfg config.Config, reports []string) {
-	inputs := readShards(rep, reports, "test", readTestMeasurements)
+// mergeTestShards runs the fold's flow over the shards' report directories
+// and builds the folded report from what it read.
+func mergeTestShards(ctx context.Context, dir string, reports []string) (*ui.Report, error) {
+	merge, err := testflow.NewMerge()
+	if err != nil {
+		return nil, err
+	}
+	// Kept rather than handed over: the flow learns only whether each shard's
+	// measurements were read, and the documents themselves stay here, where
+	// the composition reaches into them.
+	reader := &shardMeasurements{}
+	r, err := merge.Run(ctx, testflow.MergeParams{
+		Dir:     dir,
+		Reports: reports,
+		Reader:  reader,
+	}.Inputs())
+	if err != nil {
+		return nil, testMergeError(err)
+	}
+	loaded, err := flow.Output[teststages.LoadMergeComponentsOut](r, testflow.StageLoadMergeComponents)
+	if err != nil {
+		return nil, err
+	}
+	// A fold over no component cannot say a shard died: completeness is a
+	// question about the declaration, and an empty one answers every question
+	// with yes. `plan` refuses the same state for the same reason, and `scan`
+	// refuses it rather than emitting a row.
+	if !loaded.Declared {
+		return nil, errors.New("no components declared in " + component.FileName +
+			"\n       there is nothing to fold, and a fold over no component cannot report a shard that died")
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	read := testMergeRead{docs: reader.docs}
+	if read.shards, err = flow.Output[shardstages.ReadShardsOut](r, testflow.StageReadShards); err != nil {
+		return nil, err
+	}
+	if read.measured, err = flow.Output[teststages.ReadShardMeasurementsOut](r, testflow.StageReadShardMeasurements); err != nil {
+		return nil, err
+	}
+	rep := ui.NewReport("test")
+	addMergedTestRows(rep, loaded.File, cfg, read)
+	return rep, nil
+}
+
+// testMergeError is a run's failure as this command reports it: the stage's
+// own error, not the flow's framing of it. A declaration that will not load
+// reads word for word as the loader said.
+func testMergeError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		return failed.Err
+	}
+	return err
+}
+
+// testMergeRead is what the fold's flow read out of the shards, and the
+// measurements documents read beside their reports, keyed by directory.
+type testMergeRead struct {
+	shards   shardstages.ReadShardsOut
+	measured teststages.ReadShardMeasurementsOut
+	docs     map[string]measurementsDoc
+}
+
+// measuredShard is the hook shardInputs gives each shard's row: the
+// measurements read beside its report, or what became of reading them.
+//
+// A shard run with --no-coverage writes no measurements at all, which is a run
+// that gated nothing rather than a run that went missing. A file that is there
+// and will not parse is neither, and is named: treated as absent it would leave
+// that shard's components composing nothing while the row still read `pass`.
+func measuredShard(m teststages.ShardMeasurements, docs map[string]measurementsDoc, in *shardInput, row *ui.Row) {
+	switch {
+	case m.Read:
+		in.measured = docs[m.Dir]
+	case m.Err != nil:
+		row.Status = ui.StatusFail
+		row.Value += ", measurements not readable"
+		row.Detail = []string{m.Err.Error()}
+	}
+}
+
+// addMergedTestRows builds the folded report.
+func addMergedTestRows(rep *ui.Report, decl component.File, cfg config.Config, read testMergeRead) {
+	// Keyed by directory, which is what shardInputs hands the hook: a shard's
+	// measurements are read from the directory its report was, so a directory
+	// named twice reads the same both times.
+	measured := map[string]teststages.ShardMeasurements{}
+	for _, m := range read.measured.Shards {
+		measured[m.Dir] = m
+	}
+	inputs := shardInputs(rep, "test", read.shards.Shards, func(dir string, in *shardInput, row *ui.Row) {
+		measuredShard(measured[dir], read.docs, in, row)
+	})
 
 	problems := wholeTreeRows(rep, inputs, testWholeTreeRows)
 	if row, ok := foldedScheduleRow(inputs); ok {

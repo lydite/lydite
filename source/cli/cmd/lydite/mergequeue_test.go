@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,23 +121,39 @@ func queueEvent(t *testing.T, number int, headSHA, baseBranch string) string {
 	return path
 }
 
+// The mint endpoint and the token authorising it, as the platform sets them
+// for a job granted id-token: write.
+const (
+	testMintURL   = "https://token.example/idtoken?api-version=2.0"
+	testMintToken = "the-mint-token"
+)
+
 // runQueueCmd drives the command against a fake transport, with the mint
 // endpoint the platform sets for a job granted id-token: write.
 func runQueueCmd(t *testing.T, relay *fakeRelay, dir, base, eventPath string) (string, error) {
 	t.Helper()
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
-	var out bytes.Buffer
-	cmd := newQueueCmd()
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	err := runQueue(context.Background(), cmd, relay, queueOptions{
+	return runQueueCmdWith(t, relay, queueOptions{
 		dir:       dir,
 		eventPath: eventPath,
 		relay:     "https://relay.example",
 		base:      base,
 		noColor:   true,
-	})
+	}, testMintURL, testMintToken)
+}
+
+// runQueueCmdWith drives the command with opt, under the mint endpoint and
+// mint token given — either of which is empty for a job that was not granted
+// id-token: write. What it answers is everything written to stdout and stderr,
+// and the error.
+func runQueueCmdWith(t *testing.T, relay *fakeRelay, opt queueOptions, mintURL, mintToken string) (string, error) {
+	t.Helper()
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", mintURL)
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", mintToken)
+	var out bytes.Buffer
+	cmd := newQueueCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := runQueue(context.Background(), cmd, relay, opt)
 	return out.String(), err
 }
 
@@ -446,28 +461,20 @@ func TestQueueFailsWithoutAMintEndpoint(t *testing.T) {
 		map[string]string{"README.md": "hello"},
 		map[string]string{"src/auth.go": "package src"},
 	)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	relay := newFakeRelay()
 
-	err := runQueue(context.Background(), newQueueCmd(), relay, queueOptions{
+	_, err := runQueueCmdWith(t, relay, queueOptions{
 		dir:       dir,
 		base:      base,
 		eventPath: queueEvent(t, 7, "beef1234beef1234beef1234beef1234beef1234", "main"),
 		relay:     "https://relay.example",
 		noColor:   true,
-	})
+	}, "", "")
 	if err == nil {
 		t.Fatal("a job that cannot mint an OIDC token must say so")
 	}
 	if len(relay.requests) != 0 {
 		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
-	}
-	// No token comes back either. A caller reading the value alongside the
-	// error would present an unminted string as a bearer token, which the
-	// relay would answer 401 to rather than naming the missing permission.
-	if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil {
-		t.Errorf("actionsIDToken = %q, %v; want no token and a refusal", token, err)
 	}
 }
 
@@ -500,13 +507,6 @@ func TestQueueFailsWhenTheMintAnswersNoToken(t *testing.T) {
 				if strings.HasSuffix(req.URL.Path, queueRoute) {
 					t.Error("the comparison was submitted without a token to authorise it")
 				}
-			}
-			// No token comes back either: a caller reading the value alongside
-			// the error would present an unminted string as a bearer token,
-			// which the relay would answer 401 to rather than naming the
-			// missing permission.
-			if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil {
-				t.Errorf("actionsIDToken = %q, %v; want no token and a refusal", token, err)
 			}
 		})
 	}
@@ -629,19 +629,6 @@ func TestQueueRefusesAPayloadThatIsNotAMergeGroup(t *testing.T) {
 	}
 }
 
-// The route and the origin are composed rather than assembled by hand at the
-// call site, so a trailing slash on the configured origin does not become a
-// path the relay has no route for.
-func TestTheSubmissionURLToleratesATrailingSlash(t *testing.T) {
-	req, err := newQueueRequest(context.Background(), "https://relay.example/", "token", queueRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := req.URL.String(); got != "https://relay.example"+queueRoute {
-		t.Errorf("url = %q", got)
-	}
-}
-
 // The payload is the whole of what says which entry this run is for, so a run
 // pointed at no payload and one pointed at a payload that is not there are both
 // refused before anything is measured — and each says which it was, because a
@@ -754,16 +741,24 @@ func TestQueueDecisionRefusesADiffItCannotRead(t *testing.T) {
 // where it is composed, with the origin named, rather than reaching the
 // transport as a request nothing could send.
 func TestQueueRefusesAnOriginThatComposesNoURL(t *testing.T) {
-	if _, err := newQueueRequest(context.Background(), "https://relay.example\n", "token", queueRequest{}); err == nil {
-		t.Fatal("an origin carrying a control character composes no request, and must say so")
-	}
-
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
 	relay := newFakeRelay()
-	answer, err := submitQueueComparison(context.Background(), relay, "https://relay.example\n", queueRequest{})
+
+	out, err := runQueueCmdWith(t, relay, queueOptions{
+		dir:       dir,
+		base:      base,
+		eventPath: queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"),
+		relay:     "https://relay.example\n",
+		noColor:   true,
+	}, testMintURL, testMintToken)
 	if err == nil {
-		t.Fatalf("answer = %+v, want the refusal newQueueRequest composed", answer)
+		t.Fatalf("an origin carrying a control character composes no request, and must say so:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "composing the request to the relay") {
+		t.Errorf("error = %v, want the refusal the composition made", err)
 	}
 	// The mint still ran — the audience is escaped, so the origin only fails
 	// where it becomes a path — and nothing was submitted with the token it
@@ -828,12 +823,6 @@ func TestQueueFailsWhenTheMintNeverAnswers(t *testing.T) {
 			relay := newFakeRelay()
 			relay.tokenFails = tc.mode
 
-			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
-			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
-			if token, err := actionsIDToken(context.Background(), relay, "https://relay.example"); token != "" || err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("actionsIDToken = %q, %v; want no token and a refusal naming %q", token, err, tc.want)
-			}
-
 			out, err := runQueueCmd(t, relay, dir, base,
 				queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"))
 			if err == nil {
@@ -851,39 +840,105 @@ func TestQueueFailsWhenTheMintNeverAnswers(t *testing.T) {
 	}
 }
 
-// The mint endpoint is the platform's own, read from the environment, and an
-// environment naming one that composes no URL is refused where it is composed:
-// the audience would otherwise be appended to a string nothing can send, and
-// the run would report the mint as having answered nothing rather than as
-// never having been asked.
-func TestTheMintRefusesAnEndpointThatComposesNoURL(t *testing.T) {
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0\n")
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
-	relay := newFakeRelay()
+// Each refusal reaches the caller in its own words and nothing else: the stage
+// that refused is how the run is organised, not something a workflow log's
+// reader has to see, and a prefix naming it would be text a person skims past
+// to find the reason. A refused run reports no rows either, because a row
+// naming the entry reads as a verdict having been published for it.
+func TestQueueReportsEachRefusalInItsOwnWords(t *testing.T) {
+	dir, base := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	const unresolvable = "1111111111111111111111111111111111111111"
+	for _, tc := range []struct {
+		name      string
+		base      string
+		mintURL   string
+		mintToken string
+		status    int
+		want      string
+	}{
+		{
+			name: "no mint endpoint",
+			base: base,
+			want: "no Actions OIDC token can be minted here: the job needs `id-token: write`",
+		},
+		{
+			name:    "a mint endpoint with no token authorising it",
+			base:    base,
+			mintURL: testMintURL,
+			want:    "no Actions OIDC token can be minted here: the job needs `id-token: write`",
+		},
+		{
+			name:      "a relay that refuses the submission",
+			base:      base,
+			mintURL:   testMintURL,
+			mintToken: testMintToken,
+			status:    http.StatusForbidden,
+			want:      "the relay answered 403 and published no verdict: refused",
+		},
+		{
+			name:      "a base the checkout cannot resolve",
+			base:      unresolvable,
+			mintURL:   testMintURL,
+			mintToken: testMintToken,
+			want:      `--base "` + unresolvable + `" does not name a commit`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relay := newFakeRelay()
+			if tc.status != 0 {
+				relay.status = tc.status
+				relay.answer = `{"error":"refused"}`
+			}
 
-	token, err := actionsIDToken(context.Background(), relay, "https://relay.example")
-	if token != "" || err == nil || !strings.Contains(err.Error(), "composing the token request") {
-		t.Fatalf("actionsIDToken = %q, %v; want a refusal naming the composition", token, err)
-	}
-	if len(relay.requests) != 0 {
-		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
+			out, err := runQueueCmdWith(t, relay, queueOptions{
+				dir:       dir,
+				base:      tc.base,
+				eventPath: queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"),
+				relay:     "https://relay.example",
+				noColor:   true,
+			}, tc.mintURL, tc.mintToken)
+			if err == nil {
+				t.Fatalf("the run must fail:\n%s", out)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			}
+			if out != "" {
+				t.Errorf("a refused run wrote a report:\n%s", out)
+			}
+		})
 	}
 }
 
-// The audience is escaped into the mint query rather than concatenated, so an
-// origin carrying anything a query reserves names one audience and not two.
-func TestTheMintQueryEscapesTheAudience(t *testing.T) {
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example/idtoken?api-version=2.0")
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "the-mint-token")
+// A run that could fail for two reasons fails for the one it meets first: the
+// base decides what there is to submit at all, so a checkout that cannot
+// resolve it is refused for that before a missing mint permission is ever
+// reached — and nothing is requested of either endpoint.
+func TestQueueRefusesAnUnresolvableBaseBeforeAMissingMintEndpoint(t *testing.T) {
+	dir, _ := reviewRepo(t,
+		map[string]string{"README.md": "hello"},
+		map[string]string{"src/auth.go": "package src"},
+	)
+	const unresolvable = "1111111111111111111111111111111111111111"
 	relay := newFakeRelay()
 
-	if _, err := actionsIDToken(context.Background(), relay, "https://relay.example/a&b=c"); err != nil {
-		t.Fatal(err)
+	out, err := runQueueCmdWith(t, relay, queueOptions{
+		dir:       dir,
+		base:      unresolvable,
+		eventPath: queueEvent(t, 7, "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "main"),
+		relay:     "https://relay.example",
+		noColor:   true,
+	}, "", "")
+	if err == nil {
+		t.Fatalf("the run must fail:\n%s", out)
 	}
-	if got := relay.requests[0].URL.Query().Get("audience"); got != "https://relay.example/a&b=c" {
-		t.Errorf("audience = %q, want the origin whole", got)
+	if want := `--base "` + unresolvable + `" does not name a commit`; err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
-	if !strings.Contains(relay.requests[0].URL.RawQuery, url.QueryEscape("https://relay.example/a&b=c")) {
-		t.Errorf("raw query = %q, want the audience escaped", relay.requests[0].URL.RawQuery)
+	if len(relay.requests) != 0 {
+		t.Errorf("requests = %d, want nothing attempted", len(relay.requests))
 	}
 }

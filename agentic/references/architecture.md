@@ -4,10 +4,11 @@
 > `internal/forge`'s `SCMRepository`, and any `cmd/lydite` command built as a Flow.**
 
 `clearance` is the first command built this way; `internal/flow`'s own doc comment names the
-rest of the shape. A command that answers a webhook by reading a platform live, deciding
-something, and writing back to the platform is the pattern this exists for — `test`, `mutation`,
-`scan`, `review`, `publish` and the others stay as they are until each is migrated on its own
-terms, which is a decision made command by command rather than one this file makes for them.
+rest of the shape. Business logic — what lydite does to, or concludes about, a repository:
+reading its state, deciding a verdict, writing a result back to it or to disk — runs on this
+scaffold; the CLI's own concerns, the tool managing itself (`version`, `update`, the update
+nudge), do not. See [ADR 0076](../../docs/adr/0076-business-logic-runs-as-a-flow-and-the-cli-keeps-its-own-concerns.md)
+for the principle and the verdict for every command.
 
 ## Four layers, and no jumping
 
@@ -327,18 +328,60 @@ Two packages sit underneath the stages, split by what they own rather than by re
   `Output{W, Rel}` — so the CLI's own log-opening decisions (a file, a mirror to the terminal, or
   nothing) stay the CLI's.
 
+### `test plan` and `test merge`
+
+`testflow` holds two more flows beside `New()`: `NewPlan()` for `lydite test plan` and
+`NewMerge()` for `lydite test merge`. Both are wired over stages in `teststages` that return data
+and an unwrapped error only, never a `ui.Row` — a deliberate departure from `Declaration` and the
+rest of `New()`'s own stages, which predate ADR 0065 and still return `Rows []ui.Row`.
+
+`NewPlan()` runs `LoadPlanComponents` then `GroupShards`, the second `.When(Declared)`: a
+declaration naming no component has nothing to group. `LoadPlanComponents` reads the declaration
+alone — no configuration, no toolchain, no orphan gate — because a plan runs no suite.
+`GroupShards` groups every component that declares a suite into the transitive closure of
+`scheduler.Conflicts`, reading each compose file with `compose.NoRuntime` so grouping depends on
+nothing but the declaration and the files beside it. A compose file that will not load, or two
+shards that would take one name, fail the stage with the error that says so; `planError` unwraps
+the flow's `*flow.StageError` back to that error, the same unwrap `release check`'s `ResolveTag`
+performs for `ErrNoTag` (see "The release flow" below) to keep a stage's own words intact rather
+than the flow's framing of them. The `--out` matrix's own row type, `matrixEntry`, stays in
+`cmd/lydite/plan.go`: the stage returns plain shard-grouping data (`PlanShard`), and the CLI is
+what turns it into the matrix's JSON shape.
+
+`NewMerge()` runs `LoadMergeComponents`, then, both `.When(Declared)`, the generic
+`shardstages.ReadShards` (`Command = flow.Literal("test")`) and `ReadShardMeasurements`.
+`ReadShardMeasurements` never fails the flow as a whole: a shard's `measurements.json` that will
+not parse becomes that shard's own `Err`, the same shape mutation's `ReadShardCounts` already
+uses for a shard whose counts document will not parse (see "Mutation flows" below). It reads
+through `teststages.MeasurementsReader` — a stage-owned interface, not a reuse of
+`recordstages.ReportReader`, because that interface is a different concern's own boundary type.
+`cmd/lydite`'s implementation, `shardMeasurements` (`cmd/lydite/measurements.go`), caches each real
+`measurementsDoc` it reads, keyed by directory, mirroring `record.go`'s `recordReports`; the
+stage's own `Out` carries only which directories were read and each shard's error, never the
+document itself — the same shape the section below states for keeping that schema off a stage
+boundary at all. No fold stage exists for `test merge`: `foldMeasured` and every row it renders
+stay in `cmd/lydite/merge.go`, calling `fold.go`'s row-fold helpers (`shardInputs`, `rowsFor`,
+`carryUnhandled`) directly, the way `mutation_merge.go` already does, rather than duplicating
+them.
+
 ### `componentPlan`, `componentLog`, `measurementsDoc` and `componentMeasurement` stay in `cmd/lydite`
 
 These four types are test/coverage logic by every other measure, and were left out of the move
-anyway: `cmd/lydite/mutants.go`, `merge.go` and `record.go` — owned by other sessions in the same
-milestone, and out of reach of this one — reach into their *unexported fields and methods*
-directly (`p.c`, `p.log`, `folded.snapshot()`, `e.asMeasurement(c)`), and no alias or rename
-survives a type changing package: a field selector or a method call on a value of that type
+anyway: `cmd/lydite/mutants.go`, `merge.go` and `record.go` reach into their *unexported fields and
+methods* directly (`p.c`, `p.log`, `folded.snapshot()`, `e.asMeasurement(c)`), and no alias or
+rename survives a type changing package: a field selector or a method call on a value of that type
 breaks the moment the type is no longer the one declared where the caller's own compiler unit
 sees it. This is the decision the rest of the migration is arranged around, and it generalises: a
 future stage extraction should check, symbol by symbol, whether the calling file reaches a
 *field or method* on a type (the type has to stay where it is) or merely *calls a function*
 (safe to move behind a same-signature wrapper the CLI keeps).
+
+`teststages.MeasurementsReader` is built to this same constraint rather than around it: the stage
+never receives a `measurementsDoc` or a `componentMeasurement`, only whether a directory's document
+was read and why not, and `shardMeasurements` is what keeps the real, unexported-field-bearing
+values the composition still reaches into once the flow has returned. It is the general pattern
+`recordstages.ReportReader` already establishes for `record` (above), not an exception carved out
+for `test merge`.
 
 ### `measurements.json` stays a `cmd/lydite` document
 
@@ -609,3 +652,118 @@ carries the shard's `ui.Document`, as input the same way. Neither builds a `ui.R
 `ui.Report` — reading the grammar as data a caller supplied is not the same thing as deciding
 what a report says, and every stage in this codebase does the first and never the second.
 Deciding a row, in every flow built so far, is the CLI's job alone.
+
+## The queue flow
+
+`internal/flows/queue` (`queueflow`) and `internal/stages/queue` (`queuestages`) put `lydite
+clearance queue` on the scaffold, over a new domain package, `internal/relay` — the pr-relay
+client, transport and protocol only, importing nothing above it. Five stages, none conditioned on
+another's output: `load-event` reads the entry the `merge_group` payload names; `resolve-base`
+resolves the commit the decision is recomputed against; `recompute-decision` recomputes and
+fingerprints that decision; `mint-token` mints the OIDC token the relay accepts, audienced to the
+relay's own origin; `submit-comparison` submits the fingerprint for the relay to compare and
+publish. `mint-token` is declared after `recompute-decision` so a run that cannot resolve the base
+or recompute the decision fails for that reason before it fails for a missing mint endpoint. The
+CLI reads `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` itself and passes them through as flow inputs,
+empty or not; no stage reads the environment, and `truststages.InitTrust` stays the only one that
+does anywhere in this codebase.
+
+The flow declares no `init-trust` and no `init-scm`: this job is built to hold no writing
+credential — `runQueue` refuses outright when `--relay` is empty, since there is no token to fall
+back to — so there is neither a `TrustedContext` nor an `SCMRepository` for those stages to build.
+That absence is why `load-event` reads the payload's `head_sha`, `head_ref` and `base_ref` as data
+rather than a pointer resolved live: "trust and the repository come first" (see above, and ADR
+0061) holds where a credential exists to resolve something live against, and this job has none.
+The relay is what performs that live resolution instead, from the verified OIDC claim, checking
+what this job submits against what it reads there itself. See
+[ADR 0075](../../docs/adr/0075-the-merge-queue-submission-is-a-flow-over-a-relay-client.md) for
+the full reasoning, including why this is not an `SCMRepository` implementation and not a
+`RelaySink`.
+## The threads flow
+
+`threadsflow.New` (`internal/flows/threads`) declares `threads`'s stages in this order:
+
+| Stage | Conditions |
+|---|---|
+| `init-trust` | none |
+| `init-scm` | none |
+| `load-pull-request` | none |
+| `read-findings` | none |
+| `list-threads` | none |
+| `plan` | none |
+| `write-ops` | none |
+| `take-down` | `.When(apply)` |
+| `answer` | `.When(apply)` |
+| `open` | `.When(apply)` |
+
+`init-trust` and `init-scm` are declared first, unconditionally — the opposite of the review
+flow's ordering above. A `threads` run needs its `SCMRepository` from its very first read:
+`list-threads` fetches the pull request's standing threads live even when `--apply` is not given,
+because `plan` computes a delta against them, not against nothing. There is no point in this
+flow's body where that need does not already hold, so trust is declared where the flow first
+needs it — the same rule the review flow's late, conditional declaration follows for its own
+premise. See [ADR 0073](../../docs/adr/0073-threads-declares-trust-first-and-writes-only-what-it-listed.md)
+for the full comparison and the failure precedence this ordering produces: repository
+(`init-trust`) → token (`init-scm`'s `scmstages.ErrNoCredential`) → event
+(`load-pull-request`) → everything else. The CLI reads the repository slug for its own rows off
+`init-trust`'s `Trusted.Repository()`, read from `flow.Output[truststages.Out](r,
+threadsflow.StageInitTrust)`, rather than off the payload or a flag.
+
+`read-findings`, `list-threads` and `plan` run unconditionally too: the plan and its warnings
+(a duplicate fingerprint dropped, a report directory that could not be read) are computed and
+written to `--ops` whether or not the caller asked to apply them, the same way `write-ops` always
+runs. `take-down`, `answer` and `open` are the flow's gated tail, run only `.When(apply)`, after
+the plan already exists — deleting the comments `Ops.Delete` names, replying to the ones
+`Ops.Reply` leaves standing, and opening the ones `Ops.Create` names as new. Every id those three
+stages write to comes from `Ops`, computed from `list-threads`'s own listing earlier in the same
+run; no stage lists the pull request's comments a second time before writing.
+
+`TakeDown` and `Open` each perform more than one write per call, and a `Result`'s `Out` is
+unavailable once a stage has failed, so the progress each made before failing travels in a typed
+error instead: `*threadsstages.TakeDownError{Answered []int64, Err error}` names every comment
+answered instead of deleted before the failure, which is why the CLI still prints a warning for
+each of those even when the run as a whole fails; `*threadsstages.OpenError{Lost, Posted int, Err
+error}`'s `Error()` reads `"<Lost> located finding(s) reached no surface: <Err>"`. Both implement
+`Unwrap`, so `errors.Is`/`errors.As` still reach the underlying cause.
+
+## The release flow
+
+`releaseflow.New` (`internal/flows/release`) declares `lydite release check`'s stages in this
+order: `resolve-tag`, `previous-tag`, `read-commits`, `judge`. `internal/stages/release`
+(`releasestages`) holds all four — `ResolveTag`, `PreviousTag`, `ReadCommits`, `Judge` — no
+platform, no credential, and no webhook in the loop: the command reads a checkout's own tags and
+commit messages and concludes whether a declared break lands on a bump that admits one, which is
+business logic by [ADR 0076](../../docs/adr/0076-business-logic-runs-as-a-flow-and-the-cli-keeps-its-own-concerns.md)'s
+definition even though it reads no platform live.
+
+`resolve-tag` settles which tag is being released, in descending order of how explicitly it was
+stated: a caller's own `--tag`, then the short name of the ref a run was triggered by (only when
+that ref's type says it is a tag — a branch build's ref name is a branch, and checking it as a
+version would report a misconfiguration as a malformed tag), then the tag the checkout itself is
+on. `previous-tag` finds the release before it and runs unconditionally — a run with nothing to
+check still needs to know whether this is the repository's first release. `read-commits` and
+`judge` are declared `.Unless(flow.FromStage(StagePreviousTag, "First"))`: a first release has an
+empty range, with no commits to read and nothing to judge. This is safe with no preceding guard,
+for the reason the scan flow's `semgrep`/`secrets` pair already states for the same shape:
+`previous-tag` runs under no condition of its own and the default `FailFlow`, so by the time
+either later stage's condition is evaluated, `previous-tag` has either produced the `First` output
+being read or already failed the run — there is no earlier condition to declare first, because
+there is no way to reach the read with `previous-tag` having been skipped.
+
+`ResolveTag` answers `releasestages.ErrNoTag` when neither the flag, the ref, nor the checkout
+names a tag — a sentinel, not a worded message: a stage speaks in its own domain's terms and knows
+nothing about how the CLI wants a person told to fix it. `runReleaseCheck` unwraps the flow's
+`*flow.StageError` back to the stage's own error before comparing it against `ErrNoTag`, the same
+unwrap every other command's top-level error handling performs to keep a stage's own error text
+intact rather than reporting the flow's framing of it; only then does it supply the CLI's own
+words naming `--tag`, `GITHUB_REF_NAME` and a checked-out tag as the three places one could have
+come from.
+
+The CLI picks the row from `previous-tag`'s and `judge`'s outputs in the same order the flow's own
+conditions read them: `releaseRow` reads `previous-tag`'s `First` before it ever reads `judge`'s
+output, because a first release's `judge` never ran and reading an unavailable stage's output
+outside a flow's own guarded `Run` is exactly as unsafe as reading it from inside one. A first
+release renders as an empty range that passed; declaring no break in the range renders as a pass
+naming the range's size; a declared break the bump admits renders as a pass naming which commits
+declared one; a declared break the bump does not admit renders as the one row this command exists
+to produce, its detail closing with the rule the bump failed to satisfy.

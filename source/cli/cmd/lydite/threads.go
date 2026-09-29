@@ -1,20 +1,19 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"lydite/lydite/internal/finding"
-	"lydite/lydite/internal/forge"
+	"lydite/lydite/internal/flow"
+	threadsflow "lydite/lydite/internal/flows/threads"
 	"lydite/lydite/internal/runner"
-	"lydite/lydite/internal/threads"
+	scmstages "lydite/lydite/internal/stages/scm"
+	threadsstages "lydite/lydite/internal/stages/threads"
+	truststages "lydite/lydite/internal/stages/trust"
 	"lydite/lydite/internal/ui"
 )
 
@@ -69,208 +68,170 @@ func newThreadsCmd() *cobra.Command {
 	return cmd
 }
 
+// runThreads runs the threads flow and renders what it did.
+//
+// The findings' warnings are written whether or not a later stage failed, and
+// so is every refused delete answered before one did: a warning raised before
+// a failure is part of what whoever investigates the failure reads. A run that
+// stopped before applying anything writes no rows, since there is no plan it
+// acted on to report. A run that stopped while applying reports the plan, and
+// the row for how far applying it got.
 func runThreads(cmd *cobra.Command, reports []string, opsPath, eventPath string, apply bool) error {
-	target, err := resolveTarget("threads", eventPath)
-	if err != nil {
-		return err
-	}
+	// Made first: a report times the run from its own creation.
 	rep := ui.NewReport("threads")
-
-	found, missing := readFindings(reports)
-	located, dropped := finding.Dedup(threads.Located(found))
-	for _, fp := range dropped {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"warning: %s was reported twice and one copy is dropped; one claim is one thread\n", fp)
-	}
-	for _, m := range missing {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", m)
-	}
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: "findings",
-		Value: fmt.Sprintf("%d located of %d, %d duplicate(s) dropped", len(located), len(found), len(dropped))})
-
-	ctx := cmd.Context()
-	standing, err := target.Client.ReviewComments(ctx, target.Repo, target.Number)
+	reconcile, err := threadsflow.New()
 	if err != nil {
 		return err
 	}
-	grouped := threads.Threads(standing)
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: "threads",
-		Value: fmt.Sprintf("%d standing on %s#%d", len(grouped), target.Repo, target.Number)})
+	r, runErr := reconcile.Run(cmd.Context(), threadsflow.Params{
+		Reports:   reports,
+		OpsPath:   opsPath,
+		EventPath: firstNonEmpty(eventPath, os.Getenv("GITHUB_EVENT_PATH")),
+		Apply:     apply,
+		Reader:    commandFindingsReader{},
+	}.Inputs())
 
-	document := threads.Delta(located, grouped, target.Number, target.SHA)
-	if err := writeOps(opsPath, document); err != nil {
+	stderr := cmd.ErrOrStderr()
+	if read, err := flow.Output[threadsstages.ReadFindingsOut](r, threadsflow.StageReadFindings); err == nil {
+		for _, fp := range read.Dropped {
+			_, _ = fmt.Fprintf(stderr,
+				"warning: %s was reported twice and one copy is dropped; one claim is one thread\n", fp)
+		}
+		for _, m := range read.Missing {
+			_, _ = fmt.Fprintf(stderr, "warning: %s\n", m)
+		}
+	}
+	for _, id := range answeredInstead(r, runErr) {
+		_, _ = fmt.Fprintf(stderr,
+			"warning: comment %d was written by another identity and cannot be deleted; answering it instead\n", id)
+	}
+	if runErr != nil && r.Status(threadsflow.StageTakeDown) == flow.StatusNotReached {
+		return threadsError(runErr)
+	}
+
+	if err := addThreadsRows(rep, r, opsPath, runErr); err != nil {
 		return err
 	}
-	rep.Add(ui.Row{Status: ui.StatusContext, Label: "plan",
-		Value: fmt.Sprintf("%d to open, %d to close, %d to answer — written to %s",
-			len(document.Create), len(document.Delete), len(document.Reply), opsPath)})
-
-	var applyErr error
-	if apply {
-		applyErr = applyOps(ctx, target, document, rep, cmd.ErrOrStderr())
-	}
-
 	out := cmd.OutOrStdout()
 	if err := rep.Write(out, false, ui.ColorEnabled(out, false)); err != nil {
 		return err
 	}
-	return applyErr
-}
-
-// readFindings collects every located claim the named directories hold.
-//
-// A directory that could not be read is named and does not stop the run, for
-// the standing comment's reason: the claims that did arrive are still worth
-// putting on their lines, and a missing input is already rendered as a section
-// saying so in the comment the same run publishes.
-func readFindings(dirs []string) (found []finding.Finding, missing []string) {
-	for _, dir := range dirs {
-		docs, err := readDocuments(dir)
-		if err != nil {
-			missing = append(missing, fmt.Sprintf("%s holds no findings: %v", dir, err))
-			continue
-		}
-		for _, doc := range docs {
-			found = append(found, doc.Findings...)
-		}
+	if runErr != nil {
+		return threadsError(runErr)
 	}
-	return found, missing
-}
-
-// writeOps puts the operations where the caller asked for them.
-//
-// Always, and never into .lydite-reports/. The document is lydite's own wire
-// between the delta and whatever applies it, and nothing about it is promised
-// to a consumer — `lydite test plan` is the precedent for a command that
-// reaches no verdict writing no report document.
-func writeOps(path string, document threads.Ops) error {
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-	}
-	raw, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(raw, '\n'), 0o600)
-}
-
-// applyOps performs the operations with the job's own token.
-//
-// This is the `github-token` fallback, and it is a designed path rather than a
-// stopgap: a consumer who has installed nothing still gets its threads, from
-// `github-actions[bot]`, and the only thing they lose is whose name is on
-// them.
-//
-// A review the platform refuses fails the run, naming how many claims reached
-// no surface. Never a silent green — the claims are still in the terminal, the
-// job log and the uploaded report directory, and a run that quietly posted
-// nothing is indistinguishable from a change with nothing wrong with it.
-//
-// A refused delete is not a failure. The platform will not let one identity
-// delete another's comment, so the thread is left standing with the reply the
-// document already carries for that case — the same path a thread somebody
-// else spoke in takes.
-func applyOps(ctx context.Context, target publishTarget, document threads.Ops, rep *ui.Report, stderr io.Writer) error {
-	var refused int
-	for _, del := range document.Delete {
-		answered, err := takeDown(ctx, target, del)
-		if err != nil {
-			return err
-		}
-		if answered {
-			refused++
-			_, _ = fmt.Fprintf(stderr,
-				"warning: comment %d was written by another identity and cannot be deleted; answering it instead\n", del.Comment)
-		}
-	}
-	for _, reply := range document.Reply {
-		if err := target.Client.ReplyToReviewComment(ctx, target.Repo, target.Number, reply.Comment, reply.Body); err != nil {
-			return err
-		}
-	}
-	posted, err := openThreads(ctx, target, document)
-	if err != nil {
-		lost := len(document.Create) - posted
-		rep.Add(ui.Row{Status: ui.StatusFail, Label: "review",
-			Value:  fmt.Sprintf("refused — %d located finding(s) reached no surface", lost),
-			Detail: []string{err.Error(), "they are in this job's log and in the uploaded " + runner.ReportDir + " directory"}})
-		return fmt.Errorf("%d located finding(s) reached no surface: %w", lost, err)
-	}
-	value := fmt.Sprintf("%d opened, %d closed, %d answered",
-		len(document.Create), len(document.Delete)-refused, len(document.Reply)+refused)
-	if refused > 0 {
-		value += fmt.Sprintf(" — %d delete(s) refused by the platform", refused)
-	}
-	rep.Add(ui.Row{Status: ui.StatusPass, Label: "applied", Value: value})
 	return nil
 }
 
-// takeDown removes one comment, and reports whether it had to be answered
-// instead.
-//
-// The platform refuses a delete of another identity's comment with a 403 when
-// this one can see the comment and a 404 when it cannot, so both take the
-// answering path. A reply that is itself unfound settles which of the two a
-// 404 was: the comment is gone, the state the delete was asking for, and
-// there is nothing left to say to it.
-func takeDown(ctx context.Context, target publishTarget, del threads.Delete) (bool, error) {
-	err := target.Client.DeleteReviewComment(ctx, target.Repo, del.Comment)
-	switch {
-	case err == nil:
-		return false, nil
-	case !forge.Forbidden(err) && !forge.NotFound(err):
-		return false, err
-	case del.Refused == "":
-		// A refusal is refused for the whole thread at once, and only one
-		// operation in it carries what to say. The rest are left as they
-		// are rather than answered again.
-		return false, nil
+// answeredInstead is the id of every comment take-down answered rather than
+// deleted, whether it finished or failed partway: a failed stage has no
+// output, so the answers it made before failing are read off its error.
+func answeredInstead(r *flow.Result, runErr error) []int64 {
+	if took, err := flow.Output[threadsstages.TakeDownOut](r, threadsflow.StageTakeDown); err == nil {
+		return took.Answered
 	}
-	replyErr := target.Client.ReplyToReviewComment(ctx, target.Repo, target.Number, del.Comment, del.Refused)
-	switch {
-	case replyErr == nil:
-		return true, nil
-	case forge.NotFound(replyErr):
-		return false, nil
-	default:
-		return false, replyErr
+	var failed *threadsstages.TakeDownError
+	if errors.As(runErr, &failed) {
+		return failed.Answered
 	}
+	return nil
 }
 
-// openThreads posts the new threads: the line-anchored ones in one review, and
-// the file-anchored ones one at a time. It answers with how many reached the
-// pull request.
+// addThreadsRows renders what a run that reached its plan found, what was
+// standing, what it planned, and — when it applied the plan — how that went.
 //
-// The split is the platform's. A review's comments are drafts with no
-// `subjectType` field and a required position, so a claim about a whole file
-// is refused inside one and accepted on its own — which makes a run one review
-// plus a call per file-level thread.
+// A run that failed taking down or answering threads adds no row for applying
+// the plan: the error it returns is the whole of what it has to say about it.
+// A run whose new threads were refused adds a failing row naming how many
+// claims reached no surface, because the job log is where a reader looks for
+// them.
+func addThreadsRows(rep *ui.Report, r *flow.Result, opsPath string, runErr error) error {
+	read, err := flow.Output[threadsstages.ReadFindingsOut](r, threadsflow.StageReadFindings)
+	if err != nil {
+		return err
+	}
+	trusted, err := flow.Output[truststages.Out](r, threadsflow.StageInitTrust)
+	if err != nil {
+		return err
+	}
+	loaded, err := flow.Output[scmstages.LoadPullRequestOut](r, threadsflow.StageLoadPullRequest)
+	if err != nil {
+		return err
+	}
+	listed, err := flow.Output[threadsstages.ListThreadsOut](r, threadsflow.StageListThreads)
+	if err != nil {
+		return err
+	}
+	planned, err := flow.Output[threadsstages.PlanOut](r, threadsflow.StagePlan)
+	if err != nil {
+		return err
+	}
+	ops := planned.Ops
+
+	rep.Add(ui.Row{Status: ui.StatusContext, Label: "findings",
+		Value: fmt.Sprintf("%d located of %d, %d duplicate(s) dropped", len(read.Located), read.Total, len(read.Dropped))})
+	rep.Add(ui.Row{Status: ui.StatusContext, Label: "threads",
+		Value: fmt.Sprintf("%d standing on %s#%d", listed.Standing, trusted.Trusted.Repository(), loaded.Ref.Number)})
+	rep.Add(ui.Row{Status: ui.StatusContext, Label: "plan",
+		Value: fmt.Sprintf("%d to open, %d to close, %d to answer — written to %s",
+			len(ops.Create), len(ops.Delete), len(ops.Reply), opsPath)})
+
+	switch r.Status(threadsflow.StageOpen) {
+	case flow.StatusFailed:
+		var openErr *threadsstages.OpenError
+		if !errors.As(runErr, &openErr) {
+			return threadsError(runErr)
+		}
+		rep.Add(ui.Row{Status: ui.StatusFail, Label: "review",
+			Value:  fmt.Sprintf("refused — %d located finding(s) reached no surface", openErr.Lost),
+			Detail: []string{openErr.Err.Error(), "they are in this job's log and in the uploaded " + runner.ReportDir + " directory"}})
+	case flow.StatusSucceeded:
+		took, err := flow.Output[threadsstages.TakeDownOut](r, threadsflow.StageTakeDown)
+		if err != nil {
+			return err
+		}
+		value := fmt.Sprintf("%d opened, %d closed, %d answered",
+			len(ops.Create), len(ops.Delete)-took.Refused, len(ops.Reply)+took.Refused)
+		if took.Refused > 0 {
+			value += fmt.Sprintf(" — %d delete(s) refused by the platform", took.Refused)
+		}
+		rep.Add(ui.Row{Status: ui.StatusPass, Label: "applied", Value: value})
+	}
+	return nil
+}
+
+// threadsError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it, with a missing credential and a missing
+// or foreign event each named by this command.
 //
-// The count is what the failure names, and it is what was posted rather than
-// what was asked for: a review that landed and one file thread the platform
-// then refused has lost one claim, not all of them, and a row saying otherwise
-// sends a reader looking for threads that are on the pull request.
-func openThreads(ctx context.Context, target publishTarget, document threads.Ops) (int, error) {
-	var onLines int
-	for _, create := range document.Create {
-		if create.Subject != "file" {
-			onLines++
-		}
+// A repository trust refuses is reported in trust's own words. Its errors are
+// untyped, and telling a missing repository from a malformed one apart would
+// mean matching another package's prose.
+func threadsError(err error) error {
+	if errors.Is(err, scmstages.ErrNoCredential) {
+		return noTokenError("threads")
 	}
-	if err := target.Client.CreateReview(ctx, target.Repo, target.Number, document.Head, document.Create); err != nil {
-		return 0, err
+	var failed *flow.StageError
+	if !errors.As(err, &failed) {
+		return err
 	}
-	posted := onLines
-	for _, create := range document.Create {
-		if create.Subject != "file" {
-			continue
-		}
-		if err := target.Client.CreateFileComment(ctx, target.Repo, target.Number, document.Head, create); err != nil {
-			return posted, err
-		}
-		posted++
+	if failed.Stage == threadsflow.StageLoadPullRequest {
+		return pullRequestError("threads", failed.Err)
 	}
-	return posted, nil
+	return failed.Err
+}
+
+// commandFindingsReader reads a report directory the way every other command
+// reading a report does, and hands the flow the findings its documents carry.
+type commandFindingsReader struct{}
+
+func (commandFindingsReader) Findings(dir string) ([]finding.Finding, error) {
+	docs, err := readDocuments(dir)
+	if err != nil {
+		return nil, err
+	}
+	var found []finding.Finding
+	for _, doc := range docs {
+		found = append(found, doc.Findings...)
+	}
+	return found, nil
 }

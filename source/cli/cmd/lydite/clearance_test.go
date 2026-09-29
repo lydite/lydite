@@ -1665,7 +1665,7 @@ func TestAReplyThatCannotBePostedIsLoggedAndFailsNothing(t *testing.T) {
 	}
 }
 
-func TestPublishNeedsThePlatformsEnvironmentRatherThanSkipping(t *testing.T) {
+func TestThreadsNeedsThePlatformsEnvironmentRatherThanSkipping(t *testing.T) {
 	for _, missing := range []string{"GITHUB_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH"} {
 		t.Run("without "+missing, func(t *testing.T) {
 			t.Setenv("GITHUB_TOKEN", "token")
@@ -1676,8 +1676,9 @@ func TestPublishNeedsThePlatformsEnvironmentRatherThanSkipping(t *testing.T) {
 			if missing == "GITHUB_TOKEN" {
 				t.Setenv("GH_TOKEN", "")
 			}
-			if _, err := resolveTarget("--publish", ""); err == nil {
-				t.Fatalf("publishing without %s was accepted, so a run could report success having posted nothing", missing)
+			_, _, err := threadsFlowRun(t, []string{t.TempDir()}, filepath.Join(t.TempDir(), "threads.json"), "", true)
+			if err == nil {
+				t.Fatalf("threads without %s was accepted, so a run could report success having posted nothing", missing)
 			}
 		})
 	}

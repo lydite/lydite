@@ -85,3 +85,11 @@ another layer.
 
 See [`agentic/references/architecture.md`](../../agentic/references/architecture.md) for the
 layering this decision produces and the full account of why hand-rolled beats a pipeline library.
+
+## Amended by ADR 0076: business logic runs as a Flow, and the CLI keeps its own concerns
+
+[ADR 0076](0076-business-logic-runs-as-a-flow-and-the-cli-keeps-its-own-concerns.md) narrows
+"each on its own terms and each its own piece of work; this decision states the scaffold, not the
+schedule." Which commands migrate is decided by a principle — business logic runs as a Flow, the
+CLI's own concerns (`version`, `update`, the update nudge) do not — rather than left open to each
+command's own terms.
