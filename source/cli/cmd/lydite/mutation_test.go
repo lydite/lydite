@@ -214,6 +214,62 @@ func TestAnUnmeasuredRowStillSaysWhenAMutantHeldOutputOpen(t *testing.T) {
 	}
 }
 
+// An unmeasured row still names an unmatched declaration and an unbounded
+// mutant on their own, independent of whether output was held open — each
+// note is its own conditional, and one being silent must not depend on the
+// others being present.
+func TestAnUnmeasuredRowSaysWhenADeclarationIsUnmatchedOrMemoryWasNotBounded(t *testing.T) {
+	unviable := []mutation.Result{{Outcome: mutation.Unviable, Detail: "did not compile"}}
+
+	unmatched, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1, Unmatched: 1}, unviable, nil, time.Second)
+	if !detailSaying(unmatched, "cover no mutant") {
+		t.Errorf("an unmeasured row with an unmatched declaration says %v", unmatched.Detail)
+	}
+
+	unbounded := []mutation.Result{{Outcome: mutation.Unviable, Detail: "did not compile", MemoryUnbounded: true}}
+	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, unbounded, nil, time.Second)
+	if !detailSaying(row, "memory was not bounded") {
+		t.Errorf("an unmeasured row from an unbounded run says %v", row.Detail)
+	}
+
+	neither, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, unviable, nil, time.Second)
+	if detailSaying(neither, "cover no mutant") || detailSaying(neither, "memory was not bounded") {
+		t.Errorf("an unmeasured row with neither condition says %v", neither.Detail)
+	}
+}
+
+// A failing row — one holding survivors — still names an unmatched
+// declaration: the note is not conditional on the row's own verdict, and a
+// survivor's own detail must not crowd it out.
+func TestAFailingRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
+	survivor := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}}
+	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1, Survived: 1, Unmatched: 1}, survivor, nil, time.Second)
+	if !detailSaying(row, "cover no mutant") {
+		t.Errorf("a failing row with an unmatched declaration says %v", row.Detail)
+	}
+}
+
+// A component with nothing to mutate still names an unmatched declaration:
+// the run generated no mutants at all, but a marker on a line the run never
+// reached is exactly the shape "covers no mutant" already means.
+func TestAKindNothingToMutateRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
+	row, _ := kindRow(mutationstages.ComponentOutcome{
+		Kind:      mutationstages.KindNothingToMutate,
+		Component: component.Component{Name: "app", Dir: "app"},
+		Summary:   mutation.Summary{Unmatched: 2},
+	}, false)
+	if !detailSaying(row, "cover no mutant") {
+		t.Errorf("a nothing-to-mutate row with an unmatched declaration says %v", row.Detail)
+	}
+}
+
 func detailSaying(row ui.Row, want string) bool {
 	for _, d := range row.Detail {
 		if strings.Contains(d, want) {

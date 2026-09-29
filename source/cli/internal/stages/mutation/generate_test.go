@@ -76,6 +76,32 @@ func TestAChangedFileThatIsGoneIsSkipped(t *testing.T) {
 	}
 }
 
+// A scoped file outside the component's own directory is an error generate
+// abandons the whole component on — the component's Scope should never hand
+// it one, but generate does not trust that from the inside.
+func TestAScopedFileOutsideTheComponentFailsTheRun(t *testing.T) {
+	root := t.TempDir()
+	c := component.Component{Name: "web", Dir: "web", Runner: "go-test"}
+	_, _, err := generate(root, c, runner.Go,
+		coverage.LineHits{"other/a.go": {3: 1}}, map[string][]int{"other/a.go": {3}}, io.Discard)
+	if err == nil {
+		t.Fatal("a file outside the component's directory generated instead of failing")
+	}
+}
+
+// A language with no generator fails the whole component, rather than
+// silently producing nothing for it to mutate.
+func TestALanguageWithNoGeneratorFailsTheRun(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "a.sh", "#!/bin/sh\necho hi\n")
+	c := component.Component{Name: "app", Dir: ".", Runner: "command"}
+	_, _, err := generate(root, c, runner.Shell,
+		coverage.LineHits{"a.sh": {2: 1}}, map[string][]int{"a.sh": {2}}, io.Discard)
+	if err == nil {
+		t.Fatal("a language with no generator generated instead of failing")
+	}
+}
+
 // A declaration covering no mutant is both named on diagnostics, as it
 // arises, and counted across the component's files, since the count is what
 // reaches the row a reader of the report sees.

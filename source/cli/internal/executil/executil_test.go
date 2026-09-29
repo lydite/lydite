@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -585,4 +586,23 @@ func TestRunOutputBoundedKeepsAZeroExitWhenAGrandchildHoldsTheOutput(t *testing.
 		t.Errorf("the run took %s, past the wait delay (%s)", elapsed, limit)
 	}
 	requireGone(t, pid)
+}
+
+// A group with no members left when the kill lands — the child exited on its
+// own between the deadline and the signal — answers os.ErrProcessDone, which
+// os/exec reads as a cancellation that found nothing to kill rather than as a
+// failure of its own.
+func TestKillGroupOfAnAlreadyExitedGroupReportsProcessDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	cmd := exec.Command("true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running the throwaway child: %v", err)
+	}
+
+	if err := killGroup(cmd.Process.Pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killGroup(%d) of an already-exited group = %v, want os.ErrProcessDone", cmd.Process.Pid, err)
+	}
 }
