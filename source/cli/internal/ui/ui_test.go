@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -102,6 +103,62 @@ func TestExitCodeComesFromTheVerdictNotTheGlyph(t *testing.T) {
 			}
 			if got := rep.ExitCode(); got != tc.want {
 				t.Errorf("ExitCode = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// A run marked incomplete exits 3 whatever its rows say short of a failure or
+// a referral: the rows about what it did not finish are unmeasured, and an
+// unmeasured row does not vote. A failure it already found still exits 1, and
+// a referral still exits 2.
+func TestAnIncompleteRunExitsThreeUnlessSomethingOutranksIt(t *testing.T) {
+	cases := []struct {
+		name        string
+		rows        []Status
+		wantVerdict Verdict
+		wantExit    int
+		wantLine    string
+	}{
+		{"only unmeasured rows", []Status{StatusPass, StatusUnmeasured}, VerdictIncomplete, ExitIncomplete, "mutation incomplete in"},
+		{"no rows at all", nil, VerdictIncomplete, ExitIncomplete, "mutation incomplete in"},
+		{"a failure outranks it", []Status{StatusUnmeasured, StatusFail}, VerdictFail, ExitFail, "mutation failed in"},
+		{"a referral outranks it", []Status{StatusUnmeasured, StatusRefer}, VerdictRefer, ExitRefer, "mutation referred in"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := NewReport("mutation")
+			for _, s := range tc.rows {
+				rep.Add(Row{Status: s, Label: "x"})
+			}
+			rep.MarkIncomplete()
+			if got := rep.Verdict(); got != tc.wantVerdict {
+				t.Errorf("Verdict = %q, want %q", got, tc.wantVerdict)
+			}
+			if got := rep.ExitCode(); got != tc.wantExit {
+				t.Errorf("ExitCode = %d, want %d", got, tc.wantExit)
+			}
+			var exit ExitError
+			if err := rep.Err(); !errors.As(err, &exit) || exit.Code != tc.wantExit {
+				t.Errorf("Err() = %v, want an ExitError with code %d", err, tc.wantExit)
+			}
+			var buf bytes.Buffer
+			if err := rep.WriteText(&buf, false); err != nil {
+				t.Fatalf("WriteText: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.wantLine) {
+				t.Errorf("verdict line missing %q:\n%s", tc.wantLine, buf.String())
+			}
+			buf.Reset()
+			if err := rep.WriteJSON(&buf); err != nil {
+				t.Fatalf("WriteJSON: %v", err)
+			}
+			doc, err := ReadDocument(&buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if doc.Verdict != tc.wantVerdict || doc.Exit != tc.wantExit {
+				t.Errorf("document says %q/%d, want %q/%d", doc.Verdict, doc.Exit, tc.wantVerdict, tc.wantExit)
 			}
 		})
 	}

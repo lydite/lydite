@@ -479,6 +479,16 @@ listing; a digest that included the state would change with every verdict record
 **A state failure is a diagnostic, never a failure.** A state that cannot be opened, read or
 written is reported and the component measures everything, as it would with no state.
 
+**An incomplete run exits 3.** A component `--deadline` stopped before every mutant had a verdict
+renders `unmeasured`, "N of M measured, rerun to resume", and so does one the deadline reached
+before its baseline or before it started. `unmeasured` does not vote, so `cmd/lydite` marks the
+report incomplete (`ui.Report.MarkIncomplete`) and the verdict becomes `ui.VerdictIncomplete`,
+exit `ui.ExitIncomplete` (3) — under `--no-gate` too, since that flag silences a survivor's vote,
+not a measurement that never finished. A failure outranks it: a survivor found before the deadline
+fails its row, is never withdrawn (a deadline is not an interrupt), and the run exits 1. Exit 3 is
+a public contract a workflow reads to tell a run cut short, which a rerun resumes, from one that
+failed.
+
 ## The fold
 
 `lydite mutation merge` folds a matrix of shards, through the same implementation `lydite test

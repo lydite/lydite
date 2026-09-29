@@ -22,6 +22,23 @@ const (
 	// Distinct from VerdictFail because no edit to the branch satisfies it —
 	// it is resolved by a human, outside the repository.
 	VerdictRefer Verdict = "refer"
+	// VerdictIncomplete is exit 3: nothing failed and nothing was referred,
+	// and a measurement the run was asked for stopped before it finished. It
+	// is a run-level fact rather than a row's, because the rows saying so are
+	// unmeasured and an unmeasured row does not vote; without it a job that
+	// ran out of time would exit exactly as green as one that measured
+	// everything.
+	VerdictIncomplete Verdict = "incomplete"
+)
+
+// Exit codes, one per verdict. ExitIncomplete is a public contract: a caller
+// tells a run cut short from a run that failed by it, and a rerun resumes the
+// former.
+const (
+	ExitPass       = 0
+	ExitFail       = 1
+	ExitRefer      = 2
+	ExitIncomplete = 3
 )
 
 // ExitError asks main to exit with Code without printing anything further.
@@ -39,6 +56,9 @@ type Report struct {
 	findings finding.Set
 	crashed  []finding.Crash
 	started  time.Time
+	// incomplete is whether the command left a measurement it was asked for
+	// unfinished; see MarkIncomplete.
+	incomplete bool
 }
 
 // NewReport starts a report, and the clock — the verdict line carries the
@@ -92,6 +112,12 @@ func (r *Report) AddCrashed(c ...finding.Crash) { r.crashed = append(r.crashed, 
 // Crashed returns every crash added so far.
 func (r *Report) Crashed() []finding.Crash { return r.crashed }
 
+// MarkIncomplete says the run stopped before a measurement it was asked for
+// finished. The command decides this, not a row: the rows about it are
+// unmeasured, which is also what a component nobody asked to measure renders
+// as, and only the command knows which of the two it is looking at.
+func (r *Report) MarkIncomplete() { r.incomplete = true }
+
 // Command names the run. It is what the document is keyed by on disk, so a
 // caller saving one does not have to restate a name the report already holds
 // and could disagree with.
@@ -100,6 +126,10 @@ func (r *Report) Command() string { return r.command }
 // Verdict is the worst state any row reached. A failure outranks a referral
 // because it is actionable by the author: telling someone to fetch a human
 // for a change that does not yet build wastes the human.
+//
+// An incomplete run is below both. A failure it already found stands whatever
+// is still unmeasured, and a referral is answered by a human whether or not a
+// rerun finishes the measurement.
 func (r *Report) Verdict() Verdict {
 	verdict := VerdictPass
 	for _, row := range r.rows {
@@ -110,21 +140,27 @@ func (r *Report) Verdict() Verdict {
 			verdict = VerdictRefer
 		}
 	}
+	if verdict == VerdictPass && r.incomplete {
+		return VerdictIncomplete
+	}
 	return verdict
 }
 
 // ExitCode maps the verdict onto a process exit code. StatusUnmeasured and
 // StatusDropped reach this function and change nothing, which is the point:
 // they are loud in the terminal and silent in CI, because a path-filtered
-// coverage job is not a reason to fail someone's build.
+// coverage job is not a reason to fail someone's build. A run the command
+// marked incomplete is the exception it states for itself.
 func (r *Report) ExitCode() int {
 	switch r.Verdict() {
 	case VerdictFail:
-		return 1
+		return ExitFail
 	case VerdictRefer:
-		return 2
+		return ExitRefer
+	case VerdictIncomplete:
+		return ExitIncomplete
 	default:
-		return 0
+		return ExitPass
 	}
 }
 
@@ -137,9 +173,10 @@ func (r *Report) Err() error {
 }
 
 var verdictWord = map[Verdict]string{
-	VerdictPass:  "passed",
-	VerdictFail:  "failed",
-	VerdictRefer: "referred",
+	VerdictPass:       "passed",
+	VerdictFail:       "failed",
+	VerdictRefer:      "referred",
+	VerdictIncomplete: "incomplete",
 }
 
 // WriteText renders the human grammar: every row, a blank line, then the
@@ -160,6 +197,8 @@ func (r *Report) WriteText(w io.Writer, color bool) error {
 		status = StatusFail
 	case VerdictRefer:
 		status = StatusRefer
+	case VerdictIncomplete:
+		status = StatusUnmeasured
 	}
 	_, err := fmt.Fprintf(w, "\n%s\n", pal.paint(status,
 		fmt.Sprintf("%s %s in %.1fs", r.command, verdictWord[verdict], time.Since(r.started).Seconds())))

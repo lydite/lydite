@@ -27,6 +27,7 @@ import (
 	mutationflow "lydite/lydite/internal/flows/mutation"
 	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
+	"lydite/lydite/internal/scheduler"
 	mutationstages "lydite/lydite/internal/stages/mutation"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
@@ -80,7 +81,14 @@ that line. A formatter that moves a trailing comment off its line (Biome does,
 on a line ending in ` + "`{`" + `) needs a ` + "`// biome-ignore format`" + ` comment above it to
 keep the marker where the mutation gate reads it. The declared mutant is
 generated, counted and never run — and, because internal/referral reads the
-same token as a suppression, declaring one refers the change to a human.`,
+same token as a suppression, declaring one refers the change to a human.
+
+A run given --deadline that reaches it before every mutant has a verdict keeps
+the verdicts it has, and a rerun resumes from them. Each component it cut short
+reads "N of M measured, rerun to resume", and the command exits 3 — under
+--no-gate too, because an unmeasured row does not vote and a job that ran out
+of time must not exit as green as one that measured everything. A survivor
+already found still fails the run, and then it exits 1.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("mutation")
@@ -239,7 +247,7 @@ same token as a suppression, declaring one refers the change to a human.`,
 	// it measured rather than being killed and keeping nothing. See ADR 0075.
 	cmd.Flags().DurationVar(&deadline, "deadline", 0,
 		"how long after lydite starts to stop dispatching mutants and cancel those in flight, "+
-			"keeping every verdict reached for a rerun to resume from; no deadline by default")
+			"keeping every verdict reached for a rerun to resume from and exiting 3 if any went unmeasured; no deadline by default")
 	cmd.Flags().BoolVar(&stream, "stream", false, "mirror each component's output to stderr as it runs, as well as to its log")
 	cmd.Flags().BoolVar(&declined, "declined", false,
 		"write a report saying this repository declined mutation testing for this run, and do nothing else")
@@ -374,7 +382,15 @@ type componentMutation struct {
 	elapsed  time.Duration
 	ran      bool
 	findings []finding.Finding
+	// incomplete is a component the deadline stopped before every one of its
+	// mutants had a verdict. Its outcome is recorded, and its partial counts
+	// are not part of the summary: a run's total over components whose
+	// mutants were not all measured is a figure about nothing in particular.
+	incomplete bool
 }
+
+// kept reports whether the component's outcome stands and is recorded.
+func (m componentMutation) kept() bool { return m.ran || m.incomplete }
 
 // recordMutants writes what this run made of its mutants beside its report.
 //
@@ -576,6 +592,12 @@ type mutationReporting struct {
 // than none. A withdrawn component is absent from what is returned, exactly as
 // one that never ran is.
 //
+// A deadline withdraws nothing. The stage cut short every mutant still in
+// flight and left it without a verdict, so each verdict the run has was
+// decided by a suite nothing killed, and a survivor among them stands. What
+// the deadline stopped renders unmeasured and marks the run incomplete, which
+// exits 3 unless a failure outranks it.
+//
 // What is withdrawn is decided by the row a gating run renders, whatever
 // --no-gate says: the flag turns a survivor's fail into context, and a
 // withdrawal keyed on the displayed row would keep claims under --no-gate that
@@ -601,26 +623,38 @@ func addMutationRows(rep *ui.Report, sel mutationstages.SelectAffectedOut, run m
 			scheduled = append(scheduled, i)
 		}
 	}
+	if run.DeadlineReached {
+		for _, i := range scheduled {
+			rows[i] = deadlineRow(run.Components[i], rows[i])
+		}
+	}
 	if run.Interrupted {
 		gating := make([]ui.Row, len(run.Components))
 		for i, o := range run.Components {
 			gating[i], _ = outcomeRow(o, false)
+			if run.DeadlineReached {
+				gating[i] = deadlineRow(o, gating[i])
+			}
 		}
 		withdrawInterrupted(gating, results, scheduled)
 		// A scheduled component left holding no result was either withdrawn,
 		// and takes the withdrawn row, or never completed, where --no-gate
 		// changes nothing and the gating row is the row it already had.
 		for _, i := range scheduled {
-			if !results[i].ran {
+			if !results[i].kept() {
 				rows[i] = gating[i]
 			}
 		}
+	}
+	incomplete := leftIncomplete(run)
+	if incomplete {
+		rep.MarkIncomplete()
 	}
 
 	// Counted over the components that declare a suite: one that declares none
 	// was never the scheduler's to start, so it is neither a component the
 	// run started nor one it failed to.
-	rep.Add(scheduleRow(endedContext(run.Interrupted), run.Schedule, run.Suites, how.limit))
+	rep.Add(mutationScheduleRow(run, how.limit, incomplete))
 	addRows(rep, rows, sel.Ordered, skipped, mutationLabel)
 	for _, r := range results {
 		rep.AddFindings(r.findings...)
@@ -629,17 +663,72 @@ func addMutationRows(rep *ui.Report, sel mutationstages.SelectAffectedOut, run m
 		rep.Add(mutationSummaryRow(results))
 	}
 
-	// Outcomes and results are indexed in parallel, and `ran` is set only where
-	// a component's mutants were generated and executed to a summary — and not
-	// where withdrawInterrupted took the run back, which resets the result and
-	// with it that flag.
+	// Outcomes and results are indexed in parallel, and a result is kept only
+	// where a component's mutants were generated and executed to a summary, or
+	// to the deadline — and not where withdrawInterrupted took the run back,
+	// which resets the result and with it both flags.
 	var kept []mutationstages.ComponentOutcome
 	for i, o := range run.Components {
-		if results[i].ran {
+		if results[i].kept() {
 			kept = append(kept, o)
 		}
 	}
 	return kept
+}
+
+// leftIncomplete reports whether the run stopped before a measurement it was
+// asked for finished: a component the deadline cut short, or one the deadline
+// reached before its baseline or before it started at all. Every one of them
+// renders unmeasured, and an unmeasured row does not vote, so this is what
+// keeps a run that ran out of time from exiting as one that measured
+// everything.
+func leftIncomplete(run mutationstages.RunMutantsOut) bool {
+	for _, o := range run.Components {
+		switch {
+		case o.Kind == mutationstages.KindIncomplete:
+			return true
+		case run.DeadlineReached && deadlineStopped(o):
+			return true
+		}
+	}
+	return false
+}
+
+// deadlineStopped reports whether a component of a run that reached its
+// deadline was stopped by it before its mutants were known: never started, or
+// started and not past its baseline.
+func deadlineStopped(o mutationstages.ComponentOutcome) bool {
+	return o.Scheduled && (o.Kind == mutationstages.KindNotRun || o.Kind == mutationstages.KindBaselineInterrupted)
+}
+
+// deadlineRow is the row of a component the deadline stopped before its
+// mutants were known, naming the deadline rather than an interrupt, and row
+// itself for every other component.
+func deadlineRow(o mutationstages.ComponentOutcome, row ui.Row) ui.Row {
+	if !deadlineStopped(o) {
+		return row
+	}
+	if o.Kind == mutationstages.KindNotRun {
+		row.Detail = []string{"the run reached its deadline before this component started, rerun to resume"}
+		return row
+	}
+	return unmeasuredRow(row.Label, "the run reached its deadline before this component's baseline suite ran, rerun to resume")
+}
+
+// mutationScheduleRow is the schedule row, which reads a run the deadline left
+// incomplete as unmeasured rather than as a clean finish. An interrupt still
+// reads as one, and fails the row, whatever the deadline did.
+func mutationScheduleRow(run mutationstages.RunMutantsOut, limit int, incomplete bool) ui.Row {
+	row := scheduleRow(endedContext(run.Interrupted), run.Schedule, run.Suites, limit)
+	if run.Interrupted || !incomplete {
+		return row
+	}
+	row.Status = ui.StatusUnmeasured
+	row.Value = fmt.Sprintf("reached the deadline with %d of %d component(s) started", run.Schedule.Started, run.Suites)
+	if pairs := scheduler.Pairs(run.Schedule.Conflicts); pairs > 0 {
+		row.Value += fmt.Sprintf(", %d pair(s) serialised", pairs)
+	}
+	return row
 }
 
 // endedContext is a context whose Err says whether the run was interrupted, as
@@ -663,10 +752,16 @@ func endedContext(interrupted bool) context.Context {
 // A teardown that failed takes over the row where teardownFailureReplaces says
 // it does, and leaves the counts and findings beside it alone: the mutants
 // said what they had to say whatever the teardown did afterwards.
+//
+// An incomplete component's teardown row still says how far it got, because
+// the verdicts it reached are kept for a rerun to resume from either way.
 func outcomeRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentMutation) {
 	row, out := kindRow(o, noGate)
-	if o.TeardownErr != nil && teardownFailureReplaces(row.Status) {
+	if o.TeardownErr != nil && teardownFailureReplaces(o.Kind, row.Status) {
 		row = lifecycleRow(row.Label, o.TeardownErr)
+		if o.Kind == mutationstages.KindIncomplete {
+			row.Detail = append(row.Detail, incompleteProgress(o))
+		}
 	}
 	return row, out
 }
@@ -748,10 +843,53 @@ func kindRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentM
 			row.Detail = append(row.Detail, reusedNote(o.Reused, o.Summary.Total()))
 		}
 		return completedRow(row, noGate), out
+	case mutationstages.KindIncomplete:
+		return incompleteRow(label, log, o, noGate)
 	default:
 		return ui.Row{Status: ui.StatusFail, Label: label, Value: "not runnable",
 			Detail: []string{fmt.Sprintf("lydite has no account of a %s outcome", o.Kind)}}, componentMutation{}
 	}
+}
+
+// incompleteRow is the row of a component the deadline stopped before every
+// one of its mutants had a verdict.
+//
+// Unmeasured, because the mutants it has no verdict for may hold a survivor,
+// and a green row over them would claim a gate cleared what it never ran. The
+// exception is a survivor already found: it fails the row outright, since no
+// verdict a rerun reaches can take it back, and under --no-gate it is context
+// exactly as a completed component's survivor is. Either way the row says how
+// far the run got, and its findings are the survivors it found.
+func incompleteRow(label string, log *componentLog, o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentMutation) {
+	out := componentMutation{incomplete: true}
+	progress := incompleteProgress(o)
+	var row ui.Row
+	if o.Summary.Survived > 0 {
+		c := o.Component
+		row, out.findings = mutationRow(label, c.Name, c.Dir, log, o.Summary, o.Results, o.Scoped, o.Elapsed)
+		row.Detail = append([]string{progress}, row.Detail...)
+		row = completedRow(row, noGate)
+	} else {
+		row = ui.Row{Status: ui.StatusUnmeasured, Label: label, Value: progress,
+			Detail: []string{"the run reached its deadline before every mutant had a verdict"}}
+		if a := aside(o.Summary); a != "" {
+			row.Detail = append(row.Detail, a)
+		}
+		if n := unmatchedNote(o.Summary); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		row = detailed(row, log)
+	}
+	if o.Reused > 0 {
+		row.Detail = append(row.Detail, reusedNote(o.Reused, o.Summary.Total()))
+	}
+	return row, out
+}
+
+// incompleteProgress is how far an incomplete component got, in the words its
+// row uses.
+func incompleteProgress(o mutationstages.ComponentOutcome) string {
+	return fmt.Sprintf("%d of %d measured, rerun to resume", o.Measured, o.Wanted)
 }
 
 // withdrawInterrupted takes back every failing verdict a cancelled run reached.
@@ -837,10 +975,18 @@ func completedRow(row ui.Row, noGate bool) ui.Row {
 // under --no-gate, and a teardown failure is a command that did not run rather
 // than a measurement, so the flag does not excuse it.
 //
+// An incomplete component's unmeasured row is the same measurement, stopped at
+// the deadline: nothing it found was wrong, so it takes the teardown's row too.
+// Hiding the teardown behind it would leave a stack running under a row that
+// does not fail.
+//
 // A row that already names why the component could not be measured keeps that
 // reason, and so does a survivor a gating run is failing on: both are upstream
 // of the teardown, and the cause a reader acts on is the one they name.
-func teardownFailureReplaces(status ui.Status) bool {
+func teardownFailureReplaces(kind mutationstages.OutcomeKind, status ui.Status) bool {
+	if kind == mutationstages.KindIncomplete && status == ui.StatusUnmeasured {
+		return true
+	}
 	return status == ui.StatusPass || status == ui.StatusContext
 }
 
