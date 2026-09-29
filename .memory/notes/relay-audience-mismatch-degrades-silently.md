@@ -1,42 +1,56 @@
 ---
 name: relay-audience-mismatch-degrades-silently
 kind: gotcha
-description: The relay's AUDIENCE and the workflow's requested audience are two independently-edited values with no shared source, and a mismatch falls back to the bot token forever without going red.
+description: The relay's AUDIENCE and a caller's requested audience are two independently-edited values with no shared source, but a mismatch (401) now fails the posting step loudly — only a missing install (409) or an outage (5xx/000) fall back.
 anchors:
   - path: source/cloud-services/pr-relay/wrangler.toml
-    blob: 5e7b4557cc65
+    blob: d9f53f54fac4
   - path: source/cloud-services/pr-relay/src/index.ts
-    blob: a660487f0cc0
+    blob: cccaa62747de
   - path: source/cloud-services/libs/github-app/src/oidc.ts
-    blob: c3affd4a9859
+    blob: 148f32f2e36f
   - path: .github/actions/lydite-comment/action.yml
-    blob: dafe821c9fd6
-  - path: .github/workflows/lydite-pr.yml
-    blob: 1de36959efb1
+    blob: 232a9df93a50
+  - path: .github/actions/lydite-threads/action.yml
+    blob: 7ac719f13a0a
+  - path: source/cli/cmd/lydite/mergequeue.go
+    blob: 884ec4e21b1e
 confidence: verified
 ---
 
 `verifyActionsToken` rejects a token whose `claims.aud` is not the relay's own
-(`libs/github-app/src/oidc.ts:94-95`, "the token was minted for another audience").
-The expected value is passed as `env.AUDIENCE` (`pr-relay/src/index.ts:99`), a hardcoded
-Worker var: `AUDIENCE = "https://pr.lydite.org"` (`pr-relay/wrangler.toml:19`).
+(`libs/github-app/src/oidc.ts:113-114`, "the token was minted for another audience").
+The expected value is passed as `env.AUDIENCE` (`pr-relay/src/index.ts:249`), a
+hardcoded Worker var: `AUDIENCE = "https://pr.lydite.org"` (`pr-relay/wrangler.toml:19`).
+The caller mints its token against a separately-configured origin (e.g.
+`vars.LYDITE_RELAY_URL`, a GitHub Actions repository variable) with no shared constant
+or check tying the two strings together — they must be byte-identical by convention
+alone.
 
-The caller mints the token against a different, independently-set string: the action
-requests `"${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${RELAY}"`
-(`.github/actions/lydite-comment/action.yml:65`) where `RELAY` is
-`vars.LYDITE_RELAY_URL`, a GitHub Actions repository variable passed in at
-`.github/workflows/lydite-pr.yml:581` and again at `:591`.
+**This drifting apart is no longer a silent failure.** `.github/actions/lydite-comment/action.yml`
+and `.github/actions/lydite-threads/action.yml` both now sort the relay's answer into three
+buckets (documented in each action's own header comment, `lydite-comment/action.yml:15-26`):
 
-Nothing ties the two together — no shared constant, no check, no comment on either side
-naming the other. One lives in a file deployed to Cloudflare, the other in repo
-settings, and they must be byte-identical.
+- **409, or no relay configured** — the App isn't installed on this repository. Falls back
+  silently to `github-actions[bot]` (the ordinary, supported state for an opted-out repo).
+- **5xx, or curl's `000`** — an outage. Falls back, under a `::warning::`.
+- **Anything else — 401 (bad audience), 400 (bad payload), or an unambiguous 403** — fails
+  the step outright (`::error::`, `exit 1`, no `posted`/`applied` output, no fallback
+  comment posted). An audience mismatch now produces a red job naming the status, not a
+  silently-green one under the wrong byline.
 
-The failure is silent and permanent. On any drift (trailing slash, http vs https, a
-stale value after a custom-domain change) the relay answers 401, and the action's relay
-step just writes `posted=false` and logs `the relay answered ${status}; falling back to
-this workflow's token` to stderr (`action.yml:82-83`), then the `posted != 'true'` step
-(`action.yml:86`) comments as `github-actions[bot]`. That is indistinguishable in the
-rendered PR comment from the intended app-not-installed fallback, and nothing goes red —
-the fallback is a supported, permanently-green path, so a misconfiguration here can sit
-unnoticed indefinitely. Check the Worker var against the repo var directly; the comment
-appearing is not evidence the relay ran.
+So the note's original claim — "a mismatch falls back to the bot token forever without
+going red" — no longer holds; it was true before the three-way sort landed. What is still
+true: `AUDIENCE` and the caller's relay URL remain two independently-edited values with no
+shared source, so a drift is still possible and still worth checking directly — it just now
+announces itself as a failing `publish`/`threads` step instead of hiding behind a green one.
+
+**`cmd/lydite/mergequeue.go`'s relay call is a separate, unrelated code path** (`submitQueueComparison`,
+`actionsIDToken`): it mints its own OIDC token in-process against `--relay` and its own doc
+comment states "every answer but 200 fails the run, and nothing falls back" — it was never
+subject to this gotcha, silent or otherwise.
+
+Note also: this repo's own CI does not currently invoke `.github/actions/lydite-comment` at
+all (orchestration moved to `lydite/actions`' reusable workflows per ADR 0051) — see
+[[local-lydite-actions-composites-are-dead-in-this-repo]]. The gotcha above is about the
+composite action's own code, live for any consumer (e.g. `lydite/actions`) that still calls it.

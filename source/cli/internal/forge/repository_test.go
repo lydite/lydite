@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"lydite/lydite/internal/clearance"
+	"lydite/lydite/internal/threads"
 	"lydite/lydite/internal/trust"
 )
 
@@ -40,6 +41,10 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"state": "pending", "context": clearance.Context}})
 		case strings.HasSuffix(r.URL.Path, "/permission"):
 			_ = json.NewEncoder(w).Encode(map[string]string{"permission": "write"})
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/comments"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 99, "body": "nit", "path": "a.go", "line": 3, "position": 1, "subject_type": "line"},
+			})
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"title": "fix: x", "head": map[string]string{"sha": "abc123"}})
 		default:
@@ -74,6 +79,22 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 	if err := scm.CreateComment(ctx, 7, "hello"); err != nil {
 		t.Errorf("CreateComment: %v", err)
 	}
+	if comments, err := scm.ReviewComments(ctx, 7); err != nil || len(comments) != 1 || comments[0].ID != 99 {
+		t.Errorf("ReviewComments = %+v, %v", comments, err)
+	}
+	create := threads.Create{Path: "a.go", Line: 3, Subject: "line", Body: "nit"}
+	if err := scm.CreateReview(ctx, 7, "abc123", []threads.Create{create}); err != nil {
+		t.Errorf("CreateReview: %v", err)
+	}
+	if err := scm.CreateFileComment(ctx, 7, "abc123", threads.Create{Path: "b.go", Subject: "file", Body: "nit"}); err != nil {
+		t.Errorf("CreateFileComment: %v", err)
+	}
+	if err := scm.ReplyToReviewComment(ctx, 7, 99, "ack"); err != nil {
+		t.Errorf("ReplyToReviewComment: %v", err)
+	}
+	if err := scm.DeleteReviewComment(ctx, 99); err != nil {
+		t.Errorf("DeleteReviewComment: %v", err)
+	}
 
 	want := []request{
 		{method: "GET", path: "/repos/lydite/lydite/issues/comments/55"},
@@ -85,6 +106,11 @@ func TestGitHubRepositoryDelegatesEveryCallToTheClient(t *testing.T) {
 		{method: "GET", path: "/repos/lydite/lydite/commits/abc123/statuses"},
 		{method: "POST", path: "/repos/lydite/lydite/statuses/abc123"},
 		{method: "POST", path: "/repos/lydite/lydite/issues/7/comments", body: `{"body":"hello"}`},
+		{method: "GET", path: "/repos/lydite/lydite/pulls/7/comments"},
+		{method: "POST", path: "/repos/lydite/lydite/pulls/7/reviews"},
+		{method: "POST", path: "/repos/lydite/lydite/pulls/7/comments"},
+		{method: "POST", path: "/repos/lydite/lydite/pulls/7/comments/99/replies", body: `{"body":"ack"}`},
+		{method: "DELETE", path: "/repos/lydite/lydite/pulls/comments/99"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d requests %+v, want %d", len(got), got, len(want))

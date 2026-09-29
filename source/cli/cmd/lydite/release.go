@@ -2,16 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/mod/semver"
 
-	"lydite/lydite/internal/declaration"
-	"lydite/lydite/internal/executil"
-	"lydite/lydite/internal/gitstate"
+	"lydite/lydite/internal/flow"
+	releaseflow "lydite/lydite/internal/flows/release"
+	releasestages "lydite/lydite/internal/stages/release"
 	"lydite/lydite/internal/ui"
 )
 
@@ -79,157 +78,95 @@ const declarationsLabel = "declared breaks"
 func runReleaseCheck(ctx context.Context, cmd *cobra.Command, dir, tag string, asJSON, noColor bool) error {
 	streamDiagnostics(asJSON) // [lydite:exclude_from_mutation][every command calls this by convention, but release check runs no executil.Run that could stream — nothing here observes whether it ran]
 
-	tag = releaseTag(ctx, dir, tag)
-	if tag == "" {
-		return fmt.Errorf("release check needs the tag it is checking: pass --tag, " +
-			"run where GITHUB_REF_NAME names a tag, or check the tag out")
-	}
-	rep := ui.NewReport("release")
-
-	// An invalid tag arrives back as an error rather than a verdict: a range
-	// this cannot place is a check that did not run, and the alternative here
-	// is publishing a tag nobody looked at.
-	previous, ok, err := gitstate.PreviousTag(ctx, dir, tag)
+	check, err := releaseflow.New()
 	if err != nil {
 		return err
 	}
-	if !ok {
-		// A shallow checkout with no tags below the target reads exactly like a
-		// genuine first release — both have no candidate to find. Only a
-		// shallow repository is asked here, because a full-history checkout
-		// with no lower tag really is the first release, and reporting that
-		// as an error would refuse a case ADR 0045 states must pass.
-		if shallow, err := isShallow(ctx, dir); err != nil {
-			return err
-		} else if shallow {
-			return fmt.Errorf("%s has no tag below it in a shallow checkout, so a real predecessor cannot be told from none at all: "+
-				"check out with `fetch-depth: 0` and the repository's tags fetched", tag)
-		}
-		return writeReleaseReport(cmd, rep, asJSON, noColor, ui.Row{
-			Status: ui.StatusPass,
-			Label:  declarationsLabel,
-			Value:  fmt.Sprintf("none — %s is the first release and its range is empty", tag),
-		})
-	}
-
-	// The range ends at HEAD, never at the tag string. A tag-triggered run is
-	// checked out detached at the pushed tag, so HEAD is that tag's commit —
-	// and reading to HEAD is also what lets a release be checked from the
-	// commit it is about to be cut at, before the tag object exists.
-	messages, err := gitstate.CommitMessages(ctx, dir, previous, "HEAD")
+	// The report's duration is measured from here, so it covers the run
+	// whose verdict it carries.
+	rep := ui.NewReport("release")
+	// GITHUB_REF_NAME is the short name of whatever ref triggered a run, and is
+	// a tag only when GITHUB_REF_TYPE says so — on a branch build it holds a
+	// branch name, and checking a branch name as a version would report a
+	// misconfiguration as a malformed tag. Both travel to the flow, which reads
+	// the name only when the type is a tag.
+	r, err := check.Run(ctx, releaseflow.Params{
+		Dir:     dir,
+		Tag:     tag,
+		RefType: os.Getenv("GITHUB_REF_TYPE"),
+		RefName: os.Getenv("GITHUB_REF_NAME"),
+	}.Inputs())
 	if err != nil {
-		return fmt.Errorf("the commits in %s..HEAD cannot be read: %w"+
-			"\n       %s must exist here as a tag and its commit must be present and reachable from HEAD:"+
-			"\n       check out with `fetch-depth: 0` and the repository's tags fetched", previous, err, previous)
+		return releaseError(err)
 	}
+	row, err := releaseRow(r)
+	if err != nil {
+		return err
+	}
+	return writeReleaseReport(cmd, rep, asJSON, noColor, row)
+}
 
-	var declaring []string
-	for _, message := range messages {
-		if declaration.Declared(message) {
-			declaring = append(declaring, subject(message))
-		}
+// releaseError is a run's failure as this command reports it: the stage's own
+// error, not the flow's framing of it, and a run with no tag to check named by
+// the three places one can come from.
+func releaseError(err error) error {
+	var failed *flow.StageError
+	if errors.As(err, &failed) {
+		err = failed.Err
 	}
-	// The range the report names is the version range the verdict is about,
-	// which is what a consumer upgrades along. HEAD is the revision the commits
-	// were read to and is a ref that moves, so naming it would describe the
-	// release by something that no longer points there when anybody looks.
-	rng := previous + ".." + tag
-	if len(declaring) == 0 {
-		return writeReleaseReport(cmd, rep, asJSON, noColor, ui.Row{
+	if errors.Is(err, releasestages.ErrNoTag) {
+		return errors.New("release check needs the tag it is checking: pass --tag, " +
+			"run where GITHUB_REF_NAME names a tag, or check the tag out")
+	}
+	return err
+}
+
+// releaseRow is the verdict on the range a run read.
+//
+// A first release has no range, so judge never ran and its output is never
+// read: the row says the range is empty rather than reporting a clean one.
+func releaseRow(r *flow.Result) (ui.Row, error) {
+	resolved, err := flow.Output[releasestages.ResolveTagOut](r, releaseflow.StageResolveTag)
+	if err != nil {
+		return ui.Row{}, err
+	}
+	previous, err := flow.Output[releasestages.PreviousTagOut](r, releaseflow.StagePreviousTag)
+	if err != nil {
+		return ui.Row{}, err
+	}
+	if previous.First {
+		return ui.Row{
 			Status: ui.StatusPass,
 			Label:  declarationsLabel,
-			Value:  fmt.Sprintf("none in the %d commits in %s", len(messages), rng),
-		})
+			Value:  fmt.Sprintf("none — %s is the first release and its range is empty", resolved.Tag),
+		}, nil
 	}
-	if bumpAdmitsBreak(previous, tag) {
-		return writeReleaseReport(cmd, rep, asJSON, noColor, ui.Row{
+	judged, err := flow.Output[releasestages.JudgeOut](r, releaseflow.StageJudge)
+	if err != nil {
+		return ui.Row{}, err
+	}
+	if len(judged.Declaring) == 0 {
+		return ui.Row{
 			Status: ui.StatusPass,
 			Label:  declarationsLabel,
-			Value:  fmt.Sprintf("%d of the %d commits in %s, and this bump admits one", len(declaring), len(messages), rng),
-			Detail: declaring,
-		})
+			Value:  fmt.Sprintf("none in the %d commits in %s", judged.Count, judged.Range),
+		}, nil
 	}
-	return writeReleaseReport(cmd, rep, asJSON, noColor, ui.Row{
+	if judged.Admits {
+		return ui.Row{
+			Status: ui.StatusPass,
+			Label:  declarationsLabel,
+			Value:  fmt.Sprintf("%d of the %d commits in %s, and this bump admits one", len(judged.Declaring), judged.Count, judged.Range),
+			Detail: judged.Declaring,
+		}, nil
+	}
+	return ui.Row{
 		Status: ui.StatusFail,
 		Label:  declarationsLabel,
-		Value:  fmt.Sprintf("%d of the %d commits in %s, and this bump admits none", len(declaring), len(messages), rng),
-		Detail: append(declaring,
-			fmt.Sprintf("a declared break lands where the leftmost non-zero component of %s increases", previous)),
-	})
-}
-
-// releaseTag is the tag being released, in descending order of how explicitly
-// it was stated: what a caller passed, then the tag the workflow run is on,
-// then the tag checked out here.
-//
-// GITHUB_REF_NAME is the short name of whatever ref triggered a run, so it is
-// read only when GITHUB_REF_TYPE says that ref is a tag — on a branch build it
-// holds a branch name, and checking a branch name as a version would report a
-// misconfiguration as a malformed tag.
-func releaseTag(ctx context.Context, dir, tag string) string {
-	if tag != "" {
-		return tag
-	}
-	if os.Getenv("GITHUB_REF_TYPE") == "tag" {
-		if name := os.Getenv("GITHUB_REF_NAME"); name != "" {
-			return name
-		}
-	}
-	// --exact-match, so a commit that merely descends from a tag resolves to
-	// nothing: the check is about the tag this commit is, not the one before
-	// it.
-	if r := executil.RunQuiet(ctx, dir, "git", "describe", "--tags", "--exact-match", "HEAD"); r.Ok() {
-		return strings.TrimSpace(r.Output)
-	}
-	return ""
-}
-
-// isShallow reports whether dir is a shallow checkout — one that may hold
-// commits without holding the tags that decorate its own history, which is
-// exactly the shape that makes "no previous tag" ambiguous between a genuine
-// first release and one the checkout never fetched.
-func isShallow(ctx context.Context, dir string) (bool, error) {
-	r := executil.RunQuiet(ctx, dir, "git", "rev-parse", "--is-shallow-repository")
-	if !r.Ok() {
-		return false, fmt.Errorf("git rev-parse --is-shallow-repository: %w", r.Err)
-	}
-	return strings.TrimSpace(r.Output) == "true", nil
-}
-
-// subject is a commit's first line, which is what identifies it to a person
-// reading the failure. The whole message is what declaration reads, because a
-// break may be declared in a footer.
-func subject(message string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(message), "\n")
-	return strings.TrimSpace(line)
-}
-
-// bumpAdmitsBreak reports whether moving from previous to tag increases the
-// leftmost non-zero component of previous, which is the bump ADR 0010 requires
-// a declared break to land on.
-//
-// The comparison is over the prefix through that component rather than over
-// the component alone, so a release crossing eras answers correctly:
-// v0.2.0 → v1.0.0 admits a break even though the minor it is measured on went
-// from 2 to 0.
-func bumpAdmitsBreak(previous, tag string) bool {
-	p, t := releaseVersion(previous), releaseVersion(tag)
-	switch {
-	case semver.Major(p) != "v0":
-		return semver.Compare(semver.Major(t), semver.Major(p)) > 0
-	case semver.MajorMinor(p) != "v0.0":
-		return semver.Compare(semver.MajorMinor(t), semver.MajorMinor(p)) > 0
-	default:
-		return semver.Compare(t, p) > 0
-	}
-}
-
-// releaseVersion is the version a tag releases, with any prerelease and build
-// metadata dropped: v0.3.0-rc.1 is the 0.3.0 line reaching a consumer early,
-// and the bump it carries is 0.3.0's.
-func releaseVersion(tag string) string {
-	canonical := semver.Canonical(tag)
-	return strings.TrimSuffix(canonical, semver.Prerelease(canonical))
+		Value:  fmt.Sprintf("%d of the %d commits in %s, and this bump admits none", len(judged.Declaring), judged.Count, judged.Range),
+		Detail: append(judged.Declaring,
+			fmt.Sprintf("a declared break lands where the leftmost non-zero component of %s increases", previous.Previous)),
+	}, nil
 }
 
 // writeReleaseReport renders the verdict and returns the exit code it owns.

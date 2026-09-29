@@ -285,6 +285,12 @@ own verdict.
 
 ## The threads
 
+**`lydite threads` runs as a flow.** Its stages live in `internal/stages/threads`, declared by
+`internal/flows/threads`; the CLI in `cmd/lydite/threads.go` renders what the flow's `Result`
+carries and reads no credential itself. Trust and the repository are declared first, before the
+findings are even read — see [`architecture.md`](architecture.md)'s "The threads flow" section
+and [ADR 0073](../../docs/adr/0073-threads-declares-trust-first-and-writes-only-what-it-listed.md).
+
 **`lydite threads` owns the fetch, the delta and the apply.** It reads `--reports` (repeatable),
 lists the threads already standing on the pull request, computes what reconciles them with this
 run's located findings, and **always** writes that to `--ops <file>`. It applies it only under
