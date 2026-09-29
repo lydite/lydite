@@ -842,6 +842,13 @@ func TestProvisionPnpmRefusesAnUnverifiableExe(t *testing.T) {
 				return pnpmTarballDepending(t, pnpmVersion, deps)
 			},
 			nil, nil, "not an exact version"},
+		{"a release naming its exe with a v-prefixed version",
+			func(t *testing.T) []byte {
+				deps := exeDeps(pnpmVersion)
+				deps[hostExe(t)] = "v" + pnpmVersion
+				return pnpmTarballDepending(t, pnpmVersion, deps)
+			},
+			nil, nil, "not the same version"},
 		{"an exe tarball carrying no pnpm binary",
 			func(t *testing.T) []byte { return pnpmTarball(t, pnpmVersion) },
 			pnpmExeTarballMissingBinary,

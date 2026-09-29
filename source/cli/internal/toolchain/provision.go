@@ -582,7 +582,7 @@ func pinnedExe(pkgDir, exe, version string) error {
 	switch {
 	case !ok:
 		return fmt.Errorf("pnpm@%s names no %s among its optionalDependencies", version, exe)
-	case pinned(want) == "" || strings.HasPrefix(want, "v"):
+	case pinned(want) == "":
 		return fmt.Errorf("pnpm@%s depends on %s at %q, not an exact version", version, exe, want)
 	case want != version:
 		return fmt.Errorf("pnpm@%s depends on %s@%s, not the same version", version, exe, want)
