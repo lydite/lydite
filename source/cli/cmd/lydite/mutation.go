@@ -739,6 +739,12 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 		if n := unmatchedNote(s); n != "" {
 			row.Detail = append(row.Detail, n)
 		}
+		if n := unboundedNote(results); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		if n := heldOpenNote(results); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
 		return detailed(row, log), nil
 	}
 	// The elapsed time is in the value rather than under the row, because a

@@ -191,6 +191,29 @@ func TestARowSaysWhenAMutantsOutputWasHeldOpen(t *testing.T) {
 	}
 }
 
+// A component whose every mutant was unviable or acknowledged is unmeasured,
+// not passing — and that row says just as loudly as a passing or failing one
+// when a mutant it never scored still left something running or unbounded:
+// the denominator being zero does not mean nothing was observed.
+func TestAnUnmeasuredRowStillSaysWhenAMutantHeldOutputOpen(t *testing.T) {
+	results := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Unviable, Detail: "the run was interrupted before this mutant finished",
+		OutputHeldOpen: true,
+	}}
+	row, findings := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, results, nil, time.Second)
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("status = %q, want %q", row.Status, ui.StatusUnmeasured)
+	}
+	if findings != nil {
+		t.Errorf("an unmeasured row reports findings: %v", findings)
+	}
+	if !detailSaying(row, "still running") {
+		t.Errorf("an unmeasured row from a run that held output open says %v", row.Detail)
+	}
+}
+
 func detailSaying(row ui.Row, want string) bool {
 	for _, d := range row.Detail {
 		if strings.Contains(d, want) {
