@@ -181,6 +181,14 @@ type RunMutantsIn struct {
 	Stream bool
 	// Diagnostics is where a declaration that matched no mutant is named.
 	Diagnostics io.Writer
+	// StateDir is the resume state root, and empty when resume is off. Fresh
+	// asks for what it holds to be ignored, LyditeVersion is the lydite that
+	// wrote what is recorded, and TreeDigest is the digest of the tree the
+	// run mutates.
+	StateDir      string
+	Fresh         bool
+	LyditeVersion string
+	TreeDigest    string
 }
 
 // RunMutantsOut is what became of every selected component, and of the run.
