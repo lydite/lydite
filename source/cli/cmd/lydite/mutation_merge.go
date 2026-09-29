@@ -14,6 +14,7 @@ import (
 	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/flow"
 	mutationflow "lydite/lydite/internal/flows/mutation"
+	"lydite/lydite/internal/mutation"
 	"lydite/lydite/internal/runner"
 	mutationstages "lydite/lydite/internal/stages/mutation"
 	shardstages "lydite/lydite/internal/stages/shards"
@@ -154,7 +155,7 @@ func addMergedMutationRows(rep *ui.Report, decl component.File, read mutationMer
 	if row, ok := foldedScheduleRow(inputs); ok {
 		rep.Add(row)
 	}
-	problems = append(problems, mutationRows(rep, decl, inputs, read.projections.Projections)...)
+	problems = append(problems, mutationRows(rep, decl, neverPassingIncomplete(inputs, read.folded.Counts), read.projections.Projections)...)
 	// A tree the shards disagree about is reported under `shards`, which is the
 	// row that says these documents are not one run. The counts still fold from
 	// the rows, because a fold that dropped them would answer a narrower
@@ -165,6 +166,105 @@ func addMergedMutationRows(rep *ui.Report, decl component.File, read mutationMer
 	rep.Add(foldedMutationRow(inputs, read.folded.Counts, decl))
 	carryUnhandled(rep, inputs, func(label string) bool { return foldedMutationLabel(label, decl) })
 	shardsRow(rep, decl, inputs, problems)
+	if foldIncomplete(inputs, read.folded.Counts, decl) {
+		rep.MarkIncomplete()
+	}
+}
+
+// foldIncomplete reports whether any shard left a measurement it was asked for
+// unfinished, which makes the fold incomplete too: incomplete wins, because a
+// component one shard stopped is not measured by another shard having finished
+// something else.
+//
+// Any of three says so. The folded counts hold an incomplete component; a
+// shard's own report reads incomplete, which is also how a component the
+// deadline reached before its baseline is known, since it has no counts at
+// all; or a component's carried row says how far it got, which is all a shard
+// whose counts were not read leaves behind. The rows saying so are unmeasured
+// and do not vote, so without this a fold over a shard that ran out of time
+// would exit as green as one over shards that measured everything.
+func foldIncomplete(inputs []shardInput, counts mutantsDoc, decl component.File) bool {
+	if len(counts.IncompleteComponents) > 0 {
+		return true
+	}
+	for _, in := range inputs {
+		if in.read && in.doc.Verdict == ui.VerdictIncomplete {
+			return true
+		}
+	}
+	for _, c := range decl.Components {
+		for _, row := range rowsFor(inputs, mutationLabel(c.Name)) {
+			if rowIncomplete(row) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// incompleteProgressLine is the progress an incomplete component's row states,
+// as its value or as a line of its detail, in the words incompleteProgress
+// gives it.
+var incompleteProgressLine = regexp.MustCompile(`^\d+ of \d+ measured, rerun to resume$`)
+
+// rowIncomplete reports whether a component's row is one the deadline stopped
+// before every mutant had a verdict.
+//
+// It is read off the row because a shard whose counts were not read leaves
+// nothing else saying so, and the row of such a component that found a
+// survivor states its score in exactly the words a complete one does: read
+// back as a score, its partial count would fold as a finished one.
+func rowIncomplete(row ui.Row) bool {
+	if incompleteProgressLine.MatchString(row.Value) {
+		return true
+	}
+	for _, d := range row.Detail {
+		if incompleteProgressLine.MatchString(d) {
+			return true
+		}
+	}
+	return false
+}
+
+// neverPassingIncomplete is inputs with every row of a component the folded
+// counts hold incomplete kept from reading `pass`.
+//
+// A shard renders such a component unmeasured, or failing on a survivor it
+// found, and its row is carried as it is. A row claiming a pass beside counts
+// that say the component did not finish is a shard contradicting itself, and
+// of the two the fold takes the answer that does not render a gate that never
+// finished as one that cleared: the row becomes the unmeasured one the counts
+// describe. inputs itself is left as it is.
+func neverPassingIncomplete(inputs []shardInput, counts mutantsDoc) []shardInput {
+	if len(counts.IncompleteComponents) == 0 {
+		return inputs
+	}
+	out := make([]shardInput, len(inputs))
+	for i, in := range inputs {
+		rows := make([]ui.Row, len(in.doc.Rows))
+		for j, row := range in.doc.Rows {
+			rows[j] = row
+			if row.Status != ui.StatusPass {
+				continue
+			}
+			for name, c := range counts.IncompleteComponents {
+				if row.Label == mutationLabel(name) {
+					rows[j] = foldedIncompleteRow(row.Label, *c.Incomplete)
+				}
+			}
+		}
+		in.doc.Rows = rows
+		out[i] = in
+	}
+	return out
+}
+
+// foldedIncompleteRow is the unmeasured row of a component the counts say did
+// not finish, in the words a run gives it.
+func foldedIncompleteRow(label string, p mutation.IncompleteCounts) ui.Row {
+	return ui.Row{Status: ui.StatusUnmeasured, Label: label,
+		Value:  incompleteProgress(mutationstages.ComponentOutcome{Measured: p.Measured, Wanted: p.Wanted}),
+		Detail: []string{"the run reached its deadline before every mutant had a verdict"}}
 }
 
 // mutationRows is componentRowsNoting over the declaration, with every
@@ -310,6 +410,11 @@ var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived)
 // conjunction of the rows above it — and each of those has already failed the
 // run if it had a survivor.
 //
+// A component that did not finish is left out of it, whether its counts or its
+// row say so, and the row says how many were: a partial count summed beside
+// complete ones is a figure about nothing in particular, and its survivors
+// already fail the component's own row.
+//
 // The elapsed time is the sum over the components that recorded one, which is
 // machine time and not wall-clock: shards run beside each other, so no clock
 // ever read this, and it is the same quantity an unsharded run's own summary
@@ -317,9 +422,13 @@ var killedOf = regexp.MustCompile(`^(\d+) of (\d+) mutant\(s\) (killed|survived)
 // a shard with no document, or one an older lydite wrote — is left out of it,
 // and the row says how many contributed rather than counting them at nought.
 func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.File) ui.Row {
-	killed, total, covered, timed := 0, 0, 0, 0
+	killed, total, covered, timed, cut := 0, 0, 0, 0, 0
 	var elapsed time.Duration
 	for _, c := range decl.Components {
+		if _, ok := counts.IncompleteComponents[c.Name]; ok {
+			cut++
+			continue
+		}
 		if s, ok := counts.Components[c.Name]; ok {
 			// Every component the document holds ran, including one whose
 			// mutants said nothing about the suite — its row is `unmeasured`
@@ -334,6 +443,10 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			continue
 		}
 		for _, row := range rowsFor(inputs, mutationLabel(c.Name)) {
+			if rowIncomplete(row) {
+				cut++
+				continue
+			}
 			m := killedOf.FindStringSubmatch(row.Value)
 			if m == nil {
 				continue
@@ -346,8 +459,13 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 			killed, total, covered = killed+n, total+of, covered+1
 		}
 	}
+	var unfinished []string
+	if cut > 0 {
+		unfinished = []string{fmt.Sprintf(
+			"%d component(s) stopped before every mutant had a verdict, and are left out of the total", cut)}
+	}
 	if covered == 0 {
-		return ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "no component was mutated"}
+		return ui.Row{Status: ui.StatusContext, Label: "mutation", Value: "no component was mutated", Detail: unfinished}
 	}
 	row := ui.Row{Status: ui.StatusContext, Label: "mutation",
 		Value: fmt.Sprintf("%d of %d mutant(s) killed across %d component(s)", killed, total, covered)}
@@ -363,5 +481,6 @@ func foldedMutationRow(inputs []shardInput, counts mutantsDoc, decl component.Fi
 		// recorded none is the one a reader has to go and look at.
 		row.Detail = []string{"no shard recorded how long its components took"}
 	}
+	row.Detail = append(row.Detail, unfinished...)
 	return row
 }

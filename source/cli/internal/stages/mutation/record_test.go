@@ -168,3 +168,29 @@ func TestACountsDocumentIsWrittenWhenItCannotBeIgnored(t *testing.T) {
 		t.Errorf("warned %q", warnings.String())
 	}
 }
+
+// A component the deadline stopped is recorded apart from the complete ones,
+// with how far it got beside the verdicts it reached: dropped, its survivors
+// would reach no fold, and listed among the complete, its partial count would
+// read as a finished score to anything unaware of the marker.
+func TestAnIncompleteOutcomeIsRecordedAsIncomplete(t *testing.T) {
+	cut := completed("app", mutation.Summary{Killed: 1, Survived: 1}, 7*time.Second)
+	cut.Kind, cut.Measured, cut.Wanted, cut.Reused = KindIncomplete, 2, 5, 1
+
+	doc := countsOf("tree", []ComponentOutcome{cut, completed("lib", mutation.Summary{Killed: 3}, time.Second)})
+	if _, ok := doc.Components["app"]; ok {
+		t.Errorf("the incomplete component is among the complete: %+v", doc.Components)
+	}
+	want := mutation.CountsOf(mutation.Summary{Killed: 1, Survived: 1}, 7*time.Second)
+	want.Reused = 1
+	want.Incomplete = &mutation.IncompleteCounts{Measured: 2, Wanted: 5}
+	if got := doc.IncompleteComponents["app"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("app = %+v, want %+v", got, want)
+	}
+	if _, ok := doc.Components["lib"]; !ok || len(doc.IncompleteComponents) != 1 {
+		t.Errorf("document = %+v, want lib complete and app alone incomplete", doc)
+	}
+	if none := countsOf("tree", []ComponentOutcome{completed("lib", mutation.Summary{Killed: 3}, time.Second)}); none.IncompleteComponents != nil {
+		t.Errorf("a run nothing stopped wrote incomplete components: %+v", none.IncompleteComponents)
+	}
+}

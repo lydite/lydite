@@ -2,16 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"lydite/lydite/internal/component"
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/mutation"
 	shardreport "lydite/lydite/internal/shard"
+	mutationstages "lydite/lydite/internal/stages/mutation"
 	"lydite/lydite/internal/ui"
 )
 
@@ -401,5 +405,230 @@ func TestFindingsCrossShardsInReportsOrderNotDeclarationOrder(t *testing.T) {
 	if doc.Findings[0].Component != "b" || doc.Findings[1].Component != "a" {
 		t.Errorf("findings are in component order %q, %q; want the --reports order (b's shard first)",
 			doc.Findings[0].Component, doc.Findings[1].Component)
+	}
+}
+
+// incompleteShard writes one shard's report directory the way a run the
+// deadline stopped leaves it: a report marked incomplete, its rows, and the
+// counts beside it — or none, when counts is nil.
+func incompleteShard(t *testing.T, counts *mutantsDoc, rows ...ui.Row) string {
+	t.Helper()
+	dir := t.TempDir()
+	rep := ui.NewReport("mutation")
+	rep.MarkIncomplete()
+	for _, r := range rows {
+		rep.Add(r)
+	}
+	f, err := os.Create(filepath.Join(dir, documentName("mutation"))) // #nosec G304 -- a temp directory this test owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rep.WriteJSON(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if counts != nil {
+		data, err := json.Marshal(counts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, mutantsName), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// incompleteCountsOf is the counts document of a shard whose component a the
+// deadline stopped with measured of wanted mutants decided, s counting them.
+func incompleteCountsOf(s mutation.Summary, measured, wanted int) *mutantsDoc {
+	counts := mutation.CountsOf(s, 7*time.Second)
+	counts.Incomplete = &mutation.IncompleteCounts{Measured: measured, Wanted: wanted}
+	return &mutantsDoc{Tree: "abc", IncompleteComponents: map[string]mutantCounts{"a": counts}}
+}
+
+// completeShardB is a shard that mutated b to the end and killed everything.
+func completeShardB(t *testing.T) string {
+	t.Helper()
+	return countsShard(t,
+		mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"b": {Killed: 3, ElapsedSeconds: 30}}},
+		ui.Row{Status: ui.StatusPass, Label: mutationLabel("b"), Value: "3 of 3 mutant(s) killed in 30s"})
+}
+
+// Incomplete wins the fold. A component any shard left unfinished keeps the
+// row its shard gave it, out of the summary's total, and the fold exits 3 as
+// the shard did — under --no-gate too, since the flag silences a survivor and
+// not a measurement that never finished. A survivor found before the deadline
+// outranks it, and the fold exits 1.
+func TestAnIncompleteShardMakesTheFoldIncomplete(t *testing.T) {
+	survivor := mutationSurvivor()
+	clean := mutation.Summary{Killed: 2}
+	survived := mutation.Summary{Killed: 1, Survived: 1}
+	rowOf := func(s mutation.Summary, results []mutation.Result, noGate bool) ui.Row {
+		row, _ := kindRow(mutationIncomplete("a", s, results, 2, 5), noGate)
+		return row
+	}
+	for _, c := range []struct {
+		name       string
+		shard      func(t *testing.T) string
+		wantExit   int
+		wantStatus ui.Status
+		wantCut    bool
+	}{
+		{
+			name: "every shard complete",
+			shard: func(t *testing.T) string {
+				return countsShard(t, mutantsDoc{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 2, ElapsedSeconds: 7}}},
+					ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "2 of 2 mutant(s) killed in 7s"})
+			},
+			wantExit: ui.ExitPass, wantStatus: ui.StatusPass,
+		},
+		{
+			name: "an incomplete shard",
+			shard: func(t *testing.T) string {
+				return incompleteShard(t, incompleteCountsOf(clean, 2, 5), rowOf(clean, nil, false))
+			},
+			wantExit: ui.ExitIncomplete, wantStatus: ui.StatusUnmeasured, wantCut: true,
+		},
+		{
+			name: "an incomplete shard that found a survivor",
+			shard: func(t *testing.T) string {
+				return incompleteShard(t, incompleteCountsOf(survived, 2, 5), rowOf(survived, []mutation.Result{survivor}, false))
+			},
+			wantExit: ui.ExitFail, wantStatus: ui.StatusFail, wantCut: true,
+		},
+		{
+			name: "an incomplete shard that found a survivor under --no-gate",
+			shard: func(t *testing.T) string {
+				return incompleteShard(t, incompleteCountsOf(survived, 2, 5), rowOf(survived, []mutation.Result{survivor}, true))
+			},
+			wantExit: ui.ExitIncomplete, wantStatus: ui.StatusContext, wantCut: true,
+		},
+		{
+			name: "a shard the deadline stopped before its baseline",
+			shard: func(t *testing.T) string {
+				return incompleteShard(t, &mutantsDoc{Tree: "abc"}, unmeasuredRow(mutationLabel("a"),
+					"the run reached its deadline before this component's baseline suite ran, rerun to resume"))
+			},
+			wantExit: ui.ExitIncomplete, wantStatus: ui.StatusUnmeasured,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			doc, err := runMutationMerge(t, mergeRepo(t), c.shard(t), completeShardB(t))
+			if doc.Exit != c.wantExit {
+				t.Errorf("exit = %d, want %d; rows %+v", doc.Exit, c.wantExit, doc.Rows)
+			}
+			var exit ui.ExitError
+			if (c.wantExit == ui.ExitPass) != (err == nil) || (err != nil && (!errors.As(err, &exit) || exit.Code != c.wantExit)) {
+				t.Errorf("the fold returned %v, want exit %d", err, c.wantExit)
+			}
+			row, ok := rowNamed(doc, mutationLabel("a"))
+			if !ok || row.Status != c.wantStatus {
+				t.Errorf("mutation(a) = %+v, want %s", row, c.wantStatus)
+			}
+			if c.wantCut && !rowIncomplete(row) {
+				t.Errorf("mutation(a) = %+v, want it to say how far it got", row)
+			}
+			summary, _ := rowNamed(doc, "mutation")
+			if c.wantCut {
+				want := "3 of 3 mutant(s) killed across 1 component(s) in 30s"
+				if summary.Value != want || !detailSaying(summary, "1 component(s) stopped before every mutant had a verdict") {
+					t.Errorf("summary = %+v, want %q and the incomplete component named as left out", summary, want)
+				}
+			}
+			if shards, _ := rowNamed(doc, "shards"); shards.Status != ui.StatusPass {
+				t.Errorf("shards = %+v, want the incomplete shard folded in as one of the run", shards)
+			}
+		})
+	}
+}
+
+// A shard contradicting itself — a passing row beside counts saying the
+// component did not finish — folds as the counts say: a gate that never
+// finished does not render as one that cleared.
+func TestAPassingRowOverIncompleteCountsFoldsUnmeasured(t *testing.T) {
+	shard := countsShard(t, *incompleteCountsOf(mutation.Summary{Killed: 2}, 2, 5),
+		ui.Row{Status: ui.StatusPass, Label: mutationLabel("a"), Value: "2 of 2 mutant(s) killed in 7s"})
+	doc, _ := runMutationMerge(t, mergeRepo(t), shard, completeShardB(t))
+	row, _ := rowNamed(doc, mutationLabel("a"))
+	if row.Status != ui.StatusUnmeasured || row.Value != "2 of 5 measured, rerun to resume" {
+		t.Errorf("mutation(a) = %+v, want unmeasured, saying how far it got", row)
+	}
+	if doc.Exit != ui.ExitIncomplete {
+		t.Errorf("exit = %d, want %d", doc.Exit, ui.ExitIncomplete)
+	}
+	// The shard's own document is read as it was written, so the fold's
+	// replacement is its alone.
+	if b, _ := rowNamed(doc, mutationLabel("b")); b.Status != ui.StatusPass {
+		t.Errorf("mutation(b) = %+v, want its own passing row", b)
+	}
+}
+
+// A shard whose counts were not read has its score read back out of its rows,
+// and an incomplete component's row that found a survivor states its score in
+// the words a complete one does. The fold recognises the row by the progress
+// it carries and refuses to read a partial count back as a finished score.
+func TestTheFoldNeverReadsAnIncompleteRowBackAsAScore(t *testing.T) {
+	survivor := mutationSurvivor()
+	for _, c := range []struct {
+		name     string
+		s        mutation.Summary
+		results  []mutation.Result
+		wantExit int
+	}{
+		{name: "with a survivor", s: mutation.Summary{Killed: 1, Survived: 1}, results: []mutation.Result{survivor}, wantExit: ui.ExitFail},
+		{name: "with none", s: mutation.Summary{Killed: 2}, wantExit: ui.ExitIncomplete},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row, _ := kindRow(mutationIncomplete("a", c.s, c.results, 2, 5), false)
+			doc, _ := runMutationMerge(t, mergeRepo(t), mutationShard(t, row), completeShardB(t))
+			summary, _ := rowNamed(doc, "mutation")
+			if want := "3 of 3 mutant(s) killed across 1 component(s) in 30s"; summary.Value != want {
+				t.Errorf("summary = %q, want %q: the partial count was read back as a score", summary.Value, want)
+			}
+			if doc.Exit != c.wantExit {
+				t.Errorf("exit = %d, want %d", doc.Exit, c.wantExit)
+			}
+		})
+	}
+	// A fold of nothing but an unfinished component reports no score at all,
+	// and says why.
+	row, _ := kindRow(mutationIncomplete("a", mutation.Summary{Killed: 2}, nil, 2, 5), false)
+	decl := component.File{Components: []component.Component{{Name: "a"}}}
+	folded := foldedMutationRow([]shardInput{{read: true, doc: ui.Document{Rows: []ui.Row{row}}}}, mutantsDoc{}, decl)
+	if folded.Value != "no component was mutated" || !detailSaying(folded, "1 component(s) stopped") {
+		t.Errorf("summary = %+v, want no score and the unfinished component named", folded)
+	}
+}
+
+// Every row a run gives an incomplete component says how far it got in the
+// words the fold recognises — unmeasured, failing, under --no-gate, and with
+// its teardown's row in front — and no completed component's row does. This
+// is what holds the renderer and the fold's reader together.
+func TestEveryIncompleteRowIsRecognisedAsIncomplete(t *testing.T) {
+	survivor := mutationSurvivor()
+	cut := mutationIncomplete("a", mutation.Summary{Killed: 1}, nil, 1, 4)
+	cutSurvived := mutationIncomplete("a", mutation.Summary{Survived: 1}, []mutation.Result{survivor}, 1, 4)
+	torn := cut
+	torn.TeardownErr = errors.New("docker compose down: exit status 1")
+	for name, c := range map[string]struct {
+		o      mutationstages.ComponentOutcome
+		noGate bool
+	}{
+		"unmeasured":             {o: cut},
+		"failing on a survivor":  {o: cutSurvived},
+		"under --no-gate":        {o: cutSurvived, noGate: true},
+		"with a failed teardown": {o: torn},
+	} {
+		row, _ := outcomeRow(c.o, c.noGate)
+		if !rowIncomplete(row) {
+			t.Errorf("%s: %+v is not recognised as incomplete", name, row)
+		}
+	}
+	done, _ := outcomeRow(mutationCompleted("a", mutation.Summary{Survived: 1}, []mutation.Result{survivor}, time.Second), false)
+	if rowIncomplete(done) {
+		t.Errorf("a completed row %+v is recognised as incomplete", done)
 	}
 }

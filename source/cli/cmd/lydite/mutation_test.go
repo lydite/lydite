@@ -2969,3 +2969,24 @@ func TestAnInterruptAfterTheDeadlineStillWithdraws(t *testing.T) {
 		t.Errorf("findings %+v and kept %d, want every claim withdrawn", doc.Findings, len(kept))
 	}
 }
+
+// `lydite test record` folds the counts and reads the complete components
+// alone, so a component any shard left incomplete reaches the quality history
+// by no route: not beside a shard that finished it, and not on its own.
+func TestARecordingNeverReceivesAnIncompleteCount(t *testing.T) {
+	cut := mutantCounts{Killed: 1, Survived: 1, Incomplete: &mutation.IncompleteCounts{Measured: 2, Wanted: 5}}
+	folded, err := foldMutants([]mutantsDoc{
+		{Tree: "abc", Components: map[string]mutantCounts{"a": {Killed: 5}, "b": {Killed: 3}}},
+		{Tree: "abc", IncompleteComponents: map[string]mutantCounts{"a": cut, "c": cut}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := recordedMutants(folded)
+	if len(recorded.Components) != 1 {
+		t.Errorf("the recording received %+v, want b alone", recorded.Components)
+	}
+	if _, ok := recorded.Components["b"]; !ok {
+		t.Errorf("the recording received %+v, want the complete b", recorded.Components)
+	}
+}

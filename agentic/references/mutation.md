@@ -519,3 +519,30 @@ rendered, the same trade `foldedScheduleRow` already makes for `max N concurrent
 together, since a wording change would otherwise be a fold that silently stops counting a shard
 with no document to fall back on.
 
+**A component the deadline stopped is written apart from the complete ones.** `mutants.json` holds
+it under `incomplete_components`, never under `components`, with its counts over the verdicts it
+reached and `incomplete: {measured, wanted}` beside them. The separate key is the compatibility
+decision: every reader of the document ignores keys it does not know, so a marker alone on an entry
+under `components` would read, to a lydite older than the marker, as a complete score — folded into
+a total, or landed in the quality history for good. Under its own key the same reader finds the
+component absent, the answer it already gives a component nothing measured to completion.
+`ReadCounts` refuses a marked entry under `components`, an unmarked one under
+`incomplete_components`, and a component under both. A document with no such key is one where every
+component finished, which is every document an older lydite wrote.
+
+**Incomplete wins the fold.** `FoldCounts` folds a component any shard left incomplete into
+`incomplete_components` wherever a complete entry for it stands, keeping the first incomplete entry
+whole rather than summing a second — two entries for one component are the same mutants measured
+twice. The component's row is the one its shard rendered: `unmeasured` "N of M measured, rerun to
+resume", or `fail` on a survivor found before the deadline (context under that shard's
+`--no-gate`), with the progress beneath; a row reading `pass` beside counts saying the component did
+not finish is replaced by the unmeasured one. The `mutation` summary leaves every such component out
+of its total and says how many it left out. `mutation merge` marks its report incomplete —
+exit 3, or 1 when a survivor fails a row — whenever the folded counts hold an incomplete component,
+a shard's own report reads `incomplete` (which is how a component the deadline reached before its
+baseline is known, since it has no counts), or a component's row carries the progress line.
+That last is also what keeps the prose fallback honest: an incomplete row that found a survivor
+states its score in the words a complete one does, so `rowIncomplete` recognises the progress line
+and the fallback never reads that row back as a finished score. `recordedMutants` reads
+`components` alone, so `lydite test record` never lands an incomplete component's partial count.
+
