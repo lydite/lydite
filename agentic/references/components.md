@@ -167,10 +167,15 @@ or supplies a raw `command:`, which opts out of the derived variants entirely.
   on instrumentation — `go test -coverpkg=X` needs no separate `-cover` — so an unfiltered `args:`
   would instrument plain and build-only too, and plain is what mutation runs once per mutant
   ([ADR 0027](../../docs/adr/0027-mutation-is-its-own-command.md)): paying for instrumentation
-  there buys nothing, since neither variant produces or reads a coverage report. `dropCoverage`
+  there buys nothing, since neither variant produces or reads a coverage report. `dropFlags`
   strips `-cover`, `-coverpkg`, `-coverprofile`, `-covermode` and each one's separately-passed
   value out of a component's declared `args:` before they reach plain and build-only; instrumented
   is unchanged, still placing the declared flags after lydite's own so the declared one wins.
+
+  A Go component raises its baseline's bound by declaring `-timeout` in `args:`, which plain and
+  instrumented keep; build-only never receives a go-test-only flag, because `goBuildArgs` drops
+  `-timeout`, `-run`, `-count` and every other flag `go build` rejects, along with its
+  separately-passed value.
 - `cargo-nextest` — instrumented is `cargo llvm-cov nextest --lcov`. Build-only is `cargo build
   --all-targets`, because `cargo build` alone never compiles the test targets and a test-only
   compilation error is exactly what separates an unviable mutant from a killed one.
