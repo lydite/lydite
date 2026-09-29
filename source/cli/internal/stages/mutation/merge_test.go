@@ -311,6 +311,42 @@ func TestTheProjectionIsFoundBelowALineLongerThanTheDefaultLimit(t *testing.T) {
 	}
 }
 
+// The first projection line a log carries is the one quoted, not the last: a
+// run that wrote a second one — a worker restarting the count mid-run — does
+// not retroactively change what the fold already said about this component.
+func TestShardProjectionTakesTheFirstProjectionLineInOneLog(t *testing.T) {
+	dir := t.TempDir()
+	first := costProjection(9, 2, budget(time.Minute, 0))
+	second := costProjection(41, 4, budget(2*time.Minute, 0))
+	mergeLog(t, dir, "b", first, second)
+
+	got, ok := shardProjection(dir, "b", mergeLogName)
+	if !ok || got != first {
+		t.Errorf("shardProjection with two projection lines answered %q, %v; want the first, %q", got, ok, first)
+	}
+}
+
+// scanLog's own return distinguishes a visit that stopped itself from one
+// that ran the log to its end: a caller that reads scanLog's return value
+// alongside its own state — shardProgress guards a partial read with it —
+// needs the two told apart.
+func TestScanLogReportsThatItStoppedWhereVisitDid(t *testing.T) {
+	dir := t.TempDir()
+	mergeLog(t, dir, "b", "first", "second", "third")
+
+	var seen []string
+	ok := scanLog(dir, "b", mergeLogName, func(line string) bool {
+		seen = append(seen, line)
+		return line != "second"
+	})
+	if !ok {
+		t.Errorf("scanLog whose visit stopped itself answered %v, want true", ok)
+	}
+	if want := []string{"first", "second"}; !reflect.DeepEqual(seen, want) {
+		t.Errorf("visit saw %v, want %v — the scan kept going past where it stopped", seen, want)
+	}
+}
+
 // The scanner's ceiling is a mebibyte, and a line past it ends the scan where
 // it stands: a projection below such a line is not found, and the answer is
 // no line at all rather than an error.
@@ -320,5 +356,111 @@ func TestAProjectionBelowALinePastTheCeilingIsNotFound(t *testing.T) {
 
 	if got, ok := shardProjection(dir, "b", mergeLogName); ok || got != "" {
 		t.Errorf("the projection below an over-long line read back as %q, %v; want no line at all", got, ok)
+	}
+}
+
+// progressMutant is a mutant spelled the way the executor spells it in a log,
+// through mutation.Mutant's own String, so a reader holding its own copy of the
+// spelling cannot pass here while the executor writes something else.
+func progressMutant(line int) string {
+	return mutation.Mutant{Path: "api/a.go", Line: line, Column: 7,
+		Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}.String()
+}
+
+// finished is the line the executor writes once a mutant has an outcome.
+func finished(m string, o mutation.Outcome) string {
+	return m + ": " + string(o) + " in 1.2s"
+}
+
+// A mutant the log names as started and records no outcome for was running when
+// the run stopped. Every mutant named that way is returned, in the order it
+// started — several are in flight at once over more than one worker — against
+// the number the log records an outcome for and the number its projection
+// names.
+func TestReadProgressNamesEveryMutantStartedAndNeverFinished(t *testing.T) {
+	dir := t.TempDir()
+	one, two, three, four := progressMutant(1), progressMutant(2), progressMutant(3), progressMutant(4)
+	mergeLog(t, dir, "b",
+		"running the baseline suite",
+		costProjection(412, 4, budget(30*time.Second, 0)),
+		"start "+one, "start "+two,
+		finished(one, mutation.Killed),
+		one+": releasing the mutant: busy",
+		"start "+three, "start "+four,
+		finished(four, mutation.Unviable),
+		"api/a.go:9:1: undefined: x")
+
+	out, err := ReadProgress(t.Context(), ReadProgressIn{
+		Shards:  []shard.Shard{{Dir: dir, Err: os.ErrNotExist}},
+		File:    component.File{Components: []component.Component{{Name: "a"}, {Name: "b"}}},
+		LogName: mergeLogName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ShardProgress{{Dir: dir, Components: []Progress{{
+		Component: "b", Planned: 412, Projected: true, Started: true, Finished: 2,
+		InFlight: []string{two, three},
+	}}}}
+	if !reflect.DeepEqual(out.Shards, want) {
+		t.Errorf("progress = %+v\nwant %+v", out.Shards, want)
+	}
+}
+
+// A log that names no mutant at all is a run that stopped before the first one:
+// a build, an install or a baseline that never returned leaves exactly this.
+func TestReadProgressReadsALogNamingNoMutantAsNotStarted(t *testing.T) {
+	dir := t.TempDir()
+	mergeLog(t, dir, "b", "running the baseline suite", "start the fixture server")
+
+	p, ok := shardProgress(dir, "b", mergeLogName)
+	if !ok {
+		t.Fatal("a log that reads through was not read")
+	}
+	want := Progress{Component: "b"}
+	if !reflect.DeepEqual(p, want) {
+		t.Errorf("progress = %+v, want %+v: a suite's own `start` line is not a mutant", p, want)
+	}
+}
+
+// Only a shard whose report was not read is asked about, and only for a
+// component it left a log for. A log that does not read through is no answer
+// at all, because a mutant whose outcome lies past where the read stopped would
+// be named as in flight.
+func TestReadProgressAsksOnlyAnUnreadShardAndOnlyALogThatReadsThrough(t *testing.T) {
+	read, unread := t.TempDir(), t.TempDir()
+	mergeLog(t, read, "a", "start "+progressMutant(1))
+	mergeLog(t, unread, "a", "start "+progressMutant(1), strings.Repeat("x", 1024*1024+1), finished(progressMutant(1), mutation.Survived))
+
+	out, err := ReadProgress(t.Context(), ReadProgressIn{
+		Shards:  []shard.Shard{{Dir: read, Read: true}, {Dir: unread, Err: os.ErrNotExist}},
+		File:    component.File{Components: []component.Component{{Name: "a"}, {Name: "b"}}},
+		LogName: mergeLogName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ShardProgress{{Dir: unread}}
+	if !reflect.DeepEqual(out.Shards, want) {
+		t.Errorf("progress = %+v, want only the unread shard, with nothing read from it", out.Shards)
+	}
+}
+
+// Every outcome the executor can write ends a mutant, and the projection's
+// count is read through the same format the projection is written with.
+func TestShardProgressCountsEveryOutcomeAsFinished(t *testing.T) {
+	outcomes := []mutation.Outcome{mutation.Killed, mutation.TimedOut, mutation.OutOfMemory,
+		mutation.Survived, mutation.Unviable, mutation.Acknowledged}
+	lines := []string{costProjection(9, 4, budget(20*time.Second, 0))}
+	for i, o := range outcomes {
+		m := progressMutant(i + 1)
+		lines = append(lines, "start "+m, finished(m, o))
+	}
+	dir := t.TempDir()
+	mergeLog(t, dir, "b", lines...)
+
+	p, ok := shardProgress(dir, "b", mergeLogName)
+	if !ok || p.Finished != len(outcomes) || len(p.InFlight) != 0 || !p.Started || !p.Projected || p.Planned != 9 {
+		t.Errorf("progress = %+v, %v; want all %d finished of 9 projected, none in flight", p, ok, len(outcomes))
 	}
 }

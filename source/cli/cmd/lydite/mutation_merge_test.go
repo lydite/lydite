@@ -1,13 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/mutation"
+	shardreport "lydite/lydite/internal/shard"
 	"lydite/lydite/internal/ui"
 )
 
@@ -209,6 +213,122 @@ func TestALoneShardsUnnestedDirectoryReadsTheSameAsANestedOne(t *testing.T) {
 	}
 	if !strings.Contains(flatDetail, flat) {
 		t.Errorf("the sentence does not name the directory the log was found in: %q", flatDetail)
+	}
+}
+
+// readRowOf is the row the fold wrote about reading one shard's directory.
+func readRowOf(t *testing.T, doc ui.Document, dir string) ui.Row {
+	t.Helper()
+	row, ok := rowNamed(doc, "read("+dir+")")
+	if !ok {
+		t.Fatalf("the fold wrote no row about reading %s", dir)
+	}
+	return row
+}
+
+// inFlightMutant is a mutant spelled the way the executor names it in a log.
+func inFlightMutant(line int) string {
+	return mutation.Mutant{Path: "modb/b.go", Line: line, Column: 4,
+		Operator: mutation.NegateConditional, Original: "<", Mutated: ">="}.String()
+}
+
+// A cancelled shard writes no report, and the log it leaves is the only account
+// of what it was doing: the fold names each mutant the log started and never
+// finished, and how many of the projected mutants did finish. The row still
+// fails, and so does completeness — a shard with no report is a run the fold
+// cannot count, however much its log explains.
+func TestTheFoldNamesWhatACancelledShardWasRunning(t *testing.T) {
+	ran := mutationShardDir(t, t.TempDir(), []ui.Row{mutationRowOf("a")})
+	died := mutationShardDir(t, t.TempDir(), nil)
+	one, two, three := inFlightMutant(1), inFlightMutant(2), inFlightMutant(3)
+	writeComponentLog(t, died, "b",
+		"running the baseline suite", mutationProjection9,
+		"start "+one, one+": killed in 1.1s",
+		"start "+two, "start "+three, three+": survived in 2s")
+
+	doc, err := runMutationMerge(t, mergeRepo(t), ran, died)
+	if err == nil {
+		t.Error("a shard with no report folded cleanly")
+	}
+	row := readRowOf(t, doc, died)
+	if row.Status != ui.StatusFail || row.Value != "no mutation report" {
+		t.Errorf("read(%s) = %+v, want the failing row a shard with no report takes", died, row)
+	}
+	detail := strings.Join(row.Detail, "\n")
+	if !strings.Contains(detail, "2 of 9 mutant(s) finished") {
+		t.Errorf("the detail does not count what finished against what was projected:\n%s", detail)
+	}
+	if !strings.Contains(detail, two) {
+		t.Errorf("the detail does not name the mutant in flight %q:\n%s", two, detail)
+	}
+	for _, done := range []string{one, three} {
+		if strings.Contains(detail, done) {
+			t.Errorf("the detail names %q, which finished:\n%s", done, detail)
+		}
+	}
+	if shards, _ := rowNamed(doc, "shards"); shards.Status != ui.StatusFail {
+		t.Errorf("shards = %+v, want a failure: b has no row", shards)
+	}
+}
+
+// A log that names no mutant and no projection is a run that stopped before
+// the first mutant: a build, an install or a baseline that never returned. The
+// fold says so, and still fails the shard.
+func TestTheFoldSaysACancelledShardStoppedBeforeAnyMutantRan(t *testing.T) {
+	ran := mutationShardDir(t, t.TempDir(), []ui.Row{mutationRowOf("a")})
+	died := mutationShardDir(t, t.TempDir(), nil)
+	writeComponentLog(t, died, "b", "running the baseline suite", "go: downloading example.com/m v1.0.0")
+
+	doc, err := runMutationMerge(t, mergeRepo(t), ran, died)
+	if err == nil {
+		t.Error("a shard with no report folded cleanly")
+	}
+	row := readRowOf(t, doc, died)
+	if row.Status != ui.StatusFail {
+		t.Errorf("read(%s) = %+v, want a failure", died, row)
+	}
+	if !strings.Contains(strings.Join(row.Detail, "\n"), "the run stopped before any mutant ran") {
+		t.Errorf("the detail does not say no mutant ran: %v", row.Detail)
+	}
+	if shards, _ := rowNamed(doc, "shards"); shards.Status != ui.StatusFail {
+		t.Errorf("shards = %+v, want a failure: b has no row", shards)
+	}
+}
+
+// `lydite test merge` shares the fold's reading of shards, and a directory
+// holding a mutation log says nothing to it: its document for a directory with
+// no report is the same bytes whatever else the directory holds, and the row
+// says only why the report was not read.
+func TestTheTestFoldReadsNothingBesideAShardWithNoReport(t *testing.T) {
+	root := mergeRepo(t)
+	ran := shardOf(t, "a", 1, 2)
+	died := t.TempDir()
+
+	before, err := runMergeCmd(t, root, ran, died)
+	if err == nil {
+		t.Fatalf("an empty report directory folded cleanly:\n%s", before)
+	}
+	writeComponentLog(t, died, "b", mutationProjection9, "start "+inFlightMutant(1))
+	after, err := runMergeCmd(t, root, ran, died)
+	if err == nil {
+		t.Fatalf("an empty report directory folded cleanly:\n%s", after)
+	}
+	// The one field that differs between two runs of the same fold is how long
+	// each took.
+	elapsed := regexp.MustCompile(`"duration_ms": \d+`)
+	before = elapsed.ReplaceAllString(before, `"duration_ms": 0`)
+	if timeless := elapsed.ReplaceAllString(after, `"duration_ms": 0`); before != timeless {
+		t.Errorf("a mutation log beside a missing test report changed the test fold:\nbefore:\n%s\nafter:\n%s", before, timeless)
+	}
+
+	var doc ui.Document
+	if err := json.Unmarshal([]byte(after), &doc); err != nil {
+		t.Fatalf("the test fold emitted no document: %v\n%s", err, after)
+	}
+	want := ui.Row{Status: ui.StatusFail, Label: "read(" + died + ")", Value: "no test report",
+		Detail: []string{shardreport.Read(died, "test").Err.Error()}}
+	if got := readRowOf(t, doc, died); !reflect.DeepEqual(got, want) {
+		t.Errorf("read(%s) = %+v\nwant %+v", died, got, want)
 	}
 }
 

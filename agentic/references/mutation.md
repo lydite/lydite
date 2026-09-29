@@ -81,25 +81,38 @@ reader to skim past it.
 
 An equivalent mutant is one no test could kill. Equivalence is undecidable, so lydite never tries
 to detect one: the author declares it in a `[lydite:exclude_from_mutation][<reason>]` comment
-**beside** the mutant. Go, Rust, TypeScript and TSX spell a line comment `//`; Python spells it
-`#`. `annotation.body` strips either, so one function still covers every language's declaration
-line — mutation, crap and coverage all read the same declaration through it. The declaration
-covers the mutants whose replaced *text* contains its line, and of those the ones replacing the
-least — beside `println(a < b)` sit two mutants of the comparison and one that deletes the whole
-call, and the innermost is what somebody annotating that line is looking at. Deciding by
-containment is also what lets a declaration written inside a multi-line statement work. A
-declaration that covers no mutant is named on stderr: its author believes they have answered a
-survivor and nothing they can see says otherwise.
+trailing the mutated line — the same line, never the line above it or below it. Go, Rust,
+TypeScript and TSX spell a line comment `//`; Python spells it `#`. `annotation.body` strips
+either, so one function still covers every language's declaration line — mutation, crap and
+coverage all read the same declaration through it. A formatter that relocates a trailing comment
+off its own line (Biome does this to a line ending in `{`) needs a `// biome-ignore format`
+comment above it, or the declaration lands on a line the mutation gate never reads it from.
 
-**It covers every mutant replacing that least amount, which for one operator is both its boundary
-shift and its negation.** So a line whose boundary cannot be observed and whose negation can is a
-line a declaration cannot honestly answer: it would acknowledge the killable mutant too, and stop
-counting a kill the tests are still making. Such a line is answered by leaving no comparison to
-shift: a clamp states itself as `min`/`max`, and a containment test whose edges only one node could
-ever reach becomes a walk that prunes that subtree instead — which is why `visit` skips a test module
-rather than `emit` filtering one out, and why `internal/mutation` and `cmd/lydite` write their clamps
-the way they do. This is the cost of deciding coverage by containment rather than by operator, and it
-falls on exactly one shape: a relational operator whose two ends are not equally observable.
+**A declaration covers every mutant whose replaced range contains its line and is innermost among
+those: no other such mutant's range sits strictly inside theirs.** Position alone cannot tell what
+an author meant, because one line holds mutants at several scopes — beside `println(a < b)` sit two
+mutants of the comparison and one that deletes the whole call. The call's range encloses the
+comparison's, so the declaration acknowledges the operator, and deleting the call remains a mutant
+its author has not answered. Innermost is decided by containment, never by width: mutants replacing
+the same range — an operator's boundary shift and its negation — are all innermost, and so are
+mutants replacing disjoint ranges on the line, since neither encloses the other. `i <= n + 1` has a
+comparison mutant and an addition mutant on disjoint ranges, so one declaration answers both,
+however many bytes each replaces. Reaching by containment rather than by a window of lines is also
+what lets a declaration written inside a multi-line statement work: it sits on no line the statement
+opens or closes on, and it is still written inside it. A declaration that covers no mutant is
+counted as `Unmatched` on the component's `mutation.Summary` and named on the row itself as
+"N declaration(s) cover no mutant" — its author believes they have answered a survivor and nothing
+lydite can see says otherwise, and it gates nothing.
+
+**A relational operator whose boundary shift and negation are not equally observable is a line one
+declaration cannot honestly split.** Acknowledging either acknowledges both, since both mutants
+replace the same range and are therefore both innermost — so a line where only one of the two can
+be killed is answered by leaving no comparison to shift: a clamp states itself as `min`/`max`, and
+a containment test whose edges only one node could ever reach becomes a walk that prunes that
+subtree instead — which is why `visit` skips a test module rather than `emit` filtering one out, and
+why `internal/mutation` and `cmd/lydite` write their clamps the way they do. This is the cost of
+deciding coverage by containment rather than by operator, and it falls on exactly one shape: a
+relational operator whose two ends are not equally observable.
 
 The reason is required, and its absence is an error rather than a silent non-honouring. What counts
 as a comment is each language's own parser to say, never a scan of the bytes: one scan would have
@@ -381,9 +394,24 @@ a killed job because the log does and the final document does not. Elapsed time 
 every mutant) is recorded afterwards as `elapsed_seconds` in each component's entry in
 `mutants.json`.
 
+**Each mutant also writes its own `start` line before it runs, not only a line when it finishes.**
+A mutant cancelled or timed out mid-run leaves no finish line at all, so the start line is the only
+trace in the log of what was in flight when the run stopped — `lydite mutation merge`'s
+`progressDetail` reads exactly this to name, on a shard with no report at all, the mutants that
+started and never finished against how many finished cleanly. A log naming no mutant is a run that
+stopped before the first one: a build, an install or a baseline that never returned.
+
 The **per-mutant** timeout is a different thing, and is a multiple of what this run measured: three
 times the component's own observed baseline, with a 60-second floor for a suite too fast to measure
 and `--timeout` overriding. Without one, `TimedOut` is an outcome nothing can produce.
+
+**A mutant's suite runs as the leader of a process group of its own, and a timed-out context kills
+the whole group, not only the process the executor started.** A suite is a tree — npx, node, its own
+worker processes — and a deadline that reaches only the root leaves the rest of that tree holding
+the output pipes open, so the wait for them never returns and the worker never frees its slot. The
+signal goes to the negative pgid, reaching every member at once, and `WaitDelay` bounds how long
+`Wait` keeps reading a grouped command's output after that signal before giving up on it, so a
+descendant that ignores the signal cannot hang the mutant executor forever either.
 
 **The per-mutant memory ceiling is derived the same way, off the same baseline run, and bounds a
 different failure.** It is four times the baseline's own peak — `Result.MaxRSS` — with a 2GiB

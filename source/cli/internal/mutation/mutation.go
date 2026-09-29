@@ -233,6 +233,12 @@ type Result struct {
 	// is observed where the command is run, and a bound quietly not applied
 	// otherwise reports the green of one that held.
 	MemoryUnbounded bool
+	// OutputHeldOpen reports that an execution's exit was known but its own
+	// process group had to be killed at the wait delay because something it
+	// started was still holding its output open. A mutant that exits zero
+	// this way passed only because lydite stopped waiting for what it left
+	// running, not because nothing was left running.
+	OutputHeldOpen bool
 }
 
 // Summary counts one component's results.
@@ -243,6 +249,11 @@ type Summary struct {
 	Survived     int
 	Unviable     int
 	Acknowledged int
+	// Unmatched counts the equivalence declarations on the component's
+	// mutated lines that covered no mutant. It is no mutant's outcome, so Add
+	// never moves it and Total never includes it: it is the row's account of
+	// declarations whose author believes they answered a survivor.
+	Unmatched int
 }
 
 // Add folds one result in.
@@ -298,6 +309,23 @@ func (s Summary) Passed() bool { return s.Survived == 0 }
 func Unbounded(results []Result) bool {
 	for _, r := range results {
 		if r.MemoryUnbounded {
+			return true
+		}
+	}
+	return false
+}
+
+// HeldOutputOpen reports whether any of these mutants had its process group
+// killed at the wait delay because something it started was still holding
+// its output open.
+//
+// It is what a row says out loud when a mutant's exit looked clean only
+// because lydite stopped waiting for what it left running: a run reporting
+// that as the same green as one where nothing lingered is the failure the
+// amber tag exists for.
+func HeldOutputOpen(results []Result) bool {
+	for _, r := range results {
+		if r.OutputHeldOpen {
 			return true
 		}
 	}

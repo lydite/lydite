@@ -260,6 +260,31 @@ func TestASuiteThatAllocatesWithoutStoppingIsKilledByItsMemoryBound(t *testing.T
 	}
 }
 
+// A phase that exits zero while something it started still holds its output
+// open is reported alongside its outcome, never silently: the executor's own
+// process-group kill is what let the run finish at all, and that is not the
+// same thing as nothing having been left running.
+func TestAPhaseThatExitsCleanWhileHoldingOutputOpenIsReportedOnTheResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	staged := &fake{plan: func(Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{
+			shell("sleep 300 & exit 0"),
+		}}
+	}}
+	results, err := Execute(t.Context(), staged, []Mutant{mutantAt(1)}, Options{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Survived {
+		t.Fatalf("outcome = %q, want %q: %s", results[0].Outcome, Survived, results[0].Detail)
+	}
+	if !results[0].OutputHeldOpen {
+		t.Error("the mutant reports nothing was left running, though its phase's grandchild held output open past the wait delay")
+	}
+}
+
 // A mutant whose compilation reached the ceiling is unviable rather than
 // killed: nothing ran, so nothing observed the change, and what the bound
 // caught there is the compiler's appetite.
@@ -586,8 +611,37 @@ func TestOnlyAMutantThatDidNotCompileHasItsDetailLogged(t *testing.T) {
 	if strings.Contains(log.String(), "FAIL: TestX") {
 		t.Errorf("a killed mutant put its suite's output in the log:\n%s", log.String())
 	}
-	if n := len(strings.Split(strings.TrimRight(log.String(), "\n"), "\n")); n != 3 {
-		t.Errorf("%d log line(s) for two mutants, want a line each and one detail:\n%s", n, log.String())
+	if n := len(strings.Split(strings.TrimRight(log.String(), "\n"), "\n")); n != 5 {
+		t.Errorf("%d log line(s) for two mutants, want a start and a finish line each and one detail:\n%s", n, log.String())
+	}
+}
+
+// A start line names the mutant before its finish line reports its outcome,
+// so a run killed or timed out mid-mutant still leaves a trace of what was in
+// flight when it died.
+func TestAMutantsStartLineComesBeforeItsFinishLine(t *testing.T) {
+	f := &fake{plan: func(m Mutant) Staged {
+		return Staged{Build: shell("exit 0"), Phases: []runner.Invocation{shell("exit 1")}}
+	}}
+	var log bytes.Buffer
+	m := mutantAt(1)
+	results, err := Execute(t.Context(), f, []Mutant{m}, Options{Workers: 1, Log: &log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Outcome != Killed {
+		t.Fatalf("outcome = %v, want Killed", results[0].Outcome)
+	}
+	start := strings.Index(log.String(), "start "+m.String())
+	finish := strings.Index(log.String(), m.String()+": "+string(Killed))
+	if start < 0 {
+		t.Fatalf("no start line for %s in log:\n%s", m, log.String())
+	}
+	if finish < 0 {
+		t.Fatalf("no finish line for %s in log:\n%s", m, log.String())
+	}
+	if start >= finish {
+		t.Errorf("start line at %d did not come before finish line at %d:\n%s", start, finish, log.String())
 	}
 }
 

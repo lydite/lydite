@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Run captures stdout and stderr into one combined buffer, and os/exec copies
@@ -401,5 +405,204 @@ func TestExitStatusIsTheCommandsOwnOrNone(t *testing.T) {
 	}
 	if _, exited := (Result{Err: errors.New("exit status 1")}).ExitStatus(); exited {
 		t.Error("an error carrying no process state answered with a status")
+	}
+}
+
+// holdsStdout is a child that starts a grandchild sleeping on the same
+// stdout, prints the grandchild's pid, and then waits for it — the shape of
+// `npx vitest`, whose workers inherit the pipes npx was given.
+const holdsStdout = "sleep 300 & echo $!; wait"
+
+// pidOnFirstLine is a writer that hands the first line it is given to pid,
+// parsed, the moment it arrives.
+type pidOnFirstLine struct {
+	mu   sync.Mutex
+	line []byte
+	sent bool
+	pid  chan int
+}
+
+func newPidOnFirstLine() *pidOnFirstLine { return &pidOnFirstLine{pid: make(chan int, 1)} }
+
+func (w *pidOnFirstLine) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sent {
+		return len(p), nil
+	}
+	w.line = append(w.line, p...)
+	if i := bytes.IndexByte(w.line, '\n'); i >= 0 {
+		w.sent = true
+		n, err := strconv.Atoi(strings.TrimSpace(string(w.line[:i])))
+		if err != nil {
+			n = 0
+		}
+		w.pid <- n
+	}
+	return len(p), nil
+}
+
+// awaitPid is the pid the child printed, failing the test if it printed none.
+func (w *pidOnFirstLine) awaitPid(t *testing.T) int {
+	t.Helper()
+	select {
+	case pid := <-w.pid:
+		if pid <= 0 {
+			t.Fatal("the child printed no grandchild pid")
+		}
+		return pid
+	default:
+		t.Fatal("the child printed no grandchild pid")
+		return 0
+	}
+}
+
+// processGone reports whether pid no longer names a running process. A
+// zombie counts as gone: it has been killed, and whether anything reaps it is
+// up to whichever init it was reparented to.
+func processGone(pid int) bool {
+	if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		// The state is the field after the parenthesised command name.
+		i := bytes.LastIndexByte(stat, ')')
+		return i >= 0 && i+2 < len(stat) && stat[i+2] == 'Z'
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	return p.Signal(syscall.Signal(0)) != nil
+}
+
+// requireGone fails the test unless pid is gone within a few seconds, and
+// kills it either way so a failing run leaves nothing behind.
+func requireGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !processGone(pid) {
+		if time.Now().After(deadline) {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+			t.Fatalf("grandchild %d outlived the run", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// shortWaitDelay bounds a grouped run's wait for held pipes at a second, so a
+// test proving the bound does not spend five.
+func shortWaitDelay(t *testing.T) time.Duration {
+	t.Helper()
+	prev := groupWaitDelay
+	groupWaitDelay = time.Second
+	t.Cleanup(func() { groupWaitDelay = prev })
+	return groupWaitDelay
+}
+
+// A deadline kills the whole tree a bounded run started, not only its root:
+// a grandchild left alive holds the output pipe open and Wait never returns,
+// which is a mutant's suite hanging a worker forever with no CPU spent.
+func TestRunOutputBoundedKillsTheWholeTreeAtTheDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	delay := shortWaitDelay(t)
+	const timeout = 500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out := newPidOnFirstLine()
+
+	start := time.Now()
+	r := RunOutputBounded(ctx, t.TempDir(), nil, out, 0, "sh", "-c", holdsStdout)
+	elapsed := time.Since(start)
+
+	pid := out.awaitPid(t)
+	if r.Ok() {
+		t.Fatal("a run killed at its deadline reported success")
+	}
+	if limit := timeout + delay + 2*time.Second; elapsed > limit {
+		t.Errorf("the run took %s, past its deadline plus the wait delay (%s)", elapsed, limit)
+	}
+	requireGone(t, pid)
+}
+
+// A cancelled run — the interrupt a Ctrl-C delivers through the command's
+// signal context — reaches the whole group the child leads.
+func TestRunOutputBoundedKillsTheWholeTreeOnCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	shortWaitDelay(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := newPidOnFirstLine()
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- RunOutputBounded(ctx, t.TempDir(), nil, out, 0, "sh", "-c", holdsStdout)
+	}()
+	var pid int
+	select {
+	case pid = <-out.pid:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the child never printed its grandchild's pid")
+	}
+	cancel()
+
+	select {
+	case r := <-done:
+		if r.Ok() {
+			t.Fatal("a cancelled run reported success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run did not return after its context was cancelled")
+	}
+	requireGone(t, pid)
+}
+
+// A child that exits zero while a grandchild still holds its stdout is a
+// success, not a failure: the wait delay cuts the output copy short, and
+// that is recorded beside the exit status rather than replacing it. The
+// grandchild is killed with the group, since nothing else would stop it.
+func TestRunOutputBoundedKeepsAZeroExitWhenAGrandchildHoldsTheOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	delay := shortWaitDelay(t)
+	out := newPidOnFirstLine()
+
+	start := time.Now()
+	r := RunOutputBounded(context.Background(), t.TempDir(), nil, out, 0, "sh", "-c", "sleep 300 & echo $!")
+	elapsed := time.Since(start)
+
+	pid := out.awaitPid(t)
+	if !r.Ok() {
+		t.Errorf("a child that exited zero reported %v", r.Err)
+	}
+	if !r.OutputHeldOpen {
+		t.Error("OutputHeldOpen is false, though the grandchild held stdout past the wait delay")
+	}
+	if limit := delay + 2*time.Second; elapsed > limit {
+		t.Errorf("the run took %s, past the wait delay (%s)", elapsed, limit)
+	}
+	requireGone(t, pid)
+}
+
+// A group with no members left when the kill lands — the child exited on its
+// own between the deadline and the signal — answers os.ErrProcessDone, which
+// os/exec reads as a cancellation that found nothing to kill rather than as a
+// failure of its own.
+func TestKillGroupOfAnAlreadyExitedGroupReportsProcessDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a unix notion")
+	}
+	cmd := exec.Command("true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running the throwaway child: %v", err)
+	}
+
+	if err := killGroup(cmd.Process.Pid); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killGroup(%d) of an already-exited group = %v, want os.ErrProcessDone", cmd.Process.Pid, err)
 	}
 }

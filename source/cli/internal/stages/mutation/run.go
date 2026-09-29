@@ -136,7 +136,8 @@ type ComponentOutcome struct {
 	// Summary, Results, Scoped and Elapsed are a completed component's: the
 	// counts, what became of each mutant in generation order, the changed
 	// lines its mutants came from, and how long the baseline and the mutants
-	// took together.
+	// took together. A KindNothingToMutate outcome carries Summary too, whose
+	// only fact is Unmatched.
 	Summary mutation.Summary
 	Results []mutation.Result
 	Scoped  map[string][]int
@@ -422,10 +423,13 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	if err != nil {
 		return finish(KindMeasureFailed, err)
 	}
-	mutants, err := generate(in.Dir, c, t.lang, report.Executed, t.scoped, in.Diagnostics)
+	mutants, unmatched, err := generate(in.Dir, c, t.lang, report.Executed, t.scoped, in.Diagnostics)
 	if err != nil {
 		return finish(KindGenerateFailed, err)
 	}
+	// Before the empty case, because a declaration covering no mutant is most
+	// likely exactly where nothing was generated at all.
+	out.Summary.Unmatched = unmatched
 	if len(mutants) == 0 {
 		// Nothing to mutate is its own outcome and never a pass: a gate that
 		// examined nothing must not read as one that examined everything.
@@ -451,7 +455,7 @@ func mutateComponent(ctx context.Context, in RunMutantsIn, p Planned, tc *toolch
 	if err != nil {
 		return finish(KindExecuteFailed, err)
 	}
-	var s mutation.Summary
+	s := mutation.Summary{Unmatched: unmatched}
 	for _, r := range results {
 		s.Add(r)
 	}

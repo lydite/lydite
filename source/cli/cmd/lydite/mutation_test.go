@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,116 @@ func TestARowSaysWhenMemoryWasNotBounded(t *testing.T) {
 		mutation.Summary{Killed: 1}, unheld, nil, time.Second)
 	if !detailSaying(passing, "memory was not bounded") {
 		t.Errorf("a passing row from an unbounded run says %v", passing.Detail)
+	}
+}
+
+// A mutant whose process group was killed at the wait delay is on the row,
+// never silent: it exited clean only because lydite stopped waiting for
+// what it left running, and reporting that as the green of a suite that
+// left nothing behind is the failure the amber tag exists for.
+func TestARowSaysWhenAMutantsOutputWasHeldOpen(t *testing.T) {
+	heldOpen := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		// A mutant that survived, so the note is proven on the failing row as
+		// well as on the passing one.
+		Outcome: mutation.Survived, OutputHeldOpen: true,
+	}}
+	failing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1, Survived: 1}, heldOpen, nil, time.Second)
+	if !detailSaying(failing, "still running") {
+		t.Errorf("a failing row from a run that held output open says %v", failing.Detail)
+	}
+
+	clean := []mutation.Result{{Outcome: mutation.Killed}}
+	passing, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, clean, nil, time.Second)
+	if detailSaying(passing, "still running") {
+		t.Errorf("a row from a clean run says something was still running: %v", passing.Detail)
+	}
+	heldOpenAndKilled := []mutation.Result{{Outcome: mutation.Killed, OutputHeldOpen: true}}
+	passing, _ = mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1}, heldOpenAndKilled, nil, time.Second)
+	if !detailSaying(passing, "still running") {
+		t.Errorf("a passing row from a run that held output open says %v", passing.Detail)
+	}
+}
+
+// A component whose every mutant was unviable or acknowledged is unmeasured,
+// not passing — and that row says just as loudly as a passing or failing one
+// when a mutant it never scored still left something running or unbounded:
+// the denominator being zero does not mean nothing was observed.
+func TestAnUnmeasuredRowStillSaysWhenAMutantHeldOutputOpen(t *testing.T) {
+	results := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Unviable, Detail: "the run was interrupted before this mutant finished",
+		OutputHeldOpen: true,
+	}}
+	row, findings := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, results, nil, time.Second)
+	if row.Status != ui.StatusUnmeasured {
+		t.Fatalf("status = %q, want %q", row.Status, ui.StatusUnmeasured)
+	}
+	if findings != nil {
+		t.Errorf("an unmeasured row reports findings: %v", findings)
+	}
+	if !detailSaying(row, "still running") {
+		t.Errorf("an unmeasured row from a run that held output open says %v", row.Detail)
+	}
+}
+
+// An unmeasured row still names an unmatched declaration and an unbounded
+// mutant on their own, independent of whether output was held open — each
+// note is its own conditional, and one being silent must not depend on the
+// others being present.
+func TestAnUnmeasuredRowSaysWhenADeclarationIsUnmatchedOrMemoryWasNotBounded(t *testing.T) {
+	unviable := []mutation.Result{{Outcome: mutation.Unviable, Detail: "did not compile"}}
+
+	unmatched, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1, Unmatched: 1}, unviable, nil, time.Second)
+	if !detailSaying(unmatched, "cover no mutant") {
+		t.Errorf("an unmeasured row with an unmatched declaration says %v", unmatched.Detail)
+	}
+
+	unbounded := []mutation.Result{{Outcome: mutation.Unviable, Detail: "did not compile", MemoryUnbounded: true}}
+	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, unbounded, nil, time.Second)
+	if !detailSaying(row, "memory was not bounded") {
+		t.Errorf("an unmeasured row from an unbounded run says %v", row.Detail)
+	}
+
+	neither, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Unviable: 1}, unviable, nil, time.Second)
+	if detailSaying(neither, "cover no mutant") || detailSaying(neither, "memory was not bounded") {
+		t.Errorf("an unmeasured row with neither condition says %v", neither.Detail)
+	}
+}
+
+// A failing row — one holding survivors — still names an unmatched
+// declaration: the note is not conditional on the row's own verdict, and a
+// survivor's own detail must not crowd it out.
+func TestAFailingRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
+	survivor := []mutation.Result{{
+		Mutant: mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}}
+	row, _ := mutationRow(mutationLabel("app"), "app", "app", testLog(t),
+		mutation.Summary{Killed: 1, Survived: 1, Unmatched: 1}, survivor, nil, time.Second)
+	if !detailSaying(row, "cover no mutant") {
+		t.Errorf("a failing row with an unmatched declaration says %v", row.Detail)
+	}
+}
+
+// A component with nothing to mutate still names an unmatched declaration:
+// the run generated no mutants at all, but a marker on a line the run never
+// reached is exactly the shape "covers no mutant" already means.
+func TestAKindNothingToMutateRowSaysWhenADeclarationIsUnmatched(t *testing.T) {
+	row, _ := kindRow(mutationstages.ComponentOutcome{
+		Kind:      mutationstages.KindNothingToMutate,
+		Component: component.Component{Name: "app", Dir: "app"},
+		Summary:   mutation.Summary{Unmatched: 2},
+	}, false)
+	if !detailSaying(row, "cover no mutant") {
+		t.Errorf("a nothing-to-mutate row with an unmatched declaration says %v", row.Detail)
 	}
 }
 
@@ -1021,8 +1132,50 @@ func TestDeeperIsCalledAndNothingIsAsserted(t *testing.T) {
 	if row.Status != ui.StatusUnmeasured {
 		t.Fatalf("row = %+v, want unmeasured: an acknowledged mutant measures nothing", row)
 	}
-	if !strings.Contains(row.Value, "declared equivalent") {
-		t.Errorf("value = %q, want it to name the declaration", row.Value)
+	if !strings.Contains(row.Value, "declared equivalent (refers this change for review)") {
+		t.Errorf("value = %q, want it to name the declaration and that it refers the change", row.Value)
+	}
+}
+
+// A declaration covering no mutant is named on stderr as it arises, and
+// counted on the component's row, which is what the report, mutation.json and
+// the fold over it carry. It gates nothing: the row passes on its mutants.
+func TestADeclarationCoveringNoMutantIsCountedOnTheRow(t *testing.T) {
+	root := goModuleRepo(t, deeper+"\n// "+annotation.Marker(annotation.Mutation)+
+		"[nothing on this line is ever mutated]\n", killsItsMutants)
+	var doc ui.Document
+	var err error
+	stderr := capturedStderr(t, func() {
+		doc, _, err = runMutationCmd(t, "--dir", root, "--base-branch", "main")
+	})
+	if err != nil {
+		t.Fatalf("an unmatched declaration failed the gate: %v\n%+v", err, doc.Rows)
+	}
+	if strings.Count(stderr, "covers no mutant") != 1 {
+		t.Errorf("stderr = %q, want the unmatched declaration named once", stderr)
+	}
+	const note = "1 declaration(s) cover no mutant"
+	row, _ := rowNamed(doc, mutationLabel("app"))
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v, want a pass: the count gates nothing", row)
+	}
+	if !slices.Contains(row.Detail, note) {
+		t.Errorf("detail = %v, want %q", row.Detail, note)
+	}
+
+	written, err := readDocument(documentPath(reportsDir(root), "mutation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := rowNamed(written, mutationLabel("app")); !slices.Contains(got.Detail, note) {
+		t.Errorf("mutation.json's row = %+v, want %q in its detail", got, note)
+	}
+	folded, err := runMutationMerge(t, root, reportsDir(root))
+	if err != nil {
+		t.Fatalf("a fold over one complete shard failed: %v", err)
+	}
+	if got, _ := rowNamed(folded, mutationLabel("app")); !slices.Contains(got.Detail, note) {
+		t.Errorf("the folded row = %+v, want %q carried through", got, note)
 	}
 }
 
@@ -1094,17 +1247,52 @@ func TestTheAsideNamesOnlyTheMutantsThatAreThere(t *testing.T) {
 		want string
 	}{
 		{"unviable", mutation.Summary{Killed: 1, Unviable: 2}, "2 did not compile"},
-		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent"},
+		{"acknowledged", mutation.Summary{Killed: 1, Acknowledged: 1}, "1 declared equivalent (refers this change for review)"},
 		{"timed out", mutation.Summary{Killed: 1, TimedOut: 3}, "3 timed out"},
 		{"out of memory", mutation.Summary{Killed: 1, OutOfMemory: 2}, "2 ran out of memory"},
 		{"all four", mutation.Summary{Unviable: 1, Acknowledged: 2, TimedOut: 3, OutOfMemory: 4},
-			"1 did not compile, 2 declared equivalent, 3 timed out, 4 ran out of memory"},
+			"1 did not compile, 2 declared equivalent (refers this change for review), 3 timed out, 4 ran out of memory"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := aside(c.s); got != c.want {
 				t.Errorf("aside = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// The help text tells an author where the marker goes, what one marker
+// covers, and what a formatter that moves trailing comments requires — an
+// author who places it on the line above, or lets Biome relocate it, gets a
+// mutant the gate never reads the marker for.
+func TestTheHelpTextExplainsWhereTheMarkerGoes(t *testing.T) {
+	long := newMutationCmd().Long
+	for _, want := range []string{
+		"trailing the mutated line",
+		"every innermost mutant",
+		"biome-ignore format",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("help text does not mention %q: %s", want, long)
+		}
+	}
+}
+
+// A survivor's finding tells the author the same thing the row's own remedy
+// does: the marker sits on the mutated line, and one there answers every
+// innermost mutant on it.
+func TestASurvivorsFindingNamesWhereTheMarkerGoes(t *testing.T) {
+	survivor := mutation.Result{
+		Mutant:  mutation.Mutant{Path: "a.go", Line: 3, Column: 4, Operator: mutation.NegateConditional},
+		Outcome: mutation.Survived,
+	}
+	findings := mutationFindings(mutationLabel("app"), "app", "app", []mutation.Result{survivor}, nil)
+	if len(findings) != 1 {
+		t.Fatalf("mutationFindings = %v, want exactly one", findings)
+	}
+	detail := strings.Join(findings[0].Detail, "\n")
+	if !strings.Contains(detail, "trailing the mutated line") || !strings.Contains(detail, "every innermost mutant") {
+		t.Errorf("finding detail does not say where the marker goes: %v", findings[0].Detail)
 	}
 }
 
@@ -1936,7 +2124,7 @@ func mutationLifecycleFailure(name, value, what string) ui.Row {
 
 // mutationRemedy is the line a failing row closes its survivors with.
 var mutationRemedy = "write the assertion that fails when the code changes this way, or declare the mutant equivalent with " +
-	annotationMarker + " beside it"
+	annotationMarker + " trailing the mutated line — one marker there covers every innermost mutant on it"
 
 // The whole report a run's outcomes become, in the order a reader and a
 // consumer keying rows by label both depend on: the select row when selection

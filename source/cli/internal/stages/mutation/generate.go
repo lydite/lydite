@@ -25,9 +25,12 @@ import (
 // that cannot be killed by construction, and reporting one would only restate
 // what patch coverage already said about the same line.
 //
-// A declaration that matched no mutant is named on diagnostics, one line each.
-func generate(root string, c component.Component, lang runner.Lang, executed coverage.LineHits, scoped map[string][]int, diagnostics io.Writer) ([]mutation.Mutant, error) {
+// A declaration that matched no mutant is named on diagnostics, one line each,
+// and counted across every file in the component: the count is what reaches the
+// component's row, where a reader who never sees the stream still learns of it.
+func generate(root string, c component.Component, lang runner.Lang, executed coverage.LineHits, scoped map[string][]int, diagnostics io.Writer) ([]mutation.Mutant, int, error) {
 	var out []mutation.Mutant
+	unmatchedCount := 0
 	for _, file := range sortedFiles(scoped) {
 		ran := executed[file]
 		lines := map[int]bool{}
@@ -47,7 +50,7 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 		// diff and the coverage report are both scan-root relative.
 		rel, err := componentRelative(c.Dir, file)
 		if err != nil {
-			return nil, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		// Joined onto the scan root, which is what a component's dir is
 		// relative to. Resolving it against this process's working directory
@@ -61,11 +64,11 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		mutants, unmatched, err := mutation.Generate(lang, rel, src, lines)
 		if err != nil {
-			return nil, err
+			return nil, 0, err // [lydite:exclude_from_mutation][the caller returns on this error before reading the count]
 		}
 		// Named, because their author believes they have answered a survivor
 		// and nothing they can see says otherwise: the comment is well
@@ -74,9 +77,10 @@ func generate(root string, c component.Component, lang runner.Lang, executed cov
 		for _, u := range unmatched {
 			_, _ = fmt.Fprintf(diagnostics, "lydite: %s: %s\n", c.Name, u)
 		}
+		unmatchedCount += len(unmatched)
 		out = append(out, mutants...)
 	}
-	return out, nil
+	return out, unmatchedCount, nil
 }
 
 // componentRelative maps a scan-root-relative path onto the component it is

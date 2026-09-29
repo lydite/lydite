@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"lydite/lydite/internal/finding"
 )
@@ -106,6 +107,14 @@ type Result struct {
 	// any value. The third renders as its own outcome, because a bound
 	// quietly not applied otherwise reports the green of one that held.
 	MemoryBounded bool
+	// OutputHeldOpen reports that the command exited zero while something it
+	// started still held its stdout or stderr open, so the output copy was
+	// abandoned after the wait delay rather than read to its end. Only
+	// RunOutputBounded sets it. It is not a failure: Err stays nil, since the
+	// exit status is the command's answer, and Output may be missing whatever
+	// that descendant wrote after the cut. A command that exited non-zero or
+	// was killed reports that status alone, as os/exec does.
+	OutputHeldOpen bool
 }
 
 // Ok reports whether the command exited zero.
@@ -175,7 +184,7 @@ func RunEnv(ctx context.Context, dir string, extraEnv []string, name string, arg
 // the one component that failed among the ones that did not. The caller
 // decides what out is — a log file, or a log file and the terminal both.
 func RunOutput(ctx context.Context, dir string, extraEnv []string, out io.Writer, name string, args ...string) Result {
-	return runTo(ctx, dir, extraEnv, out, out, 0, name, args...)
+	return runTo(ctx, dir, extraEnv, out, out, 0, false, name, args...)
 }
 
 // RunOutputBounded is RunOutput with a ceiling, in bytes, on the memory the
@@ -188,8 +197,14 @@ func RunOutput(ctx context.Context, dir string, extraEnv []string, out io.Writer
 // step, and loses every result the shard had. The bound reaches the child
 // only where the platform has one to set, so the caller reads MemoryBounded
 // before treating it as held.
+//
+// The command runs as the leader of a process group of its own, and a done
+// context kills the whole group: a mutant's suite is a tree — npx, node, its
+// workers — and a deadline that reaches only the root leaves the rest holding
+// the output pipes, so the wait for them never returns. Off unix the command
+// runs as RunOutput's does.
 func RunOutputBounded(ctx context.Context, dir string, extraEnv []string, out io.Writer, maxMemory int64, name string, args ...string) Result {
-	return runTo(ctx, dir, extraEnv, out, out, maxMemory, name, args...)
+	return runTo(ctx, dir, extraEnv, out, out, maxMemory, true, name, args...)
 }
 
 // RunQuiet captures output without streaming it.
@@ -328,10 +343,17 @@ func resolve(dir, name string, extraEnv []string) string {
 }
 
 func run(ctx context.Context, dir string, extraEnv []string, name string, args ...string) Result {
-	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, 0, name, args...)
+	return runTo(ctx, dir, extraEnv, streamTarget, os.Stderr, 0, false, name, args...)
 }
 
-func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, maxMemory int64, name string, args ...string) Result {
+// groupWaitDelay is how long Wait keeps reading a grouped command's output
+// after the command exits or its context is done, before it closes the pipes
+// and returns without whatever still holds them.
+var groupWaitDelay = 5 * time.Second
+
+// runTo runs the command, and with grouped set runs it in a process group of
+// its own that a done context kills whole — see RunOutputBounded.
+func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io.Writer, maxMemory int64, grouped bool, name string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, resolve(dir, name, extraEnv), args...) // #nosec G204 -- nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- name/args are static, hardcoded tool invocations, or a command from the scanned repository's own declaration; never shell-interpreted
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
@@ -349,6 +371,9 @@ func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io
 	}
 	cmd.Stdout = io.MultiWriter(out, captured)
 	cmd.Stderr = io.MultiWriter(errOut, captured)
+	if grouped {
+		ownGroup(cmd)
+	}
 	res := Result{Name: name, Args: args, MemoryLimit: maxMemory}
 	if err := cmd.Start(); err != nil {
 		res.Err = err
@@ -362,6 +387,17 @@ func runTo(ctx context.Context, dir string, extraEnv []string, stdout, stderr io
 		res.MemoryBounded = limitMemory(cmd.Process.Pid, maxMemory) == nil
 	}
 	res.Err = cmd.Wait()
+	// os/exec answers ErrWaitDelay only when the command itself exited zero
+	// and nothing else went wrong, so the exit status is the result and the
+	// held pipe is recorded beside it. Whatever held the pipe is killed with
+	// the group: the leader has exited, and nothing else would stop it.
+	if grouped && errors.Is(res.Err, exec.ErrWaitDelay) {
+		res.OutputHeldOpen = true
+		_ = killGroup(cmd.Process.Pid)
+		if cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			res.Err = nil
+		}
+	}
 	res.Output = buf.String()
 	if cmd.ProcessState != nil {
 		res.MaxRSS = peakRSS(cmd.ProcessState.SysUsage())

@@ -113,6 +113,10 @@ func mergeMutationShards(ctx context.Context, dir string, reports []string) (*ui
 	if read.projections, err = flow.Output[mutationstages.ReadProjectionsOut](r, mutationflow.StageReadProjections); err != nil {
 		return nil, err
 	}
+	// ReadProgress never fails as a whole: a log it could not read through is
+	// a component it says nothing about.
+	read.progress, _ = mutationstages.ReadProgress(ctx, mutationstages.ReadProgressIn{
+		Shards: read.shards.Shards, File: loaded.File, LogName: mutationLogName})
 	rep := ui.NewReport("mutation")
 	addMergedMutationRows(rep, loaded.File, read)
 	return rep, nil
@@ -124,6 +128,7 @@ type mutationMergeRead struct {
 	counts      mutationstages.ReadShardCountsOut
 	folded      mutationstages.FoldShardCountsOut
 	projections mutationstages.ReadProjectionsOut
+	progress    mutationstages.ReadProgressOut
 }
 
 // addMergedMutationRows builds the folded report.
@@ -135,8 +140,14 @@ func addMergedMutationRows(rep *ui.Report, decl component.File, read mutationMer
 	for _, c := range read.counts.Shards {
 		counted[c.Dir] = c
 	}
-	inputs := shardInputs(rep, "mutation", read.shards.Shards, func(dir string, _ *shardInput, row *ui.Row) {
+	progressed := map[string][]mutationstages.Progress{}
+	for _, p := range read.progress.Shards {
+		progressed[p.Dir] = p.Components
+	}
+	inputs := shardInputsNoting(rep, "mutation", read.shards.Shards, func(dir string, _ *shardInput, row *ui.Row) {
 		shardCountsRow(counted[dir], row)
+	}, func(dir string) []string {
+		return progressDetail(progressed[dir])
 	})
 
 	problems := wholeTreeRows(rep, inputs, mutationWholeTreeRows)
@@ -200,6 +211,38 @@ func projectionNote(projections map[string]mutationstages.Projection, name strin
 	}
 	return fmt.Sprintf("and the log it left in %s says the run projected: %q — what the run said it was about to cost, not what became of it",
 		p.Dir, p.Line)
+}
+
+// progressDetail is what the logs an unread shard left say about how far each
+// of its components got, one sentence per fact, to sit beneath the reason its
+// report was not read.
+//
+// A cancelled job writes no report, so this is the only place a reader learns
+// what it was doing when it stopped: the mutants it started and never
+// finished, against how many finished at all. A log that names no mutant is a
+// run that stopped before the first one — a build, an install or a baseline
+// that never returned. Like projectionNote it says what the log states and
+// never why the run stopped, and it only ever adds detail: the row it lands on
+// fails regardless, because a shard with no report is a run the fold cannot
+// count.
+func progressDetail(progress []mutationstages.Progress) []string {
+	var out []string
+	for _, p := range progress {
+		says := "the log it left for " + p.Component + " "
+		if !p.Started && p.Finished == 0 {
+			out = append(out, says+"names no mutant, so the run stopped before any mutant ran")
+			continue
+		}
+		finished := fmt.Sprintf("%d mutant(s) finished", p.Finished)
+		if p.Projected {
+			finished = fmt.Sprintf("%d of %d mutant(s) finished", p.Finished, p.Planned)
+		}
+		out = append(out, says+"says "+finished)
+		for _, m := range p.InFlight {
+			out = append(out, says+"names a mutant that started and never finished: "+m)
+		}
+	}
+	return out
 }
 
 // foldedMutationLabel names every label this fold produces itself, so

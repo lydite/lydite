@@ -237,6 +237,31 @@ func TestADiagnosticsWriterTheCallerGaveIsNeverReplaced(t *testing.T) {
 	}
 }
 
+// A declaration covering no mutant reaches the component's summary as a count,
+// beside the line naming it on diagnostics, and gates nothing: the component's
+// mutants run and are reported exactly as they would be without it.
+func TestADeclarationCoveringNoMutantIsCountedInTheSummary(t *testing.T) {
+	f := newWebFixture(t)
+	writeFile(t, f.root, "web/src/a.ts", webSource+
+		"// [lydite:exclude_from_mutation][nothing on this line is ever mutated]\n")
+	var buf bytes.Buffer
+	in := f.in(f.shape(t, lcovExecuting, "true", "exit 1"), f.lifecycle(t))
+	in.Diagnostics = &buf
+	o := only(t, in)
+	if o.Kind != KindCompleted {
+		t.Fatalf("kind = %s (%v), want completed", o.Kind, o.Err)
+	}
+	if o.Summary.Unmatched != 1 {
+		t.Errorf("summary = %+v, want the one unmatched declaration counted", o.Summary)
+	}
+	if o.Summary.Killed == 0 || !o.Summary.Passed() {
+		t.Errorf("summary = %+v, want every mutant killed and the gate unmoved by the count", o.Summary)
+	}
+	if strings.Count(buf.String(), "covers no mutant") != 1 {
+		t.Errorf("diagnostics = %q, want the unmatched declaration named once", buf.String())
+	}
+}
+
 // A suite that notices the change kills the mutant.
 func TestASuiteThatFailsKillsTheMutant(t *testing.T) {
 	f := newWebFixture(t)

@@ -69,9 +69,13 @@ whole-repository mode: it would run for hours on any mature codebase, and a
 mutant on an uncovered line cannot be killed by construction.
 
 An author who believes a survivor is unkillable declares it with a
-` + mutationMarker + ` comment beside it. The declared mutant is generated,
-counted and never run — and, because internal/referral reads the same token as
-a suppression, declaring one refers the change to a human.`,
+` + mutationMarker + ` comment trailing the mutated line itself — the same
+line, not the line above it — and one marker covers every innermost mutant on
+that line. A formatter that moves a trailing comment off its line (Biome does,
+on a line ending in ` + "`{`" + `) needs a ` + "`// biome-ignore format`" + ` comment above it to
+keep the marker where the mutation gate reads it. The declared mutant is
+generated, counted and never run — and, because internal/referral reads the
+same token as a suppression, declaring one refers the change to a human.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			streamDiagnostics(asJSON)
 			rep := ui.NewReport("mutation")
@@ -610,8 +614,11 @@ func kindRow(o mutationstages.ComponentOutcome, noGate bool) (ui.Row, componentM
 		// A run with nothing to mutate must not report a pass: a green row
 		// from a gate that examined nothing is indistinguishable from one
 		// that examined everything.
-		return detailed(unmeasuredRow(label,
-			"no line this change touched is both mutable and reported as executed"), log), componentMutation{}
+		row := unmeasuredRow(label, "no line this change touched is both mutable and reported as executed")
+		if n := unmatchedNote(o.Summary); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		return detailed(row, log), componentMutation{}
 	case mutationstages.KindCompleted:
 		out := componentMutation{summary: o.Summary, elapsed: o.Elapsed, ran: true}
 		row, findings := mutationRow(label, c.Name, c.Dir, log, o.Summary, o.Results, o.Scoped, o.Elapsed)
@@ -727,8 +734,18 @@ func teardownFailureReplaces(status ui.Status) bool {
 func mutationRow(label, component, dir string, log *componentLog, s mutation.Summary, results []mutation.Result, changed map[string][]int, elapsed time.Duration) (ui.Row, []finding.Finding) {
 	killed, total := s.Score()
 	if total == 0 {
-		return detailed(unmeasuredRow(label, fmt.Sprintf(
-			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s))), log), nil
+		row := unmeasuredRow(label, fmt.Sprintf(
+			"%d mutant(s), none of which says anything about the suite: %s", s.Total(), aside(s)))
+		if n := unmatchedNote(s); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		if n := unboundedNote(results); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		if n := heldOpenNote(results); n != "" {
+			row.Detail = append(row.Detail, n)
+		}
+		return detailed(row, log), nil
 	}
 	// The elapsed time is in the value rather than under the row, because a
 	// reader deciding whether this component is worth mutating on every pull
@@ -740,7 +757,13 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
 	}
+	if n := unmatchedNote(s); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
 	if n := unboundedNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
+	if n := heldOpenNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
 	}
 	survivors := mutation.Survivors(results)
@@ -760,12 +783,18 @@ func mutationRow(label, component, dir string, log *componentLog, s mutation.Sum
 	if a := aside(s); a != "" {
 		row.Detail = append(row.Detail, a)
 	}
+	if n := unmatchedNote(s); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
 	if n := unboundedNote(results); n != "" {
+		row.Detail = append(row.Detail, n)
+	}
+	if n := heldOpenNote(results); n != "" {
 		row.Detail = append(row.Detail, n)
 	}
 	row.Detail = append(row.Detail,
 		"write the assertion that fails when the code changes this way, or declare the mutant equivalent with "+
-			annotationMarker+" beside it")
+			annotationMarker+" trailing the mutated line — one marker there covers every innermost mutant on it")
 	if log.Rel != "" {
 		row.Detail = append(row.Detail, "full output: "+log.Rel)
 	}
@@ -803,7 +832,7 @@ func mutationFindings(label, component, dir string, survivors []mutation.Result,
 			Detail: []string{
 				"This mutant survived: the suite passed with the code changed this way.",
 				"Write the assertion that fails when it is, or declare the mutant equivalent with " +
-					annotationMarker + " beside it.",
+					annotationMarker + " trailing the mutated line — one marker there covers every innermost mutant on it.",
 			},
 			Site: string(m.Operator) + "\x1f" + finding.Normalise(m.Original) + "\x1f" + finding.Normalise(m.Mutated),
 		})
@@ -829,7 +858,7 @@ func aside(s mutation.Summary) string {
 		parts = append(parts, fmt.Sprintf("%d did not compile", s.Unviable))
 	}
 	if s.Acknowledged > 0 {
-		parts = append(parts, fmt.Sprintf("%d declared equivalent", s.Acknowledged))
+		parts = append(parts, fmt.Sprintf("%d declared equivalent (refers this change for review)", s.Acknowledged))
 	}
 	if s.TimedOut > 0 {
 		parts = append(parts, fmt.Sprintf("%d timed out", s.TimedOut))
@@ -838,6 +867,22 @@ func aside(s mutation.Summary) string {
 		parts = append(parts, fmt.Sprintf("%d ran out of memory", s.OutOfMemory))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// unmatchedNote counts the equivalence declarations that covered no mutant.
+//
+// A line of its own rather than a part of aside, because these are not mutants
+// at all: aside's parts are each a share of the mutants the run generated, and
+// a declaration covering nothing adds no mutant to any of them. It is on the
+// row, and not only on the diagnostic stream, because the row is what a
+// reader of the report or of the pull-request comment sees — and the author of
+// such a declaration believes they have answered a survivor that is generated
+// and run anyway. It gates nothing.
+func unmatchedNote(s mutation.Summary) string {
+	if s.Unmatched == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d declaration(s) cover no mutant", s.Unmatched)
 }
 
 // unboundedNote says on the row that the memory bound did not reach the
@@ -852,6 +897,20 @@ func unboundedNote(results []mutation.Result) string {
 		return ""
 	}
 	return "memory was not bounded: this platform has no limit to set, so a mutant that allocates without stopping was held to nothing"
+}
+
+// heldOpenNote says on the row that a mutant's own process group had to be
+// killed at the wait delay because something it started was still holding
+// its output open when the suite itself had already exited.
+//
+// Said out loud rather than left out, because a mutant reporting killed or
+// survived this way exited clean only because lydite stopped waiting for
+// what it left running, not because nothing was left running.
+func heldOpenNote(results []mutation.Result) string {
+	if !mutation.HeldOutputOpen(results) {
+		return ""
+	}
+	return "a mutant exited while something it started was still running: its process group was killed after lydite stopped waiting for it"
 }
 
 // parseBytes reads a byte quantity as a flag spells one: a plain number of
