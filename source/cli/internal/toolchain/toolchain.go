@@ -513,13 +513,18 @@ func resolveOne(ctx context.Context, root string, req Requirement, ov Overrides,
 	// cache's key, and both compare it verbatim.
 	resolved, err := confirm(ctx, root, req, st, runtime)
 	if err != nil {
-		// The install succeeded, so the environment is real and keeping it is
-		// not in question; only the identity went unestablished. The
-		// declaration stands in for it, and the line says so rather than
-		// letting an unconfirmed version read as a measured one.
-		resolved = displayRaw(req)
-		r.note += fmt.Sprintf("; warning: could not confirm %s's installed version (%v) — recording %q",
-			req.subject(), err, resolved)
+		// An install that cannot name its own version is a failed provision.
+		// Keeping its environment would run the component under a toolchain
+		// nothing established, and the declaration is no stand-in for its
+		// identity: it names a channel or a floor, not what was installed. The
+		// component continues with what is on PATH, and every component sharing
+		// this resolution is told so, with the install sentence folded in.
+		unconfirmed := fmt.Sprintf("installed, but its version could not be confirmed: %v", err)
+		if st.note != "" {
+			unconfirmed = st.note + "; " + unconfirmed
+		}
+		r.kind, r.note = resolutionFailed, unconfirmed
+		return r, nil
 	}
 	r.env = &Env{PathDirs: st.pathDirs, Vars: st.vars, Resolved: resolved}
 	return r, nil
@@ -537,9 +542,9 @@ func confirm(ctx context.Context, root string, req Requirement, st *step, runtim
 		// to report.
 		active, _, lack := rustReady(ctx, dir, Compose(st.pathDirs, nil, st.vars))
 		if active == "" {
-			// The caller discards this string on a non-nil error and
-			// substitutes its own fallback, so what matters here is the
-			// error, not the value — returning active rather than a literal
+			// The caller discards this string on a non-nil error and fails
+			// the provision, so what matters here is the error, not the
+			// value — returning active rather than a literal
 			// keeps that true by construction instead of by convention.
 			return active, errors.New(lack)
 		}

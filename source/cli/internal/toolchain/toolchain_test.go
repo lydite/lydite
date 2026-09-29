@@ -443,34 +443,44 @@ func TestAmbientAndProvisionedAgreeOnTheToolchainTheyResolvedTo(t *testing.T) {
 	}
 }
 
-// A confirming probe that fails after a successful install leaves a toolchain
-// that is genuinely there. Discarding the environment over it would undo the
-// install; recording a version nothing confirmed would be a claim. So the
-// environment stands, the declaration is recorded as the stand-in it is, and
-// the line says the identity is unconfirmed.
-func TestAnUnconfirmedInstalledVersionKeepsTheEnvironmentAndWarns(t *testing.T) {
+// unconfirmed is the note a provision carries when the install ran and the
+// toolchain it left behind would not say what version it is.
+const unconfirmed = "installed, but its version could not be confirmed: "
+
+// A toolchain whose installed version cannot be confirmed is a failed
+// provision. Env.Resolved is a baseline's producer and half of a tool cache's
+// key, so an environment kept without an established identity records a
+// producer nothing measured and keys a cache on a declaration rather than on a
+// toolchain. The environment is dropped whole — the selecting variable
+// included — and the component continues with what is on PATH, under a warning
+// that names why.
+func TestAnUnconfirmedInstalledVersionIsAFailedProvision(t *testing.T) {
 	dir := rustCrate(t, "1.85")
 	bin := fakeToolchainBin(t)
 	fakeCargo(t, bin, "1.90.0")
 	fakeRustupInstalling(t, bin, "1.91.0-x86_64-unknown-linux-gnu", true)
 
 	var log bytes.Buffer
-	// Overridden, so provisioning contributes a variable there is something to
-	// lose: RUSTUP_TOOLCHAIN is what selects the channel just installed.
+	// Overridden, so provisioning produces a variable that would otherwise
+	// reach the environment: RUSTUP_TOOLCHAIN is what selects the channel.
 	env := ensureOne(t, dir, runner.Rust, Overrides{Rust: "stable"}, &log)
 
-	if !slices.Contains(env.Environ(), "RUSTUP_TOOLCHAIN=stable") {
-		t.Fatalf("Environ = %q, want the selection the successful install made", env.Environ())
+	if slices.Contains(env.Environ(), "RUSTUP_TOOLCHAIN=stable") {
+		t.Fatalf("Environ = %q, want no selection for a toolchain whose version went unconfirmed", env.Environ())
 	}
-	if got := env.Version(); got != "stable" {
-		t.Errorf("Version = %q, want the declaration as the stand-in for a version nothing confirmed", got)
+	if len(env.Environ()) != 0 {
+		t.Fatalf("an unconfirmed provision must contribute nothing to the env, got %+v", env)
+	}
+	if got := env.Version(); got != "" {
+		t.Errorf("Version = %q, want none recorded for a toolchain nothing confirmed", got)
 	}
 	out := log.String()
-	if !strings.Contains(out, "installed toolchain stable") {
-		t.Errorf("log should still report the install that succeeded, got %q", out)
+	want := unconfirmed + "is one rustup resolves no channel for in this component"
+	if !strings.Contains(out, want) {
+		t.Errorf("log should warn that the installed version went unconfirmed and name why, want %q in %q", want, out)
 	}
-	if !strings.Contains(out, "warning:") || !strings.Contains(out, `recording "stable"`) {
-		t.Errorf("log should warn that the installed version went unconfirmed and say what it recorded, got %q", out)
+	if !strings.Contains(out, "continuing with what is on PATH") {
+		t.Errorf("log should say the component continues with what is on PATH, got %q", out)
 	}
 }
 
@@ -479,7 +489,7 @@ func TestAnUnconfirmedInstalledVersionKeepsTheEnvironmentAndWarns(t *testing.T) 
 // then removes itself the moment it is asked to install something reaches
 // exactly that branch on the re-probe, which is otherwise only exercised by
 // the readiness check before anything is provisioned.
-func TestConfirmFallsBackWhenRustupVanishesAfterInstalling(t *testing.T) {
+func TestAnInstallWhoseRustupVanishesIsAFailedProvision(t *testing.T) {
 	dir := unpinnedRustCrate(t)
 	bin := fakeToolchainBin(t)
 	marker := filepath.Join(t.TempDir(), "installs")
@@ -496,18 +506,65 @@ func TestConfirmFallsBackWhenRustupVanishesAfterInstalling(t *testing.T) {
 
 	var log bytes.Buffer
 	env := ensureOne(t, dir, runner.Rust, Overrides{}, &log)
-	if env == nil {
-		t.Fatalf("Ensure returned no environment after a successful install; log was %q", log.String())
+	if env != nil {
+		t.Fatalf("Ensure returned %+v for an install nothing could confirm; log was %q", env, log.String())
 	}
-	if got := env.Version(); got != "an unidentified version" {
-		t.Errorf("Version = %q, want the unpinned fallback recorded once rustup could no longer confirm anything", got)
+	if got := installs(t, marker); got == "" {
+		t.Fatalf("rustup was never asked to install, so the confirming probe was never reached; log was %q", log.String())
 	}
 	out := log.String()
-	if !strings.Contains(out, "warning:") {
-		t.Errorf("log should warn that the installed version could not be confirmed once rustup vanished, got %q", out)
+	if want := unconfirmed + "needs rustup, which is not installed"; !strings.Contains(out, want) {
+		t.Errorf("log should warn that the installed version went unconfirmed once rustup vanished, want %q in %q", want, out)
 	}
-	if strings.Contains(out, `recording "lydite"`) {
-		t.Errorf("a fallback string must never be confused for a real toolchain name, got %q", out)
+}
+
+// A downloaded Node is confirmed by running the node binary the install put on
+// PATH, and one that will not answer `--version` confirms nothing. Every
+// component sharing the resolution is told, because the line is about what
+// each one continues without.
+func TestAnInstalledNodeThatCannotNameItsVersionIsAFailedProvision(t *testing.T) {
+	isolatedCache(t)
+	fakeToolchainBin(t)
+	root := t.TempDir()
+	write(t, root, ".nvmrc", "22.0.0\n")
+	write(t, root, "a/package.json", `{"name":"a"}`)
+	write(t, root, "b/package.json", `{"name":"b"}`)
+	// A finished install in the cache, so provisioning fetches nothing and
+	// the node it leaves on PATH fails its own version probe.
+	cache, err := cacheRoot("node-22.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cache, "bin"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, filepath.Join(cache, "bin", "node"), "#!/bin/sh\necho 'node: bad install' >&2\nexit 1\n")
+
+	var log bytes.Buffer
+	envs, err := Ensure(context.Background(), root, []Unit{
+		{Name: "a", Lang: runner.TypeScript, Dir: "a"},
+		{Name: "b", Lang: runner.TypeScript, Dir: "b"},
+	}, Overrides{}, &log)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	out := log.String()
+	if !strings.Contains(out, "installed Node v22.0.0") && !strings.Contains(out, unconfirmed) {
+		t.Fatalf("the cached Node was never provisioned, so the confirming probe was never reached; log was %q", out)
+	}
+	for _, name := range []string{"a", "b"} {
+		if env := envs.For(name); env != nil {
+			t.Errorf("component %s got %+v for a Node nothing could confirm", name, env)
+		}
+	}
+	if n := strings.Count(out, unconfirmed); n != 2 {
+		t.Errorf("the unconfirmed install was reported %d times, want once per component; log was %q", n, out)
+	}
+	if !strings.Contains(out, "exit status 1") {
+		t.Errorf("log should name why the version probe failed, got %q", out)
+	}
+	if n := strings.Count(out, "continuing with what is on PATH"); n != 2 {
+		t.Errorf("continuing with what is on PATH was reported %d times, want once per component; log was %q", n, out)
 	}
 }
 

@@ -69,10 +69,11 @@ probe already proved was broken, and the run proceeded to hand a component this 
 
 **Fixed by ADR 0075** (this branch): pnpm ≥ 12 is no longer unpacked through the node wrapper at
 all — `downloadPnpm` installs its `@pnpm/exe.<os>-<arch>` native binary directly, so there is no
-placeholder for `confirm`'s probe to fail against in the first place. `confirm`'s general
-"a failed post-install probe still puts the toolchain on PATH" behavior is untouched for every
-*other* toolchain (Go, Rust, Node, yarn) — that is a separate, still-open gap, deliberately
-deferred to a follow-up slice on top of this ADR rather than fixed here.
+placeholder for `confirm`'s probe to fail against in the first place. `confirm`'s failure is a failed
+provision for every toolchain (Go, Rust, Node, yarn, pnpm): `resolveOne` returns a nil env, warns
+"installed, but its version could not be confirmed: <err> — continuing with what is on PATH",
+and no `Env` carries a raw declaration as `Resolved`. A manager whose probe fails leaves the
+component's runtime env intact (toolchain.go `resolveOne`, toolchains.md).
 
 `provision_test.go`'s `pnpmTarball` fixture used to model only the ≤10.x shape
 (`bin: {"pnpm": "bin/pnpm.cjs"}`); this branch rewrote it to the ≥12 placeholder shape and added
