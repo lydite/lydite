@@ -129,8 +129,12 @@ type Declared struct {
 }
 
 // exactVersion is the only version form `packageManager` admits: Corepack
-// installs exactly what it names, so a range there is not a pin.
-var exactVersion = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+// installs exactly what it names, so a range there is not a pin. Each
+// numeric component follows semver's own grammar — no leading zero unless
+// the component is "0" — so a version this regex accepts is always one
+// golang.org/x/mod/semver parses too; Supported reads the major off exactly
+// that parse.
+var exactVersion = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
 
 // PackageManager reads the `packageManager` field of root's package.json —
 // the field Corepack itself reads — and reports false with no error when the
@@ -195,12 +199,17 @@ const MinimumPnpmMajor = 12
 // Supported reports whether lydite installs with the manager d pins. Only
 // pnpm has a floor, and it is on the major alone: a 12 prerelease orders below
 // 12.0.0 as semver, and is still a 12 release in the shape lydite provisions.
+//
+// A version Supported cannot parse as semver is unsupported, not exempt from
+// the floor: PackageManager's own exactVersion already refuses that shape for
+// a field it read itself, so the only way here is a Declared some other
+// caller built directly, and a floor a bad version can walk past is not one.
 func (d Declared) Supported() bool {
 	if d.Name != "pnpm" {
 		return true
 	}
 	major, err := strconv.Atoi(strings.TrimPrefix(semver.Major("v"+d.Version), "v"))
-	return err != nil || major >= MinimumPnpmMajor
+	return err == nil && major >= MinimumPnpmMajor
 }
 
 // Refusal is the error a component under dir fails its install with when the

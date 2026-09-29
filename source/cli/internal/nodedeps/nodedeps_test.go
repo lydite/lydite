@@ -125,6 +125,15 @@ func TestPackageManager(t *testing.T) {
 			wantErr:   true,
 		},
 		{
+			// A leading zero is not a number x/mod/semver parses; a version
+			// exactVersion admits but semver.Major cannot is a floor a bad
+			// pin could otherwise walk past unsupported.
+			name:      "a leading zero is not a pin",
+			manifest:  `{"packageManager":"pnpm@08.15.4"}`,
+			lockfiles: []string{"pnpm-lock.yaml"},
+			wantErr:   true,
+		},
+		{
 			name:      "no name",
 			manifest:  `{"packageManager":"@12.4.1"}`,
 			lockfiles: []string{"pnpm-lock.yaml"},
@@ -177,6 +186,7 @@ func TestSupportedIsPnpmsMajorAlone(t *testing.T) {
 		{Declared{Name: "pnpm", Version: "12.0.0"}, true},
 		{Declared{Name: "pnpm", Version: "12.4.1", Hash: "sha512.abc"}, true},
 		{Declared{Name: "pnpm", Version: "13.0.0"}, true},
+		{Declared{Name: "pnpm", Version: "not-a-version"}, false},
 		{Declared{Name: "yarn", Version: "1.22.19"}, true},
 		{Declared{Name: "yarn", Version: "4.1.0"}, true},
 		{Declared{Name: "npm", Version: "10.2.0"}, true},
