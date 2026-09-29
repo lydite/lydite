@@ -571,8 +571,55 @@ func TestEnsureProvisionsThePinnedManagerAlongsideNode(t *testing.T) {
 	if !strings.Contains(out, "installed pnpm "+pnpmVersion) || !strings.Contains(out, "ambient 12.5.0 is not the pinned release") {
 		t.Errorf("log should name the pinned install and why the ambient pnpm was passed over, got %q", out)
 	}
-	if strings.Contains(out, "could not confirm") {
+	if strings.Contains(out, unconfirmed) {
 		t.Errorf("the installed pnpm should confirm its own version, got %q", out)
+	}
+}
+
+// A package manager whose installed version cannot be confirmed is a failed
+// provision of the manager alone. The component keeps the Node it resolved,
+// directories and identity both, and gains nothing from the manager — not a
+// directory holding a release nothing confirmed is the one pinned.
+func TestAnUnconfirmedManagerLeavesTheComponentsRuntimeIntact(t *testing.T) {
+	isolatedCache(t)
+	dir := pnpmWorkspace(t, pnpmVersion)
+	write(t, dir, ".nvmrc", "22.0.0\n")
+	fakeToolchainBin(t)
+	// The component's Node is itself provisioned, so its environment carries a
+	// directory that has to survive the manager's failure.
+	node, err := cacheRoot("node-22.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(node, "bin"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode(t, filepath.Join(node, "bin"), "v22.0.0")
+	// A cached pnpm whose binary fails, so `pnpm --version` answers with an error.
+	manager := cachedPnpm(t, pnpmVersion, "")
+	writeScript(t, filepath.Join(manager, "bin", "pnpm"), "#!/bin/sh\necho 'pnpm: bad install' >&2\nexit 1\n")
+
+	var log bytes.Buffer
+	env := ensureOne(t, dir, runner.TypeScript, Overrides{}, &log)
+	out := log.String()
+	if !strings.Contains(out, "installed Node v22.0.0") {
+		t.Fatalf("the cached Node was never provisioned, so there is no runtime to keep; log was %q", out)
+	}
+	if env == nil {
+		t.Fatalf("Ensure returned no environment, want the component's Node; log was %q", out)
+	}
+	if want := []string{filepath.Join(node, "bin")}; !slices.Equal(env.PathDirs, want) {
+		t.Errorf("PathDirs = %q, want the Node's %q alone and not the unconfirmed pnpm's %q",
+			env.PathDirs, want, filepath.Join(manager, "bin"))
+	}
+	if got := env.Version(); got != "22.0.0" {
+		t.Errorf("Version = %q, want the Node the component runs under", got)
+	}
+	if !strings.Contains(out, unconfirmed) || !strings.Contains(out, "exit status 1") {
+		t.Errorf("log should warn that pnpm's installed version went unconfirmed and name why, got %q", out)
+	}
+	if !strings.Contains(out, "continuing with what is on PATH") {
+		t.Errorf("log should say the component continues with what is on PATH, got %q", out)
 	}
 }
 
