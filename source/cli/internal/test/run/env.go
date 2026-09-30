@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -108,19 +109,32 @@ func Env(c component.Component) []string {
 // A shard's set is its own, since it can never execute a component outside it
 // and materialising a rustup channel for one is a download nothing uses.
 //
-// A component declaring its own command implies no language and needs nothing,
-// and neither does one declaring no suite: its lang: names what it is scanned
-// as, and Lang — the language a suite runs in — stays empty without a runner.
-func ComponentUnits(components []component.Component) []toolchain.Unit {
+// A component declaring its own command implies no language: its lang: names
+// what it is scanned as, and Lang — the language a suite runs in — stays empty
+// without a runner. One whose own directory under root holds a package.json is
+// resolved through the workspace's Node toolchain instead, as a NodeCommand
+// unit, because the command it runs installs and runs through that Node and
+// its pinned package manager. A command without one needs nothing, and neither
+// does a component declaring no suite.
+func ComponentUnits(root string, components []component.Component) []toolchain.Unit {
 	var out []toolchain.Unit
 	for _, c := range components {
-		lang := measure.LangOf(c)
-		if lang == "" {
+		if lang := measure.LangOf(c); lang != "" {
+			out = append(out, toolchain.Unit{Name: c.Name, Lang: lang, Dir: c.Dir})
 			continue
 		}
-		out = append(out, toolchain.Unit{Name: c.Name, Lang: lang, Dir: c.Dir})
+		if len(c.Command) > 0 && hasPackageJSON(root, c.Dir) {
+			out = append(out, toolchain.Unit{Name: c.Name, Dir: c.Dir, NodeCommand: true})
+		}
 	}
 	return out
+}
+
+// hasPackageJSON reports whether a component's own directory, relative to
+// root, holds a package.json.
+func hasPackageJSON(root, dir string) bool {
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(dir), "package.json"))
+	return err == nil && !info.IsDir()
 }
 
 // EnsureToolchains makes each unit's language toolchain available at the

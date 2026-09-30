@@ -1430,14 +1430,84 @@ func jsonFindings(t *testing.T, out string) []finding.Finding {
 // language it declares: lang: names what it is scanned as, and a suite that
 // does not exist has nothing to run under a Go it asked nobody for.
 func TestAComponentDeclaringNoSuiteProvisionsNoToolchain(t *testing.T) {
-	got := componentUnits([]component.Component{
+	root := t.TempDir()
+	write(t, root, "scripts/package.json", "{}\n")
+	got := testUnits(root, []component.Component{
 		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
 		{Name: "gen", Dir: "gen", DeclaredLang: runner.Go},
 		{Name: "mod", Dir: "mod", Runner: runner.GoTest},
 	})
 	want := []toolchain.Unit{{Name: "mod", Lang: runner.Go, Dir: "mod"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("testUnits = %+v, want %+v", got, want)
+	}
+}
+
+// A raw command implies no language, and one whose own directory holds a
+// package.json is resolved through the workspace's Node toolchain: its command
+// installs and runs through that Node and its pinned package manager. Lang
+// stays empty, so nothing deciding by language reads it as TypeScript.
+func TestACommandComponentWithItsOwnPackageJSONIsANodeCommandUnit(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "web/package.json", "{}\n")
+	got := testUnits(root, []component.Component{
+		{Name: "web", Dir: "web", Command: []string{"pnpm", "test"}, DeclaredLang: runner.Shell},
+		{Name: "mod", Dir: "mod", Runner: runner.GoTest},
+	})
+	want := []toolchain.Unit{
+		{Name: "web", Dir: "web", NodeCommand: true},
+		{Name: "mod", Lang: runner.Go, Dir: "mod"},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("testUnits = %+v, want %+v", got, want)
+	}
+}
+
+// A command whose own directory holds no package.json needs no toolchain on
+// the test side, whatever language it declares: a Go or Rust command runs
+// through a go.mod or a Cargo.toml, never a Node workspace, and a package.json
+// in a directory above it is not its own.
+func TestACommandComponentWithoutItsOwnPackageJSONProvisionsNothing(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "package.json", "{}\n")
+	write(t, root, "tool/go.mod", "module tool\n\ngo 1.26\n")
+	write(t, root, "crate/Cargo.toml", "[package]\nname = \"crate\"\n")
+	write(t, root, "make/Makefile", "test:\n")
+	write(t, root, "odd/package.json/keep", "")
+	got := testUnits(root, []component.Component{
+		{Name: "tool", Dir: "tool", Command: []string{"go", "test", "./..."}, DeclaredLang: runner.Go},
+		{Name: "crate", Dir: "crate", Command: []string{"cargo", "test"}, DeclaredLang: runner.Rust},
+		{Name: "make", Dir: "make", Command: []string{"make", "test"}},
+		{Name: "odd", Dir: "odd", Command: []string{"make", "test"}},
+	})
+	if len(got) != 0 {
+		t.Errorf("testUnits = %+v, want none: no command component has a package.json of its own", got)
+	}
+}
+
+// review's API-surface comparison provisions only the units a component's
+// runner implies. A command component beside its own package.json is a
+// NodeCommand unit to `lydite test`, and never reaches review's list — even
+// with the process sitting where a relative directory would find it.
+func TestReviewProvisionsNoNodeCommandUnit(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "web/package.json", "{}\n")
+	t.Chdir(root)
+	components := []component.Component{
+		{Name: "web", Dir: "web", Command: []string{"pnpm", "test"}},
+		{Name: "mod", Dir: "mod", Runner: runner.GoTest},
+		{Name: "ui", Dir: "ui", Runner: runner.Vitest},
+	}
+	got := componentUnits(components)
+	want := []toolchain.Unit{
+		{Name: "mod", Lang: runner.Go, Dir: "mod"},
+		{Name: "ui", Lang: runner.TypeScript, Dir: "ui"},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("componentUnits = %+v, want %+v", got, want)
+	}
+	if units := testUnits(root, components); len(units) != 3 || !units[0].NodeCommand {
+		t.Errorf("testUnits = %+v, want the command component as a NodeCommand unit ahead of the two runners", units)
 	}
 }
 

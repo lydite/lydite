@@ -185,7 +185,7 @@ func measureBaseTree(ctx context.Context, w io.Writer, dir, base string, concurr
 	// still checked, by the resolution this run did for itself, so a
 	// repository carrying a bad value is told about it exactly once and on
 	// the tree whose author can fix it.
-	envs, err := testrun.EnsureToolchains(ctx, w, root, baseCfg, testrun.ComponentUnits(decl.Components))
+	envs, err := testrun.EnsureToolchains(ctx, w, root, baseCfg, testrun.ComponentUnits(root, decl.Components))
 	if err != nil {
 		_, _ = fmt.Fprintf(w,
 			"warning: could not resolve the base tree's toolchains (%v) — measuring it with what is on PATH\n", err)
