@@ -27,6 +27,7 @@ import (
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/scheduler"
 	teststages "lydite/lydite/internal/stages/test"
+	testmeasure "lydite/lydite/internal/test/measure"
 	testrun "lydite/lydite/internal/test/run"
 	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
@@ -741,9 +742,24 @@ func splitPath(declared []string) (dirs, vars []string) { return testrun.SplitPa
 // env is testrun.Env.
 func env(c component.Component) []string { return testrun.Env(c) }
 
-// componentUnits is testrun.ComponentUnits.
+// testUnits is testrun.ComponentUnits, rooted at the scan root.
+func testUnits(root string, components []component.Component) []toolchain.Unit {
+	return testrun.ComponentUnits(root, components)
+}
+
+// componentUnits is the units review's API-surface comparison provisions: the
+// ones testrun.ComponentUnits implies through a component's runner, and never
+// a NodeCommand unit, since the comparison runs no component's raw command.
+// Only runner components reach ComponentUnits here, so no directory is read
+// and no root is needed.
 func componentUnits(components []component.Component) []toolchain.Unit {
-	return testrun.ComponentUnits(components)
+	var runners []component.Component
+	for _, c := range components {
+		if testmeasure.LangOf(c) != "" {
+			runners = append(runners, c)
+		}
+	}
+	return testrun.ComponentUnits("", runners)
 }
 
 // orphanRow is testrun.OrphanRow, warning on stderr.

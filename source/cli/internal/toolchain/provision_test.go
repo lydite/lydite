@@ -576,6 +576,43 @@ func TestEnsureProvisionsThePinnedManagerAlongsideNode(t *testing.T) {
 	}
 }
 
+// A raw-command component with its own package.json installs and runs through
+// the workspace's package manager, so its environment carries the pinned pnpm
+// just as a TypeScript component's does — with no ambient pnpm to fall back on,
+// that directory is the only pnpm the command's install can find.
+func TestEnsureProvisionsThePinnedManagerForANodeCommandUnit(t *testing.T) {
+	isolatedCache(t)
+	dir := pnpmWorkspace(t, pnpmVersion)
+	bin := fakeToolchainBin(t)
+	fakeNode(t, bin, "v22.0.0")
+	cache := cachedPnpm(t, pnpmVersion, "")
+
+	unit := Unit{Name: "c", Dir: ".", NodeCommand: true}
+	reqs, err := Requirements(dir, []Unit{unit}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 2 || reqs[1].Manager != "pnpm" || reqs[1].Raw != pnpmVersion {
+		t.Fatalf("Requirements = %+v, want Node followed by pnpm %s", reqs, pnpmVersion)
+	}
+
+	var log bytes.Buffer
+	envs, err := Ensure(context.Background(), dir, []Unit{unit}, Overrides{}, &log)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	env := envs.For("c")
+	if env == nil {
+		t.Fatalf("Ensure returned no environment; log was %q", log.String())
+	}
+	if want := filepath.Join(cache, "bin"); !slices.Contains(env.PathDirs, want) {
+		t.Fatalf("PathDirs = %q, want the pinned pnpm's %q; log was %q", env.PathDirs, want, log.String())
+	}
+	if !strings.Contains(log.String(), "installed pnpm "+pnpmVersion) {
+		t.Errorf("log should name the pinned pnpm install, got %q", log.String())
+	}
+}
+
 // A package manager whose installed version cannot be confirmed is a failed
 // provision of the manager alone. The component keeps the Node it resolved,
 // directories and identity both, and gains nothing from the manager — not a

@@ -596,3 +596,85 @@ func managerAt(t *testing.T, manager, version, lockfile string, ov Overrides) Re
 	}
 	return reqs[1]
 }
+
+// A command component with its own package.json runs through the workspace's
+// Node and package manager, so it needs exactly what a TypeScript component
+// in the same directory would — every field but the Unit it was resolved for.
+func TestANodeCommandUnitIsResolvedAsATypeScriptUnit(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22\n")
+	write(t, dir, "package.json", `{"name":"root","packageManager":"pnpm@12.4.1"}`)
+	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	write(t, filepath.Join(dir, "tools"), "package.json", `{"name":"tools","engines":{"node":">=20"}}`)
+
+	command := Unit{Name: "tools", Dir: "tools", NodeCommand: true}
+	typescript := Unit{Name: "tools", Lang: runner.TypeScript, Dir: "tools"}
+	got, err := Requirements(dir, []Unit{command}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	want, err := Requirements(dir, []Unit{typescript}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(got) != 2 || len(got) != len(want) {
+		t.Fatalf("got %+v, want the Node and pnpm: %+v", got, want)
+	}
+	for i := range want {
+		if got[i].Unit != command {
+			t.Errorf("requirement %d carries unit %+v, want %+v — its Lang stays empty", i, got[i].Unit, command)
+		}
+		got[i].Unit, want[i].Unit = Unit{}, Unit{}
+		if got[i] != want[i] {
+			t.Errorf("requirement %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// A unit with no language and no NodeCommand has nothing lydite provisions,
+// package.json beside it or not.
+func TestAnUnflaggedLanguagelessUnitHasNoRequirement(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".nvmrc", "22\n")
+	write(t, dir, "package.json", `{"packageManager":"pnpm@12.4.1"}`)
+	write(t, dir, "pnpm-lock.yaml", "")
+
+	reqs, err := Requirements(dir, []Unit{{Name: "c", Dir: "."}}, Overrides{Node: "24"})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 0 {
+		t.Errorf("got %+v, want no requirements", reqs)
+	}
+}
+
+// The pnpm floor holds for a NodeCommand unit as for a TypeScript one: the
+// refused pin makes no requirement, and the Node one still stands.
+func TestANodeCommandUnitsPnpmPinBelowTwelveMakesNoRequirement(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"packageManager":"pnpm@10.18.3"}`)
+	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+
+	reqs, err := Requirements(dir, []Unit{{Name: "c", Dir: ".", NodeCommand: true}}, Overrides{})
+	if err != nil {
+		t.Fatalf("Requirements: %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].Manager != "" || reqs[0].Lang != runner.TypeScript {
+		t.Fatalf("got %+v, want only the Node requirement", reqs)
+	}
+}
+
+// A NodeCommand unit reads the Node override, so a bad one is an error naming
+// the key the user would edit, not a key built from its empty Lang.
+func TestABadNodeOverrideOnANodeCommandUnitNamesTheNodeKey(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"name":"x"}`)
+
+	_, err := Requirements(dir, []Unit{{Name: "c", Dir: ".", NodeCommand: true}}, Overrides{Node: "lts/*"})
+	if err == nil {
+		t.Fatal("an unparseable toolchain.node override was accepted")
+	}
+	if !strings.Contains(err.Error(), "toolchain.node in") {
+		t.Errorf("error should name toolchain.node, got: %v", err)
+	}
+}

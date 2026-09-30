@@ -39,7 +39,7 @@ type ToolchainsOut struct {
 // inherited from a `lydite scan` earlier in the same job, since the result is a
 // value handed to each component's own commands, not a change to this process.
 func Toolchains(ctx context.Context, in ToolchainsIn) (ToolchainsOut, error) {
-	envs, err := testrun.EnsureToolchains(ctx, orDiscard(in.Stderr), in.Dir, in.Config, testrun.ComponentUnits(in.Own))
+	envs, err := testrun.EnsureToolchains(ctx, orDiscard(in.Stderr), in.Dir, in.Config, testrun.ComponentUnits(in.Dir, in.Own))
 	if err != nil {
 		return ToolchainsOut{}, err
 	}

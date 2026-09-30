@@ -317,17 +317,17 @@ func TestALanguageWithNoScannerIsNotReadAsAnOptOut(t *testing.T) {
 }
 
 // A declared lang: is the language a component is scanned as, and never the
-// one its suite runs in. A command component stating `lang: go` is provisioned
-// nothing for its suite, which a runner never derived; a `lang: shell`
-// component names a language no toolchain exists for, so it is provisioned
-// nothing on either side.
+// one its suite runs in. A raw command implies no language, so a command
+// component stating `lang: go` without a package.json of its own is
+// provisioned nothing for its suite; a `lang: shell` component names a
+// language no toolchain exists for, so it is provisioned nothing on either side.
 func TestADeclaredLangReachesNoTestUnit(t *testing.T) {
 	file := component.File{Components: []component.Component{
 		{Name: "tool", Dir: "tool", Command: []string{"make", "test"}, DeclaredLang: runner.Go},
 		{Name: "scripts", Dir: "scripts", DeclaredLang: runner.Shell},
 	}}
 
-	if got := componentUnits(file.Components); len(got) != 0 {
+	if got := testUnits(t.TempDir(), file.Components); len(got) != 0 {
 		t.Fatalf("test units = %+v, want none: neither component has a runner to imply a suite's language", got)
 	}
 

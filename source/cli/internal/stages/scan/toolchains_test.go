@@ -119,6 +119,40 @@ func TestScanUnitsReadsADeclaredLang(t *testing.T) {
 	}
 }
 
+// A package.json beside a raw command decides only what its suite runs under,
+// never what it is scanned as: a `lang: shell` command sitting in a node
+// package is provisioned as shell, and a command stating no lang is provisioned
+// nothing, however much of a node package its directory is. Reading either as
+// TypeScript would run TypeScript's checks over a component whose author named
+// what it is.
+func TestAPackageJSONBesideACommandDoesNotMakeItsScanTypeScript(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "scripts/package.json", `{"name":"scripts","packageManager":"pnpm@12.4.1"}`)
+	write(t, dir, "tools/package.json", `{"name":"tools"}`)
+	write(t, dir, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	file := component.File{Components: []component.Component{
+		{Name: "scripts", Dir: "scripts", Command: []string{"sh", "check.sh"}, DeclaredLang: runner.Shell},
+		{Name: "tools", Dir: "tools", Command: []string{"pnpm", "run", "check"}},
+	}}
+	cfg := config.Default()
+	cfg.Shell.Enabled = true
+
+	var gotUnits []toolchain.Unit
+	if _, err := ProvisionToolchains(context.Background(), ProvisionToolchainsIn{
+		Dir: dir, File: file, Config: cfg,
+		Toolchains: fakeToolchains{t: t, ensure: func(_ context.Context, _ string, _ config.Config, units []toolchain.Unit) (toolchain.Envs, error) {
+			gotUnits = units
+			return toolchain.Envs{}, nil
+		}},
+	}); err != nil {
+		t.Fatalf("ProvisionToolchains: %v", err)
+	}
+	want := []toolchain.Unit{{Name: "scripts", Lang: runner.Shell, Dir: "scripts"}}
+	if !slices.Equal(gotUnits, want) {
+		t.Fatalf("scan units = %+v, want only scripts, as shell and not a NodeCommand unit", gotUnits)
+	}
+}
+
 // gitInit stages every file under dir into git's index without committing —
 // enough for git ls-files to see them, which is all Unscanned reads.
 func gitInit(t *testing.T, dir string) {

@@ -361,6 +361,18 @@ Meeting the criterion routes the component through the identical
 `nodedeps.Install` call, coalesced on the same workspace root as every other
 component there.
 
+The same criterion decides the component's toolchain. `testrun.ComponentUnits` hands such a
+component to `internal/toolchain` as a unit with `NodeCommand` set, and `Requirements` resolves
+it exactly as a TypeScript unit — `engines.node`, the `packageManager` pin, the pnpm floor and the
+`toolchain.node` override — so the install has a provisioned Node and package manager to run, and
+the command itself runs with the toolchain's `PathDirs` ahead of its declared `PATH`. `Unit.Lang`
+stays empty: it is the runner's language, and a `lang: bash` command beside a `package.json` must
+not read as TypeScript to anything that decides by language. Only `lydite test` builds these
+units; `review` and `scan` do not. If provisioning fails the run continues with what is on `PATH`
+under a warning, so a machine with no ambient pnpm still fails the install with
+`pnpm: not on PATH`, the warning above it. See
+[ADR 0079](../../docs/adr/0079-a-raw-command-with-its-own-package-json-runs-under-the-provisioned-node.md).
+
 A component's coverage or mutation producer — the runner and provider
 `internal/runner.Producer` reads back out of `node_modules` — is read from the
 same place `Install` wrote to: the workspace root when one resolved, the

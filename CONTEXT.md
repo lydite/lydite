@@ -81,6 +81,10 @@ A measurement record that cannot be recomputed after the fact — the toolchain 
 **Cache**:
 Derived data that can be regenerated on demand by re-running the tool that produced it. Losing a cache entry costs time, not information, so cache writes are best-effort and non-fatal. The per-tree **Baseline** is a cache; **Quality history** is a **Ledger**. The distinction is not stylistic: it dictates whether a failed write may be ignored.
 
+**Node command**:
+A **Component** declared with a raw `command:` and no runner whose own directory holds a `package.json`. It implies no language, yet it installs and runs through the workspace's Node and pinned package manager, so its toolchain is resolved as a TypeScript component's is.
+_Avoid_: "TypeScript command" — the component declares no language, and the toolchain it needs is not one.
+
 **Mutation state**:
 One **Component**'s recorded **Mutant** verdicts and the baseline they were measured against, kept under a **Fingerprint** so a rerun measures only the mutants that have no verdict yet. It is a **Cache**: losing it costs the time spent measuring what it held, so a state that cannot be read or written is reported and the run measures everything. Only a verdict the run itself decided is recorded; a mutant its declaration acknowledges is answered from the declaration and never enters it.
 _Avoid_: "checkpoint", "session" — nothing here is a place to return to, only verdicts a rerun does not need to reproduce.
