@@ -97,14 +97,35 @@ type Unit struct {
 	Lang runner.Lang
 	// Dir is the component's directory, relative to the scan root.
 	Dir string
+	// NodeCommand marks a component declared with `command:` and no `runner:`
+	// whose own directory holds a package.json, and it is set only on a unit
+	// whose Lang is empty. Such a component is resolved as a TypeScript unit
+	// is — the workspace's Node and its pinned package manager — because the
+	// command it runs installs and runs through them.
+	//
+	// It is deliberately narrower than "installs node dependencies" and kept
+	// apart from Lang: Lang is the runner's language and nothing else, so a
+	// `lang: bash` command beside a package.json must not read as TypeScript
+	// to anything that decides by language.
+	NodeCommand bool
+}
+
+// lang is the language a unit's toolchain is resolved as: its runner's, or
+// TypeScript's for a NodeCommand unit, which declares none.
+func (u Unit) lang() runner.Lang {
+	if u.Lang == "" && u.NodeCommand {
+		return runner.TypeScript
+	}
+	return u.Lang
 }
 
 // Requirements resolves what each unit needs, in unit order: one Requirement
 // per unit, followed — for a TypeScript unit whose workspace pins pnpm or yarn
 // in `packageManager` — by a second one for that package manager, carrying the
-// same Unit. A unit naming a language lydite provisions no toolchain for is
-// skipped rather than given an unpinned requirement, so nothing probes the
-// machine on its behalf.
+// same Unit. A NodeCommand unit resolves exactly as a TypeScript unit does,
+// override included. A unit naming a language lydite provisions no toolchain
+// for — or naming none, without NodeCommand — is skipped rather than given an
+// unpinned requirement, so nothing probes the machine on its behalf.
 //
 // Resolution is per unit and not per repository, which is what makes a
 // monorepo answerable: a workspace declaring `engines.node: >=22` and a tools
@@ -123,9 +144,10 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 	var out []Requirement
 	for _, u := range units {
 		dir := filepath.Join(root, filepath.FromSlash(u.Dir))
+		lang := u.lang()
 		var req Requirement
 		var err error
-		switch u.Lang {
+		switch lang {
 		case runner.Go:
 			req, err = goRequirement(root, dir)
 		case runner.Rust:
@@ -138,7 +160,7 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 		if err != nil {
 			return nil, err
 		}
-		if override := cfg.For(u.Lang); override != "" {
+		if override := cfg.For(lang); override != "" {
 			v := canonical(override)
 			// A version lydite cannot parse is a hard config error, not a
 			// silent downgrade. Assigning it unconditionally would set
@@ -153,19 +175,19 @@ func Requirements(root string, units []Unit, cfg Overrides) ([]Requirement, erro
 			// rustup is the authority on which of those are real, not
 			// lydite. Such an override stays unpinned and is handed through
 			// verbatim.
-			if v == "" && u.Lang != runner.Rust {
+			if v == "" && lang != runner.Rust {
 				return nil, fmt.Errorf(
 					"toolchain.%s in .lydite/config.yml: %q is not a version lydite can compare against an installed toolchain",
-					overrideKey(u.Lang), override)
+					overrideKey(lang), override)
 			}
 			req.Version = v
 			req.Raw = override
-			req.Source = "toolchain." + overrideKey(u.Lang) + " in .lydite/config.yml"
+			req.Source = "toolchain." + overrideKey(lang) + " in .lydite/config.yml"
 			req.Overridden = true
 		}
 		req.Unit = u
 		out = append(out, req)
-		if u.Lang != runner.TypeScript {
+		if lang != runner.TypeScript {
 			continue
 		}
 		pm, ok, err := managerRequirement(root, dir, cfg.Disabled)
