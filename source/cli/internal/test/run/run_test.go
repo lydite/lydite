@@ -1,11 +1,15 @@
 package run
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"lydite/lydite/internal/component"
@@ -13,6 +17,7 @@ import (
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/runner"
 	"lydite/lydite/internal/test/measure"
+	"lydite/lydite/internal/toolchain"
 	"lydite/lydite/internal/ui"
 )
 
@@ -146,6 +151,163 @@ func TestACommandComponentWhoseInstallFailsDoesNotRunItsSuite(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(row.Detail, " "), config.FileName) {
 		t.Errorf("detail = %v, want the override named as the way out", row.Detail)
+	}
+}
+
+// provisionedPnpmVersion is the pnpm release the workspaces below pin, and the
+// one pinnedPnpmOnly lays out as already provisioned.
+const provisionedPnpmVersion = "12.4.1"
+
+// pinnedPnpmOnly makes a machine with no pnpm of its own: PATH is a directory
+// holding a stand-in node and sh and nothing else, and the user cache holds a
+// finished pnpm install at the pin, so internal/toolchain provisions it
+// without fetching anything. The stand-in pnpm appends one line per install
+// to the file whose path is returned.
+//
+// The cache layout is internal/toolchain's own (its cacheRoot and
+// managerCacheKey): a pnpm install is keyed on its version and platform.
+func pinnedPnpmOnly(t *testing.T) (installs string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(sh, filepath.Join(bin, "sh")); err != nil {
+		t.Fatal(err)
+	}
+	executable(t, filepath.Join(bin, "node"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.0.0; exit 0; fi\nexit 1\n")
+	t.Setenv("PATH", bin)
+
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	installs = filepath.Join(t.TempDir(), "installs")
+	pnpm := filepath.Join(cache, "lydite", "pnpm-exe-"+provisionedPnpmVersion+"-"+runtime.GOOS+"-"+runtime.GOARCH, "bin", "pnpm")
+	executable(t, pnpm, "#!/bin/sh\n"+
+		"if [ \"$1\" = --version ]; then echo "+provisionedPnpmVersion+"; exit 0; fi\n"+
+		"echo \"$PWD $*\" >> '"+installs+"'\n")
+	return installs
+}
+
+func executable(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G306 -- a stand-in executable, in a temp dir
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pinnedPnpmWorkspace is a pnpm workspace at root pinning
+// provisionedPnpmVersion, whose root sits above every package in it.
+func pinnedPnpmWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write(t, root, "package.json", `{"name":"root","private":true,"packageManager":"pnpm@`+provisionedPnpmVersion+`"}`)
+	write(t, root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+	return root
+}
+
+// componentEnvs is what `lydite test` hands each component's run: the units
+// its declarations imply, each provisioned.
+func componentEnvs(t *testing.T, root string, cfg config.Config, components ...component.Component) toolchain.Envs {
+	t.Helper()
+	var log bytes.Buffer
+	envs, err := EnsureToolchains(context.Background(), &log, root, cfg, ComponentUnits(root, components))
+	if err != nil {
+		t.Fatalf("EnsureToolchains: %v; log was %q", err, log.String())
+	}
+	return envs
+}
+
+// installLines is each install the stand-in pnpm recorded.
+func installLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path) // #nosec G304 -- a file under the test's own temporary directory
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// A raw command inside a pnpm workspace installs through the pnpm the
+// workspace pins, so on a machine with no pnpm of its own that install needs
+// the provisioned one on the environment its preparation runs under. Without
+// it the component fails "not prepared" before its command runs, naming a pnpm
+// nothing on PATH supplies.
+func TestACommandComponentInAPnpmWorkspaceInstallsWithTheProvisionedPnpm(t *testing.T) {
+	installs := pinnedPnpmOnly(t)
+	root := pinnedPnpmWorkspace(t)
+	write(t, root, "packages/web/package.json", `{"name":"web"}`)
+	c := component.Component{Name: "web", Dir: "packages/web", Command: []string{"sh", "-c", "exit 0"}}
+	cfg := config.Default()
+
+	envs := componentEnvs(t, root, cfg, c)
+	row, _ := runComponent(context.Background(), root, planFor(t, root, c), cfg, envs.For(c.Name), false, nil)
+	if row.Status != ui.StatusPass {
+		t.Fatalf("row = %+v, want the command prepared under the provisioned pnpm and passing", row)
+	}
+	// The install's working directory as the shell reports it, which is the
+	// temporary root with any symlink above it resolved.
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := installLines(t, installs)
+	if len(got) != 1 || (got[0] != root+" install --frozen-lockfile" && got[0] != resolved+" install --frozen-lockfile") {
+		t.Errorf("installs = %q, want one frozen install at the workspace root %q", got, root)
+	}
+}
+
+// A command component and a runner component resolving one workspace root
+// share its single install, so they must reach it under one environment: the
+// same provisioned Node and pnpm. Differing environments would make whichever
+// arrives second fail on the one the first installed under.
+func TestACommandAndARunnerComponentShareOneWorkspaceInstall(t *testing.T) {
+	installs := pinnedPnpmOnly(t)
+	root := pinnedPnpmWorkspace(t)
+	write(t, root, "packages/web/package.json", `{"name":"web"}`)
+	write(t, root, "packages/ui/package.json", `{"name":"ui"}`)
+	command := component.Component{Name: "web", Dir: "packages/web", Command: []string{"sh", "-c", "exit 0"}}
+	vitest := component.Component{Name: "ui", Dir: "packages/ui", Runner: runner.Vitest}
+	cfg := config.Default()
+	envs := componentEnvs(t, root, cfg, command, vitest)
+
+	var wg sync.WaitGroup
+	rows := make([]ui.Row, 2)
+	oks := make([]bool, 2)
+	for i, c := range []component.Component{command, vitest} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inv, err := invocationFor(c, runner.Plain, nil)
+			if err != nil {
+				t.Errorf("invocationFor(%s): %v", c.Name, err)
+				return
+			}
+			dir := filepath.Join(root, filepath.FromSlash(c.Dir))
+			rows[i], oks[i] = Prepare(context.Background(), inv, dir, root, TestLabel(c.Name), c, cfg, envs.For(c.Name), Output{W: io.Discard})
+		}()
+	}
+	wg.Wait()
+	for i, c := range []component.Component{command, vitest} {
+		if !oks[i] {
+			t.Errorf("%s: row = %+v, want it prepared from the shared install", c.Name, rows[i])
+		}
+	}
+	if got := installLines(t, installs); len(got) != 1 {
+		t.Errorf("installs = %q, want the workspace root installed exactly once", got)
 	}
 }
 
