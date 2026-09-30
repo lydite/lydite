@@ -1,5 +1,5 @@
 ---
-about: line numbers moved in prepare.go and the two-requirement/mutation-worker claims still hold
+about: line numbers moved in prepare.go and the mutation-worker claim still holds; a command component with a package.json now also gets a provisioned toolchain
 saw:
   - source/cli/internal/test/run/prepare.go
   - source/cli/internal/toolchain/require.go
