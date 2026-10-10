@@ -56,7 +56,36 @@ func BinDir(name, version, key string) (string, error) {
 // tool built by an older Go rejects newer source outright. A wrapper that only
 // reads another command's output has no such coupling and passes nothing.
 func Ensure(ctx context.Context, env []string, name, version, pkg, key string) (string, error) {
-	binDir, err := BinDir(name, version, key)
+	return EnsureWith(ctx, env, name, version, pkg, key, nil)
+}
+
+// A Require is a module whose version the install must use, whatever the tool
+// itself asks for.
+type Require struct {
+	Module  string
+	Version string
+}
+
+// EnsureWith is Ensure for a tool built against dependency versions lydite
+// chooses rather than the ones the tool's own go.mod resolves to.
+//
+// `go install pkg@version` builds with exactly the versions that module
+// declares, so a tool that analyses source is only as current as the
+// golang.org/x/tools it was released with. That library reads the compiler's
+// export data, and a Go release that writes a newer format than the pinned
+// reader knows makes every import fail with "export data version N is greater
+// than maximum supported" — a tool that then scans nothing. Raising the
+// dependency has to happen at build time, in a module of its own, because
+// `go install pkg@version` refuses to take requirements from anywhere else.
+//
+// The requirements are part of the install's identity: they join the cache
+// directory's name, so changing one builds again instead of reusing a binary
+// made against the old version.
+func EnsureWith(ctx context.Context, env []string, name, version, pkg, key string, require []Require) (string, error) {
+	for _, r := range require {
+		key += "-" + filepath.Base(r.Module) + "-" + r.Version
+	}
+	binDir, err := BinDir(name, version, strings.TrimPrefix(key, "-"))
 	if err != nil {
 		return "", err
 	}
@@ -67,6 +96,12 @@ func Ensure(ctx context.Context, env []string, name, version, pkg, key string) (
 	if err := os.MkdirAll(binDir, 0o750); err != nil {
 		return "", err
 	}
+	if len(require) > 0 {
+		if err := installRequiring(ctx, env, binDir, pkg, require); err != nil {
+			return "", err
+		}
+		return bin, nil
+	}
 	r := executil.RunEnv(ctx, "", append(append([]string{}, env...), "GOBIN="+binDir), "go", "install", pkg)
 	if !r.Ok() {
 		// The command's own output, not just its exit status: `exit status 1`
@@ -75,4 +110,33 @@ func Ensure(ctx context.Context, env []string, name, version, pkg, key string) (
 		return "", fmt.Errorf("installing %s: %w\n%s", pkg, r.Err, strings.TrimSpace(r.Output))
 	}
 	return bin, nil
+}
+
+// installRequiring builds pkg inside a throwaway module that requires the
+// tool at its pinned version and each of require beside it. Minimal version
+// selection then takes the higher of the tool's own requirement and ours, and
+// the go command checks every module it fetches against the checksum database
+// exactly as `go install pkg@version` does.
+func installRequiring(ctx context.Context, env []string, binDir, pkg string, require []Require) error {
+	work, err := os.MkdirTemp("", "lydite-install-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(work) }()
+
+	// -mod=mod because the module is created empty and `go get` fills it in;
+	// the default read-only mode would refuse to add the requirements.
+	env = append(append([]string{}, env...), "GOBIN="+binDir, "GOFLAGS=-mod=mod")
+	path, _, _ := strings.Cut(pkg, "@")
+	steps := [][]string{{"mod", "init", "lydite.invalid/install"}, {"get", pkg}}
+	for _, r := range require {
+		steps = append(steps, []string{"get", r.Module + "@" + r.Version})
+	}
+	steps = append(steps, []string{"install", path})
+	for _, args := range steps {
+		if r := executil.RunEnv(ctx, work, env, "go", args...); !r.Ok() {
+			return fmt.Errorf("installing %s: go %s: %w\n%s", pkg, args[0], r.Err, strings.TrimSpace(r.Output))
+		}
+	}
+	return nil
 }

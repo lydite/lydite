@@ -52,6 +52,20 @@ declaring them in the main module works, but drags gosec's entire dependency gra
 `google.golang.org/api`, …) into code lydite never links — measured at go.mod 17→69 lines and
 go.sum 17→114 — which would then generate a stream of irrelevant Dependabot PRs.
 
+**gosec and govulncheck are built against a `golang.org/x/tools` lydite chooses.** Both read
+the compiler's export data through that library, and `go install pkg@version` builds with
+whatever it was released against — so a Go release that writes a newer export-data format than
+the pinned library reads makes every import fail ("export data version 5 is greater than
+maximum supported version 4"), and gosec reports having scanned nothing. Go 1.27 did exactly
+that to gosec v2.29.0 (`x/tools` v0.49.0) and govulncheck v1.8.0 (v0.50.0); v0.51.0 reads it.
+`gotool.EnsureWith` builds them in a throwaway module that requires the tool at its pin and
+`golang.org/x/tools` at `xToolsVersion`, so minimal version selection takes the newer, and the
+requirement joins the cache directory's name so raising it builds again. `xToolsVersion` is a
+mirror of the `go-pin/go.mod` entry like the two scanner versions, and the floor is "at least
+as new as the newest Go a scanned repository may declare" — raise it before that Go is
+supported, not after a consumer's CI turns red. gosec already reports a build error in its
+report as `Crashed`, so a reader that cannot import never renders as a clean run.
+
 ## A version stated twice: `internal/pins` and `go run ./tools/pinsync`
 
 Three pins are stated a second time somewhere Dependabot cannot reach: `golang.go`'s constants

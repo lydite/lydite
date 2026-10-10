@@ -114,3 +114,54 @@ func TestAFailedInstallReturnsNoPath(t *testing.T) {
 		t.Errorf("Ensure = %q on a failed install, want no path at all", got)
 	}
 }
+
+// A requirement is part of what an install is: a binary built against one
+// version of a dependency must not answer for the same tool built against
+// another, or raising the requirement would keep serving the old build.
+func TestARequirementSeparatesOtherwiseIdenticalInstalls(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cached := func(version string) string {
+		dir, err := BinDir("gosec", "v2.29.0", "go1.27.2-tools-"+version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		bin := filepath.Join(dir, "gosec")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return bin
+	}
+	old, bumped := cached("v0.50.0"), cached("v0.51.0")
+	env := []string{"GOPROXY=off"}
+	for version, want := range map[string]string{"v0.50.0": old, "v0.51.0": bumped} {
+		got, err := EnsureWith(context.Background(), env, "gosec", "v2.29.0", "github.com/securego/gosec/v2/cmd/gosec@v2.29.0",
+			"go1.27.2", []Require{{Module: "golang.org/x/tools", Version: version}})
+		if err != nil {
+			t.Fatalf("EnsureWith re-installed a tool already cached for tools %s: %v", version, err)
+		}
+		if got != want {
+			t.Errorf("tools %s resolved to %s, want %s", version, got, want)
+		}
+	}
+}
+
+// A failed install under a requirement hands back no path, for the reason a
+// plain one does, and names the step that failed.
+func TestAFailedInstallWithARequirementReturnsNoPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got, err := EnsureWith(context.Background(), []string{"GOPROXY=off"},
+		"gotestsum", "v0.0.0-does-not-exist", "gotest.tools/gotestsum@v0.0.0-does-not-exist", "",
+		[]Require{{Module: "golang.org/x/tools", Version: "v0.51.0"}})
+	if err == nil {
+		t.Fatal("EnsureWith reported success for a package that cannot be installed")
+	}
+	if got != "" {
+		t.Errorf("EnsureWith returned %q beside an error, want no path", got)
+	}
+	if !strings.Contains(err.Error(), "gotest.tools/gotestsum@v0.0.0-does-not-exist") {
+		t.Errorf("error = %q, want it to name the package that could not be installed", err)
+	}
+}

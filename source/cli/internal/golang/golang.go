@@ -26,6 +26,12 @@ import (
 const (
 	gosecVersion       = "v2.29.0"
 	govulncheckVersion = "v1.8.0"
+	// xToolsVersion is the golang.org/x/tools both scanners are built against,
+	// rather than the one each release declares. It reads the compiler's export
+	// data, so it has to be at least as new as the newest Go a scanned
+	// repository may declare: one that is older rejects that Go's standard
+	// library as unreadable, and the scanner reports having checked nothing.
+	xToolsVersion = "v0.51.0"
 
 	gosecPkg       = "github.com/securego/gosec/v2/cmd/gosec@" + gosecVersion
 	govulncheckPkg = "golang.org/x/vuln/cmd/govulncheck@" + govulncheckVersion
@@ -97,5 +103,6 @@ func Check(ctx context.Context, dir string, env executil.Env, toolchainKey strin
 // satisfies the declaration both set GOTOOLCHAIN=local, and what separates
 // them is the directory on PATH.
 func ensure(ctx context.Context, env []string, toolchainKey, name, version, pkg string) (string, error) {
-	return gotool.Ensure(ctx, env, name, version, pkg, toolchainKey)
+	return gotool.EnsureWith(ctx, env, name, version, pkg, toolchainKey,
+		[]gotool.Require{{Module: "golang.org/x/tools", Version: xToolsVersion}})
 }
