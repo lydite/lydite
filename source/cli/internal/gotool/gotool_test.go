@@ -165,3 +165,101 @@ func TestAFailedInstallWithARequirementReturnsNoPath(t *testing.T) {
 		t.Errorf("error = %q, want it to name the package that could not be installed", err)
 	}
 }
+
+// fakeGo puts a `go` on PATH that records how it was invoked and, for an
+// install, leaves the binary where GOBIN says. It stands in for the real
+// command so the test reads the install's shape rather than the network's.
+func fakeGo(t *testing.T) (env []string, calls func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\n" +
+		"echo \"$*|GOFLAGS=$GOFLAGS|GOBIN=$GOBIN|DIR=$(basename \"$PWD\")\" >> \"$FAKEGO_LOG\"\n" +
+		"if [ \"$1\" = install ]; then mkdir -p \"$GOBIN\" && : > \"$GOBIN/tool\"; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable stub in a test directory
+		t.Fatal(err)
+	}
+	env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "FAKEGO_LOG=" + log}
+	return env, func() []string {
+		data, err := os.ReadFile(log) // #nosec G304 -- a path this test wrote
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+}
+
+// Without a requirement the install is the plain one: a single
+// `go install pkg@version` outside any module, with nothing added to the
+// cache key.
+func TestAnInstallWithoutARequirementIsAPlainInstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	env, calls := fakeGo(t)
+	bin, err := EnsureWith(context.Background(), env, "tool", "v1.0.0", "example.com/tool/cmd/tool@v1.0.0", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := calls()
+	if len(got) != 1 || !strings.HasPrefix(got[0], "install example.com/tool/cmd/tool@v1.0.0|") {
+		t.Fatalf("go was run as %q, want one `go install pkg@version`", got)
+	}
+	if strings.Contains(got[0], "GOFLAGS=-mod=mod") {
+		t.Errorf("a plain install ran with %q, want the caller's flags untouched", got[0])
+	}
+	want, err := BinDir("tool", "v1.0.0", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bin != filepath.Join(want, "tool") {
+		t.Errorf("bin = %s, want it under %s", bin, want)
+	}
+}
+
+// A requirement is built in a module of its own: the tool is added at its
+// pin, each requirement beside it, and the package is installed by path with
+// no version left to override them.
+func TestAnInstallWithARequirementIsBuiltInAThrowawayModule(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	env, calls := fakeGo(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	bin, err := EnsureWith(context.Background(), env, "tool", "v1.0.0", "example.com/tool/cmd/tool@v1.0.0", "",
+		[]Require{{Module: "golang.org/x/tools", Version: "v0.51.0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Dir(bin)
+	got := calls()
+	want := []string{
+		"mod init lydite.invalid/install",
+		"get example.com/tool/cmd/tool@v1.0.0",
+		"get golang.org/x/tools@v0.51.0",
+		"install example.com/tool/cmd/tool",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("go was run %d times (%q), want %d", len(got), got, len(want))
+	}
+	for i, call := range got {
+		if !strings.HasPrefix(call, want[i]+"|") {
+			t.Errorf("call %d = %q, want it to be `go %s`", i, call, want[i])
+		}
+		if !strings.Contains(call, "GOFLAGS=-mod=mod") {
+			t.Errorf("call %d = %q, want -mod=mod so the empty module can take requirements", i, call)
+		}
+		if !strings.Contains(call, "GOBIN="+binDir+"|") {
+			t.Errorf("call %d = %q, want GOBIN=%s", i, call, binDir)
+		}
+		if !strings.Contains(call, "DIR=lydite-install-") {
+			t.Errorf("call %d = %q, want it run in the throwaway module's directory", i, call)
+		}
+	}
+	// With no key of its own the requirement is the whole of the directory's
+	// suffix, with no dangling separator in front of it.
+	if base := filepath.Base(binDir); !strings.HasSuffix(base, "-v1.0.0-tools-v0.51.0") || strings.Contains(base, "--") {
+		t.Errorf("install directory %q, want ...-v1.0.0-tools-v0.51.0 with a single separator", base)
+	}
+	// The module is removed once the build is done.
+	if entries, err := os.ReadDir(tmp); err != nil || len(entries) != 0 {
+		t.Errorf("temp directory holds %v (err %v), want the throwaway module removed", entries, err)
+	}
+}
