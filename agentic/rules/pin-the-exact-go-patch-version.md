@@ -4,7 +4,7 @@ description: "Workflows pin the exact Go patch version, never a bare minor."
 
 # Pin the exact Go patch version in workflows
 
-`go-version: "1.26.6"`, never a bare `"1.26"`. `actions/setup-go` resolves a bare minor to
+`go-version: "1.26.9"`, never a bare `"1.26"`. `actions/setup-go` resolves a bare minor to
 whatever patch it has, and `go install` of an external tool does not consult the current
 module's `toolchain` directive — so a govulncheck built by an older Go passes locally and fails
 in CI. When `go.mod`'s `toolchain` line moves, every `go-version-file:`

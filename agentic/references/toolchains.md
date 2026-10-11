@@ -107,7 +107,7 @@ Each language provisions differently, and only one of the three downloads anythi
   failure recorded in [ci.md](ci.md), and it reproduces on a runner whose ambient toolchain is
   perfectly correct. `pinAmbientGo` therefore sets `GOTOOLCHAIN=local` in that case.
   `local`, not the declared version: the declaration is a *minimum*, so a `go 1.26` directive
-  resolves to `go1.26.0` and pinning it would downgrade a runner already on 1.26.6 — backwards,
+  resolves to `go1.26.0` and pinning it would downgrade a runner already on 1.26.9 — backwards,
   when the newer patch is the one carrying the security fix. lydite's own `ci.yml` sets
   `GOTOOLCHAIN: local` by hand for exactly this reason; consumers now get it automatically.
   The probe reads the ambient version with `GOTOOLCHAIN=local` set for the same reason: `go
@@ -191,7 +191,7 @@ Each language provisions differently, and only one of the three downloads anythi
   asking Corepack to fetch the same tarball on lydite's behalf.
 
   **A package manager's declared version is an exact pin, never a floor.** Everywhere else in this
-  file "satisfied" means "at least the declared version" — an ambient Go 1.26.6 satisfies a
+  file "satisfied" means "at least the declared version" — an ambient Go 1.26.9 satisfies a
   `go 1.26` directive, a newer patch and all. A package manager is different: Corepack enforces
   `packageManager` by refusing to run any release but the one named, because a newer pnpm can
   resolve and write a lockfile the pinned one would not, so lydite's own `satisfied` predicate
