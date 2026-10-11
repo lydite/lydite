@@ -17,8 +17,8 @@ func tree(t *testing.T, statedGo, pinnedGo, statedBiome, pinnedBiome string) str
 	t.Helper()
 	root := t.TempDir()
 	for path, content := range map[string]string{
-		"internal/golang/go-pin/go.mod":              "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln " + pinnedGo + "\n)\n",
-		"internal/golang/golang.go":                  "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"" + statedGo + "\"\n)\n",
+		"internal/golang/go-pin/go.mod":              "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln " + pinnedGo + "\n\tgolang.org/x/tools v0.51.0\n)\n",
+		"internal/golang/golang.go":                  "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"" + statedGo + "\"\n\txToolsVersion = \"v0.51.0\"\n)\n",
 		"internal/runner/gotestsum-pin/go.mod":       "require (\n\tgotest.tools/gotestsum v1.13.0\n)\n",
 		"internal/runner/pins.go":                    "const (\n\tgotestsumVersion = \"v1.13.0\"\n)\n",
 		"internal/typescript/biome-pin/package.json": `{"dependencies":{"@biomejs/biome":"` + pinnedBiome + `"}}`,

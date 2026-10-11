@@ -199,7 +199,7 @@ worker directory, and this repository declares no Rust component.
 exercises the scan/report path end to end against a real repository, and it caught a real bug
 once (see the git history around the `go-version: "1.26.5"` pin below).
 
-**Pin the exact Go patch version in workflows (currently `"1.26.6"`), never a bare minor (`"1.26"`).**
+**Pin the exact Go patch version in workflows (currently `"1.26.9"`), never a bare minor (`"1.26"`).**
 `actions/setup-go`'s `go-version: "1.26"` resolves to whatever `1.26.x` patch it has
 cached/available, which is not necessarily the version this repo's `go.mod` `toolchain` directive
 pins — and critically, `go install`-ing an *external* tool (gosec, govulncheck) does **not** consult

@@ -120,7 +120,7 @@ same argument that keeps a types-only TypeScript package from being reported.
   for a change that moved no figure. The flag itself reaches only the instrumented run that
   produces this producer: plain and build-only never see it, so mutation's per-mutant plain runs
   are never instrumented on its account (see components.md). lydite's own default scope renders
-  as the toolchain alone (`go 1.26.6`), so a component that narrows nothing carries the producer
+  as the toolchain alone (`go 1.26.9`), so a component that narrows nothing carries the producer
   it would have had with
   no scope at all. A narrowing is therefore the incomparable-producer case ADR 0025 exists to
   catch rather than a coverage movement: the component is reported `new`, and the row reads

@@ -103,8 +103,8 @@ func TestWriteTouchesOnlyWhatDrifted(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("internal/golang/go-pin/go.mod", "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln v1.8.0\n)\n")
-	write("internal/golang/golang.go", "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"v1.7.0\"\n)\n")
+	write("internal/golang/go-pin/go.mod", "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln v1.8.0\n\tgolang.org/x/tools v0.51.0\n)\n")
+	write("internal/golang/golang.go", "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"v1.7.0\"\n\txToolsVersion = \"v0.51.0\"\n)\n")
 	write("internal/runner/gotestsum-pin/go.mod", "require (\n\tgotest.tools/gotestsum v1.13.0\n)\n")
 	write("internal/runner/pins.go", "const (\n\tgotestsumVersion = \"v1.13.0\"\n)\n")
 	write("internal/typescript/biome-pin/package.json", `{"dependencies":{"@biomejs/biome":"2.5.10"}}`)
@@ -192,10 +192,10 @@ func completeTree(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	for path, content := range map[string]string{
-		"internal/golang/go-pin/go.mod":              "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln v1.7.0\n)\n",
+		"internal/golang/go-pin/go.mod":              "require (\n\tgithub.com/securego/gosec/v2 v2.29.0\n\tgolang.org/x/vuln v1.7.0\n\tgolang.org/x/tools v0.51.0\n)\n",
 		"internal/runner/gotestsum-pin/go.mod":       "require (\n\tgotest.tools/gotestsum v1.13.0\n)\n",
 		"internal/runner/pins.go":                    "const (\n\tgotestsumVersion = \"v1.13.0\"\n)\n",
-		"internal/golang/golang.go":                  "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"v1.7.0\"\n)\n",
+		"internal/golang/golang.go":                  "const (\n\tgosecVersion = \"v2.29.0\"\n\tgovulncheckVersion = \"v1.7.0\"\n\txToolsVersion = \"v0.51.0\"\n)\n",
 		"internal/typescript/biome-pin/package.json": `{"dependencies":{"@biomejs/biome":"2.5.10"}}`,
 		"internal/typescript/biome.json":             `{"$schema": "https://biomejs.dev/schemas/2.5.10/schema.json"}`,
 		"internal/secrets/gitleaks-pin/go.mod":       "require (\n\tgithub.com/zricethezav/gitleaks/v8 v8.30.1\n)\n",
