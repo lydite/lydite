@@ -20,4 +20,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
-cargo-semver-checks = "=0.50.0"
+cargo-semver-checks = "=0.51.0"
