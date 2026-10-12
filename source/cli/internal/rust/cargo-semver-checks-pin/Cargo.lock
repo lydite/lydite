@@ -296,9 +296,9 @@ dependencies = [
 
 [[package]]
 name = "cargo-semver-checks"
-version = "0.50.0"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19851f36d06d163d810113105ad062d6e086f065ca2612d157fbfeabfb3e67fd"
+checksum = "484e65e62077aed1a119d04ab414038d20b9013302b7353487ff69a461842bf8"
 dependencies = [
  "anstream",
  "anstyle",
