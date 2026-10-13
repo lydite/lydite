@@ -1299,8 +1299,10 @@ func TestTheBaselineReadAndTheRecordAreDifferentRows(t *testing.T) {
 // reachable from a unit test.
 func gateRepo(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	origin := t.TempDir()
+	var root, origin string
+	explainLeftoverDirs(t, &root, &origin)
+	root = t.TempDir()
+	origin = t.TempDir()
 	run := func(dir string, args ...string) {
 		t.Helper()
 		if r := executil.RunQuiet(context.Background(), dir, "git", args...); !r.Ok() {
