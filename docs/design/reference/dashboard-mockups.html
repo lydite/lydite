@@ -1,0 +1,341 @@
+<title>Lydite Dashboard Mockups</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: app shell (side nav + content) shown as five switchable screens. Dark only: no product screen is drawn light yet. */
+:root{
+  --bg:#0D0E10; --surface:#151619; --raised:#1C1E21; --border:#24262A; --strong:#35383E;
+  --text:#D3D6D8; --muted:#9A9DA3; --faint:#767980;
+  --pass:#16C79A; --crit:#F2426E; --high:#FF7A45; --med:#F0B429; --low:#35C4E8;
+  --violet:#6930E8; --violet-soft:#A17AFF;
+  --sans:'Geist',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:400 13.5px/1.4 var(--sans);
+  padding-block:20px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+h1{font:600 28px/1.2 var(--sans);letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font:600 18px/1.3 var(--sans);letter-spacing:-.02em;margin:0}
+.eyebrow{font:500 11px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.mono{font-family:var(--mono)}
+.note{color:var(--muted);max-width:68ch;margin:0}
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+.tab{font:500 12px var(--mono);letter-spacing:.04em;padding:7px 12px;border-radius:999px;border:1px solid var(--border);background:var(--raised);color:var(--muted);cursor:pointer}
+.tab:hover{color:var(--text)}
+.tab[aria-selected=true]{background:var(--violet);border-color:var(--violet);color:#fff}
+:focus-visible{outline:2px solid var(--violet-soft);outline-offset:2px}
+.screen{display:none}.screen.on{display:block}
+.app{display:grid;grid-template-columns:200px minmax(0,1fr);border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg)}
+.nav{background:var(--surface);border-right:1px solid var(--border);padding:16px 8px;display:flex;flex-direction:column;gap:4px}
+.brand{display:flex;align-items:center;gap:8px;padding:0 8px 16px;font-weight:600;font-size:15px}
+.gem{width:20px;height:20px;border-radius:5px;background:linear-gradient(135deg,#32108F,#6930E8 55%,#A17AFF)}
+.ni{padding:9px 10px;border-radius:8px;color:var(--muted)}
+.ni.a{background:var(--raised);color:#fff}
+.nav .sp{flex:1}
+.who{padding:8px;border-top:1px solid var(--border);color:var(--faint);font:400 11px var(--mono)}
+.main{padding:20px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.crumb{color:var(--muted)}.crumb b{color:var(--text);font-weight:500}
+.ctl{display:flex;gap:8px;flex-wrap:wrap}
+.chip{font:400 11px var(--mono);padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--raised);color:var(--muted)}
+.chip.on{background:var(--violet);border-color:var(--violet);color:#fff}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;min-width:0}
+.banner{display:flex;gap:16px;align-items:center;flex-wrap:wrap;border-radius:12px;padding:14px 16px;border:1px solid color-mix(in srgb,var(--pass) 34%,transparent);background:color-mix(in srgb,var(--pass) 14%,transparent)}
+.banner.drift{border-color:color-mix(in srgb,var(--med) 34%,transparent);background:color-mix(in srgb,var(--med) 14%,transparent)}
+.banner .t{font-weight:600;flex:1;min-width:200px}
+.banner .m{font:400 12px var(--mono);color:var(--muted)}
+.pill{font:500 10px var(--mono);letter-spacing:.06em;padding:3px 8px;border-radius:6px;border:1px solid color-mix(in srgb,currentColor 34%,transparent);background:color-mix(in srgb,currentColor 12%,transparent);white-space:nowrap}
+.pass{color:var(--pass)}.crit{color:var(--crit)}.high{color:var(--high)}.med{color:var(--med)}.low{color:var(--low)}.faint{color:var(--faint)}.vs{color:var(--violet-soft)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.kpi .v{font:500 30px/1.1 var(--mono);letter-spacing:-.02em;margin:8px 0 2px}
+.kpi .s{font:400 11.5px var(--mono);color:var(--muted)}
+.kpi svg{width:100%;height:36px;display:block;margin-top:10px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
+.chart{width:100%;height:auto;display:block}
+.chart text{font:400 10px var(--mono);fill:var(--faint)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font:400 11px var(--mono);color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:640px}
+th{font:500 11px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+td{padding:11px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+td .spk{width:96px;height:24px;display:block}
+.ev{display:flex;flex-direction:column}
+.ev div{display:grid;grid-template-columns:70px 1fr auto;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);align-items:center}
+.ev div:last-child{border:0}
+.ev .c{font:400 11px var(--mono);color:var(--faint)}
+.gapnote{font:400 11.5px var(--mono);color:var(--med)}
+.center{text-align:center;padding:48px 16px;display:flex;flex-direction:column;align-items:center;gap:12px}
+.btn{font:500 13px var(--sans);padding:9px 16px;border-radius:8px;border:1px solid var(--violet);background:var(--violet);color:#fff;cursor:pointer}
+.btn.g{background:transparent;color:var(--violet-soft);border-color:var(--strong)}
+.states{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.map{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.map ul{margin:8px 0 0;padding-left:18px;color:var(--muted)}.map li{margin:4px 0}
+.ann{font:400 11.5px var(--mono);color:var(--violet-soft);margin:0}
+.fgrid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:12px;align-items:start}
+@media(max-width:980px){.fgrid{grid-template-columns:1fr}}
+#ftable tbody tr{cursor:pointer}#ftable tbody tr:hover td,#ftable tbody tr.sel td{background:var(--raised)}
+#ftable td .p{font:400 11px var(--mono);color:var(--faint);display:block;margin-top:2px;overflow-wrap:anywhere}
+#fdetail{display:flex;flex-direction:column;gap:14px;position:sticky;top:12px}
+#fdetail pre{margin:0;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font:400 12px/1.55 var(--mono);overflow-x:auto;color:var(--text)}
+#fdetail pre .hl{background:color-mix(in srgb,var(--crit) 16%,transparent);display:block;margin:0 -12px;padding:0 12px}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:6px 12px;font:400 12px var(--mono)}.kv dt{color:var(--faint)}.kv dd{margin:0;overflow-wrap:anywhere}
+.tl{display:flex;flex-direction:column;gap:8px;font:400 12px var(--mono);border-left:1px solid var(--strong);padding-left:12px}
+.tl span{color:var(--muted)}
+.cta{color:var(--violet-soft);font:500 12px var(--mono)}
+@media(max-width:760px){.app{grid-template-columns:1fr}.nav{flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--border)}.nav .sp,.who,.brand{display:none}}
+@media(prefers-reduced-motion:no-preference){.tab{transition:background .14s,color .14s}}
+</style>
+
+<div class="wrap">
+  <div>
+    <div class="eyebrow">lydite · epic #66 · mockups for discussion</div>
+    <h1>The dashboard, screen by screen</h1>
+    <p class="note" style="margin-top:8px">Every number below is example data. Charts are drawn with the same shapes <span class="mono">@vipengele/react-charts</span> produces (line, area, gate reference line); tiles, sparklines and bars are the pieces that library does not have yet. Dark only, 1240px and up, as the design system records.</p>
+  </div>
+  <div class="tabs" role="tablist" id="tabs"></div>
+
+  <!-- 1 PORTFOLIO -->
+  <section class="screen" id="s-portfolio">
+    <div class="app"><nav class="nav">
+      <div class="brand"><span class="gem"></span>lydite</div>
+      <div class="ni a">Portfolio</div><div class="ni">Repositories</div><div class="ni">Settings</div>
+      <div class="sp"></div><div class="who">@pedromvgomes<br>GitHub App · contents:read</div></nav>
+      <div class="main">
+        <div class="top"><div><h1>Portfolio</h1><div class="crumb">24 repositories you can read and have installed</div></div>
+          <div class="ctl"><span class="chip on">all</span><span class="chip">rust</span><span class="chip">typescript</span><span class="chip">go</span><span class="chip">needs attention</span></div></div>
+        <div class="kpis">
+          <div class="card kpi"><div class="eyebrow">In parity</div><div class="v pass">22<span class="faint"> / 24</span></div><div class="s">2 drifting from CI ruleset</div></div>
+          <div class="card kpi"><div class="eyebrow">Median coverage</div><div class="v">84%</div><div class="s">+1.2 pts over 30 days</div></div>
+          <div class="card kpi"><div class="eyebrow">Open findings</div><div class="v">61</div><div class="s"><span class="crit">3 critical</span> · <span class="high">9 high</span></div></div>
+          <div class="card kpi"><div class="eyebrow">Gaps in history</div><div class="v med">2</div><div class="s">repos with a break in the last 30 days</div></div>
+        </div>
+        <div class="card tw"><table id="repos"><thead><tr><th>Repository</th><th>Parity</th><th class="n">Coverage</th><th>30 days</th><th class="n">CRAP &gt;30</th><th class="n">Findings</th><th class="n">Mutation kill</th><th>Last record</th></tr></thead><tbody></tbody></table></div>
+        <p class="ann">Reads one projection file per repo (≤1 MB) with the viewer's token. Rows load independently; a repo the App cannot read shows “no access”, not an error page.</p>
+      </div></div>
+  </section>
+
+  <!-- 2 REPO OVERVIEW -->
+  <section class="screen" id="s-repo">
+    <div class="app"><nav class="nav">
+      <div class="brand"><span class="gem"></span>lydite</div>
+      <div class="ni">Portfolio</div><div class="ni a">acme/core-api</div><div class="ni" style="padding-left:24px">Findings <span class="pill high">23</span></div><div class="ni">Settings</div>
+      <div class="sp"></div><div class="who">@pedromvgomes<br>GitHub App · contents:read</div></nav>
+      <div class="main">
+        <div class="top"><div><div class="crumb">Portfolio / <b>acme/core-api</b></div><h1>core-api</h1></div>
+          <div class="ctl"><span class="chip on">main</span><span class="chip">release/2.x</span><span class="chip">|</span><span class="chip">30d</span><span class="chip on">90d</span><span class="chip">1y</span><span class="chip">all</span></div></div>
+        <div class="banner"><span class="pill pass">PARITY</span><div class="t">Local matches CI</div>
+          <div class="m">ci · lydite v2.4.1 · ruleset 7f2ac9</div><div class="m">last local run 4m ago · ruleset 7f2ac9</div></div>
+        <div class="kpis" id="kpis"></div>
+        <div class="grid2">
+          <div class="card"><h2>Coverage vs gate</h2><div class="note" style="margin:2px 0 8px">Per component, last record per day. The break is a gap, not zero.</div><svg class="chart" id="c-cov" viewBox="0 0 560 220"></svg>
+            <div class="legend"><span><i style="background:var(--violet-soft)"></i>rust · cli</span><span><i style="background:var(--low)"></i>typescript · web</span><span><i style="background:var(--faint)"></i>gate 80%</span><span class="gapnote">▒ gap · 3 commits unrecorded</span></div></div>
+          <div class="card"><h2>Tests run and failed</h2><div class="note" style="margin:2px 0 8px">A red suite still records its counts.</div><svg class="chart" id="c-tests" viewBox="0 0 560 220"></svg>
+            <div class="legend"><span><i style="background:var(--pass)"></i>passed</span><span><i style="background:var(--crit)"></i>failed</span></div></div>
+          <div class="card"><h2>Open findings by gate</h2><div class="note" style="margin:2px 0 8px">Counts per scanner. A gate that never ran draws no line.</div><svg class="chart" id="c-find" viewBox="0 0 560 220"></svg>
+            <div class="legend"><span><i style="background:var(--crit)"></i>gosec</span><span><i style="background:var(--high)"></i>semgrep</span><span><i style="background:var(--med)"></i>clippy</span><span><i style="background:var(--low)"></i>biome</span></div></div>
+          <div class="card"><h2>CRAP and mutation</h2><div class="note" style="margin:2px 0 8px">Functions above 30, and mutants killed.</div><svg class="chart" id="c-crap" viewBox="0 0 560 220"></svg>
+            <div class="legend"><span><i style="background:var(--high)"></i>CRAP &gt; 30 (count)</span><span><i style="background:var(--pass)"></i>mutation kill rate</span></div></div>
+        </div>
+        <div class="card"><div class="top"><h2>What changed</h2><span class="eyebrow">appeared / resolved since last record</span></div>
+          <div class="ev" id="events"></div></div>
+        <p class="ann">No per-finding table: the ledger stores counts and appeared/resolved fingerprints. Each event links to the commit. Ruleset identity per record backs the banner and marks where it changed on every chart.</p>
+      </div></div>
+  </section>
+
+
+  <!-- 3 FINDINGS -->
+  <section class="screen" id="s-findings">
+    <div class="app"><nav class="nav">
+      <div class="brand"><span class="gem"></span>lydite</div>
+      <div class="ni">Portfolio</div><div class="ni">acme/core-api</div><div class="ni a" style="padding-left:24px">Findings <span class="pill high">23</span></div><div class="ni">Settings</div>
+      <div class="sp"></div><div class="who">@pedromvgomes<br>GitHub App · contents:read</div></nav>
+      <div class="main">
+        <div class="top"><div><div class="crumb">Portfolio / acme/core-api / <b>Findings</b></div><h1>Findings</h1></div>
+          <div class="ctl"><span class="chip on">main</span><span class="chip">release/2.x</span></div></div>
+        <div class="kpis">
+          <div class="card kpi"><div class="eyebrow">Open</div><div class="v">23</div><div class="s"><span class="crit">3 critical</span> · <span class="high">5 high</span> · <span class="med">8 medium</span></div></div>
+          <div class="card kpi"><div class="eyebrow">Appeared, 30d</div><div class="v crit">7</div><div class="s">across 4 commits</div></div>
+          <div class="card kpi"><div class="eyebrow">Resolved, 30d</div><div class="v pass">12</div><div class="s">median open for 9 days</div></div>
+          <div class="card kpi"><div class="eyebrow">Oldest open</div><div class="v">214<span class="faint" style="font-size:16px"> d</span></div><div class="s">cargo-audit · RUSTSEC-2020-0071</div></div>
+        </div>
+        <div class="card" style="padding:12px 16px"><div class="top" style="gap:8px">
+          <div class="ctl"><span class="chip on" id="f-open">open · 23</span><span class="chip" id="f-res">resolved · 41</span></div>
+          <div class="ctl"><span class="chip">gate: all</span><span class="chip">severity: all</span><span class="chip">component: all</span><span class="chip">first seen: any</span><span class="chip">search path or rule…</span></div></div></div>
+        <div class="fgrid">
+          <div class="card tw" style="padding:0"><table id="ftable"><thead><tr><th>Severity</th><th>Finding</th><th>Gate</th><th>Component</th><th class="n">First seen</th></tr></thead><tbody></tbody></table></div>
+          <aside class="card" id="fdetail" aria-live="polite"></aside>
+        </div>
+        <p class="ann">List = latest snapshot of open findings, overwritten each run (≈24 KB per 150). First seen, reappeared and resolved-in come from the ledger's appeared/resolved events, keyed by the same fingerprint. Resolved tab lists events, so it carries rule and path but not the old message.</p>
+      </div></div>
+  </section>
+
+  <!-- 3b COMPONENT DRILL-DOWN -->
+  <section class="screen" id="s-comp">
+    <div class="app"><nav class="nav">
+      <div class="brand"><span class="gem"></span>lydite</div>
+      <div class="ni">Portfolio</div><div class="ni a">acme/core-api</div><div class="ni">Settings</div></nav>
+      <div class="main">
+        <div class="top"><div><div class="crumb">Portfolio / acme/core-api / <b>cli</b></div><h1>cli <span class="pill vs" style="vertical-align:middle">RUST</span></h1></div>
+          <div class="ctl"><span class="chip on">all metrics</span><span class="chip">coverage</span><span class="chip">tests</span><span class="chip">CRAP</span><span class="chip">findings</span><span class="chip">mutation</span></div></div>
+        <div class="kpis">
+          <div class="card kpi"><div class="eyebrow">Coverage</div><div class="v">91.4%</div><div class="s pass">+0.6 vs 30d ago</div></div>
+          <div class="card kpi"><div class="eyebrow">Tests</div><div class="v">2 418</div><div class="s">0 failed · 1 flaky</div></div>
+          <div class="card kpi"><div class="eyebrow">CRAP &gt; 30</div><div class="v high">3</div><div class="s">worst 41</div></div>
+          <div class="card kpi"><div class="eyebrow">Mutation</div><div class="v">88%</div><div class="s">61 killed · 8 survived · 1 acknowledged</div></div>
+        </div>
+        <div class="card"><h2>Mutants by outcome</h2><div class="note" style="margin:2px 0 8px">One bar per recorded post-merge run. Absent bars are commits the diff did not touch this component.</div><svg class="chart" id="c-mut" viewBox="0 0 1100 200"></svg>
+          <div class="legend"><span><i style="background:var(--pass)"></i>killed</span><span><i style="background:var(--low)"></i>timed out</span><span><i style="background:var(--crit)"></i>survived</span><span><i style="background:var(--faint)"></i>unviable</span></div></div>
+        <p class="ann">Needs a stacked-bar chart. Today react-charts exports only LineChart and AreaChart.</p>
+      </div></div>
+  </section>
+
+  <!-- 4 STATES -->
+  <section class="screen" id="s-states">
+    <div class="states">
+      <div class="card center"><span class="gem" style="width:36px;height:36px;border-radius:9px"></span><h2>Read your repositories' quality history</h2><p class="note">The dashboard holds no data. It reads the <span class="mono">lydite</span> branch in each repository with your GitHub access, only for repositories you select.</p><button class="btn">Sign in with GitHub</button><span class="faint mono" style="font-size:11px">contents: read · no write access</span></div>
+      <div class="card center"><h2>Install on a repository</h2><p class="note">You are signed in but the App is installed on no repository you can read.</p><button class="btn">Choose repositories</button><button class="btn g">What does it read?</button></div>
+      <div class="card center"><h2>No history yet</h2><p class="note">acme/new-svc has no records on the lydite branch. History starts with the first <span class="mono">lydite test record</span> on the default branch.</p><button class="btn g">Show the workflow step</button></div>
+      <div class="card center"><h2 class="med">A gap in the record</h2><p class="note">3 commits between <span class="mono">a41c9e0</span> and <span class="mono">b77d213</span> were not recorded. Charts break here instead of joining the points.</p><span class="pill med">GAP · 3 COMMITS</span></div>
+      <div class="card center"><h2>No access to this repository</h2><p class="note">The App is not installed on acme/secret-svc, or your access was revoked.</p><button class="btn g">Manage installation</button></div>
+      <div class="card center"><h2>GitHub is rate limiting reads</h2><p class="note">Showing the last data loaded 12 minutes ago. Retrying at 14:32.</p><span class="pill med">STALE · 12m</span></div>
+    </div>
+    <p class="ann" style="margin-top:12px">Every state names what happened and the next action. A blank chart never stands in for “nothing recorded”.</p>
+  </section>
+
+  <!-- 5 MAP -->
+  <section class="screen" id="s-map">
+    <div class="map">
+      <div class="card"><h2>Screens</h2><ul><li><b>Portfolio</b> · all installed repos, sortable, parity at a glance</li><li><b>Repository</b> · parity banner, tiles, four trend charts, change feed</li><li><b>Findings</b> · open list with filters, a detail panel (location, excerpt, how to clear, history) and a resolved tab</li><li><b>Component</b> · every metric for one component, mutation detail</li><li><b>States</b> · sign-in, install, empty, gap, no access, stale</li></ul></div>
+      <div class="card"><h2>Capabilities</h2><ul><li>Branch picker, range picker (30d, 90d, 1y, all)</li><li>Hover tooltip with commit, date, ruleset</li><li>Gaps drawn as breaks, ruleset changes as markers</li><li>Deep link to a repo, branch and range</li><li>README badge via the Worker proxy (later)</li><li>Offline: <span class="mono">lydite report</span> emits one HTML file</li></ul></div>
+      <div class="card"><h2>Not in 1.0</h2><ul><li>Triage, assignment or dismissing findings (read-only)</li><li>Light theme and layouts below 1240px</li><li>Alerts and notifications</li><li>Any data stored by lydite</li></ul></div>
+    </div>
+  </section>
+</div>
+
+<script>
+var SCREENS=[['portfolio','Portfolio'],['repo','Repository'],['findings','Findings'],['comp','Component'],['states','States'],['map','Scope']];
+var tabs=document.getElementById('tabs');
+function show(id){
+  SCREENS.forEach(function(s){document.getElementById('s-'+s[0]).classList.toggle('on',s[0]===id);});
+  [].forEach.call(tabs.children,function(b){b.setAttribute('aria-selected',b.dataset.id===id);});
+  try{localStorage.setItem('lyd-tab',id);}catch(e){}
+}
+SCREENS.forEach(function(s){
+  var b=document.createElement('button');b.className='tab';b.textContent=s[1];b.dataset.id=s[0];b.setAttribute('role','tab');
+  b.onclick=function(){show(s[0]);};tabs.appendChild(b);
+});
+var start='repo';try{start=localStorage.getItem('lyd-tab')||'repo';}catch(e){}
+if(!SCREENS.some(function(s){return s[0]===start;}))start='repo';
+show(start);
+
+var NS='http://www.w3.org/2000/svg';
+function rng(seed){return function(){seed=(seed*16807)%2147483647;return seed/2147483647;};}
+function series(n,base,drift,noise,seed){var r=rng(seed),v=base,o=[];for(var i=0;i<n;i++){v+=drift+(r()-.5)*noise;o.push(v);}return o;}
+function spark(vals,color,w,h){
+  var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),sp=(mx-mn)||1;
+  var pts=vals.map(function(v,i){return [i/(vals.length-1)*w,h-3-(v-mn)/sp*(h-6)];});
+  var d=pts.map(function(p,i){return (i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}).join('');
+  var last=pts[pts.length-1];
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none" class="spk" aria-hidden="true"><path d="'+d+'L'+w+' '+h+'L0 '+h+'Z" fill="'+color+'" fill-opacity=".14"/><path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>';
+}
+/* repos table */
+var R=[['acme/core-api','rust','ok',87,'pass',3,12,88,'4m ago'],['acme/web-console','typescript','ok',82,'pass',0,4,'—','11m ago'],['acme/billing','go','ok',91,'pass',1,2,93,'1h ago'],['acme/ingest','rust','drift',74,'med',7,19,71,'2h ago'],['acme/sdk-js','typescript','ok',89,'pass',0,1,'—','5h ago'],['acme/legacy-sync','go','drift',63,'crit',11,23,'—','gap · 2d ago']];
+var tb=document.querySelector('#repos tbody');
+R.forEach(function(r,i){
+  var tr=document.createElement('tr');
+  var col=r[4]==='pass'?'var(--pass)':r[4]==='med'?'var(--med)':'var(--crit)';
+  tr.innerHTML='<td><div style="font-weight:500">'+r[0]+'</div><div class="faint mono" style="font-size:11px">'+r[1]+'</div></td>'+
+   '<td><span class="pill '+(r[2]==='ok'?'pass':'med')+'">'+(r[2]==='ok'?'✓ PARITY':'! DRIFT')+'</span></td>'+
+   '<td class="n mono">'+r[3]+'%</td><td>'+spark(series(30,r[3]-4,.13,2,i+3),col,96,24)+'</td>'+
+   '<td class="n mono '+(r[5]>5?'high':'')+'">'+r[5]+'</td><td class="n mono">'+r[6]+'</td><td class="n mono">'+(r[7]==='—'?'<span class="faint">n/a</span>':r[7]+'%')+'</td>'+
+   '<td class="mono '+(r[8].indexOf('gap')===0?'med':'faint')+'" style="font-size:11.5px">'+r[8]+'</td>';
+  tb.appendChild(tr);
+});
+/* repo kpis */
+var K=[['Coverage','87%','gate 80% · passing','pass',series(30,82,.17,1.4,7)],['Tests','2 418','0 failed · 1 flaky','pass',series(30,2300,4,30,9)],['Open findings','23','3 critical · 5 high','crit',series(30,30,-.25,3,4)],['CRAP > 30','3','worst 41','high',series(30,5,-.07,1.2,5)]];
+document.getElementById('kpis').innerHTML=K.map(function(k){
+  var c={pass:'var(--pass)',crit:'var(--crit)',high:'var(--high)'}[k[3]];
+  return '<div class="card kpi"><div class="eyebrow">'+k[0]+'</div><div class="v">'+k[1]+'</div><div class="s">'+k[2]+'</div>'+spark(k[4],c,200,36)+'</div>';
+}).join('');
+/* line charts */
+function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+function lineChart(id,defs,o){
+  var svg=document.getElementById(id),W=560,H=220,L=36,Rr=10,T=10,B=24;
+  var N=o.n,x=function(i){return L+i/(N-1)*(W-L-Rr);},y=function(v){return T+(1-(v-o.min)/(o.max-o.min))*(H-T-B);};
+  for(var g=0;g<=4;g++){var v=o.min+(o.max-o.min)*g/4,yy=y(v);
+    svg.appendChild(el('line',{x1:L,x2:W-Rr,y1:yy,y2:yy,stroke:'var(--border)','stroke-width':1}));
+    var t=el('text',{x:L-6,y:yy+3,'text-anchor':'end'});t.textContent=Math.round(v)+(o.unit||'');svg.appendChild(t);}
+  [['14 Aug',0],['28 Aug',N*.4|0],['11 Sep',N*.7|0],['25 Sep',N-1]].forEach(function(l){var t=el('text',{x:x(l[1]),y:H-6,'text-anchor':'middle'});t.textContent=l[0];svg.appendChild(t);});
+  if(o.gap){var gx=x(o.gap[0]),gw=x(o.gap[1])-gx;
+    svg.appendChild(el('rect',{x:gx,y:T,width:gw,height:H-T-B,fill:'var(--med)','fill-opacity':.1}));
+    var t=el('text',{x:gx+gw/2,y:T+12,'text-anchor':'middle'});t.textContent='gap';t.style.fill='var(--med)';svg.appendChild(t);}
+  if(o.ruleset){var rx=x(o.ruleset);svg.appendChild(el('line',{x1:rx,x2:rx,y1:T,y2:H-B,stroke:'var(--violet-soft)','stroke-dasharray':'2 3'}));
+    var t=el('text',{x:rx+4,y:H-B-4});t.textContent='ruleset 7f2ac9';t.style.fill='var(--violet-soft)';svg.appendChild(t);}
+  if(o.gate){var gy=y(o.gate);svg.appendChild(el('line',{x1:L,x2:W-Rr,y1:gy,y2:gy,stroke:'var(--faint)','stroke-dasharray':'4 4'}));}
+  defs.forEach(function(s){
+    var d='',pen=false;
+    s.v.forEach(function(v,i){
+      if(o.gap&&i>o.gap[0]&&i<o.gap[1]){pen=false;return;}
+      d+=(pen?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1);pen=true;});
+    if(s.area){var a=el('path',{d:d+'L'+x(N-1)+' '+(H-B)+'L'+x(0)+' '+(H-B)+'Z',fill:s.c,'fill-opacity':.08});svg.appendChild(a);}
+    svg.appendChild(el('path',{d:d,fill:'none',stroke:s.c,'stroke-width':1.8,'stroke-linejoin':'round'}));
+    var li=N-1;svg.appendChild(el('circle',{cx:x(li),cy:y(s.v[li]),r:3.5,fill:s.c}));
+  });
+}
+var N=60;
+lineChart('c-cov',[{c:'var(--violet-soft)',v:series(N,80,.14,1.1,11),area:1},{c:'var(--low)',v:series(N,72,.2,1.6,12)}],{n:N,min:60,max:100,unit:'%',gate:80,gap:[34,38],ruleset:44});
+lineChart('c-tests',[{c:'var(--pass)',v:series(N,2100,5,25,21),area:1}],{n:N,min:1900,max:2500,gap:[34,38]});
+(function(){ /* failed overlay as bars on tests chart */
+  var svg=document.getElementById('c-tests'),r=rng(33);
+  for(var i=0;i<N;i+=1){if(r()>.9&&!(i>34&&i<38)){var xx=36+i/(N-1)*514;svg.appendChild(el('rect',{x:xx-1.5,y:186-Math.round(r()*10+6),width:3,height:Math.round(r()*10+6),fill:'var(--crit)'}));}}
+})();
+lineChart('c-find',[{c:'var(--crit)',v:series(N,6,-.04,.6,31)},{c:'var(--high)',v:series(N,11,-.06,.9,32)},{c:'var(--med)',v:series(N,9,-.02,.9,33)},{c:'var(--low)',v:series(N,5,-.01,.5,34)}],{n:N,min:0,max:16,gap:[34,38]});
+lineChart('c-crap',[{c:'var(--high)',v:series(N,6,-.05,.5,41)},{c:'var(--pass)',v:series(N,12,.1,.8,42).map(function(v){return v/10*1.0+1;}).map(function(v){return v*1;})}],{n:N,min:0,max:16,gap:[34,38]});
+
+/* findings */
+var SEVC={critical:'crit',high:'high',medium:'med',low:'low',info:'faint'};
+var F=[
+ {sev:'critical',t:'User input reaches a raw SQL string',gate:'semgrep',comp:'web',path:'api/src/query.ts',line:88,rule:'semgrep:sql-injection',first:'3 days',fp:'v1:9f3a07c21be4d5a8',since:'9ce02a1',code:['86  export function find(db, q) {','87    const term = q.query.name','88    return db.raw("SELECT * FROM users WHERE name = \'" + term + "\'")','89  }'],hl:3,msg:'User-controlled data is concatenated into a SQL query.',fix:'Pass the value as a bound parameter instead of building the string.',link:'Rule docs: semgrep.dev/r/sql-injection',tl:[['9ce02a1','appeared · feat: session refresh'],['now','open on main']]},
+ {sev:'critical',t:'Unwrapped Result on the auth path',gate:'clippy',comp:'cli',path:'src/auth/session.rs',line:143,rule:'clippy::unwrap_used',first:'3 days',fp:'v1:41d8e9b07a3c6f12',since:'9ce02a1',code:['142  let token = store.load(id);','143  let user = token.unwrap().user;','144  Ok(user)'],hl:1,msg:'Used `unwrap()` on a `Result` value.',fix:'Propagate the error with `?` or map it to the module error type.',link:'Rule docs: rust-lang.github.io/rust-clippy',tl:[['9ce02a1','appeared · feat: session refresh'],['now','open on main']]},
+ {sev:'high',t:'Vulnerable dependency: time 0.1.44',gate:'cargo-audit',comp:'cli',path:'Cargo.lock',line:1204,rule:'RUSTSEC-2020-0071',first:'214 days',fp:'v1:77ab20ce19f40d33',since:'e3c01aa',code:['name = "time"','version = "0.1.44"'],hl:1,msg:'Potential segfault in the time crate.',fix:'Upgrade time to 0.2.23 or later. The fixed version comes from the advisory.',link:'Advisory: rustsec.org/advisories/RUSTSEC-2020-0071',tl:[['e3c01aa','appeared · chore: add chrono'],['b77d213','still open after 118 records'],['now','open on main']]},
+ {sev:'high',t:'Missing timeout on outbound call',gate:'semgrep',comp:'web',path:'api/src/client.ts',line:54,rule:'semgrep:no-timeout',first:'41 days',fp:'v1:c0129f4478d1ab50',since:'7d19e44',code:['53  export async function call(u) {','54    return fetch(u)','55  }'],hl:1,msg:'fetch() without an AbortSignal timeout.',fix:'Pass `signal: AbortSignal.timeout(ms)`.',link:'Rule docs: semgrep.dev/r/no-timeout',tl:[['7d19e44','appeared'],['now','open on main']]},
+ {sev:'high',t:'Panic in a request handler',gate:'clippy',comp:'cli',path:'src/http/router.rs',line:212,rule:'clippy::panic',first:'88 days',fp:'v1:0be37711d9a2c640',since:'51fa009',code:['211  match route {','212      _ => panic!("unhandled route")','213  }'],hl:1,msg:'`panic!` in a handler brings the worker down.',fix:'Return a 404 response for an unknown route.',link:'Rule docs: rust-lang.github.io/rust-clippy',tl:[['51fa009','appeared'],['now','open on main']]},
+ {sev:'medium',t:'Function above CRAP 30: Merge',gate:'crap',comp:'cli',path:'internal/sync/merge.go',line:210,rule:'',first:'60 days',fp:'v1:5ad1be08e3f7a921',since:'2c80bd6',code:['complexity 14 · coverage 38% · CRAP 41'],hl:-1,msg:'CRAP score 41 exceeds 30.',fix:'Add tests for the uncovered branches or split the function.',link:'',tl:[['2c80bd6','appeared · coverage dropped'],['now','open on main']]},
+ {sev:'medium',t:'Mutant survived: `<` replaced with `<=`',gate:'mutation',comp:'cli',path:'internal/pathmatch/match.go',line:77,rule:'',first:'6 days',fp:'v1:e92c04a5d1b87633',since:'a41c9e0',code:['77  if depth < limit {'],hl:0,msg:'No test failed when the comparison changed.',fix:'Add a test at the boundary value.',link:'',tl:[['a41c9e0','appeared'],['now','open on main']]},
+ {sev:'low',t:'Licence not allowed: GPL-3.0 (left-pad-ng)',gate:'licence',comp:'web',path:'package-lock.json',line:0,rule:'',first:'2 days',fp:'v1:a7743be9c0d15f28',since:'b77d213',code:['left-pad-ng  GPL-3.0'],hl:-1,msg:'Package licence is outside the allowed set.',fix:'Replace the package or add the licence to the policy.',link:'',tl:[['b77d213','appeared'],['now','open on main']]},
+];
+var ftb=document.querySelector('#ftable tbody'),fd=document.getElementById('fdetail');
+function showF(i){
+  var f=F[i];
+  [].forEach.call(ftb.children,function(r,j){r.classList.toggle('sel',j===i);});
+  var code=f.code.map(function(l,j){return f.hl===-1||j!==f.hl?'<span>'+l.replace(/</g,'&lt;')+'</span>\n':'<span class="hl">'+l.replace(/</g,'&lt;')+'</span>';}).join('');
+  fd.innerHTML='<div><span class="pill '+SEVC[f.sev]+'">'+f.sev.toUpperCase()+'</span></div><h2>'+f.t+'</h2><div class="note" style="margin:0">'+f.msg+'</div>'+
+   '<pre>'+code+'</pre>'+
+   '<dl class="kv" style="margin:0"><dt>Where</dt><dd>'+f.path+(f.line?':'+f.line:'')+' <span class="cta">View at head ↗</span></dd><dt>Gate</dt><dd>'+f.gate+(f.rule?' · '+f.rule:'')+'</dd><dt>Component</dt><dd>'+f.comp+'</dd><dt>Fingerprint</dt><dd>'+f.fp+'</dd></dl>'+
+   '<div><div class="eyebrow" style="margin-bottom:6px">How to clear it</div><div>'+f.fix+'</div>'+(f.link?'<div class="cta" style="margin-top:6px">'+f.link+' ↗</div>':'')+'</div>'+
+   '<div><div class="eyebrow" style="margin-bottom:8px">History</div><div class="tl">'+f.tl.map(function(t){return '<div><b>'+t[0]+'</b> <span>'+t[1]+'</span></div>';}).join('')+'<div><span class="faint">resolved: when a later record no longer holds this fingerprint</span></div></div></div>';
+}
+F.forEach(function(f,i){
+  var tr=document.createElement('tr');tr.tabIndex=0;
+  tr.innerHTML='<td><span class="pill '+SEVC[f.sev]+'">'+f.sev.toUpperCase()+'</span></td><td><div style="font-weight:500">'+f.t+'</div><span class="p">'+f.path+(f.line?':'+f.line:'')+'</span></td><td class="mono" style="font-size:11.5px">'+f.gate+'</td><td class="mono" style="font-size:11.5px">'+f.comp+'</td><td class="n mono" style="font-size:11.5px">'+f.first+'</td>';
+  tr.onclick=function(){showF(i);};tr.onkeydown=function(e){if(e.key==='Enter')showF(i);};
+  ftb.appendChild(tr);
+});
+showF(0);
+/* events */
+var E=[['b77d213','fix: bound the retry loop','<span class="pill pass">▼ 2 RESOLVED</span> <span class="faint mono" style="font-size:11px">gosec · G114</span>'],['9ce02a1','feat: session refresh','<span class="pill crit">▲ 1 NEW</span> <span class="faint mono" style="font-size:11px">semgrep · sql-injection</span>'],['a41c9e0','chore: bump deps','<span class="pill pass">▼ 1 RESOLVED</span> <span class="faint mono" style="font-size:11px">cargo-audit · RUSTSEC</span>'],['—','3 commits not recorded','<span class="pill med">GAP</span>']];
+document.getElementById('events').innerHTML=E.map(function(e){return '<div><span class="c">'+e[0]+'</span><span>'+e[1]+'</span><span>'+e[2]+'</span></div>';}).join('');
+/* mutation bars */
+(function(){
+  var svg=document.getElementById('c-mut'),r=rng(55),n=34,W=1100,H=200,L=10,B=22,T=8,bw=(W-L*2)/n;
+  for(var i=0;i<n;i++){ if(r()<.25) continue;
+    var parts=[['killed','var(--pass)',40+r()*30],['timed out','var(--low)',2+r()*4],['survived','var(--crit)',2+r()*8],['unviable','var(--faint)',3+r()*6]],tot=parts.reduce(function(a,p){return a+p[2];},0),yy=H-B;
+    parts.forEach(function(p){var h=p[2]/80*(H-B-T);yy-=h;svg.appendChild(el('rect',{x:L+i*bw+2,y:yy,width:bw-4,height:h,fill:p[1]}));});
+  }
+  svg.appendChild(el('line',{x1:L,x2:W-L,y1:H-B,y2:H-B,stroke:'var(--border)'}));
+})();
+</script>
