@@ -5,7 +5,7 @@ go 1.26.4
 toolchain go1.26.9
 
 require (
-	github.com/github/go-spdx/v2 v2.7.0
+	github.com/github/go-spdx/v2 v2.7.1
 	github.com/google/licensecheck v0.3.1
 	github.com/odvcencio/gotreesitter v0.55.1
 	github.com/spf13/cobra v1.10.2
