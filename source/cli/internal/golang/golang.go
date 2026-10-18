@@ -25,13 +25,13 @@ import (
 // regardless of what's already on the machine.
 const (
 	gosecVersion       = "v2.29.0"
-	govulncheckVersion = "v1.8.0"
+	govulncheckVersion = "v1.9.0"
 	// xToolsVersion is the golang.org/x/tools both scanners are built against,
 	// rather than the one each release declares. It reads the compiler's export
 	// data, so it has to be at least as new as the newest Go a scanned
 	// repository may declare: one that is older rejects that Go's standard
 	// library as unreadable, and the scanner reports having checked nothing.
-	xToolsVersion = "v0.51.0"
+	xToolsVersion = "v0.52.0"
 
 	gosecPkg       = "github.com/securego/gosec/v2/cmd/gosec@" + gosecVersion
 	govulncheckPkg = "golang.org/x/vuln/cmd/govulncheck@" + govulncheckVersion
