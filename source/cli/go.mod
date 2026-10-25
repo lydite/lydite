@@ -7,7 +7,7 @@ toolchain go1.26.9
 require (
 	github.com/github/go-spdx/v2 v2.7.1
 	github.com/google/licensecheck v0.3.1
-	github.com/odvcencio/gotreesitter v0.55.1
+	github.com/odvcencio/gotreesitter v0.56.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba
 	golang.org/x/mod v0.42.0
