@@ -24,7 +24,7 @@ import (
 // Pinned so every invocation of lydite uses the exact same toolchain
 // regardless of what's already on the machine.
 const (
-	gosecVersion       = "v2.29.0"
+	gosecVersion       = "v2.30.0"
 	govulncheckVersion = "v1.9.0"
 	// xToolsVersion is the golang.org/x/tools both scanners are built against,
 	// rather than the one each release declares. It reads the compiler's export
