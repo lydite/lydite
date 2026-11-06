@@ -2,7 +2,7 @@ module lydite/lydite
 
 go 1.26.4
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/github/go-spdx/v2 v2.8.0
