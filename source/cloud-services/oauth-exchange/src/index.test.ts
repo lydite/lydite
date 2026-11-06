@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LOGIN_COOKIE, REFRESH_COOKIE } from "./cookies.js";
 import exchange, { type Env } from "./index.js";
@@ -14,9 +14,13 @@ const STATE = "s".repeat(43);
 const VERIFIER = "v".repeat(43);
 const LOGIN_CLEARED = `${LOGIN_COOKIE}=; Secure; Path=/; HttpOnly; Max-Age=0`;
 
+const REFRESH = "ghr_current";
+const REFRESH_CLEARED = `${REFRESH_COOKIE}=; Secure; Path=/; HttpOnly; Max-Age=0`;
+
 const original = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = original;
+  vi.restoreAllMocks();
 });
 
 interface Sent {
@@ -50,6 +54,31 @@ function get(path: string, cookie?: string): Promise<Response> {
     env,
   );
 }
+
+function post(path: string, headers: Record<string, string> = {}): Promise<Response> {
+  return exchange.fetch(new Request(`${ORIGIN}${path}`, { method: "POST", headers }), env);
+}
+
+// `null` sends no Origin at all; leaving it out sends the Worker's own.
+function refresh(cookie = `${REFRESH_COOKIE}=${REFRESH}`, origin: string | null = ORIGIN) {
+  return post("/auth/refresh", { ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}) });
+}
+
+function logout(origin: string | null = ORIGIN) {
+  return post("/auth/logout", {
+    ...(origin ? { origin } : {}),
+    cookie: `${REFRESH_COOKIE}=${REFRESH}`,
+  });
+}
+
+const rotated = () =>
+  Response.json({
+    access_token: "ghu_fresh",
+    expires_in: 28800,
+    refresh_token: "ghr_rotated",
+    refresh_token_expires_in: 15811200,
+    token_type: "bearer",
+  });
 
 function callback(query: string, cookie: string | undefined = `${LOGIN_COOKIE}=${STATE}.${VERIFIER}`) {
   return get(`/auth/callback?${query}`, cookie);
@@ -252,5 +281,208 @@ describe("GET /auth/callback", () => {
     expect(refreshCookieOf(response)).toBeUndefined();
     expect(cookies(response)).toEqual([LOGIN_CLEARED]);
     expect(await response.text()).not.toContain("ghr_refresh");
+  });
+});
+
+describe("POST /auth/refresh", () => {
+  it.each([
+    ["no Origin", null],
+    ["another site's Origin", "https://evil.example"],
+    ["a sibling subdomain's Origin", "https://evil.lydite.org"],
+    ["the same host over http", "http://app.lydite.org"],
+  ])("refuses a request with %s, without reaching GitHub", async (_, origin) => {
+    const sent = github(rotated);
+    const response = await refresh(undefined, origin);
+    expect(response.status).toBe(403);
+    expect(cookies(response)).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("answers 401 to a browser holding no refresh cookie, without reaching GitHub", async () => {
+    const sent = github(rotated);
+    const response = await refresh("");
+    expect(response.status).toBe(401);
+    expect(cookies(response)).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("sends the cookie's refresh token as a refresh grant to GitHub's token endpoint", async () => {
+    const sent = github(rotated);
+    await refresh();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe("https://github.com/login/oauth/access_token");
+    expect(sent[0]?.body).toEqual({
+      client_id: "Iv1.test",
+      client_secret: "shh",
+      grant_type: "refresh_token",
+      refresh_token: REFRESH,
+    });
+  });
+
+  it("rotates the cookie for GitHub's lifetime and answers the access token alone, uncached", async () => {
+    github(rotated);
+    const response = await refresh();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(cookies(response)).toEqual([
+      `${REFRESH_COOKIE}=ghr_rotated; Secure; Path=/; HttpOnly; SameSite=Strict; Max-Age=15811200`,
+    ]);
+    const body = await response.text();
+    expect(JSON.parse(body)).toEqual({ access_token: "ghu_fresh", expires_in: 28800, token_type: "bearer" });
+    expect(body).not.toContain("ghr_rotated");
+    expect(body).not.toContain(REFRESH);
+    expect(body).not.toContain("refresh_token");
+  });
+
+  // GitHub rotates the refresh token on every grant, so a refused grant is most
+  // often one a sibling tab has just spent, and that tab has set its successor.
+  it("answers 401 to a grant GitHub refused and leaves the cookie as it is", async () => {
+    github(() => Response.json({ error: "bad_refresh_token" }));
+    const response = await refresh();
+    expect(response.status).toBe(401);
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(await response.text()).not.toContain(REFRESH);
+  });
+
+  it("answers 502 when GitHub cannot be reached", async () => {
+    github(() => {
+      throw new TypeError("network down");
+    });
+    const response = await refresh();
+    expect(response.status).toBe(502);
+    expect(cookies(response)).toEqual([]);
+  });
+
+  it("answers 502 when GitHub answers a non-2xx status", async () => {
+    github(() => new Response("unavailable", { status: 503 }));
+    const response = await refresh();
+    expect(response.status).toBe(502);
+    expect(cookies(response)).toEqual([]);
+  });
+
+  it("answers 502 when GitHub's reply is not a JSON object", async () => {
+    github(() => new Response("[]", { status: 200 }));
+    const response = await refresh();
+    expect(response.status).toBe(502);
+    expect(cookies(response)).toEqual([]);
+  });
+
+  it.each([
+    ["no access token", { refresh_token: "ghr_rotated", refresh_token_expires_in: 60 }],
+    ["no refresh token", { access_token: "ghu_fresh", refresh_token_expires_in: 60 }],
+    ["no lifetime for the refresh token", { access_token: "ghu_fresh", refresh_token: "ghr_rotated" }],
+  ])("answers 502 and sets no cookie when GitHub's reply carries %s", async (_, reply) => {
+    github(() => Response.json(reply));
+    const response = await refresh();
+    expect(response.status).toBe(502);
+    expect(cookies(response)).toEqual([]);
+    const body = await response.text();
+    expect(body).not.toContain("ghu_fresh");
+    expect(body).not.toContain("ghr_rotated");
+  });
+});
+
+describe("POST /auth/logout", () => {
+  it.each([
+    ["no Origin", null],
+    ["another site's Origin", "https://evil.example"],
+  ])("refuses a request with %s and clears nothing", async (_, origin) => {
+    const sent = github(rotated);
+    const response = await logout(origin);
+    expect(response.status).toBe(403);
+    expect(cookies(response)).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("clears the refresh cookie with the attributes a __Host- deletion needs, without reaching GitHub", async () => {
+    const sent = github(rotated);
+    const response = await logout();
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
+    const [cleared, ...rest] = cookies(response);
+    expect(rest).toEqual([]);
+    const [pair, ...attributes] = (cleared ?? "").split("; ");
+    expect(pair).toBe(`${REFRESH_COOKIE}=`);
+    expect(attributes).toContain("Secure");
+    expect(attributes).toContain("Path=/");
+    expect(attributes).toContain("HttpOnly");
+    expect(attributes).toContain("Max-Age=0");
+    expect(attributes.some((a) => a.toLowerCase().startsWith("domain="))).toBe(false);
+    expect(cleared).toBe(REFRESH_CLEARED);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("every route", () => {
+  const CODE = "the_code_value";
+
+  // Every route the Worker answers, success and failure, with GitHub stubbed
+  // to the answer each needs.
+  const exercises: [string, () => Promise<Response>][] = [
+    ["login", () => get("/auth/login")],
+    [
+      "a successful callback",
+      () => {
+        github(granted);
+        return callback(`code=${CODE}&state=${STATE}`);
+      },
+    ],
+    [
+      "a refused callback",
+      () => {
+        github(() => Response.json({ error: "bad_verification_code" }));
+        return callback(`code=${CODE}&state=${STATE}`);
+      },
+    ],
+    ["a forged callback", () => callback(`code=${CODE}&state=forged`)],
+    [
+      "a successful refresh",
+      () => {
+        github(rotated);
+        return refresh();
+      },
+    ],
+    [
+      "a refused refresh",
+      () => {
+        github(() => Response.json({ error: "bad_refresh_token" }));
+        return refresh();
+      },
+    ],
+    [
+      "a failed refresh",
+      () => {
+        github(() => new Response("unavailable", { status: 503 }));
+        return refresh();
+      },
+    ],
+    ["a cross-origin refresh", () => refresh(undefined, "https://evil.example")],
+    ["logout", () => logout()],
+    ["an unknown path", () => get("/nowhere")],
+  ];
+
+  it.each(exercises)("logs nothing on %s", async (_, run) => {
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation(() => {}),
+    );
+    await run();
+    for (const spy of spies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(exercises)("echoes no code, state or refresh token on %s", async (_, run) => {
+    const response = await run();
+    const body = await response.text();
+    const location = response.headers.get("location") ?? "";
+    for (const secret of [CODE, STATE, REFRESH, "ghr_refresh", "ghr_rotated"]) {
+      expect(body).not.toContain(secret);
+      expect(location).not.toContain(secret);
+    }
+  });
+
+  it.each(exercises)("sends no CORS header on %s", async (_, run) => {
+    const response = await run();
+    expect([...response.headers.keys()].filter((name) => name.startsWith("access-control-"))).toEqual([]);
   });
 });

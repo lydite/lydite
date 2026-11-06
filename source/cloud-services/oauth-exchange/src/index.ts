@@ -3,6 +3,7 @@ import {
   LOGIN_COOKIE,
   loginCookie,
   parseLogin,
+  REFRESH_COOKIE,
   readCookie,
   refreshCookie,
 } from "./cookies.js";
@@ -18,6 +19,8 @@ const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 
 const CALLBACK_PATH = "/auth/callback";
 const LOGIN_PATH = "/auth/login";
+const LOGOUT_PATH = "/auth/logout";
+const REFRESH_PATH = "/auth/refresh";
 
 type Handler = (request: Request, env: Env) => Promise<Response>;
 
@@ -25,6 +28,8 @@ type Handler = (request: Request, env: Env) => Promise<Response>;
 const ROUTES: Record<string, Handler> = {
   [`GET ${LOGIN_PATH}`]: login,
   [`GET ${CALLBACK_PATH}`]: callback,
+  [`POST ${REFRESH_PATH}`]: sameOrigin(refresh),
+  [`POST ${LOGOUT_PATH}`]: sameOrigin(logout),
 };
 
 /**
@@ -37,7 +42,13 @@ const ROUTES: Record<string, Handler> = {
  * with the verifier, and keeps only the refresh token — in an `HttpOnly`,
  * `SameSite=Strict` cookie no script on the page can read. The first access
  * token GitHub returns is discarded rather than handed over: no token ever
- * appears in a URL or a response body.
+ * appears in a URL, and the refresh token never in a response body.
+ *
+ * `/auth/refresh` trades that cookie for an access token, the only response
+ * body any token appears in, and `/auth/logout` clears it. Both act on a
+ * cookie the browser attaches by itself, so both answer only a request whose
+ * `Origin` is this one; no CORS header is ever sent, so no other origin can
+ * read what either answers.
  *
  * It never reads a repository — the dashboard reads the ledger with the
  * *viewer's* credentials, which is what ADR 0009 means by lydite holding none
@@ -93,7 +104,11 @@ async function callback(request: Request, env: Env): Promise<Response> {
     return redirect("/", [cleared]);
   }
 
-  const token = await exchange(env, code, binding.verifier, callbackUrl(request));
+  const token = await exchange(env, {
+    code,
+    code_verifier: binding.verifier,
+    redirect_uri: callbackUrl(request),
+  });
   if (!token) {
     return json(502, { error: "the token exchange failed" }, [cleared]);
   }
@@ -115,13 +130,76 @@ async function callback(request: Request, env: Env): Promise<Response> {
   return redirect("/", [cleared, refresh]);
 }
 
-/** GitHub's token reply as an object, or `undefined` when the exchange did not produce one. */
-async function exchange(
-  env: Env,
-  code: string,
-  verifier: string,
-  redirectUri: string,
-): Promise<Record<string, unknown> | undefined> {
+/**
+ * Trades the refresh cookie for a fresh access token, and rotates the cookie to
+ * the refresh token GitHub issues with it. The body carries the access token
+ * alone: the refresh token never leaves the cookie.
+ */
+async function refresh(request: Request, env: Env): Promise<Response> {
+  const current = readCookie(request, REFRESH_COOKIE);
+  if (!current) {
+    return json(401, { error: "not signed in" });
+  }
+
+  const token = await exchange(env, { grant_type: "refresh_token", refresh_token: current });
+  if (!token) {
+    return json(502, { error: "the token refresh failed" });
+  }
+  if (typeof token.error === "string") {
+    // The cookie is left as it is. GitHub rotates the refresh token on every
+    // grant, so a refused one is most often a token another tab has just
+    // spent — and that tab's response has already set its successor here.
+    // Clearing it would sign every tab out.
+    return json(401, { error: "the session could not be renewed" });
+  }
+
+  const rotated =
+    typeof token.refresh_token === "string" && typeof token.refresh_token_expires_in === "number"
+      ? refreshCookie(token.refresh_token, token.refresh_token_expires_in)
+      : undefined;
+  if (typeof token.access_token !== "string" || !rotated) {
+    return json(502, { error: "the token refresh failed" });
+  }
+  return json(
+    200,
+    { access_token: token.access_token, expires_in: token.expires_in, token_type: token.token_type },
+    [rotated],
+  );
+}
+
+/**
+ * Clears the refresh cookie. The token is not revoked at GitHub: it expires on
+ * its own, and with the cookie gone nothing on this origin can present it.
+ */
+async function logout(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: { "cache-control": "no-store", "set-cookie": clearCookie(REFRESH_COOKIE) },
+  });
+}
+
+/**
+ * A handler that answers only a request whose `Origin` is exactly the one it
+ * arrived at. The refresh cookie is `SameSite=Strict`, and this is the check
+ * that does not depend on the browser honouring that. A request with no
+ * `Origin` is refused, since a browser sends one on every cross-origin POST
+ * and the dashboard's own fetch sends one too.
+ */
+function sameOrigin(handler: Handler): Handler {
+  return async (request, env) => {
+    if (request.headers.get("origin") !== new URL(request.url).origin) {
+      return json(403, { error: "forbidden" });
+    }
+    return handler(request, env);
+  };
+}
+
+/**
+ * GitHub's token reply to a grant, as an object, or `undefined` when the
+ * exchange did not produce one. The client's own credentials are added here;
+ * `grant` carries the rest.
+ */
+async function exchange(env: Env, grant: Record<string, string>): Promise<Record<string, unknown> | undefined> {
   let response: Response;
   try {
     response = await fetch(GITHUB_TOKEN_URL, {
@@ -130,9 +208,7 @@ async function exchange(
       body: JSON.stringify({
         client_id: env.LYDITE_DASHBOARD_CLIENT_ID,
         client_secret: env.LYDITE_DASHBOARD_CLIENT_SECRET,
-        code,
-        code_verifier: verifier,
-        redirect_uri: redirectUri,
+        ...grant,
       }),
     });
   } catch {
