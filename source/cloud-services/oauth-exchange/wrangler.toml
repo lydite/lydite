@@ -7,8 +7,10 @@ workers_dev = false
 pattern = "app.lydite.org"
 custom_domain = true
 
-# The app and its callback share this one origin, so the exchange never crosses
-# origins — see ADR 0009.
+# The sign-in is Worker-driven and runs on this one origin: /auth/login,
+# /auth/callback, /auth/refresh and /auth/logout. The redirect URI is derived
+# from the request's own origin, so no URL is configured here. The refresh token
+# lives only in an HttpOnly cookie; the Worker has no storage binding.
 [vars]
 LYDITE_DASHBOARD_CLIENT_ID = ""
 
