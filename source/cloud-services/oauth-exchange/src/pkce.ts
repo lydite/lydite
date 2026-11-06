@@ -33,7 +33,7 @@ export function sameText(a: string, b: string): boolean {
     return false;
   }
   let difference = 0;
-  for (let i = 0; i < left.length; i++) {
+  for (let i = 0; i < left.length; i++) { // [lydite:exclude_from_mutation][an index past the end reads both sides as 0 through the ?? fallback, and 0 ^ 0 leaves the accumulated difference unchanged]
     difference |= (left[i] ?? 0) ^ (right[i] ?? 0);
   }
   return difference === 0;

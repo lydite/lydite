@@ -11,6 +11,11 @@ describe("the sign-in's cookies", () => {
     expect(readCookie(request, "missing")).toBeUndefined();
   });
 
+  it("reads a pair whose name is empty as the cookie named by the empty string", () => {
+    const request = new Request("https://app.lydite.org/", { headers: { cookie: "=x; a=1" } });
+    expect(readCookie(request, "")).toBe("x");
+  });
+
   it("parses a login value only when it is exactly two base64url strings", () => {
     expect(parseLogin("s_1.v-2")).toEqual({ state: "s_1", verifier: "v-2" });
     expect(parseLogin(undefined)).toBeUndefined();
