@@ -1,85 +1,170 @@
+import {
+  clearCookie,
+  LOGIN_COOKIE,
+  loginCookie,
+  parseLogin,
+  readCookie,
+  refreshCookie,
+} from "./cookies.js";
+import { challengeFor, randomToken, sameText } from "./pkce.js";
+
 export interface Env {
   LYDITE_DASHBOARD_CLIENT_ID: string;
   LYDITE_DASHBOARD_CLIENT_SECRET: string;
 }
 
+const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 
+const CALLBACK_PATH = "/auth/callback";
+const LOGIN_PATH = "/auth/login";
+
+type Handler = (request: Request, env: Env) => Promise<Response>;
+
+/** Every route the Worker answers, keyed by method and path; anything else is 404. */
+const ROUTES: Record<string, Handler> = {
+  [`GET ${LOGIN_PATH}`]: login,
+  [`GET ${CALLBACK_PATH}`]: callback,
+};
+
 /**
- * The dashboard's token exchange.
+ * The dashboard's sign-in, served on `app.lydite.org` beside the app itself.
  *
- * It does one thing: turn a code or a refresh token into a token, because the
- * client secret cannot live in a static bundle. It never reads a repository —
- * the dashboard reads the ledger with the *viewer's* credentials, which is what
- * ADR 0009 means by lydite holding none of your data — and it stores nothing.
+ * The Worker drives the whole OAuth round trip, because the client secret
+ * cannot live in a static bundle: `/auth/login` sends the viewer to GitHub with
+ * a fresh `state` and a PKCE S256 challenge, both bound to this browser by an
+ * `HttpOnly` cookie, and `/auth/callback` checks the `state`, exchanges the code
+ * with the verifier, and keeps only the refresh token — in an `HttpOnly`,
+ * `SameSite=Strict` cookie no script on the page can read. The first access
+ * token GitHub returns is discarded rather than handed over: no token ever
+ * appears in a URL or a response body.
  *
- * The refresh half is not an afterthought. The dashboard App has expiring user
- * tokens on, so an access token lasts eight hours and a refresh token six
- * months; a flow built around the initial exchange alone works for one working
- * day and then logs everyone out. Both grants go through one handler because
- * they are the same request to GitHub with a different grant type, and two
- * handlers would be two places to get the secret handling wrong.
- *
- * It is a scaffold: the dashboard it serves is ADR 0009's and is not built. The
- * two Apps and their key custody are the decision this delivers, and a relay
- * that could read repository contents would be that decision unmade.
+ * It never reads a repository — the dashboard reads the ledger with the
+ * *viewer's* credentials, which is what ADR 0009 means by lydite holding none
+ * of your data — and it stores and logs nothing. Every rejection carries a
+ * generic body: an answer that echoed a code, a state or a token would put
+ * them wherever responses end up.
  */
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.method !== "POST" || url.pathname !== "/token") {
-      return json(404, { error: "POST /token" });
+    const handler = ROUTES[`${request.method} ${new URL(request.url).pathname}`];
+    if (!handler) {
+      return json(404, { error: "not found" });
     }
+    return handler(request, env);
+  },
+};
 
-    const body = (await request.json().catch(() => ({}))) as {
-      code?: string;
-      refresh_token?: string;
-    };
-    const grant = grantFor(body);
-    if (!grant) {
-      return json(400, { error: "either a code or a refresh_token is required" });
-    }
+async function login(request: Request, env: Env): Promise<Response> {
+  const state = randomToken();
+  const verifier = randomToken();
+  const authorize = new URL(GITHUB_AUTHORIZE_URL);
+  authorize.searchParams.set("client_id", env.LYDITE_DASHBOARD_CLIENT_ID);
+  authorize.searchParams.set("redirect_uri", callbackUrl(request));
+  authorize.searchParams.set("state", state);
+  authorize.searchParams.set("code_challenge", await challengeFor(verifier));
+  authorize.searchParams.set("code_challenge_method", "S256");
+  return redirect(authorize.toString(), [loginCookie({ state, verifier })]);
+}
 
-    const response = await fetch(GITHUB_TOKEN_URL, {
+/**
+ * GitHub's redirect back. The login cookie is single-use, so every outcome
+ * clears it: a sign-in that failed starts over from `/auth/login` with a fresh
+ * pair rather than retrying with one a failed attempt has already exposed.
+ */
+async function callback(request: Request, env: Env): Promise<Response> {
+  const cleared = clearCookie(LOGIN_COOKIE);
+  const binding = parseLogin(readCookie(request, LOGIN_COOKIE));
+  if (!binding) {
+    // No sign-in was started from this browser, or it expired: the code is
+    // never exchanged, since nothing here binds it to the viewer presenting it.
+    return redirect(LOGIN_PATH, [cleared]);
+  }
+
+  const params = new URL(request.url).searchParams;
+  const state = params.get("state");
+  if (state === null || !sameText(state, binding.state)) {
+    return json(400, { error: "the sign-in could not be verified" }, [cleared]);
+  }
+
+  const code = params.get("code");
+  if (params.has("error") || !code) {
+    // The viewer declined on GitHub, or GitHub answered with nothing to exchange.
+    return redirect("/", [cleared]);
+  }
+
+  const token = await exchange(env, code, binding.verifier, callbackUrl(request));
+  if (!token) {
+    return json(502, { error: "the token exchange failed" }, [cleared]);
+  }
+  if (typeof token.error === "string") {
+    // GitHub answers 200 with an error body for a spent or invalid grant, so
+    // the status alone is not the answer.
+    return json(400, { error: "the grant was refused" }, [cleared]);
+  }
+
+  const refresh =
+    typeof token.refresh_token === "string" && typeof token.refresh_token_expires_in === "number"
+      ? refreshCookie(token.refresh_token, token.refresh_token_expires_in)
+      : undefined;
+  if (!refresh) {
+    // A token with no refresh token, or no lifetime for it, is an App without
+    // expiring user tokens: the session it would start could never be renewed.
+    return json(502, { error: "the token exchange failed" }, [cleared]);
+  }
+  return redirect("/", [cleared, refresh]);
+}
+
+/** GitHub's token reply as an object, or `undefined` when the exchange did not produce one. */
+async function exchange(
+  env: Env,
+  code: string,
+  verifier: string,
+  redirectUri: string,
+): Promise<Record<string, unknown> | undefined> {
+  let response: Response;
+  try {
+    response = await fetch(GITHUB_TOKEN_URL, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({
         client_id: env.LYDITE_DASHBOARD_CLIENT_ID,
         client_secret: env.LYDITE_DASHBOARD_CLIENT_SECRET,
-        ...grant,
+        code,
+        code_verifier: verifier,
+        redirect_uri: redirectUri,
       }),
     });
-    if (!response.ok) {
-      return json(502, { error: "the token exchange failed" });
-    }
-    const token = (await response.json()) as Record<string, unknown>;
-    if (typeof token.error === "string") {
-      // GitHub answers 200 with an error body for a spent or invalid grant, so
-      // the status alone is not the answer. The client's move is to send the
-      // viewer back through login, which needs the distinction.
-      return json(400, { error: "the grant was refused" });
-    }
-    // Relayed as GitHub returned it, minus nothing and plus nothing. The
-    // expiry and the refresh token are the client's to manage, and a Worker
-    // that reshaped them would be a second place the token lifetime is
-    // described.
-    return json(200, token);
-  },
-};
-
-function grantFor(body: { code?: string; refresh_token?: string }): Record<string, string> | undefined {
-  if (body.code) {
-    return { code: body.code, grant_type: "authorization_code" };
+  } catch {
+    return undefined;
   }
-  if (body.refresh_token) {
-    return { refresh_token: body.refresh_token, grant_type: "refresh_token" };
+  if (!response.ok) {
+    return undefined;
   }
-  return undefined;
+  const body: unknown = await response.json().catch(() => undefined);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return undefined;
+  }
+  return body as Record<string, unknown>;
 }
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+/** The callback on the origin the request arrived at, so the authorize and the exchange name the same one. */
+function callbackUrl(request: Request): string {
+  return `${new URL(request.url).origin}${CALLBACK_PATH}`;
+}
+
+function redirect(location: string, cookies: string[]): Response {
+  const headers = new Headers({ location, "cache-control": "no-store" });
+  for (const cookie of cookies) {
+    headers.append("set-cookie", cookie);
+  }
+  return new Response(null, { status: 302, headers });
+}
+
+function json(status: number, body: unknown, cookies: string[] = []): Response {
+  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+  for (const cookie of cookies) {
+    headers.append("set-cookie", cookie);
+  }
+  return new Response(JSON.stringify(body), { status, headers });
 }
