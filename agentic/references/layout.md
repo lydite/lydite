@@ -95,8 +95,9 @@ source/cli/internal/annotation/   # the exclusion declaration: the [lydite:exclu
                                   #   token for mutation, crap and coverage, and how a comment
                                   #   carrying one is read. A leaf, so referral can link it
 source/cli/internal/gitstate/     # the base branch, and lydite branch read/write (see coverage.md)
-source/cli/internal/ledger/       # the quality history: append-only NDJSON and the daily
-                                  #   projection the dashboard reads (see quality-history.md)
+source/cli/internal/ledger/       # the quality history: append-only NDJSON, the daily
+                                  #   projection the dashboard reads, and the open-findings
+                                  #   snapshot (see quality-history.md)
 source/cli/internal/junit/        # the test counts every runner's JUnit report holds
 source/cli/internal/flaky/        # which tests a change declares as new, and what two JUnit
                                   #   runs of them establish about each (see components.md)
