@@ -185,10 +185,7 @@ func TestTheRecordIsFiledUnderTheStatedOrCheckedOutBranch(t *testing.T) {
 			if out.Records == nil {
 				t.Fatalf("no record to append: reason %#v", out.Reason)
 			}
-			recs, err := out.Records(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			recs := ledgerRecording(t, out, t.TempDir()).Records
 			if len(recs) != 1 || recs[0].Branch != tc.want {
 				t.Errorf("records = %+v, want one filed under %s", recs, tc.want)
 			}
@@ -227,10 +224,7 @@ func TestTheRecordDescribesTheCommitItIsFiledAgainst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComposeRecords: %v", err)
 	}
-	recs, err := out.Records(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	recs := ledgerRecording(t, out, t.TempDir()).Records
 	want := []ledger.Record{{
 		Kind: ledger.KindEntry, At: head.At, Commit: head.SHA, Parent: head.Parent, Tree: head.Tree,
 		Branch:       "main",
@@ -262,10 +256,7 @@ func TestEachAttemptDiffsAgainstTheBranchItIsHanded(t *testing.T) {
 		t.Fatalf("ComposeRecords: %v", err)
 	}
 
-	fresh, err := out.Records(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	fresh := ledgerRecording(t, out, t.TempDir()).Records
 	if len(fresh) != 1 || len(fresh[0].FindingEvents) != 1 {
 		t.Fatalf("records over an empty branch = %+v, want one entry whose claim appeared", fresh)
 	}
@@ -277,10 +268,7 @@ func TestEachAttemptDiffsAgainstTheBranchItIsHanded(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	retried, err := out.Records(advanced)
-	if err != nil {
-		t.Fatal(err)
-	}
+	retried := ledgerRecording(t, out, advanced).Records
 	for _, rec := range retried {
 		if rec.Kind == ledger.KindEntry && rec.FindingEvents != nil {
 			t.Errorf("the retry's entry carries %+v, want nothing: the branch it was handed already holds the claim open", rec.FindingEvents)
@@ -321,10 +309,7 @@ func TestAGapIsWrittenOnlyWhereTheLastRecordIsNotThisCommitsParent(t *testing.T)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recs, err := out.Records(tc.store)
-			if err != nil {
-				t.Fatal(err)
-			}
+			recs := ledgerRecording(t, out, tc.store).Records
 			if tc.wantGap == nil {
 				if len(recs) != 1 || recs[0].Kind != ledger.KindEntry {
 					t.Errorf("records = %+v, want the entry alone", recs)
@@ -379,5 +364,144 @@ func TestFindingEventsAreSortedAndEachFingerprintAppearsOnce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("findingEvents = %+v, want %+v", got, want)
+	}
+}
+
+// The open-findings snapshot holds exactly the fingerprints the ledger holds
+// open once this commit's events are applied. A bucket this run measured takes
+// its words from this run; a bucket it did not — crashed or not run — carries
+// them forward from the previous snapshot, and is identity only where that
+// snapshot never held the fingerprint. A previous snapshot lagging the ledger
+// lends words and never membership: a fingerprint it holds that the ledger has
+// since resolved is gone, and one the ledger has since opened is there.
+func TestTheOpenFindingsSnapshotIsTheLedgersOpenSet(t *testing.T) {
+	repo, _ := ledgerRepo(t, map[string]string{"README.md": "a repository\n"})
+	head, err := gitstate.DescribeCommit(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stays := finding.Finding{Gate: "gosec", Component: "cli", Path: "a.go", Line: 7, EndLine: 9, Rule: "G101",
+		Severity: "HIGH", Message: "hardcoded credential", Detail: []string{"first line", "second line"},
+		Site: "password := \"hunter2\"", Ordinal: 1}
+	appears := finding.Finding{Gate: "gosec", Component: "cli", Path: "b.go", Line: 2, Rule: "G104", Message: "unchecked error", Site: "f()"}
+	goes := ledgerGosecClaim("a.go", "goes")
+	ran := ledger.FindingBucket{Gate: "gosec", Component: "cli"}
+	crashed := ledger.FindingBucket{Gate: "biome", Component: "web"}
+	notRun := ledger.FindingBucket{Gate: "gitleaks"}
+	appeared := func(b ledger.FindingBucket, fp string) ledger.FindingEvent {
+		return ledger.FindingEvent{Transition: ledger.FindingAppeared, Fingerprint: fp, Gate: b.Gate, Component: b.Component}
+	}
+
+	store := t.TempDir()
+	for i, events := range [][]ledger.FindingEvent{
+		{appeared(ran, stays.Fingerprint()), appeared(ran, goes.Fingerprint()),
+			appeared(crashed, "v1:carried"), appeared(crashed, "v1:unworded"),
+			appeared(notRun, "v1:kept"), appeared(notRun, "v1:resolved-since")},
+		{{Transition: ledger.FindingResolved, Fingerprint: "v1:resolved-since", Gate: notRun.Gate},
+			appeared(notRun, "v1:opened-since")},
+	} {
+		if _, _, err := ledger.Append(store, []ledger.Record{{
+			Kind: ledger.KindEntry, At: head.At.Add(-time.Duration(2-i) * time.Hour),
+			Commit: "prior" + string(rune('a'+i)), Branch: "main", FindingEvents: events,
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Lagging the ledger: it still holds the fingerprint resolved since, and
+	// never learned of the one opened since.
+	carried := ledger.OpenFinding{Gate: "biome", Component: "web", Path: "d.ts", Line: 4, Rule: "noVar", Message: "carried"}
+	kept := ledger.OpenFinding{Gate: "gitleaks", Path: ".env", Line: 1, Rule: "generic-api-key", Message: "kept"}
+	ledgerPriorSnapshot(t, store, ledger.OpenFindings{Branch: "main", Commit: "priora", At: head.At.Add(-2 * time.Hour),
+		Findings: []ledger.OpenFinding{
+			{Gate: "gosec", Component: "cli", Path: "old.go", Message: "stale words", Fingerprint: stays.Fingerprint()},
+			{Gate: "gosec", Component: "cli", Path: "a.go", Fingerprint: goes.Fingerprint()},
+			withFingerprint(carried, "v1:carried"),
+			withFingerprint(kept, "v1:kept"),
+			{Gate: "gitleaks", Path: ".env", Message: "resolved", Fingerprint: "v1:resolved-since"},
+		}})
+
+	out, err := ComposeRecords(context.Background(), ComposeRecordsIn{
+		Dir: repo, BranchOverride: "main",
+		Components: map[string]ledger.Component{"cli": {Findings: map[string]int{"gosec": 2}}},
+		Scope:      map[ledger.FindingBucket]bool{ran: true},
+		Found:      []finding.Finding{stays, appears},
+	})
+	if err != nil {
+		t.Fatalf("ComposeRecords: %v", err)
+	}
+	recording := ledgerRecording(t, out, store)
+
+	got := recording.OpenFindings
+	if got == nil {
+		t.Fatal("no open-findings snapshot composed")
+	}
+	if got.Branch != "main" || got.Commit != head.SHA || !got.At.Equal(head.At) {
+		t.Errorf("header = %s %s %s, want main %s %s: the record's own", got.Branch, got.Commit, got.At, head.SHA, head.At)
+	}
+	want := map[string]ledger.OpenFinding{
+		stays.Fingerprint(): {Gate: "gosec", Component: "cli", Path: "a.go", Line: 7, EndLine: 9, Rule: "G101",
+			Severity: "HIGH", Message: "hardcoded credential", Ordinal: 1,
+			Fingerprint: stays.Fingerprint()},
+		appears.Fingerprint(): {Gate: "gosec", Component: "cli", Path: "b.go", Line: 2, Rule: "G104",
+			Message: "unchecked error", Fingerprint: appears.Fingerprint()},
+		"v1:carried":      withFingerprint(carried, "v1:carried"),
+		"v1:unworded":     {Gate: "biome", Component: "web", Fingerprint: "v1:unworded"},
+		"v1:kept":         withFingerprint(kept, "v1:kept"),
+		"v1:opened-since": {Gate: "gitleaks", Fingerprint: "v1:opened-since"},
+	}
+	held := map[string]ledger.OpenFinding{}
+	for _, f := range got.Findings {
+		if _, dup := held[f.Fingerprint]; dup {
+			t.Errorf("%s is in the snapshot twice", f.Fingerprint)
+		}
+		held[f.Fingerprint] = f
+	}
+	if !reflect.DeepEqual(held, want) {
+		t.Errorf("open findings = %+v\nwant %+v", held, want)
+	}
+}
+
+func withFingerprint(f ledger.OpenFinding, fp string) ledger.OpenFinding {
+	f.Fingerprint = fp
+	return f
+}
+
+// Each call reads its words from the open-findings snapshot of the branch it
+// is handed: a retry's fetched branch may hold a snapshot a concurrent run
+// wrote, and the first attempt's must not stand in for it.
+func TestEachAttemptTakesItsOpenFindingsFromTheBranchItIsHanded(t *testing.T) {
+	repo, _ := ledgerRepo(t, map[string]string{"README.md": "a repository\n"})
+	head, err := gitstate.DescribeCommit(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notRun := ledger.FindingBucket{Gate: "semgrep"}
+	branch := func(message string) string {
+		store := t.TempDir()
+		if _, _, err := ledger.Append(store, []ledger.Record{{
+			Kind: ledger.KindEntry, At: head.At.Add(-time.Hour), Commit: "prior", Branch: "main",
+			FindingEvents: []ledger.FindingEvent{{Transition: ledger.FindingAppeared, Fingerprint: "v1:open", Gate: notRun.Gate}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if message != "" {
+			ledgerPriorSnapshot(t, store, ledger.OpenFindings{Branch: "main", Commit: "prior", At: head.At.Add(-time.Hour),
+				Findings: []ledger.OpenFinding{{Gate: notRun.Gate, Message: message, Fingerprint: "v1:open"}}})
+		}
+		return store
+	}
+	out, err := ComposeRecords(context.Background(), ComposeRecordsIn{
+		Dir: repo, BranchOverride: "main", Components: ledgerScalar(),
+	})
+	if err != nil {
+		t.Fatalf("ComposeRecords: %v", err)
+	}
+
+	for _, message := range []string{"", "the words a concurrent run wrote"} {
+		got := ledgerRecording(t, out, branch(message)).OpenFindings
+		want := []ledger.OpenFinding{{Gate: notRun.Gate, Message: message, Fingerprint: "v1:open"}}
+		if got == nil || !reflect.DeepEqual(got.Findings, want) {
+			t.Errorf("open findings over a branch whose snapshot says %q = %+v, want %+v", message, got, want)
+		}
 	}
 }

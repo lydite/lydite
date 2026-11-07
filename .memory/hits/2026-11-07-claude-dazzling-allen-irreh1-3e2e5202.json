@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "notes": {
+    "gitstate-write-retry-cap-is-a-tolerance-not-a-correctness-bound": {
+      "count": 1,
+      "first": "2026-11-07T07:04:15.024615788Z",
+      "last": "2026-11-07T07:04:15.024615788Z"
+    },
+    "ledger-branchstate-replay-bounded-and-timestamp-ordered": {
+      "count": 2,
+      "first": "2026-11-07T07:04:15.009918261Z",
+      "last": "2026-11-07T07:33:35.932571366Z"
+    },
+    "ledger-records-closure-runs-once-per-push-attempt": {
+      "count": 2,
+      "first": "2026-11-07T07:04:15.038335216Z",
+      "last": "2026-11-07T07:33:35.920276062Z"
+    },
+    "local-lydite-actions-composites-are-dead-in-this-repo": {
+      "count": 1,
+      "first": "2026-11-07T07:33:35.905359991Z",
+      "last": "2026-11-07T07:33:35.905359991Z"
+    }
+  }
+}

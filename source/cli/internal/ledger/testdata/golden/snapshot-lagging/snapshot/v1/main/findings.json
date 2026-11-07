@@ -1,0 +1,1 @@
+{"branch":"main","commit":"0000000000000000000000000000000000001ef0","at":"2026-09-01T09:00:00Z","part":0,"parts":1,"findings":[{"gate":"gosec","component":"api","path":"internal/handler/file1.go","line":11,"end_line":13,"rule":"G104","severity":"medium","message":"errors unhandled","ordinal":1,"fingerprint":"9e3779b97f4a7c15"}]}

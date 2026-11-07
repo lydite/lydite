@@ -1,0 +1,1 @@
+{"branch":"main","commit":"0000000000000000000000000000000000001ef0","at":"2026-09-01T09:00:00Z","part":0,"parts":1,"findings":[{"gate":"biome","component":"web","fingerprint":"3c6ef372fe94f82a"},{"gate":"gosec","component":"api","fingerprint":"9e3779b97f4a7c15"}]}

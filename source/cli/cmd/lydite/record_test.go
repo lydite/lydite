@@ -334,6 +334,7 @@ func TestABaselineMissingADeclaredComponentIsRefusedAndItsHistoryLands(t *testin
 ✗ record ........................ not recorded — api has no entry, and a baseline missing a component gates on nothing
   → the next change against this tree measures it instead of gating against a partial baseline
 → history ....................... 1 record(s) appended
+→ open findings ................. snapshot written in 1 part(s)
 
 record failed in 0.0s
 `, `{
@@ -364,6 +365,11 @@ record failed in 0.0s
       "status": "context",
       "label": "history",
       "value": "1 record(s) appended"
+    },
+    {
+      "status": "context",
+      "label": "open findings",
+      "value": "snapshot written in 1 part(s)"
     }
   ]
 }
@@ -434,6 +440,7 @@ func TestEachReportDirectorySaysWhatItHeldAndWhatWouldNotParse(t *testing.T) {
 → findings ...................... not counted — no declared component has a gate that reports findings
 ✓ record ........................ 1 component(s) recorded for <TREE>
 → history ....................... 1 record(s) appended
+→ open findings ................. snapshot written in 1 part(s)
 
 record passed in 0.0s
 `, `{
@@ -487,6 +494,11 @@ record passed in 0.0s
       "status": "context",
       "label": "history",
       "value": "1 record(s) appended"
+    },
+    {
+      "status": "context",
+      "label": "open findings",
+      "value": "snapshot written in 1 part(s)"
     }
   ]
 }
@@ -553,7 +565,7 @@ func TestTheReportReaderFoldsWhatItReadRatherThanReadingAgain(t *testing.T) {
 // Each reason a recording appends no history reads as its own, and a history
 // nothing composed is an error rather than a row claiming an append.
 func TestEveryHistoryReasonSaysWhyNothingWasAppended(t *testing.T) {
-	records := func(string) ([]ledger.Record, error) { return nil, nil }
+	records := func(string) (gitstate.Recording, error) { return gitstate.Recording{}, nil }
 	for _, tc := range []struct {
 		composed ledgerstages.ComposeRecordsOut
 		want     string

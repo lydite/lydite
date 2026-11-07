@@ -29,6 +29,10 @@ type WriteStateOut struct {
 	// appended again, so a commit recorded twice lands nothing the second
 	// time.
 	Landed []ledger.Record
+	// OpenFindingsParts is how many parts of the open-findings snapshot were
+	// written beside the records, nought when none was: a commit already
+	// recorded lands no record and so writes no snapshot.
+	OpenFindingsParts int
 }
 
 // WriteState lands the baseline and the quality history in one commit on the
@@ -46,9 +50,9 @@ type WriteStateOut struct {
 // failed, or a routine push race over history alone — depends on what was
 // being landed, which is not this stage's to judge.
 func WriteState(ctx context.Context, in WriteStateIn) (WriteStateOut, error) {
-	landed, err := gitstate.Write(ctx, in.Dir, in.Head, in.Snapshot, in.Records)
+	written, err := gitstate.Write(ctx, in.Dir, in.Head, in.Snapshot, in.Records)
 	if err != nil {
 		return WriteStateOut{}, err
 	}
-	return WriteStateOut{Landed: landed}, nil
+	return WriteStateOut{Landed: written.Landed, OpenFindingsParts: written.OpenFindingsParts}, nil
 }

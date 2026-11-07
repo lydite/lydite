@@ -149,15 +149,48 @@ func ledgerFindingEvents(t *testing.T, components map[string]ledger.Component, r
 	if out.Records == nil {
 		t.Fatalf("no record to append: reason %#v", out.Reason)
 	}
-	recs, err := out.Records(store)
+	recording, err := out.Records(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rec := range recs {
+	for _, rec := range recording.Records {
 		if rec.Kind == ledger.KindEntry {
 			return rec.FindingEvents
 		}
 	}
-	t.Fatalf("no entry among %+v", recs)
+	t.Fatalf("no entry among %+v", recording.Records)
 	return nil
+}
+
+// ledgerPriorSnapshot writes o into store as the open-findings snapshot the
+// branch already holds.
+func ledgerPriorSnapshot(t *testing.T, store string, o ledger.OpenFindings) {
+	t.Helper()
+	parts, err := ledger.EncodeOpenFindings(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range parts {
+		path := filepath.Join(store, filepath.FromSlash(p.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, p.Data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// ledgerRecording is what the closure ComposeRecords returns answers when
+// handed store.
+func ledgerRecording(t *testing.T, out ComposeRecordsOut, store string) gitstate.Recording {
+	t.Helper()
+	if out.Records == nil {
+		t.Fatalf("no record to append: reason %#v", out.Reason)
+	}
+	recording, err := out.Records(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recording
 }

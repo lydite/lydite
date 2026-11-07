@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
 	"lydite/lydite/internal/junit"
 	"lydite/lydite/internal/ledger"
@@ -36,9 +37,9 @@ func TestWriteStateLandsTheBaselineAndTheRecordsInOneWrite(t *testing.T) {
 		Components: map[string]ledger.Component{"svc": {Tests: &junit.Counts{Total: 1}}},
 	}
 	var asked []string
-	records := func(worktree string) ([]ledger.Record, error) {
+	records := func(worktree string) (gitstate.Recording, error) {
 		asked = append(asked, worktree)
-		return []ledger.Record{rec}, nil
+		return gitstate.Recording{Records: []ledger.Record{rec}}, nil
 	}
 
 	out, err := WriteState(context.Background(), WriteStateIn{Dir: dir, Head: tree, Snapshot: snap, Records: records})
@@ -104,5 +105,60 @@ func TestWriteStateReturnsAWriteThatNeverLandedAsItsError(t *testing.T) {
 	}
 	if out.Landed != nil {
 		t.Errorf("Landed = %+v from a write that never landed", out.Landed)
+	}
+}
+
+// The open-findings snapshot a recording writes carries tool text and a
+// location, and never source: a finding's site and detail — here a secret, quoted code, and the value
+// a component's declared env: holds — appears nowhere in what lands on the
+// branch. A commit recorded again writes no snapshot at all.
+func TestTheOpenFindingsSnapshotLandsWithoutSourceAndOnlyOnce(t *testing.T) {
+	dir, tree := ledgerRemote(t)
+	const site, declared, quoted = "AKIAIOSFODNN7EXAMPLE-site-text", "s3cr3t-declared-env-value", "password := \"hunter2-quoted-detail\""
+	leak := finding.Finding{Gate: "gitleaks", Path: "config/app.env", Line: 3, Rule: "aws-access-token",
+		Message: "AWS access token", Site: site}
+	env := finding.Finding{Gate: "gitleaks", Path: ".lydite/components.yml", Line: 9, Rule: "generic-api-key",
+		Message: "generic API key", Site: "API_TOKEN: " + declared}
+	gosec := finding.Finding{Gate: "gosec", Component: "cli", Path: "creds.go", Line: 4, Rule: "G101",
+		Message: "hardcoded credential", Detail: []string{"4: " + quoted, "5: next line"}, Site: quoted}
+	history, err := ComposeRecords(context.Background(), ComposeRecordsIn{
+		Dir: dir, Components: ledgerScalar(), RootFindings: map[string]int{"gitleaks": 2},
+		Scope: map[ledger.FindingBucket]bool{{Gate: "gitleaks"}: true, {Gate: "gosec", Component: "cli"}: true},
+		Found: []finding.Finding{leak, env, gosec},
+	})
+	if err != nil {
+		t.Fatalf("ComposeRecords: %v", err)
+	}
+
+	out, err := WriteState(context.Background(), WriteStateIn{Dir: dir, Head: tree, Records: history.Records})
+	if err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+	if out.OpenFindingsParts != 1 {
+		t.Errorf("OpenFindingsParts = %d, want 1", out.OpenFindingsParts)
+	}
+	path, err := ledger.OpenFindingsPath("main", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerGit(t, dir, "fetch", "--quiet", "origin", gitstate.BranchName)
+	written := ledgerGit(t, dir, "show", "origin/"+gitstate.BranchName+":"+path)
+	for _, want := range []string{leak.Fingerprint(), env.Fingerprint(), "config/app.env", "generic API key", "creds.go"} {
+		if !strings.Contains(written, want) {
+			t.Errorf("%s does not carry %q:\n%s", path, want, written)
+		}
+	}
+	for _, source := range []string{site, declared, quoted, "hunter2-quoted-detail"} {
+		if strings.Contains(written, source) {
+			t.Errorf("%s carries the source text %q:\n%s", path, source, written)
+		}
+	}
+
+	again, err := WriteState(context.Background(), WriteStateIn{Dir: dir, Head: tree, Records: history.Records})
+	if err != nil {
+		t.Fatalf("WriteState again: %v", err)
+	}
+	if again.Landed != nil || again.OpenFindingsParts != 0 {
+		t.Errorf("WriteState again = %+v, want no record landed and no snapshot written for a commit already recorded", again)
 	}
 }
