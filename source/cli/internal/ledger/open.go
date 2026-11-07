@@ -1,0 +1,231 @@
+package ledger
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"time"
+)
+
+// OpenFinding is one finding still open on a branch, as the open-findings
+// snapshot records it. It carries tool text and a location, never an excerpt
+// of source: a secret a scanner flagged must not gain a second copy in the
+// branch's history. An entry with no known fields is identity only —
+// fingerprint, gate and component.
+type OpenFinding struct {
+	Gate        string `json:"gate"`
+	Component   string `json:"component"`
+	Path        string `json:"path,omitempty"`
+	Line        int    `json:"line,omitempty"`
+	EndLine     int    `json:"end_line,omitempty"`
+	Rule        string `json:"rule,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Message     string `json:"message,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	Ordinal     int    `json:"ordinal,omitempty"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// OpenFindings is the open set of one branch at one commit.
+type OpenFindings struct {
+	Branch   string
+	Commit   string
+	At       time.Time
+	Findings []OpenFinding
+}
+
+// OpenPart is one file of an encoded open-findings snapshot: a path relative
+// to the worktree root and the document's bytes.
+type OpenPart struct {
+	Path string
+	Data []byte
+}
+
+// openHeader is the header every part carries, so a reader can check that the
+// parts it fetched belong together.
+type openHeader struct {
+	Branch string    `json:"branch"`
+	Commit string    `json:"commit"`
+	At     time.Time `json:"at"`
+	Part   int       `json:"part"`
+	Parts  int       `json:"parts"`
+}
+
+type openDocument struct {
+	openHeader
+	Findings []OpenFinding `json:"findings"`
+}
+
+// OpenFindingsPath is where part n of a branch's open-findings snapshot lives,
+// relative to the worktree root: snapshot/v1/<branch>/findings.json for part
+// 0 and findings.<n>.json after it. The branch's slashes are directories.
+func OpenFindingsPath(branch string, part int) (string, error) {
+	if !validBranch(branch) {
+		return "", fmt.Errorf("branch %q cannot be used as a snapshot path", branch)
+	}
+	if part < 0 {
+		return "", fmt.Errorf("snapshot part %d is negative", part)
+	}
+	name := "findings.json"
+	if part > 0 {
+		name = "findings." + strconv.Itoa(part) + ".json"
+	}
+	return path.Join("snapshot", "v1", branch, name), nil
+}
+
+// EncodeOpenFindings encodes o as the documents that make up its snapshot,
+// in part order, each at the path OpenFindingsPath names. Findings are sorted
+// by (gate, component, path, line, ordinal, fingerprint), so the same input
+// encodes to the same bytes, and are split so no part exceeds
+// maxPartitionBytes. An empty open set is exactly one part with an empty
+// findings array, so a branch whose findings all resolved has its file
+// rewritten. A single finding too large for any part is an error.
+func EncodeOpenFindings(o OpenFindings) ([]OpenPart, error) {
+	return encodeOpenFindings(o, maxPartitionBytes)
+}
+
+func encodeOpenFindings(o OpenFindings, limit int) ([]OpenPart, error) {
+	if !validBranch(o.Branch) {
+		return nil, fmt.Errorf("branch %q cannot be used as a snapshot path", o.Branch)
+	}
+	sorted := append([]OpenFinding(nil), o.Findings...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		switch {
+		case a.Gate != b.Gate:
+			return a.Gate < b.Gate
+		case a.Component != b.Component:
+			return a.Component < b.Component
+		case a.Path != b.Path:
+			return a.Path < b.Path
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		case a.Ordinal != b.Ordinal:
+			return a.Ordinal < b.Ordinal
+		}
+		return a.Fingerprint < b.Fingerprint
+	})
+	encoded := make([][]byte, len(sorted))
+	for i, f := range sorted {
+		b, err := json.Marshal(f)
+		if err != nil {
+			return nil, err
+		}
+		encoded[i] = b
+	}
+
+	// A header states the part count, whose digits count towards the size, so
+	// the split is retried until the count it assumed is the count it made.
+	parts := 1
+	for {
+		groups, err := splitOpen(o, encoded, parts, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(groups) != parts {
+			parts = len(groups)
+			continue
+		}
+		out := make([]OpenPart, parts)
+		for i, g := range groups {
+			p, err := OpenFindingsPath(o.Branch, i)
+			if err != nil {
+				return nil, err
+			}
+			var buf bytes.Buffer
+			head, err := json.Marshal(openHeader{Branch: o.Branch, Commit: o.Commit, At: o.At, Part: i, Parts: parts})
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(head[:len(head)-1])
+			buf.WriteString(`,"findings":[`)
+			buf.Write(bytes.Join(g, []byte(",")))
+			buf.WriteString("]}\n")
+			if buf.Len() > limit {
+				return nil, fmt.Errorf("open-findings part %d is %d bytes, over the %d byte limit", i, buf.Len(), limit)
+			}
+			out[i] = OpenPart{Path: p, Data: buf.Bytes()}
+		}
+		return out, nil
+	}
+}
+
+// splitOpen packs encoded findings greedily into parts whose documents, with a
+// header naming parts as the total, stay within limit.
+func splitOpen(o OpenFindings, encoded [][]byte, parts, limit int) ([][][]byte, error) {
+	groups := [][][]byte{nil}
+	size := 0
+	for i, e := range encoded {
+		// The empty document is the header plus `[]` and a newline; each
+		// finding adds its bytes, and each after the first a comma.
+		base := openBase(o, len(groups)-1, parts)
+		add := len(e)
+		if len(groups[len(groups)-1]) > 0 {
+			add++
+		}
+		if len(groups[len(groups)-1]) > 0 && base+size+add > limit {
+			groups = append(groups, nil)
+			size = 0
+			base = openBase(o, len(groups)-1, parts)
+			add = len(e)
+		}
+		if base+size+add > limit {
+			return nil, fmt.Errorf("open finding %d is %d bytes and fits no part under the %d byte limit", i, len(e), limit)
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], e)
+		size += add
+	}
+	return groups, nil
+}
+
+func openBase(o OpenFindings, part, parts int) int {
+	b, err := json.Marshal(openDocument{
+		openHeader: openHeader{Branch: o.Branch, Commit: o.Commit, At: o.At, Part: part, Parts: parts},
+		Findings:   []OpenFinding{},
+	})
+	if err != nil {
+		return 0
+	}
+	return len(b) + 1
+}
+
+// ReadOpenFindings reads the open-findings snapshot of branch from a worktree
+// rooted at worktree. It reports false, with no error, when there is no
+// snapshot and when the set is torn: a missing or unparseable part, parts that
+// disagree on branch, commit, time or count, or a part whose header names a
+// different index than its file. A snapshot is a cache, so a set that cannot
+// be trusted reads the same as none. An unreadable file is absent too; only an invalid branch is an error.
+func ReadOpenFindings(worktree, branch string) (OpenFindings, bool, error) {
+	if !validBranch(branch) {
+		return OpenFindings{}, false, fmt.Errorf("branch %q cannot be used as a snapshot path", branch)
+	}
+	var result OpenFindings
+	parts := 1
+	for i := 0; i < parts; i++ {
+		p, err := OpenFindingsPath(branch, i)
+		if err != nil {
+			return OpenFindings{}, false, err
+		}
+		data, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
+		if err != nil {
+			return OpenFindings{}, false, nil
+		}
+		var doc openDocument
+		if json.Unmarshal(data, &doc) != nil || doc.Part != i || doc.Branch != branch || doc.Parts < 1 {
+			return OpenFindings{}, false, nil
+		}
+		if i == 0 {
+			parts = doc.Parts
+			result = OpenFindings{Branch: doc.Branch, Commit: doc.Commit, At: doc.At}
+		} else if doc.Commit != result.Commit || doc.Parts != parts || !doc.At.Equal(result.At) {
+			return OpenFindings{}, false, nil
+		}
+		result.Findings = append(result.Findings, doc.Findings...)
+	}
+	return result, true, nil
+}
