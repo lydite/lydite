@@ -734,7 +734,28 @@ func readState[M ~map[string]E, E any](ctx context.Context, dir string, path fun
 // nil means this recording appends no history at all, which is different from
 // a function that returns no records: the first is a caller with nothing to
 // say, the second is a caller whose records were all already there.
-type Records func(worktree string) ([]ledger.Record, error)
+type Records func(worktree string) (Recording, error)
+
+// Recording is what one attempt appends: the records, and the open-findings
+// snapshot that describes the branch once they have landed.
+//
+// The open-findings snapshot is answered by the same call as the records
+// because its membership is the open set the records leave behind, and that is
+// a question about the branch as this attempt fetched it. A nil OpenFindings
+// writes no snapshot.
+type Recording struct {
+	Records      []ledger.Record
+	OpenFindings *ledger.OpenFindings
+}
+
+// Written is what one recording put on the state branch.
+type Written struct {
+	// Landed is the records that actually landed.
+	Landed []ledger.Record
+	// OpenFindingsParts is how many parts of the open-findings snapshot were
+	// written beside them, nought when none was.
+	OpenFindingsParts int
+}
 
 // attempts is how many times one recording is pushed before the run gives up,
 // and it is a bound on overlap rather than a number picked by feel.
@@ -786,20 +807,22 @@ const attempts = 3
 // It returns the records that actually landed, which is not the same as the
 // ones the caller offered: a record already on the branch is not appended
 // again, and a caller that reported an append for it would claim a data point
-// that this run did not add.
-func Write(ctx context.Context, dir, sha string, snap Snapshot, records Records) ([]ledger.Record, error) {
+// that this run did not add. Beside them it returns how many parts of the
+// open-findings snapshot were written, which is nought whenever no record
+// landed.
+func Write(ctx context.Context, dir, sha string, snap Snapshot, records Records) (Written, error) {
 	if !snap.Recorded() && records == nil {
-		return nil, nil
+		return Written{}, nil
 	}
 	var lastErr error
 	for range attempts {
-		landed, err := pushState(ctx, dir, sha, snap, records)
+		written, err := pushState(ctx, dir, sha, snap, records)
 		if err == nil {
-			return landed, nil
+			return written, nil
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("pushing the recording for %s to %s (%d attempts): %w", sha, BranchName, attempts, lastErr)
+	return Written{}, fmt.Errorf("pushing the recording for %s to %s (%d attempts): %w", sha, BranchName, attempts, lastErr)
 }
 
 // stage adds one metric's document to what the push will write, and adds
@@ -826,10 +849,10 @@ func stage[M ~map[string]E, E any](files map[string][]byte, path string, report 
 // branch a concurrent run may have advanced. Building the appended file once
 // would write the retry against the first attempt's view and silently drop
 // whatever landed in between.
-func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Records) ([]ledger.Record, error) {
+func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Records) (Written, error) {
 	tmp, err := os.MkdirTemp("", "lydite-*")
 	if err != nil {
-		return nil, err
+		return Written{}, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	defer func() { _ = executil.RunQuiet(ctx, dir, "git", "worktree", "remove", "--force", tmp) }()
@@ -845,20 +868,20 @@ func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Reco
 	staging := "lydite-staging-" + filepath.Base(tmp)
 
 	if err := stageBranch(ctx, dir, tmp, staging); err != nil {
-		return nil, err
+		return Written{}, err
 	}
-	rels, landed, err := stageRecording(tmp, sha, snap, records)
+	rels, written, err := stageRecording(tmp, sha, snap, records)
 	if err != nil {
-		return nil, err
+		return Written{}, err
 	}
 	// Nothing to write at all: every record was already on the branch and the
 	// snapshot held no document. Committing here would fail, and there is
 	// nothing this attempt could improve.
 	if len(rels) == 0 {
-		return landed, nil
+		return written, nil
 	}
 	if r := executil.RunQuiet(ctx, tmp, "git", append([]string{"add"}, rels...)...); !r.Ok() {
-		return nil, fmt.Errorf("git add: %w", r.Err)
+		return Written{}, fmt.Errorf("git add: %w", r.Err)
 	}
 	// Nothing staged means the fetched branch already carries this exact
 	// content — a concurrent run recorded the same SHA's baseline first. The
@@ -867,52 +890,100 @@ func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Reco
 	// poisoned `{}` entry being healed by a real report) stages a change and
 	// proceeds to overwrite as usual.
 	if executil.RunQuiet(ctx, tmp, "git", "diff", "--cached", "--quiet").Ok() {
-		return landed, nil
+		return written, nil
 	}
 	commitR := executil.RunQuietEnv(ctx, tmp, []string{
 		"GIT_AUTHOR_NAME=lydite", "GIT_AUTHOR_EMAIL=lydite@users.noreply.github.com",
 		"GIT_COMMITTER_NAME=lydite", "GIT_COMMITTER_EMAIL=lydite@users.noreply.github.com",
 	}, "git", "commit", "-m", "record for "+sha)
 	if !commitR.Ok() {
-		return nil, fmt.Errorf("git commit: %w", commitR.Err)
+		return Written{}, fmt.Errorf("git commit: %w", commitR.Err)
 	}
 	if r := executil.RunQuiet(ctx, tmp, "git", "push", "origin", staging+":refs/heads/"+BranchName); !r.Ok() {
-		return nil, fmt.Errorf("git push: %w", r.Err)
+		return Written{}, fmt.Errorf("git push: %w", r.Err)
 	}
-	return landed, nil
+	return written, nil
 }
 
-// stageRecording lays every baseline document and every new record out in the
-// worktree, and returns their paths.
+// stageRecording lays every baseline document, every new record and the
+// open-findings snapshot out in the worktree, and returns their paths.
 //
 // A metric with nothing to record writes no document at all. An empty object
 // is a miss to every reader anyway, so writing one would add a file per tree
 // saying nothing — and for a repository whose components lydite computes no
 // CRAP for, one on every recording forever.
-func stageRecording(tmp, sha string, snap Snapshot, records Records) ([]string, []ledger.Record, error) {
+//
+// The open-findings snapshot is staged after the append, and only when the
+// append landed a record: a run for a commit already recorded would otherwise
+// describe an open set the ledger has not moved to.
+func stageRecording(tmp, sha string, snap Snapshot, records Records) ([]string, Written, error) {
 	files := map[string][]byte{}
 	if err := stage(files, StatePath(sha), snap.Coverage); err != nil {
-		return nil, nil, err
+		return nil, Written{}, err
 	}
 	if err := stage(files, CRAPStatePath(sha), snap.CRAP); err != nil {
-		return nil, nil, err
+		return nil, Written{}, err
 	}
 	rels, err := writeDocuments(tmp, files)
 	if err != nil {
-		return nil, nil, err
+		return nil, Written{}, err
 	}
 	if records == nil {
-		return rels, nil, nil
+		return rels, Written{}, nil
 	}
-	recs, err := records(tmp)
+	rec, err := records(tmp)
 	if err != nil {
-		return nil, nil, err
+		return nil, Written{}, err
 	}
-	files2, landed, err := ledger.Append(tmp, recs)
+	appended, landed, err := ledger.Append(tmp, rec.Records)
 	if err != nil {
-		return nil, nil, err
+		return nil, Written{}, err
 	}
-	return append(rels, files2...), landed, nil
+	rels = append(rels, appended...)
+	written := Written{Landed: landed}
+	if len(landed) == 0 || rec.OpenFindings == nil {
+		return rels, written, nil
+	}
+	open, parts, err := stageOpenFindings(tmp, *rec.OpenFindings)
+	if err != nil {
+		return nil, Written{}, err
+	}
+	written.OpenFindingsParts = parts
+	return append(rels, open...), written, nil
+}
+
+// stageOpenFindings writes every part of the open-findings snapshot, removes
+// any part past the last that a larger earlier snapshot left behind — so the
+// branch holds exactly the set its header names — and returns every path it
+// wrote or removed, and how many parts it wrote. A removed path is staged like
+// a written one: `git add` of a tracked file that is gone stages its removal.
+func stageOpenFindings(tmp string, o ledger.OpenFindings) ([]string, int, error) {
+	parts, err := ledger.EncodeOpenFindings(o)
+	if err != nil {
+		return nil, 0, err
+	}
+	files := make(map[string][]byte, len(parts))
+	for _, p := range parts {
+		files[p.Path] = p.Data
+	}
+	rels, err := writeDocuments(tmp, files)
+	if err != nil {
+		return nil, 0, err
+	}
+	for n := len(parts); ; n++ {
+		rel, err := ledger.OpenFindingsPath(o.Branch, n)
+		if err != nil {
+			return nil, 0, err
+		}
+		err = os.Remove(filepath.Join(tmp, filepath.FromSlash(rel)))
+		if errors.Is(err, os.ErrNotExist) {
+			return rels, len(parts), nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		rels = append(rels, rel)
+	}
 }
 
 // stageBranch checks the state branch out into the throwaway worktree, or
