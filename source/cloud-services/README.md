@@ -8,9 +8,13 @@ The two Workers lydite operates, as one npm workspace — see
 | `pr-relay` | `pr.lydite.org` | the `lydite` App's private key |
 | `oauth-exchange` | `app.lydite.org` | the `lydite-dashboard` App's client secret |
 
-`libs/github-app` is shared: App JWT signing, installation tokens, and the
-Actions OIDC verification. One implementation, because it is the security-
-relevant part and two would agree today and drift later.
+`oauth-exchange` is the dashboard's sign-in: `GET /auth/login`, `GET /auth/callback`,
+`POST /auth/refresh` and `POST /auth/logout`. The refresh token lives only in an `HttpOnly`
+`SameSite=Strict` cookie; the Worker stores and logs nothing — see
+[ADR 0080](../../docs/adr/0080-the-dashboard-signs-in-through-a-worker-that-keeps-the-refresh-token-in-a-cookie.md).
+
+`libs/github-app` is `pr-relay`'s: App JWT signing, installation tokens, and the
+Actions OIDC verification. `oauth-exchange` has no private key and does not use it.
 
 ## Why there are no runtime dependencies
 

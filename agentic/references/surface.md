@@ -1,7 +1,8 @@
 # Surface: `lydite publish`, `lydite threads`, and the identity that posts them
 
 > **The reference for `lydite publish`, the standing comment, `lydite threads` and the review
-> threads, `internal/threads`, and `source/cloud-services/pr-relay`.**
+> threads, `internal/threads`, `source/cloud-services/pr-relay`, and
+> `source/cloud-services/oauth-exchange`.**
 
 Every gate lydite has reports to a job log; the **Surface** is where the verdict reaches the
 person whose change it is about. There are two of them, and one rule separates them: **the
@@ -383,3 +384,52 @@ the merge, and any writer clears it without touching the code.
 stderr. It reaches `finding.Dedup`, the same primitive every report collects through. It keeps
 its own call because it consumes documents a local run wrote with no fold at all, where several
 commands' documents land in one directory and no report ever saw them together.
+
+## The dashboard's sign-in
+
+`source/cloud-services/oauth-exchange` serves the dashboard's sign-in on `app.lydite.org`. The
+`lydite-dashboard` App's user-to-server flow needs a client secret, which a static bundle cannot
+hold, so the Worker drives the whole OAuth round trip. It holds that one secret and nothing else:
+no private key, no `libs/github-app`, no storage, and no `console` output. It reads no repository;
+the dashboard reads the ledger with the viewer's own credentials
+([ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)). The two-App split is
+[ADR 0022](../../docs/adr/0022-a-vendor-operated-app-and-an-oidc-relay.md); the sign-in's design
+is [ADR 0080](../../docs/adr/0080-the-dashboard-signs-in-through-a-worker-that-keeps-the-refresh-token-in-a-cookie.md).
+
+**Four routes, and 404 for everything else.**
+
+| Route | Outcome |
+|---|---|
+| `GET /auth/login` | Redirects to GitHub's authorize URL with a fresh `state` and a PKCE S256 challenge, both bound to the browser by the login cookie. |
+| `GET /auth/callback` | Clears the login cookie on every outcome. No login cookie redirects to `/auth/login` without exchanging the code; a `state` mismatch is 400; an `error` parameter or a missing `code` redirects to `/`; a failed exchange is 502; a refused grant (GitHub answers 200 with an error body) is 400. On success it sets the refresh cookie and redirects to `/`. The first access token is discarded, so no token appears in a URL. |
+| `POST /auth/refresh` | Trades the refresh cookie for an access token and rotates the cookie. The body is `{access_token, expires_in, token_type}`, `no-store`. A missing cookie or a refused grant is 401. |
+| `POST /auth/logout` | Clears the refresh cookie and answers 204. The token is not revoked at GitHub; it expires on its own. |
+
+**Two cookies, and why their `SameSite` differs.** `__Host-lydite_refresh` holds the refresh token:
+`HttpOnly`, `Secure`, `Path=/`, `SameSite=Strict`, `Max-Age` equal to GitHub's
+`refresh_token_expires_in`. No script can read it and no other site can have the browser present
+it. It is the only place the refresh token exists; it is never in a response body. A GitHub reply
+missing the token or its lifetime is 502 with no cookie, because that session could never be
+renewed. `__Host-lydite_login` carries the `state` and PKCE verifier for ten minutes and is
+`SameSite=Lax`: GitHub's redirect back is a cross-site top-level GET, which a `Strict` cookie would
+not accompany. Every `__Host-` clear carries `Secure; Path=/; HttpOnly; Max-Age=0`, since a browser
+ignores the deletion of a `__Host-` cookie otherwise.
+
+**Refresh and logout answer only their own origin.** Both act on a cookie the browser attaches by
+itself, so both answer 403 unless `Origin` equals the request URL's origin; a request with no
+`Origin` is refused. That check does not depend on the browser honouring `SameSite`. The Worker
+sends no CORS header, so no other origin can read either answer.
+
+**A refused refresh leaves the cookie.** GitHub rotates the refresh token on every grant, so under
+concurrent tabs a refused grant is most often a token a sibling tab has just spent, whose response
+has already set the successor. Clearing the cookie would sign every tab out.
+
+**Nothing is stored or logged.** Every rejection carries a generic body that echoes no code, state
+or token, so none can reach a log or a proxy cache. The access token appears only in the
+`/auth/refresh` body.
+
+**The dashboard must coordinate its tabs** ([#331](https://github.com/lydite/lydite/issues/331)).
+A refresh invalidates the previous access token, so two tabs refreshing independently each kill the
+other's. The dashboard takes one refresh at a time across tabs under a Web Lock, shares the result
+over a `BroadcastChannel`, and retries a 401 once before sending the viewer to `/auth/login`. The
+Worker holds no state a tab could coordinate through, so none of this lives there.

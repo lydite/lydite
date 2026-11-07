@@ -2,10 +2,12 @@
 
 One npm workspace, and therefore one component. `pr-relay` posts the standing pull-request
 comment on a consumer's behalf so that no CI job holds a credential; `oauth-exchange` is the
-dashboard's. `libs/github-app` is what both mint tokens through.
+dashboard's sign-in on `app.lydite.org`: it holds the `lydite-dashboard` App's client secret and
+keeps the refresh token in an `HttpOnly` cookie. Only `pr-relay` mints tokens through
+`libs/github-app`; `oauth-exchange` imports nothing from it.
 
-Read [`surface.md`](../../agentic/references/surface.md) before changing either Worker — it
-carries the relay's trust boundary, why RS256 is fixed rather than read from the token, why a
+Read [`surface.md`](../../agentic/references/surface.md) before changing either Worker — for
+`oauth-exchange`, its "The dashboard's sign-in" section; for `pr-relay`, it carries the relay's trust boundary, why RS256 is fixed rather than read from the token, why a
 rejection carries no detail, why `ref` is the only claim a run cannot choose, why the `referral` and `clearance`
 contexts are accepted only from an allowlisted `job_workflow_ref` (empty by default) and
 a clearance run names its pull request in the body for the relay to resolve live, and why the

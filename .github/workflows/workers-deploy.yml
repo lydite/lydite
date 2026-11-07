@@ -40,19 +40,7 @@ jobs:
       # account and nothing else.
       fail-fast: false
       matrix:
-        # oauth-exchange is absent, and its absence is the accurate statement.
-        # It exchanges a GitHub OAuth code for the dashboard, and there is no
-        # dashboard and no OAuth App, so `LYDITE_DASHBOARD_CLIENT_ID` does not
-        # exist and the deploy refuses — correctly, since an exchange with no
-        # client to be would answer every caller as nobody. It has never
-        # deployed successfully. Listing it anyway made every run of this
-        # workflow red, which is worse than not listing it: a red run nobody
-        # can act on is a red run nobody reads, and the one thing this workflow
-        # must never hide is a pr-relay deploy that failed.
-        #
-        # It goes back when the dashboard does, together with the client ID it
-        # needs (#27).
-        worker: [pr-relay]
+        worker: [pr-relay, oauth-exchange]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
