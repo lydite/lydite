@@ -160,10 +160,11 @@ func encodeOpenFindings(o OpenFindings, limit int) ([]OpenPart, error) {
 func splitOpen(o OpenFindings, encoded [][]byte, parts, limit int) ([][][]byte, error) {
 	groups := [][][]byte{nil}
 	size := 0
+	// The empty document is the header plus `[]` and a newline; each finding
+	// adds its bytes, and each after the first a comma. The header's size
+	// depends only on the part it heads, so it is measured once per part.
+	base := openBase(o, 0, parts)
 	for i, e := range encoded {
-		// The empty document is the header plus `[]` and a newline; each
-		// finding adds its bytes, and each after the first a comma.
-		base := openBase(o, len(groups)-1, parts)
 		add := len(e)
 		if len(groups[len(groups)-1]) > 0 {
 			add++
