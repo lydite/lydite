@@ -109,20 +109,22 @@ func TestWriteStateReturnsAWriteThatNeverLandedAsItsError(t *testing.T) {
 }
 
 // The open-findings snapshot a recording writes carries tool text and a
-// location, and never source: a finding's site — here a secret, and the value
+// location, and never source: a finding's site and detail — here a secret, quoted code, and the value
 // a component's declared env: holds — appears nowhere in what lands on the
 // branch. A commit recorded again writes no snapshot at all.
 func TestTheOpenFindingsSnapshotLandsWithoutSourceAndOnlyOnce(t *testing.T) {
 	dir, tree := ledgerRemote(t)
-	const site, declared = "AKIAIOSFODNN7EXAMPLE-site-text", "s3cr3t-declared-env-value"
+	const site, declared, quoted = "AKIAIOSFODNN7EXAMPLE-site-text", "s3cr3t-declared-env-value", "password := \"hunter2-quoted-detail\""
 	leak := finding.Finding{Gate: "gitleaks", Path: "config/app.env", Line: 3, Rule: "aws-access-token",
 		Message: "AWS access token", Site: site}
 	env := finding.Finding{Gate: "gitleaks", Path: ".lydite/components.yml", Line: 9, Rule: "generic-api-key",
 		Message: "generic API key", Site: "API_TOKEN: " + declared}
+	gosec := finding.Finding{Gate: "gosec", Component: "cli", Path: "creds.go", Line: 4, Rule: "G101",
+		Message: "hardcoded credential", Detail: []string{"4: " + quoted, "5: next line"}, Site: quoted}
 	history, err := ComposeRecords(context.Background(), ComposeRecordsIn{
 		Dir: dir, Components: ledgerScalar(), RootFindings: map[string]int{"gitleaks": 2},
-		Scope: map[ledger.FindingBucket]bool{{Gate: "gitleaks"}: true},
-		Found: []finding.Finding{leak, env},
+		Scope: map[ledger.FindingBucket]bool{{Gate: "gitleaks"}: true, {Gate: "gosec", Component: "cli"}: true},
+		Found: []finding.Finding{leak, env, gosec},
 	})
 	if err != nil {
 		t.Fatalf("ComposeRecords: %v", err)
@@ -141,12 +143,12 @@ func TestTheOpenFindingsSnapshotLandsWithoutSourceAndOnlyOnce(t *testing.T) {
 	}
 	ledgerGit(t, dir, "fetch", "--quiet", "origin", gitstate.BranchName)
 	written := ledgerGit(t, dir, "show", "origin/"+gitstate.BranchName+":"+path)
-	for _, want := range []string{leak.Fingerprint(), env.Fingerprint(), "config/app.env", "generic API key"} {
+	for _, want := range []string{leak.Fingerprint(), env.Fingerprint(), "config/app.env", "generic API key", "creds.go"} {
 		if !strings.Contains(written, want) {
 			t.Errorf("%s does not carry %q:\n%s", path, want, written)
 		}
 	}
-	for _, source := range []string{site, declared} {
+	for _, source := range []string{site, declared, quoted, "hunter2-quoted-detail"} {
 		if strings.Contains(written, source) {
 			t.Errorf("%s carries the source text %q:\n%s", path, source, written)
 		}

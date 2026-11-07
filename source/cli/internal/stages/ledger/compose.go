@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 
 	"lydite/lydite/internal/finding"
 	"lydite/lydite/internal/gitstate"
@@ -253,7 +252,7 @@ func openFindings(scope map[ledger.FindingBucket]bool, found []finding.Finding,
 			if f, ok := current[k]; ok && scope[bucket] {
 				entry.Path, entry.Line, entry.EndLine = f.Path, f.Line, f.EndLine
 				entry.Rule, entry.Severity, entry.Message = f.Rule, f.Severity, f.Message
-				entry.Detail, entry.Ordinal = strings.Join(f.Detail, "\n"), f.Ordinal
+				entry.Ordinal = f.Ordinal
 			} else if o, ok := carried[k]; ok && !scope[bucket] {
 				entry = o
 			}

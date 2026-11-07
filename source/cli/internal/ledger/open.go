@@ -13,8 +13,9 @@ import (
 )
 
 // OpenFinding is one finding still open on a branch, as the open-findings
-// snapshot records it. It carries tool text and a location, never an excerpt
-// of source: a secret a scanner flagged must not gain a second copy in the
+// snapshot records it. It carries a location and the tool's one-line message,
+// never an excerpt of source or any tool text that can quote it (no site, no
+// detail): a secret a scanner flagged must not gain a second copy in the
 // branch's history. An entry with no known fields is identity only —
 // fingerprint, gate and component.
 type OpenFinding struct {
@@ -26,7 +27,6 @@ type OpenFinding struct {
 	Rule        string `json:"rule,omitempty"`
 	Severity    string `json:"severity,omitempty"`
 	Message     string `json:"message,omitempty"`
-	Detail      string `json:"detail,omitempty"`
 	Ordinal     int    `json:"ordinal,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 }

@@ -28,19 +28,22 @@ set it fetched. A torn or mismatched set is **absent**: parts that disagree on `
 or a part the header says exists and the branch lacks. A reader never stitches a partial set
 together.
 
-### Each finding carries tool text and a location, never source
+### Each finding carries a location and a message, never source
 
 A finding holds `gate`, `component`, `path`, `line`, `end_line`, `rule`, `severity`, `message`,
-`detail`, `ordinal` and `fingerprint`. A field with no value is omitted.
+`ordinal` and `fingerprint`. A field with no value is omitted.
 
-`site`, the excerpt of source a finding sits on, is dropped, for two reasons:
+`site`, the excerpt of source a finding sits on, and `detail`, the tool's extended text, are
+omitted. `detail` is dropped because tool text that quotes source is source: gosec's is the code
+around the flagged line (a G101 hard-coded credential included) and clippy's is the rendered
+diagnostic, which quotes the lines it points at. Dropping `site` is justified by two reasons:
 
 1. A secret gitleaks flags would otherwise get a second copy in the `lydite` branch's history, one
    nobody scrubs when the source is. The branch is public for a public repository.
 2. Excerpts are the bulk of a finding's size and push the file towards the Contents API's cap.
 
-The dashboard fetches the excerpt from the code at `path` and `line`. `detail` and `end_line` are
-tool text and position, not source, and stay. `ordinal` stays because it tells two identical claims
+The dashboard fetches the excerpt from the code at `path` and `line`, and the extended text with it. `end_line` is
+position, not source, and stays. `ordinal` stays because it tells two identical claims
 in one file apart.
 
 ### Membership is the ledger's open set; the previous snapshot supplies fields only
@@ -78,6 +81,9 @@ Inside `gitstate` the type is the open-findings snapshot, `OpenFindings`, never 
 
 **Keeping `site`.** It answers "what does the code say" without a second fetch, and costs a copy of
 any secret in the branch's history plus most of the file's size.
+
+**Keeping `detail`.** It spares the dashboard a fetch for the extended text, and copies quoted
+source, secrets included, into the branch's history exactly as `site` would.
 
 **Taking membership from the previous snapshot and patching it with events.** It is smaller work
 and wrong whenever the snapshot lags, as above.

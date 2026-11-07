@@ -252,7 +252,6 @@ func fullFinding(n int) ledger.OpenFinding {
 		Rule:        "G104",
 		Severity:    "medium",
 		Message:     "errors unhandled",
-		Detail:      "the returned error is discarded",
 		Ordinal:     n % 3,
 		Fingerprint: fingerprint(n),
 	}

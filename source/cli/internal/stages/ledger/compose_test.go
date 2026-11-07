@@ -440,7 +440,7 @@ func TestTheOpenFindingsSnapshotIsTheLedgersOpenSet(t *testing.T) {
 	}
 	want := map[string]ledger.OpenFinding{
 		stays.Fingerprint(): {Gate: "gosec", Component: "cli", Path: "a.go", Line: 7, EndLine: 9, Rule: "G101",
-			Severity: "HIGH", Message: "hardcoded credential", Detail: "first line\nsecond line", Ordinal: 1,
+			Severity: "HIGH", Message: "hardcoded credential", Ordinal: 1,
 			Fingerprint: stays.Fingerprint()},
 		appears.Fingerprint(): {Gate: "gosec", Component: "cli", Path: "b.go", Line: 2, Rule: "G104",
 			Message: "unchecked error", Fingerprint: appears.Fingerprint()},
