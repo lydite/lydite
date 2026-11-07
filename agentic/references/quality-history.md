@@ -16,7 +16,12 @@ it decided.
 history/v1/2026-09.ndjson          the month's records, one JSON object per line
 history/v1/2026-09.1.ndjson        the same month, once the first part is full
 history/v1/daily/main/2026.ndjson  the downsampled projection, per branch
+snapshot/v1/main/findings.json     the open findings per branch, in parts (findings.1.json, …)
 ```
+
+`snapshot/v1/` is a Cache beside the ledger, not part of it: the branch's open findings, written
+in the same commit as the record and recomputable from the ledger plus a rerun. See
+[ADR 0081](../../docs/adr/0081-record-writes-the-open-findings-snapshot.md).
 
 **One writer and one commit, over two policies.** `gitstate.Write` takes a snapshot and the
 records together, so the single call site stays the one place anything reaches the branch.
@@ -185,18 +190,13 @@ history can hold and no later run can fill the hole. A measurements document is 
 scan document is not: only the first names the tree that binds the recording to the checkout. See
 [ADR 0033](../../docs/adr/0033-a-finding-count-per-gate-reaches-the-ledger.md).
 
-**No workflow in this repository currently runs `lydite test record` at all.** `lydite-baseline.yml`
-was this repository's own recording workflow — `plan` → `measure` (the same matrix without
-`--affected`, since ADR 0016 requires the default-branch run to be complete) → one `record` job, the
-only job granted `contents: write` — and it no longer exists here: it was deleted rather than
-rewired when this repository became a plain consumer of `lydite/actions` through `gt` (ADR 0051).
-`lydite/actions`' own reusable `lydite-baseline.yml` exists and works, but nothing gt renders into
-this repository's stage calls it yet (tracked as `pedromvgomes/gt#76`, external to this repository).
-Pushes to the default branch here record no coverage baseline and append nothing to the ledger until
-that route is restored. The description above of what a recording workflow does — the shard shape,
-the `scan` job beside the measure matrix, the `mutate` job's `--no-gate` — is kept as reference
-material for whatever calls `lydite test record` next, not as a description of a route running
-today.
+**This repository records on every push to the default branch.** `.github/workflows/ci-orchestration.yml`'s
+`lydite-baseline` job, the only job granted `contents: write`, calls `gt`'s reusable
+`reusable-lydite-baseline.yml`, which runs the shard shape described above (measure without
+`--affected`, since ADR 0016 requires the default-branch run to be complete, a `scan` job beside
+it, one `record` job). It is deliberately absent from `ci-gate`'s `needs`: a baseline that failed
+to record is a red job, not a red gate on a commit already merged. The `lydite` branch carries a
+`record for …` commit per recorded push.
 
 **The dashboard is not this slice.** `source/web/` is still empty; the hosted read path is
 [ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work.
