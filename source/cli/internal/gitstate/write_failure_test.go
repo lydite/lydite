@@ -107,13 +107,11 @@ func TestAWriteThatCannotBeStagedOrCommittedFails(t *testing.T) {
 			want:    "git add",
 		},
 		{
-			name: "a commit hook that refuses",
+			name: "a commit git refuses to sign",
 			prepare: func(t *testing.T, clone string) {
-				hooks := t.TempDir()
-				if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { // #nosec G306 -- a hook this test needs to be executable
-					t.Fatal(err)
-				}
-				gitRunner(t, ctx)(clone, "config", "core.hooksPath", hooks)
+				run := gitRunner(t, ctx)
+				run(clone, "config", "commit.gpgsign", "true")
+				run(clone, "config", "gpg.program", "false")
 			},
 			records: recordingWith(nil),
 			want:    "git commit",

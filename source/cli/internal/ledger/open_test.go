@@ -143,8 +143,15 @@ func TestReadOpenFindingsAbsent(t *testing.T) {
 	if _, ok, err := ReadOpenFindings(t.TempDir(), "main"); ok || err != nil {
 		t.Errorf("no snapshot: ok=%v err=%v", ok, err)
 	}
-	if _, _, err := ReadOpenFindings(t.TempDir(), "../x"); err == nil {
+	got, ok, err := ReadOpenFindings(t.TempDir(), "../x")
+	if err == nil {
 		t.Error("invalid branch accepted")
+	}
+	if ok {
+		t.Error("invalid branch reported a snapshot")
+	}
+	if !reflect.DeepEqual(got, OpenFindings{}) {
+		t.Errorf("invalid branch returned %+v, want the zero value", got)
 	}
 }
 
