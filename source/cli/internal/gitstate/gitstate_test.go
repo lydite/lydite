@@ -748,7 +748,7 @@ func TestABaselineAndItsHistoryLandInOneCommit(t *testing.T) {
 		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
 	}
 	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) { return []ledger.Record{rec}, nil })
+		func(string) (Recording, error) { return Recording{Records: []ledger.Record{rec}}, nil })
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -775,7 +775,7 @@ func TestHistoryLandsWithNoBaselineBesideIt(t *testing.T) {
 		Components: map[string]ledger.Component{"api": {Tests: &junit.Counts{Total: 40, Failed: 3}}},
 	}
 	_, err := Write(ctx, clone, "tree1", Snapshot{},
-		func(string) ([]ledger.Record, error) { return []ledger.Record{rec}, nil })
+		func(string) (Recording, error) { return Recording{Records: []ledger.Record{rec}}, nil })
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -797,15 +797,199 @@ func TestTheRecordsAreRecomputedForEveryAttempt(t *testing.T) {
 	clone := originAndCloneRejectingPushes(t, ctx)
 	asked := 0
 	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) {
+		func(string) (Recording, error) {
 			asked++
-			return nil, nil
+			return Recording{}, nil
 		})
 	if err == nil {
 		t.Fatal("Write reported success even though every push was rejected")
 	}
 	if asked < 2 {
 		t.Errorf("the records were asked for %d time(s) across the retries, want one per attempt", asked)
+	}
+
+	// The open-findings snapshot is answered by the same call, so a retry
+	// builds it from the tip it refetched: a run that lands between this
+	// one's fetch and its push leaves a snapshot the retry reads its words
+	// from, never the first attempt's view.
+	origin := seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`})
+	raced := cloneOf(t, ctx, origin)
+	other := newContender(t, ctx, origin)
+	at := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
+	ours := ledger.Record{
+		Kind: ledger.KindEntry, At: at.Add(time.Hour), Commit: "ours", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
+	}
+	var seen []string
+	written, err := Write(ctx, raced, "tree1", Snapshot{},
+		func(worktree string) (Recording, error) {
+			prior, _, err := ledger.ReadOpenFindings(worktree, "main")
+			if err != nil {
+				return Recording{}, err
+			}
+			seen = append(seen, fingerprintsOf(prior.Findings))
+			if len(seen) == 1 {
+				other.landOpenFindings(ledger.OpenFindings{Branch: "main", Commit: "contender", At: at,
+					Findings: []ledger.OpenFinding{{Gate: "gosec", Component: "api", Fingerprint: "v1:landed-between", Rule: "G101"}}})
+			}
+			return Recording{Records: []ledger.Record{ours}, OpenFindings: &ledger.OpenFindings{
+				Branch: "main", Commit: ours.Commit, At: ours.At, Findings: prior.Findings,
+			}}, nil
+		})
+	if err != nil {
+		t.Fatalf("a run overtaken once never recorded: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "" || seen[1] != "v1:landed-between" {
+		t.Errorf("the attempts read the open findings %q, want none and then what the overtaking run landed", seen)
+	}
+	held := branchOpenFindings(t, ctx, raced)
+	if held.Commit != ours.Commit || fingerprintsOf(held.Findings) != "v1:landed-between" {
+		t.Errorf("the branch holds the open findings of %s, %q; want this run's, built from the refetched tip", held.Commit, fingerprintsOf(held.Findings))
+	}
+	if written.OpenFindingsParts != 1 {
+		t.Errorf("OpenFindingsParts = %d, want 1", written.OpenFindingsParts)
+	}
+}
+
+// fingerprintsOf is the fingerprints of fs, comma-separated in order.
+func fingerprintsOf(fs []ledger.OpenFinding) string {
+	fps := make([]string, len(fs))
+	for i, f := range fs {
+		fps[i] = f.Fingerprint
+	}
+	return strings.Join(fps, ",")
+}
+
+// branchOpenFindings is the open-findings snapshot of main as the remote's
+// state branch holds it, failing the test when there is none.
+func branchOpenFindings(t *testing.T, ctx context.Context, clone string) ledger.OpenFindings {
+	t.Helper()
+	verify := branchCheckout(t, ctx, clone)
+	o, ok, err := ledger.ReadOpenFindings(verify, "main")
+	if err != nil || !ok {
+		t.Fatalf("the open-findings snapshot of main = (ok %v, %v), want one on %s", ok, err, BranchName)
+	}
+	return o
+}
+
+// branchCheckout is a fresh checkout of the remote's state branch.
+func branchCheckout(t *testing.T, ctx context.Context, clone string) string {
+	t.Helper()
+	r := executil.RunQuiet(ctx, clone, "git", "remote", "get-url", "origin")
+	if !r.Ok() {
+		t.Fatalf("remote get-url: %v", r.Err)
+	}
+	verify := t.TempDir()
+	gitRunner(t, ctx)(verify, "clone", "--quiet", "-b", BranchName, strings.TrimSpace(r.Output), ".")
+	return verify
+}
+
+// The open-findings snapshot lands in the same commit as the record it
+// describes, so the two reach the branch together or not at all.
+func TestTheOpenFindingsSnapshotLandsInTheRecordsCommit(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	before := revCount(t, ctx, clone)
+	rec := ledger.Record{
+		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
+		Commit: "cafe", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Findings: map[string]int{"gosec": 1}}},
+	}
+	open := ledger.OpenFindings{Branch: "main", Commit: rec.Commit, At: rec.At,
+		Findings: []ledger.OpenFinding{{Gate: "gosec", Component: "api", Path: "a.go", Line: 3, Fingerprint: "v1:open"}}}
+
+	written, err := Write(ctx, clone, "tree1", Snapshot{},
+		func(string) (Recording, error) {
+			return Recording{Records: []ledger.Record{rec}, OpenFindings: &open}, nil
+		})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := revCount(t, ctx, clone) - before; got != 1 {
+		t.Errorf("the write added %d commits to %s, want 1 carrying the record and the snapshot", got, BranchName)
+	}
+	if written.OpenFindingsParts != 1 || len(written.Landed) != 1 {
+		t.Errorf("Write = %+v, want the record landed and one part written", written)
+	}
+	held := branchOpenFindings(t, ctx, clone)
+	if held.Commit != rec.Commit || !held.At.Equal(rec.At) || len(held.Findings) != 1 || held.Findings[0] != open.Findings[0] {
+		t.Errorf("the branch holds %+v, want %+v", held, open)
+	}
+}
+
+// A commit already recorded lands no record, and so writes no open-findings
+// snapshot: it would describe an open set the ledger has not moved to.
+func TestARecordAlreadyOnTheBranchWritesNoOpenFindings(t *testing.T) {
+	ctx := context.Background()
+	clone := originAndClone(t, ctx)
+	rec := ledger.Record{
+		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
+		Commit: "cafe", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Findings: map[string]int{"gosec": 1}}},
+	}
+	recording := func(fingerprint string) Records {
+		return func(string) (Recording, error) {
+			return Recording{Records: []ledger.Record{rec}, OpenFindings: &ledger.OpenFindings{
+				Branch: "main", Commit: rec.Commit, At: rec.At,
+				Findings: []ledger.OpenFinding{{Gate: "gosec", Component: "api", Fingerprint: fingerprint}},
+			}}, nil
+		}
+	}
+	if _, err := Write(ctx, clone, "tree1", Snapshot{}, recording("v1:first")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	before := revCount(t, ctx, clone)
+
+	again, err := Write(ctx, clone, "tree1", Snapshot{}, recording("v1:second"))
+	if err != nil {
+		t.Fatalf("Write again: %v", err)
+	}
+	if again.Landed != nil || again.OpenFindingsParts != 0 {
+		t.Errorf("Write again = %+v, want no record landed and no snapshot written", again)
+	}
+	if got := revCount(t, ctx, clone); got != before {
+		t.Errorf("a recording of a commit already recorded added %d commits", got-before)
+	}
+	if held := branchOpenFindings(t, ctx, clone); fingerprintsOf(held.Findings) != "v1:first" {
+		t.Errorf("the branch holds %q, want the first recording's snapshot untouched", fingerprintsOf(held.Findings))
+	}
+}
+
+// A snapshot written in fewer parts than the one before it removes the parts
+// past its last, so the branch holds exactly the set its header names.
+func TestASmallerOpenFindingsSnapshotRemovesThePartsPastItsLast(t *testing.T) {
+	ctx := context.Background()
+	origin := seedStateBranch(t, ctx, map[string]string{"seed": `{"api":{"covered":10,"total":100}}`})
+	clone := cloneOf(t, ctx, origin)
+	stale, err := ledger.OpenFindingsPath("main", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newContender(t, ctx, origin).landFile(stale, "{}\n")
+	staler, err := ledger.OpenFindingsPath("main", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newContender(t, ctx, origin).landFile(staler, "{}\n")
+	rec := ledger.Record{
+		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
+		Commit: "cafe", Branch: "main",
+		Components: map[string]ledger.Component{"api": {Findings: map[string]int{"gosec": 0}}},
+	}
+
+	if _, err := Write(ctx, clone, "tree1", Snapshot{}, func(string) (Recording, error) {
+		return Recording{Records: []ledger.Record{rec}, OpenFindings: &ledger.OpenFindings{Branch: "main", Commit: rec.Commit, At: rec.At}}, nil
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	verify := branchCheckout(t, ctx, clone)
+	for _, leftover := range []string{stale, staler} {
+		if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(leftover))); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s is still on %s after a one-part snapshot was written (stat: %v)", leftover, BranchName, err)
+		}
+	}
+	if held := branchOpenFindings(t, ctx, clone); len(held.Findings) != 0 {
+		t.Errorf("the branch holds %+v, want an empty open set", held.Findings)
 	}
 }
 
@@ -844,19 +1028,19 @@ func TestThreeOverlappingRunsAllRecord(t *testing.T) {
 	// Another run lands between this one's fetch and its push on every attempt
 	// but the last, which is the worst ordering three overlapping runs produce.
 	asked := 0
-	landed, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) {
+	written, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) (Recording, error) {
 			asked++
 			if asked < 3 {
 				other.land(at, "main")
 			}
-			return []ledger.Record{ours}, nil
+			return Recording{Records: []ledger.Record{ours}}, nil
 		})
 	if err != nil {
 		t.Fatalf("a run overtaken by two others never recorded: %v", err)
 	}
-	if len(landed) != 1 || landed[0].Commit != ours.Commit {
-		t.Errorf("Write reported %v as landed, want the one record it appended", landed)
+	if len(written.Landed) != 1 || written.Landed[0].Commit != ours.Commit {
+		t.Errorf("Write reported %v as landed, want the one record it appended", written.Landed)
 	}
 	recorded := recordedCommits(t, ctx, clone, at)
 	for _, commit := range []string{"contender1", "contender2", "ours"} {
@@ -886,17 +1070,17 @@ func TestARunThatLosesEveryRaceRecordsNothingAndSaysSo(t *testing.T) {
 		Components: map[string]ledger.Component{"api": {Coverage: &ledger.Lines{Covered: 30, Total: 100}}},
 	}
 	asked := 0
-	landed, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) {
+	written, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
+		func(string) (Recording, error) {
 			asked++
 			other.land(at, "main")
-			return []ledger.Record{ours}, nil
+			return Recording{Records: []ledger.Record{ours}}, nil
 		})
 	if err == nil {
 		t.Fatal("Write reported a recording even though every push was rejected")
 	}
-	if landed != nil {
-		t.Errorf("Write reported %d record(s) landed on a push that never landed", len(landed))
+	if written.Landed != nil {
+		t.Errorf("Write reported %d record(s) landed on a push that never landed", len(written.Landed))
 	}
 	if asked < 3 {
 		t.Errorf("the push was attempted %d time(s) before giving up, want at least 3", asked)
@@ -922,9 +1106,9 @@ func TestARunThatLosesEveryRaceRecordsNothingAndSaysSo(t *testing.T) {
 	var latest ledger.Record
 	seen := false
 	if _, err := Write(ctx, clone, "tree2", Snapshot{Coverage: Baseline{"api": entry(31, 100)}},
-		func(worktree string) ([]ledger.Record, error) {
+		func(worktree string) (Recording, error) {
 			latest, seen = ledger.Latest(worktree, next.Branch, next.At)
-			return []ledger.Record{next}, nil
+			return Recording{Records: []ledger.Record{next}}, nil
 		}); err != nil {
 		t.Fatalf("the run after the lost one: %v", err)
 	}
@@ -975,6 +1159,46 @@ func (c *contender) land(at time.Time, branch string) string {
 	run(c.dir, "commit", "-m", "record for "+commit)
 	run(c.dir, "push", "origin", "HEAD:refs/heads/"+BranchName)
 	return commit
+}
+
+// landOpenFindings advances the remote branch by one open-findings snapshot,
+// off whatever the branch holds now.
+func (c *contender) landOpenFindings(o ledger.OpenFindings) {
+	c.t.Helper()
+	parts, err := ledger.EncodeOpenFindings(o)
+	if err != nil {
+		c.t.Fatalf("the contending run could not encode its open findings: %v", err)
+	}
+	files := map[string]string{}
+	for _, p := range parts {
+		files[p.Path] = string(p.Data)
+	}
+	c.landFiles(files)
+}
+
+// landFile advances the remote branch by one file at rel.
+func (c *contender) landFile(rel, content string) {
+	c.t.Helper()
+	c.landFiles(map[string]string{rel: content})
+}
+
+func (c *contender) landFiles(files map[string]string) {
+	c.t.Helper()
+	run := gitRunner(c.t, c.ctx)
+	run(c.dir, "fetch", "origin", BranchName)
+	run(c.dir, "reset", "--hard", "origin/"+BranchName)
+	for rel, content := range files {
+		path := filepath.Join(c.dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			c.t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			c.t.Fatal(err)
+		}
+	}
+	run(c.dir, "add", "-A")
+	run(c.dir, "commit", "-m", "files from a contending run")
+	run(c.dir, "push", "origin", "HEAD:refs/heads/"+BranchName)
 }
 
 // recordedCommits is every commit the branch's history holds for the month of
@@ -1140,7 +1364,7 @@ func TestRecordsThatCannotBeBuiltFailTheWrite(t *testing.T) {
 	before := revCount(t, ctx, clone)
 
 	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) { return nil, errors.New("the history could not be described") })
+		func(string) (Recording, error) { return Recording{}, errors.New("the history could not be described") })
 	if err == nil {
 		t.Fatal("Write reported success though the records could not be built")
 	}
@@ -1160,10 +1384,10 @@ func TestARecordTheLedgerRefusesFailsTheWrite(t *testing.T) {
 	before := revCount(t, ctx, clone)
 
 	_, err := Write(ctx, clone, "tree1", Snapshot{Coverage: Baseline{"api": entry(30, 100)}},
-		func(string) ([]ledger.Record, error) {
+		func(string) (Recording, error) {
 			// No commit, which nothing could ever read back.
-			return []ledger.Record{{Kind: ledger.KindEntry, Branch: "main",
-				At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)}}, nil
+			return Recording{Records: []ledger.Record{{Kind: ledger.KindEntry, Branch: "main",
+				At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)}}}, nil
 		})
 	if err == nil {
 		t.Fatal("Write accepted a record the ledger refuses")

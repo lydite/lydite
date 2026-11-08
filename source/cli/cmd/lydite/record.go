@@ -233,7 +233,23 @@ func recordRows(res *flow.Result) ([]ui.Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(rows, row, historyRow(landed.Landed, why, "")), nil
+	rows = append(rows, row, historyRow(landed.Landed, why, ""))
+	if landed.OpenFindingsParts > 0 {
+		rows = append(rows, openFindingsRow(landed.OpenFindingsParts))
+	}
+	return rows, nil
+}
+
+// openFindingsRow says the open-findings snapshot was written beside the
+// record, and in how many parts.
+//
+// Only a write that landed a record writes one, so a recording the history row
+// already reports as not appended, or as already recorded, has no snapshot to
+// speak of: that row is the whole of the answer, and a second row repeating it
+// would say nothing the first did not.
+func openFindingsRow(parts int) ui.Row {
+	return ui.Row{Status: ui.StatusContext, Label: "open findings",
+		Value: fmt.Sprintf("snapshot written in %d part(s)", parts)}
 }
 
 // writeError is the error the write to the state branch failed with, which

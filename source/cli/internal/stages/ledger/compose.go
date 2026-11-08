@@ -36,8 +36,9 @@ type ComposeRecordsIn struct {
 // there is none when there is none.
 type ComposeRecordsOut struct {
 	// Records is what the write asks, once per push attempt, for the records
-	// to append. Nil whenever Reason is set, which is what tells the write
-	// there is no history to append at all.
+	// to append and the open-findings snapshot to write beside them. Nil
+	// whenever Reason is set, which is what tells the write there is no
+	// history to append at all.
 	Records gitstate.Records
 	// Reason is why there is no history to append, nil when Records is set.
 	Reason Reason
@@ -51,9 +52,9 @@ type ComposeRecordsOut struct {
 // branch as fetched by the attempt that is about to write — a retry fetches a
 // branch a concurrent run may have advanced, and an answer computed once would
 // have that retry declare a gap the intervening run had just filled. Which
-// findings appeared and resolved is the same kind of question, asked of the
-// same fetched branch for the same reason. Nothing but the write ever calls
-// it.
+// findings appeared and resolved, and which are open once they have, are the
+// same kind of question, asked of the same fetched branch for the same
+// reason. Nothing but the write ever calls it.
 //
 // No reason is an error. A recording that appends no history can still land
 // its baseline, so each one is an answer about the history alone.
@@ -91,7 +92,7 @@ func ComposeRecords(ctx context.Context, in ComposeRecordsIn) (ComposeRecordsOut
 		Components:   in.Components,
 		RootFindings: in.RootFindings,
 	}
-	records := func(worktree string) ([]ledger.Record, error) {
+	records := func(worktree string) (gitstate.Recording, error) {
 		// One walk of the branch's own history serves both gap detection and
 		// the finding diff, rather than each reading the same partitions on
 		// its own — see ledger.BranchState.
@@ -103,10 +104,20 @@ func ComposeRecords(ctx context.Context, in ComposeRecordsIn) (ComposeRecordsOut
 		// nothing to diff against what the branch holds open: findingEvents
 		// diffs no bucket outside scope, so it answers nil for an empty one.
 		rec.FindingEvents = findingEvents(in.Scope, in.Found, open)
-		if gap, ok := gapBefore(ctx, in.Dir, branch, head, previous, hasPrevious); ok {
-			return []ledger.Record{gap, rec}, nil
+		// The open-findings snapshot already on the fetched branch supplies
+		// words for buckets this run did not measure, and never membership.
+		prior, _, err := ledger.ReadOpenFindings(worktree, branch)
+		if err != nil {
+			return gitstate.Recording{}, err
 		}
-		return []ledger.Record{rec}, nil
+		snapshot := &ledger.OpenFindings{
+			Branch: branch, Commit: rec.Commit, At: rec.At,
+			Findings: openFindings(in.Scope, in.Found, applyEvents(open, rec.FindingEvents), prior.Findings),
+		}
+		if gap, ok := gapBefore(ctx, in.Dir, branch, head, previous, hasPrevious); ok {
+			return gitstate.Recording{Records: []ledger.Record{gap, rec}, OpenFindings: snapshot}, nil
+		}
+		return gitstate.Recording{Records: []ledger.Record{rec}, OpenFindings: snapshot}, nil
 	}
 	return ComposeRecordsOut{Records: records}, nil
 }
@@ -171,6 +182,84 @@ func findingEvents(scope map[ledger.FindingBucket]bool, found []finding.Finding,
 		)
 	})
 	return events
+}
+
+// applyEvents is the open set once events have been applied to open: an
+// appearance adds its fingerprint to its bucket, and a resolution removes it.
+// open itself is left as it was.
+func applyEvents(open map[ledger.FindingBucket]map[string]bool, events []ledger.FindingEvent) map[ledger.FindingBucket]map[string]bool {
+	after := make(map[ledger.FindingBucket]map[string]bool, len(open))
+	for bucket, fps := range open {
+		after[bucket] = make(map[string]bool, len(fps))
+		for fp := range fps {
+			after[bucket][fp] = true
+		}
+	}
+	for _, e := range events {
+		bucket := ledger.FindingBucket{Gate: e.Gate, Component: e.Component}
+		switch e.Transition {
+		case ledger.FindingAppeared:
+			if after[bucket] == nil {
+				after[bucket] = map[string]bool{}
+			}
+			after[bucket][e.Fingerprint] = true
+		case ledger.FindingResolved:
+			delete(after[bucket], e.Fingerprint)
+		}
+	}
+	return after
+}
+
+// openFindings is one entry per fingerprint open, and nothing else: the ledger
+// is the authority on what is open, and a previous snapshot lagging it would
+// carry a resolved finding forward or drop an opened one.
+//
+// Each entry's words come from the freshest source that holds them. A bucket
+// in scope was measured by this run, so its words are this run's own. A bucket
+// outside scope — its scanner crashed or did not run — takes them from the
+// previous snapshot where it holds the fingerprint, and is identity only where
+// it does not.
+//
+// A finding's Site is never copied. It is an excerpt of source, and a secret a
+// scanner flagged would gain a second copy in the branch's history, which
+// nobody scrubs when the source is.
+func openFindings(scope map[ledger.FindingBucket]bool, found []finding.Finding,
+	open map[ledger.FindingBucket]map[string]bool, prior []ledger.OpenFinding) []ledger.OpenFinding {
+	type key struct {
+		bucket      ledger.FindingBucket
+		fingerprint string
+	}
+	current := map[key]finding.Finding{}
+	for _, f := range found {
+		bucket := ledger.FindingBucket{Gate: f.Gate, Component: f.Component}
+		if !scope[bucket] {
+			continue
+		}
+		k := key{bucket, f.Fingerprint()}
+		if _, seen := current[k]; !seen {
+			current[k] = f
+		}
+	}
+	carried := map[key]ledger.OpenFinding{}
+	for _, o := range prior {
+		carried[key{ledger.FindingBucket{Gate: o.Gate, Component: o.Component}, o.Fingerprint}] = o
+	}
+	var out []ledger.OpenFinding
+	for bucket, fps := range open {
+		for fp := range fps {
+			k := key{bucket, fp}
+			entry := ledger.OpenFinding{Gate: bucket.Gate, Component: bucket.Component, Fingerprint: fp}
+			if f, ok := current[k]; ok && scope[bucket] {
+				entry.Path, entry.Line, entry.EndLine = f.Path, f.Line, f.EndLine
+				entry.Rule, entry.Severity, entry.Message = f.Rule, f.Severity, f.Message
+				entry.Ordinal = f.Ordinal
+			} else if o, ok := carried[k]; ok && !scope[bucket] {
+				entry = o
+			}
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // gapBefore is the explicit break to append ahead of this commit's record,
