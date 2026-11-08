@@ -918,10 +918,10 @@ func pushState(ctx context.Context, dir, sha string, snap Snapshot, records Reco
 // describe an open set the ledger has not moved to.
 func stageRecording(tmp, sha string, snap Snapshot, records Records) ([]string, Written, error) {
 	files := map[string][]byte{}
-	if err := stage(files, StatePath(sha), snap.Coverage); err != nil {
-		return nil, Written{}, err
-	}
-	if err := stage(files, CRAPStatePath(sha), snap.CRAP); err != nil {
+	if err := errors.Join(
+		stage(files, StatePath(sha), snap.Coverage),
+		stage(files, CRAPStatePath(sha), snap.CRAP),
+	); err != nil {
 		return nil, Written{}, err
 	}
 	rels, err := writeDocuments(tmp, files)
@@ -971,11 +971,8 @@ func stageOpenFindings(tmp string, o ledger.OpenFindings) ([]string, int, error)
 		return nil, 0, err
 	}
 	for n := len(parts); ; n++ {
-		rel, err := ledger.OpenFindingsPath(o.Branch, n)
-		if err != nil {
-			return nil, 0, err
-		}
-		err = os.Remove(filepath.Join(tmp, filepath.FromSlash(rel)))
+		rel := o.PartPath(n)
+		err := os.Remove(filepath.Join(tmp, filepath.FromSlash(rel)))
 		if errors.Is(err, os.ErrNotExist) {
 			return rels, len(parts), nil
 		}

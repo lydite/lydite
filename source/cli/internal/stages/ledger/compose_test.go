@@ -505,3 +505,19 @@ func TestEachAttemptTakesItsOpenFindingsFromTheBranchItIsHanded(t *testing.T) {
 		}
 	}
 }
+
+// A branch that cannot name a snapshot path fails the attempt rather than
+// recording against a snapshot that could never be read back.
+func TestABranchThatIsNoSnapshotPathFailsTheAttempt(t *testing.T) {
+	dir, _ := ledgerRepo(t, map[string]string{"README.md": "a repository\n"})
+	out, err := ComposeRecords(context.Background(), ComposeRecordsIn{Dir: dir, BranchOverride: "release/../x", Components: ledgerScalar()})
+	if err != nil {
+		t.Fatalf("ComposeRecords: %v", err)
+	}
+	if out.Records == nil {
+		t.Fatalf("no record to append: reason %#v", out.Reason)
+	}
+	if _, err := out.Records(t.TempDir()); err == nil || !strings.Contains(err.Error(), "snapshot path") {
+		t.Errorf("Records error = %v, want the refusal of the branch", err)
+	}
+}

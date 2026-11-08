@@ -71,11 +71,23 @@ func OpenFindingsPath(branch string, part int) (string, error) {
 	if part < 0 {
 		return "", fmt.Errorf("snapshot part %d is negative", part)
 	}
+	return openFindingsPath(branch, part), nil
+}
+
+// PartPath is where part n of o's snapshot lives, for a caller that has
+// already had EncodeOpenFindings accept o and so knows its branch is valid.
+func (o OpenFindings) PartPath(part int) string {
+	return openFindingsPath(o.Branch, part)
+}
+
+// openFindingsPath is OpenFindingsPath for a branch already known valid and a
+// part already known non-negative.
+func openFindingsPath(branch string, part int) string {
 	name := "findings.json"
 	if part > 0 {
 		name = "findings." + strconv.Itoa(part) + ".json"
 	}
-	return path.Join("snapshot", "v1", branch, name), nil
+	return path.Join("snapshot", "v1", branch, name)
 }
 
 // EncodeOpenFindings encodes o as the documents that make up its snapshot,
@@ -104,13 +116,15 @@ func encodeOpenFindings(o OpenFindings, limit int) ([]OpenPart, error) {
 			cmp.Compare(a.Fingerprint, b.Fingerprint),
 		)
 	})
+	// The one field of a header that can refuse to encode is the time, which
+	// JSON limits to the years 0 through 9999.
+	if _, err := json.Marshal(o.At); err != nil {
+		return nil, fmt.Errorf("open-findings time: %w", err)
+	}
 	encoded := make([][]byte, len(sorted))
 	for i, f := range sorted {
-		b, err := json.Marshal(f)
-		if err != nil {
-			return nil, err
-		}
-		encoded[i] = b
+		// A struct of strings and ints always encodes.
+		encoded[i], _ = json.Marshal(f)
 	}
 
 	// A header states the part count, whose digits count towards the size, so
@@ -127,26 +141,28 @@ func encodeOpenFindings(o OpenFindings, limit int) ([]OpenPart, error) {
 		}
 		out := make([]OpenPart, parts)
 		for i, g := range groups {
-			p, err := OpenFindingsPath(o.Branch, i)
-			if err != nil {
-				return nil, err
-			}
+			head := openHeaderJSON(o, i, parts)
 			var buf bytes.Buffer
-			head, err := json.Marshal(openHeader{Branch: o.Branch, Commit: o.Commit, At: o.At, Part: i, Parts: parts})
-			if err != nil {
-				return nil, err
-			}
 			buf.Write(head[:len(head)-1])
-			buf.WriteString(`,"findings":[`)
+			buf.WriteString(findingsOpen)
 			buf.Write(bytes.Join(g, []byte(",")))
-			buf.WriteString("]}\n")
-			if buf.Len() > limit {
-				return nil, fmt.Errorf("open-findings part %d is %d bytes, over the %d byte limit", i, buf.Len(), limit)
-			}
-			out[i] = OpenPart{Path: p, Data: buf.Bytes()}
+			buf.WriteString(findingsClose)
+			out[i] = OpenPart{Path: openFindingsPath(o.Branch, i), Data: buf.Bytes()}
 		}
 		return out, nil
 	}
+}
+
+const (
+	findingsOpen  = `,"findings":[`
+	findingsClose = "]}\n"
+)
+
+// openHeaderJSON is the header object of part n of parts. The time it carries
+// has already been checked to encode.
+func openHeaderJSON(o OpenFindings, part, parts int) []byte {
+	b, _ := json.Marshal(openHeader{Branch: o.Branch, Commit: o.Commit, At: o.At, Part: part, Parts: parts})
+	return b
 }
 
 // splitOpen packs encoded findings greedily into parts whose documents, with a
@@ -155,8 +171,8 @@ func splitOpen(o OpenFindings, encoded [][]byte, parts, limit int) ([][][]byte, 
 	groups := [][][]byte{nil}
 	size := 0
 	// The empty document is the header plus `[]` and a newline; each finding
-	// adds its bytes, and each after the first a comma. The header's size
-	// depends only on the part it heads, so it is measured once per part.
+	// adds its bytes, and each after the first a comma. A header differs
+	// between parts only in the digits of its part index.
 	base := openBase(o, 0, parts)
 	for i, e := range encoded {
 		add := len(e)
@@ -178,15 +194,10 @@ func splitOpen(o OpenFindings, encoded [][]byte, parts, limit int) ([][][]byte, 
 	return groups, nil
 }
 
+// openBase is the size of the document for part n of parts when it holds no
+// findings.
 func openBase(o OpenFindings, part, parts int) int {
-	b, err := json.Marshal(openDocument{
-		openHeader: openHeader{Branch: o.Branch, Commit: o.Commit, At: o.At, Part: part, Parts: parts},
-		Findings:   []OpenFinding{},
-	})
-	if err != nil {
-		return 0
-	}
-	return len(b) + 1
+	return len(openHeaderJSON(o, part, parts)) - 1 + len(findingsOpen) + len(findingsClose)
 }
 
 // ReadOpenFindings reads the open-findings snapshot of branch from a worktree
@@ -207,11 +218,7 @@ func ReadOpenFindings(worktree, branch string) (OpenFindings, bool, error) {
 	var result OpenFindings
 	parts := 1
 	for i := 0; i < parts; i++ {
-		p, err := OpenFindingsPath(branch, i)
-		if err != nil {
-			return OpenFindings{}, false, err
-		}
-		data, err := root.ReadFile(p)
+		data, err := root.ReadFile(openFindingsPath(branch, i))
 		if err != nil {
 			return OpenFindings{}, false, nil
 		}

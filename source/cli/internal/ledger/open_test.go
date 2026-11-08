@@ -221,3 +221,51 @@ func pick(high bool, lo, hi string) string {
 	}
 	return lo
 }
+
+func TestEncodeOpenFindingsRejectsWhatCannotBeEncoded(t *testing.T) {
+	badBranch := sampleOpen(1)
+	badBranch.Branch = "../x"
+	if _, err := EncodeOpenFindings(badBranch); err == nil {
+		t.Error("a branch that is no snapshot path was encoded")
+	}
+	badTime := sampleOpen(1)
+	badTime.At = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := EncodeOpenFindings(badTime); err == nil {
+		t.Error("a time JSON cannot hold was encoded")
+	}
+}
+
+func TestReadOpenFindingsFromAWorktreeThatDoesNotExistIsAbsent(t *testing.T) {
+	if _, ok, err := ReadOpenFindings(filepath.Join(t.TempDir(), "missing"), "main"); ok || err != nil {
+		t.Errorf("missing worktree: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestEncodeOpenFindingsHeaderDigitsCountTowardsTheCap(t *testing.T) {
+	o := sampleOpen(40)
+	parts, err := encodeOpenFindings(o, 330)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) < 10 {
+		t.Fatalf("expected a split into two-digit part indexes, got %d parts", len(parts))
+	}
+	for _, p := range parts {
+		if len(p.Data) > 330 {
+			t.Errorf("part %s is %d bytes, over the cap", p.Path, len(p.Data))
+		}
+	}
+}
+
+func TestOpenFindingsPartPathIsTheEncodedPath(t *testing.T) {
+	o := sampleOpen(12)
+	parts, err := encodeOpenFindings(o, 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range parts {
+		if got := o.PartPath(i); got != p.Path {
+			t.Errorf("PartPath(%d) = %q, want %q", i, got, p.Path)
+		}
+	}
+}
