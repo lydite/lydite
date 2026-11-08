@@ -1,0 +1,12 @@
+{
+  "cli": {
+    "covered": 12914,
+    "total": 13651,
+    "producer": "go 1.26.10"
+  },
+  "cloud-services": {
+    "covered": 534,
+    "total": 548,
+    "producer": "vitest 5.0.5, @vitest/coverage-v8 5.0.5"
+  }
+}
