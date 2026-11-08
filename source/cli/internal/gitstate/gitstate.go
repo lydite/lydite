@@ -944,40 +944,40 @@ func stageRecording(tmp, sha string, snap Snapshot, records Records) ([]string, 
 	if len(landed) == 0 || rec.OpenFindings == nil {
 		return rels, written, nil
 	}
-	open, parts, err := stageOpenFindings(tmp, *rec.OpenFindings)
+	parts, err := ledger.EncodeOpenFindings(*rec.OpenFindings)
 	if err != nil {
 		return nil, Written{}, err
 	}
-	written.OpenFindingsParts = parts
+	open, err := stageOpenFindings(tmp, *rec.OpenFindings, parts)
+	if err != nil {
+		return nil, Written{}, err
+	}
+	written.OpenFindingsParts = len(parts)
 	return append(rels, open...), written, nil
 }
 
-// stageOpenFindings writes every part of the open-findings snapshot, removes
-// any part past the last that a larger earlier snapshot left behind — so the
-// branch holds exactly the set its header names — and returns every path it
-// wrote or removed, and how many parts it wrote. A removed path is staged like
-// a written one: `git add` of a tracked file that is gone stages its removal.
-func stageOpenFindings(tmp string, o ledger.OpenFindings) ([]string, int, error) {
-	parts, err := ledger.EncodeOpenFindings(o)
-	if err != nil {
-		return nil, 0, err
-	}
+// stageOpenFindings writes every encoded part of the open-findings snapshot,
+// removes any part past the last that a larger earlier snapshot left behind — so
+// the branch holds exactly the set its header names — and returns every path it
+// wrote or removed. A removed path is staged like a written one: `git add` of a
+// tracked file that is gone stages its removal.
+func stageOpenFindings(tmp string, o ledger.OpenFindings, parts []ledger.OpenPart) ([]string, error) {
 	files := make(map[string][]byte, len(parts))
 	for _, p := range parts {
 		files[p.Path] = p.Data
 	}
 	rels, err := writeDocuments(tmp, files)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	for n := len(parts); ; n++ {
 		rel := o.PartPath(n)
 		err := os.Remove(filepath.Join(tmp, filepath.FromSlash(rel)))
 		if errors.Is(err, os.ErrNotExist) {
-			return rels, len(parts), nil
+			return rels, nil
 		}
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		rels = append(rels, rel)
 	}

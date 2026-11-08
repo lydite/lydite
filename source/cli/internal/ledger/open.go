@@ -168,28 +168,29 @@ func openHeaderJSON(o OpenFindings, part, parts int) []byte {
 // splitOpen packs encoded findings greedily into parts whose documents, with a
 // header naming parts as the total, stay within limit.
 func splitOpen(o OpenFindings, encoded [][]byte, parts, limit int) ([][][]byte, error) {
-	groups := [][][]byte{nil}
-	size := 0
+	var groups [][][]byte
+	size, base := 0, 0
 	// The empty document is the header plus `[]` and a newline; each finding
 	// adds its bytes, and each after the first a comma. A header differs
 	// between parts only in the digits of its part index.
-	base := openBase(o, 0, parts)
 	for i, e := range encoded {
-		add := len(e)
-		if len(groups[len(groups)-1]) > 0 {
-			add++
-		}
-		if len(groups[len(groups)-1]) > 0 && base+size+add > limit {
+		// A part is opened by its first finding, so an open part is never empty
+		// and a further finding always costs its comma.
+		add := len(e) + 1
+		if len(groups) == 0 || base+size+add > limit {
 			groups = append(groups, nil)
 			size = 0
 			base = openBase(o, len(groups)-1, parts)
 			add = len(e)
-		}
-		if base+size+add > limit {
-			return nil, fmt.Errorf("open finding %d is %d bytes and fits no part under the %d byte limit", i, len(e), limit)
+			if base+add > limit {
+				return nil, fmt.Errorf("open finding %d is %d bytes and fits no part under the %d byte limit", i, len(e), limit)
+			}
 		}
 		groups[len(groups)-1] = append(groups[len(groups)-1], e)
 		size += add
+	}
+	if len(groups) == 0 {
+		groups = [][][]byte{nil}
 	}
 	return groups, nil
 }

@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -254,6 +255,64 @@ func TestEncodeOpenFindingsHeaderDigitsCountTowardsTheCap(t *testing.T) {
 		if len(p.Data) > 330 {
 			t.Errorf("part %s is %d bytes, over the cap", p.Path, len(p.Data))
 		}
+	}
+}
+
+func TestEncodeOpenFindingsFillsEverySingleDigitPartExactlyToTheCap(t *testing.T) {
+	o := OpenFindings{Branch: "main", Commit: "abc", At: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+	for i := 0; i < 60; i++ {
+		o.Findings = append(o.Findings, OpenFinding{Gate: "sast", Component: "c", Path: "a.go", Line: 1000 + i, Fingerprint: "fp" + strconv.Itoa(100+i)})
+	}
+	encoded, err := json.Marshal(o.Findings[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const k = 3
+	// A part whose index has one digit, in a set of two-digit part count.
+	limit := openBase(o, 0, 11) + k*len(encoded) + (k - 1)
+	parts, err := encodeOpenFindings(o, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) < 11 {
+		t.Fatalf("got %d parts, want at least 11", len(parts))
+	}
+	for i, p := range parts {
+		if len(p.Data) > limit {
+			t.Errorf("part %d is %d bytes, over the %d byte cap", i, len(p.Data), limit)
+		}
+		if i >= 10 {
+			continue
+		}
+		if len(p.Data) != limit {
+			t.Errorf("part %d is %d bytes, want exactly %d", i, len(p.Data), limit)
+		}
+		var doc openDocument
+		if err := json.Unmarshal(p.Data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Findings) != k {
+			t.Errorf("part %d holds %d findings, want %d", i, len(doc.Findings), k)
+		}
+	}
+}
+
+func TestEncodeOpenFindingsAcceptsAFindingThatFillsAPartExactly(t *testing.T) {
+	o := sampleOpen(1)
+	encoded, err := json.Marshal(o.Findings[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := openBase(o, 0, 1) + len(encoded)
+	parts, err := encodeOpenFindings(o, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || len(parts[0].Data) != limit {
+		t.Errorf("got %d parts, first %d bytes; want one part of exactly %d", len(parts), len(parts[0].Data), limit)
+	}
+	if _, err := encodeOpenFindings(o, limit-1); err == nil {
+		t.Error("a finding one byte over the cap was accepted")
 	}
 }
 
