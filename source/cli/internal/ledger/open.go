@@ -2,12 +2,12 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -94,21 +94,15 @@ func encodeOpenFindings(o OpenFindings, limit int) ([]OpenPart, error) {
 		return nil, fmt.Errorf("branch %q cannot be used as a snapshot path", o.Branch)
 	}
 	sorted := append([]OpenFinding(nil), o.Findings...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		a, b := sorted[i], sorted[j]
-		switch {
-		case a.Gate != b.Gate:
-			return a.Gate < b.Gate
-		case a.Component != b.Component:
-			return a.Component < b.Component
-		case a.Path != b.Path:
-			return a.Path < b.Path
-		case a.Line != b.Line:
-			return a.Line < b.Line
-		case a.Ordinal != b.Ordinal:
-			return a.Ordinal < b.Ordinal
-		}
-		return a.Fingerprint < b.Fingerprint
+	slices.SortStableFunc(sorted, func(a, b OpenFinding) int {
+		return cmp.Or(
+			cmp.Compare(a.Gate, b.Gate),
+			cmp.Compare(a.Component, b.Component),
+			cmp.Compare(a.Path, b.Path),
+			cmp.Compare(a.Line, b.Line),
+			cmp.Compare(a.Ordinal, b.Ordinal),
+			cmp.Compare(a.Fingerprint, b.Fingerprint),
+		)
 	})
 	encoded := make([][]byte, len(sorted))
 	for i, f := range sorted {
@@ -205,6 +199,11 @@ func ReadOpenFindings(worktree, branch string) (OpenFindings, bool, error) {
 	if !validBranch(branch) {
 		return OpenFindings{}, false, fmt.Errorf("branch %q cannot be used as a snapshot path", branch)
 	}
+	root, err := os.OpenRoot(worktree)
+	if err != nil {
+		return OpenFindings{}, false, nil
+	}
+	defer func() { _ = root.Close() }()
 	var result OpenFindings
 	parts := 1
 	for i := 0; i < parts; i++ {
@@ -212,7 +211,7 @@ func ReadOpenFindings(worktree, branch string) (OpenFindings, bool, error) {
 		if err != nil {
 			return OpenFindings{}, false, err
 		}
-		data, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
+		data, err := root.ReadFile(p)
 		if err != nil {
 			return OpenFindings{}, false, nil
 		}

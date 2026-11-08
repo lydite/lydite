@@ -966,6 +966,11 @@ func TestASmallerOpenFindingsSnapshotRemovesThePartsPastItsLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	newContender(t, ctx, origin).landFile(stale, "{}\n")
+	staler, err := ledger.OpenFindingsPath("main", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newContender(t, ctx, origin).landFile(staler, "{}\n")
 	rec := ledger.Record{
 		Kind: ledger.KindEntry, At: time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC),
 		Commit: "cafe", Branch: "main",
@@ -978,8 +983,10 @@ func TestASmallerOpenFindingsSnapshotRemovesThePartsPastItsLast(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	verify := branchCheckout(t, ctx, clone)
-	if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(stale))); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("%s is still on %s after a one-part snapshot was written (stat: %v)", stale, BranchName, err)
+	for _, leftover := range []string{stale, staler} {
+		if _, err := os.Stat(filepath.Join(verify, filepath.FromSlash(leftover))); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s is still on %s after a one-part snapshot was written (stat: %v)", leftover, BranchName, err)
+		}
 	}
 	if held := branchOpenFindings(t, ctx, clone); len(held.Findings) != 0 {
 		t.Errorf("the branch holds %+v, want an empty open set", held.Findings)

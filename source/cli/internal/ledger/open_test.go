@@ -46,9 +46,12 @@ func TestOpenFindingsPath(t *testing.T) {
 		}
 	}
 	for _, b := range []string{"", "../x", "/x", "a//b", "a/"} {
-		if _, err := OpenFindingsPath(b, 0); err == nil {
-			t.Errorf("branch %q accepted", b)
+		if got, err := OpenFindingsPath(b, 0); err == nil || got != "" {
+			t.Errorf("branch %q: path %q, err %v; want no path and an error", b, got, err)
 		}
+	}
+	if got, err := OpenFindingsPath("main", -1); err == nil || got != "" {
+		t.Errorf("negative part: path %q, err %v; want no path and an error", got, err)
 	}
 }
 
@@ -177,4 +180,44 @@ func TestReadOpenFindingsTornSetIsAbsent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEncodeOpenFindingsOrdersOnEveryKey(t *testing.T) {
+	base := OpenFinding{Gate: "g", Component: "c", Path: "p", Line: 5, Ordinal: 5, Fingerprint: "f"}
+	vary := map[string]func(f *OpenFinding, high bool){
+		"gate":        func(f *OpenFinding, h bool) { f.Gate = pick(h, "g1", "g2") },
+		"component":   func(f *OpenFinding, h bool) { f.Component = pick(h, "c1", "c2") },
+		"path":        func(f *OpenFinding, h bool) { f.Path = pick(h, "p1", "p2") },
+		"line":        func(f *OpenFinding, h bool) { f.Line = map[bool]int{false: 1, true: 2}[h] },
+		"ordinal":     func(f *OpenFinding, h bool) { f.Ordinal = map[bool]int{false: 1, true: 2}[h] },
+		"fingerprint": func(f *OpenFinding, h bool) { f.Fingerprint = pick(h, "f1", "f2") },
+	}
+	for name, set := range vary {
+		t.Run(name, func(t *testing.T) {
+			lo, hi := base, base
+			set(&lo, false)
+			set(&hi, true)
+			o := OpenFindings{Branch: "main", Commit: "abc", Findings: []OpenFinding{hi, lo}}
+			parts, err := EncodeOpenFindings(o)
+			if err != nil || len(parts) != 1 {
+				t.Fatalf("parts %d, %v", len(parts), err)
+			}
+			dir := t.TempDir()
+			writeParts(t, dir, parts)
+			got, ok, err := ReadOpenFindings(dir, "main")
+			if err != nil || !ok {
+				t.Fatalf("read: %v %v", ok, err)
+			}
+			if !reflect.DeepEqual(got.Findings, []OpenFinding{lo, hi}) {
+				t.Errorf("order = %+v, want %+v then %+v", got.Findings, lo, hi)
+			}
+		})
+	}
+}
+
+func pick(high bool, lo, hi string) string {
+	if high {
+		return hi
+	}
+	return lo
 }
