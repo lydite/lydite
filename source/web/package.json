@@ -15,6 +15,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@vipengele/react-telemetry": "^1.0.0",
+    "@vipengele/react-tokens": "^1.0.0",
+    "@vipengele/react-ui": "^1.0.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
