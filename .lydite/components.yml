@@ -1,8 +1,8 @@
 # What lydite builds, tests, scans and gates in its own repository.
 #
-# Two components, because a component is the unit its build tool treats as a
-# whole: the Go module at source/cli/ is what `go test` treats as one, and
-# source/cloud-services/ is one npm workspace. The Workers and the library they
+# A component is the unit its build tool treats as a whole: the Go module at
+# source/cli/ is what `go test` treats as one, source/cloud-services/ is one npm
+# workspace, and source/web/ is one pnpm project. The Workers and the library they
 # share are three packages in that workspace and deliberately not three
 # components — declared separately, npm would install and build the workspace
 # three times, and each copy would provision everything the suite needs again.
@@ -33,6 +33,13 @@ components:
     # filter, so it would select no test file and the component would fail with
     # "No test files found".
 
+  - name: web
+    dir: source/web
+    runner: vitest
+    # No args, for the reason cloud-services declares none. The coverage scope
+    # (src/**/*.{ts,tsx}) is named in vitest.config.ts, so the committed bundle
+    # under dist/ is never part of the denominator.
+
   - name: scripts
     dir: scripts
     lang: shell
@@ -53,14 +60,21 @@ components:
 # build a crate that is deliberately not one; leaving them undeclared is what
 # this line says out loud.
 #
-# The last two are scripts no runner runs: the CI helper that asserts on the
+# The next two are scripts no runner runs: the CI helper that asserts on the
 # proving-ground fixture, and the CI helper that guards against an artifact
 # colliding with publish's glob (whose own --selftest exercises it, run as a
 # CI step rather than a suite). Each is exercised by the workflow that invokes
-# it, not by a suite. The installer that ships with every release is declared
-# above instead, as a `lang: shell` component with no suite of its own.
+# it, not by a suite.
+#
+# The last two belong to the dashboard: dist/ is its committed, minified build
+# output, which web-bundle.yml rebuilds and compares against bundle.sha256, and
+# scripts/bundle-hash.sh is the bash that computes that hash, run by the same
+# workflow rather than a suite. The installer that ships with every release is
+# declared above instead, as a `lang: shell` component with no suite of its own.
 excludes:
   - "source/cli/internal/**/*-pin/**"
   - "source/cli/internal/mutation/testdata/**"
   - ".github/assert-proving-ground.py"
   - ".github/assert-no-lydite-reports-collision.py"
+  - "source/web/dist/**"
+  - "source/web/scripts/bundle-hash.sh"

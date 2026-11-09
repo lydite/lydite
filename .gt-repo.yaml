@@ -184,6 +184,29 @@ dependabot:
         patterns:
           - vitest
           - '@vitest/*'
+  - ecosystem: npm
+    directory: /source/web
+    note: |
+      The quality-history dashboard (source/web): a React single-page app
+      built with Vite, and one component.
+
+      A pnpm project, pinned by packageManager and locked by pnpm-lock.yaml.
+      Dependabot's npm ecosystem reads and updates pnpm lockfiles, so no
+      separate ecosystem entry exists for it.
+
+      Not a tool pin: a bump here changes the bundle committed under dist/,
+      which web-bundle.yml rebuilds and compares against bundle.sha256, so a
+      dependency pull request must carry the rebuilt bundle to pass.
+
+      vitest and its coverage provider are grouped for the reason
+      /source/cloud-services groups them: @vitest/coverage-v8 declares an exact
+      peer on vitest, so bumping either alone resolves to nothing and the
+      install fails.
+    groups:
+      - name: vitest
+        patterns:
+          - vitest
+          - '@vitest/*'
 lydite:
   relay: https://pr.lydite.org
 pipeline:
