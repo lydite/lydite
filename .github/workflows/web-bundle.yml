@@ -1,0 +1,47 @@
+# Fails when the dashboard's inputs change and the committed bundle does not.
+#
+# source/web/dist/ is committed so `go build` never needs Node (ADR 0010). The
+# cost is drift: edit source/web/src, forget to rebuild, and the binary embeds
+# the previous dashboard while everything still builds and passes. The guard is
+# a hash over the bundle's inputs, recorded in source/web/bundle.sha256 beside
+# the bundle and recomputed here. It needs no Node and no Vite, and does not
+# depend on Vite producing byte-identical output on two machines.
+#
+# Outside the gt pipeline, so it reports a check of its own and does not block
+# a merge through ci-gate. The paths filter is safe for that reason: a filtered
+# workflow that branch protection required would leave every pull request not
+# touching source/web waiting on a check that never reports.
+name: web bundle
+
+on:
+  pull_request:
+    paths:
+      - "source/web/**"
+      - ".github/workflows/web-bundle.yml"
+  push:
+    branches: [main]
+    paths:
+      - "source/web/**"
+      - ".github/workflows/web-bundle.yml"
+
+permissions:
+  contents: read
+
+# Superseded pushes to the same pull request are cancelled; a run on main is
+# not, so every commit there is checked.
+concurrency:
+  group: web-bundle-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  hash:
+    name: bundle hash
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: check the recorded hash
+        run: bash source/web/scripts/bundle-hash.sh --check

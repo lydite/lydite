@@ -1,0 +1,3 @@
+# The built dashboard is committed (ADR 0010), so dist/ here is tracked even
+# though the repository root ignores every other dist/ as goreleaser output.
+!/dist/
