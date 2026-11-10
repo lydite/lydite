@@ -17,11 +17,22 @@ repository is a plain consumer of it (ADR 0051).
 `ci-test.yml` keeps the plain `go build` and `go test -race`, which is what `ci-gate` blocks a
 merge on.
 
-**`web-bundle.yml` guards the committed dashboard bundle, outside the gt pipeline.** It runs
-`source/web/scripts/bundle-hash.sh --check`, which recomputes a hash over `src/**`,
-`index.html`, `pnpm-lock.yaml` and `vite.config.ts` and compares it with the recorded
-`source/web/bundle.sha256`, and also requires `dist/index.html` to exist. It needs no Node, since
-`dist/` is committed so `go build` never does (ADR 0010). It triggers on `pull_request` and on
+**`web-bundle.yml` guards the committed dashboard bundle, outside the gt pipeline.**
+`source/web/bundle.sha256` records two digests, one per line as `inputs <hex>` and `dist <hex>`:
+one over `src/**`, `index.html`, `pnpm-lock.yaml` and `vite.config.ts`, and one over every file
+under `dist/`, the bytes that ship. `source/web/scripts/bundle-hash.sh --check` recomputes both
+and fails when either differs from its recorded one — an input changed without a rebuild, or
+`dist/` changed without a re-record — and requires `dist/index.html` to exist. A hand edit to the
+bundle followed by `--write` agrees with itself, so on `pull_request` the workflow runs
+`--check-against` the merge-base of `github.event.pull_request.base.sha` and the head instead
+(checked out with `fetch-depth: 0`, the base sha passed through `env:`): that also reads
+`bundle.sha256` as recorded at the merge-base and fails when the recorded `dist` digest moved
+while the recorded `inputs` digest did not, since a legitimate rebuild always follows a change to
+something the bundle is built from. A merge-base with no `bundle.sha256`, or one recording no
+`dist` digest, has nothing to compare against, and that comparison is skipped with a message
+saying so. On `push` to `main` it runs `--check`. None of it needs Node, since `dist/` is
+committed so `go build` never does, nor rebuilds the bundle, so nothing depends on Vite being
+byte-reproducible (ADR 0010). It triggers on `pull_request` and on
 `push` to `main`, both path-filtered to `source/web/**` and the workflow itself. It is not a gt
 stage, so it reports a check of its own and is not in `ci-gate`'s `needs`: a red result is
 visible on the pull request but does not block a merge. That is also why the path filter is

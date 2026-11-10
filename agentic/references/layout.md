@@ -107,7 +107,7 @@ source/cli/internal/executil/     # shared external-command runner every scanner
 source/cli/.golangci.yml          # lint config (v2 schema)
 source/web/                       # the React dashboard (see ADR 0021 for the source/ root), a pnpm
                                   #   workspace and the `web` component; AGENTS.md there names what
-                                  #   governs it (design.md, components.md, quality-history.md)
+                                  #   governs it
 source/web/src/                   # the app; mounts through <Vipengele> (src/theme/LyditeRoot.tsx),
                                   #   dark-only tokens in src/theme; src/ledger and src/auth are
                                   #   reserved for the browser ledger reader

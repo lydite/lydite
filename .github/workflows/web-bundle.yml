@@ -1,11 +1,15 @@
-# Fails when the dashboard's inputs change and the committed bundle does not.
+# Fails when the committed dashboard bundle and what it is built from disagree.
 #
 # source/web/dist/ is committed so `go build` never needs Node (ADR 0010). The
 # cost is drift: edit source/web/src, forget to rebuild, and the binary embeds
-# the previous dashboard while everything still builds and passes. The guard is
-# a hash over the bundle's inputs, recorded in source/web/bundle.sha256 beside
-# the bundle and recomputed here. It needs no Node and no Vite, and does not
-# depend on Vite producing byte-identical output on two machines.
+# the previous dashboard while everything still builds and passes — or edit the
+# minified bundle by hand, and the binary ships bytes no reviewed source
+# produced. source/web/bundle.sha256 records two digests, one over the bundle's
+# inputs and one over dist/ itself, and bundle-hash.sh --check recomputes both.
+# On a pull request, --check-against the merge-base also fails when the recorded
+# dist digest moved while the recorded inputs digest did not, since a bundle
+# re-recorded after a hand edit agrees with itself. None of this needs Node or
+# Vite, or depends on Vite producing byte-identical output on two machines.
 #
 # Outside the gt pipeline, so it reports a check of its own and does not block
 # a merge through ci-gate. The paths filter is safe for that reason: a filtered
@@ -39,9 +43,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Full history, so the merge-base and its bundle.sha256 are reachable.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: check the recorded hash
+      - name: check the recorded digests against the merge-base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          bash source/web/scripts/bundle-hash.sh --check-against "$base"
+
+      - name: check the recorded digests
+        if: github.event_name != 'pull_request'
         run: bash source/web/scripts/bundle-hash.sh --check
