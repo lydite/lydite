@@ -67,9 +67,9 @@ components:
 # it, not by a suite.
 #
 # The last two belong to the dashboard: dist/ is its committed, minified build
-# output, which web-bundle.yml rebuilds and compares against bundle.sha256, and
-# scripts/bundle-hash.sh is the bash that computes that hash, run by the same
-# workflow rather than a suite. The installer that ships with every release is
+# output, whose digest web-bundle.yml verifies against bundle.sha256 without
+# rebuilding it, and scripts/bundle-hash.sh is the bash that computes those
+# digests, run by the same workflow rather than a suite. The installer that ships with every release is
 # declared above instead, as a `lang: shell` component with no suite of its own.
 excludes:
   - "source/cli/internal/**/*-pin/**"

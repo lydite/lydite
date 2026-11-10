@@ -195,8 +195,10 @@ dependabot:
       separate ecosystem entry exists for it.
 
       Not a tool pin: a bump here changes the bundle committed under dist/,
-      which web-bundle.yml rebuilds and compares against bundle.sha256, so a
-      dependency pull request must carry the rebuilt bundle to pass.
+      so a dependency pull request must carry a rebuilt bundle and a
+      re-recorded bundle.sha256 to pass web-bundle.yml. That workflow verifies
+      digests and never rebuilds, so it cannot prove the committed dist/ is what
+      the new lockfile builds: the reviewer owns the dist/ diff.
 
       vitest and its coverage provider are grouped for the reason
       /source/cloud-services groups them: @vitest/coverage-v8 declares an exact
