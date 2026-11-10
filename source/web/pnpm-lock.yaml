@@ -172,6 +172,9 @@ importers:
       '@fontsource-variable/jetbrains-mono':
         specifier: 5.3.0
         version: 5.3.0
+      '@vipengele/react':
+        specifier: ^1.0.0
+        version: 1.0.0(@vipengele/react-telemetry@1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@vipengele/react-tokens@1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@vipengele/react-telemetry':
         specifier: ^1.0.0
         version: 1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -605,6 +608,14 @@ packages:
 
   '@vipengele/react-ui@1.0.0':
     resolution: {integrity: sha512-tpootHxpANdepRaQnjGMI5LVfb720wmrjsF8z95CdJvvWTcfcDUMupnGWqWIgJXxbgfyVU72geVvsapT5mQPUQ==}
+    peerDependencies:
+      '@vipengele/react-telemetry': ^1.0.0
+      '@vipengele/react-tokens': ^1.0.0
+      react: ^19
+      react-dom: ^19
+
+  '@vipengele/react@1.0.0':
+    resolution: {integrity: sha512-jT0SDtSF3MdBHKDhMFzkBAsqNonPt2YCH1U07IuYCAKIyr2D8f3DAhJ1IhKnRjSMxsKaJUJA9ls7VMIXRNUA5g==}
     peerDependencies:
       '@vipengele/react-telemetry': ^1.0.0
       '@vipengele/react-tokens': ^1.0.0
@@ -1376,6 +1387,14 @@ snapshots:
       react-dom: 19.3.1(react@19.3.1)
     transitivePeerDependencies:
       - '@types/react'
+
+  '@vipengele/react@1.0.0(@vipengele/react-telemetry@1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@vipengele/react-tokens@1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
+    dependencies:
+      '@vipengele/react-telemetry': 1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      '@vipengele/react-tokens': 1.0.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      '@vipengele/ts': 0.2.1
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
 
   '@vipengele/ts-core-common@0.2.1': {}
 

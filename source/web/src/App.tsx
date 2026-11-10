@@ -1,9 +1,9 @@
 import { Card, Stack, Typography } from "@vipengele/react-ui";
-import { LyditeThemeProvider } from "./theme/LyditeThemeProvider";
+import { LyditeRoot } from "./theme/LyditeRoot";
 
 export function App() {
   return (
-    <LyditeThemeProvider>
+    <LyditeRoot>
       <Stack as="main" gap="space-5" style={{ padding: "var(--vpg-space-8)" }}>
         <Typography variant="h1">lydite</Typography>
         <Card>
@@ -14,6 +14,6 @@ export function App() {
           </Card.Content>
         </Card>
       </Stack>
-    </LyditeThemeProvider>
+    </LyditeRoot>
   );
 }
