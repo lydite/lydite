@@ -28,7 +28,9 @@ bundle followed by `--write` agrees with itself, so on `pull_request` the workfl
 (checked out with `fetch-depth: 0`, the base sha passed through `env:`): that also reads
 `bundle.sha256` as recorded at the merge-base and fails when the recorded `dist` digest moved
 while the recorded `inputs` digest did not, since a legitimate rebuild always follows a change to
-something the bundle is built from. A merge-base with no `bundle.sha256`, or one recording no
+something the bundle is built from. When the inputs changed too, nothing verifies that `dist/` is
+what they produce — that needs a rebuild, which ADR 0010 rules out — so the reviewer owns the
+`dist/` diff whenever it moves. A merge-base with no `bundle.sha256`, or one recording no
 `dist` digest, has nothing to compare against, and that comparison is skipped with a message
 saying so. On `push` to `main` it runs `--check`. None of it needs Node, since `dist/` is
 committed so `go build` never does, nor rebuilds the bundle, so nothing depends on Vite being

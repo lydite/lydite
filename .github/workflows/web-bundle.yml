@@ -3,12 +3,13 @@
 # source/web/dist/ is committed so `go build` never needs Node (ADR 0010). The
 # cost is drift: edit source/web/src, forget to rebuild, and the binary embeds
 # the previous dashboard while everything still builds and passes — or edit the
-# minified bundle by hand, and the binary ships bytes no reviewed source
-# produced. source/web/bundle.sha256 records two digests, one over the bundle's
-# inputs and one over dist/ itself, and bundle-hash.sh --check recomputes both.
-# On a pull request, --check-against the merge-base also fails when the recorded
-# dist digest moved while the recorded inputs digest did not, since a bundle
-# re-recorded after a hand edit agrees with itself. None of this needs Node or
+# minified bundle by hand without re-recording it. source/web/bundle.sha256
+# records two digests, one over the bundle's inputs and one over dist/ itself,
+# and bundle-hash.sh --check recomputes both. On a pull request,
+# --check-against the merge-base also fails when the recorded dist digest moved
+# while the recorded inputs digest did not. When the inputs changed too, nothing
+# verifies that dist/ is what they produce (that needs a rebuild), so the
+# reviewer owns the dist/ diff whenever it moves. None of this needs Node or
 # Vite, or depends on Vite producing byte-identical output on two machines.
 #
 # Outside the gt pipeline, so it reports a check of its own and does not block

@@ -24,9 +24,10 @@ The built bundle is committed at `dist/` and guarded by `scripts/bundle-hash.sh`
 `inputs <hex>` and `dist <hex>`. The inputs digest covers `src/**`, `index.html`, `pnpm-lock.yaml`
 and `vite.config.ts`, so any edit under `src/` — a test included — needs a rebuild and a
 re-record. The dist digest covers every file under `dist/`, so `dist/` changes only by rebuilding:
-a hand edit fails `--check`, and a hand edit re-recorded with `--write` fails CI's
-`--check-against`, which rejects a recorded dist digest that moved while the inputs digest did
-not.
+a hand edit not re-recorded fails `--check`, and CI's `--check-against` also rejects a recorded
+dist digest that moved while the inputs digest did not. When the inputs changed too, nothing
+verifies that `dist/` is what they produce (that needs a rebuild, which ADR 0010 rules out), so
+the reviewer owns the `dist/` diff whenever it moves.
 
 ```sh
 pnpm install --frozen-lockfile

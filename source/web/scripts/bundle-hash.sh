@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Ties the committed dashboard bundle to what it is built from, so a change to
 # the dashboard that was never rebuilt fails CI instead of shipping the previous
-# bundle silently, and a bundle edited by hand fails it too (ADR 0010, "The
-# dashboard bundle is committed, and guarded").
+# bundle silently, and a bundle edited without re-recording its digest fails it
+# too (ADR 0010, "The dashboard bundle is committed, and guarded").
 #
 # bundle.sha256 records two digests, one per line, each "<name> <hex>":
 #
@@ -21,11 +21,14 @@
 # byte-identical output across machines — nothing here rebuilds the bundle.
 #
 # --check alone cannot catch a dist/ edited by hand and re-recorded, because the
-# re-record makes the file agree with itself. --check-against <ref> closes that:
+# re-record makes the file agree with itself. --check-against <ref> narrows that:
 # it reads bundle.sha256 as recorded at <ref> and fails when the recorded dist
-# digest moved while the recorded inputs digest did not. A legitimate rebuild
-# always follows a change to something the bundle is built from (the lockfile
-# included), so a bundle that changed on its own is the one this rejects. When
+# digest moved while the recorded inputs digest did not, so a bundle that changed
+# while nothing it is built from did is rejected. It does not verify dist/ when
+# the inputs digest moved too: a hand edit to dist/ alongside any input change
+# (a comment in src/, a lockfile bump), re-recorded with --write, passes. Only a
+# rebuild could show that dist/ is what the inputs produce, which ADR 0010 rules
+# out, so whenever dist/ moves its diff is the reviewer's to own. When
 # <ref> records no dist digest — no bundle.sha256 there yet, or one recording
 # the inputs digest alone — there is nothing to compare against, and the
 # comparison is skipped with a message saying so.
@@ -35,7 +38,7 @@
 #   scripts/bundle-hash.sh --write               record them in bundle.sha256
 #   scripts/bundle-hash.sh --check               fail unless bundle.sha256 matches them
 #   scripts/bundle-hash.sh --check-against REF   --check, then fail if dist moved
-#                                                without inputs moving since REF
+#                                                while inputs did not since REF
 set -euo pipefail
 export LC_ALL=C
 
@@ -161,7 +164,7 @@ check_against() {
     echo "  dist recorded at $ref: $base_dist" >&2
     echo "  dist recorded now:     $head_dist" >&2
     echo "A rebuild follows a change to src/**, index.html, pnpm-lock.yaml or vite.config.ts;" >&2
-    echo "a bundle that changed on its own was edited by hand. Restore dist/ and $recorded from $ref." >&2
+    echo "a bundle that changed on its own was not produced by a rebuild. Restore dist/ and $recorded from $ref." >&2
     return 1
   fi
   echo "bundle-hash: the bundle has not changed without its inputs changing since $ref"
@@ -169,7 +172,9 @@ check_against() {
 
 case "${1:-}" in
   "")
-    printf 'inputs %s\ndist %s\n' "$(compute_inputs)" "$(compute_dist)"
+    inputs_now="$(compute_inputs)"
+    dist_now="$(compute_dist)"
+    printf 'inputs %s\ndist %s\n' "$inputs_now" "$dist_now"
     ;;
   --write)
     inputs_now="$(compute_inputs)"
