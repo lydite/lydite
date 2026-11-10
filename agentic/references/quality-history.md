@@ -198,7 +198,7 @@ it, one `record` job). It is deliberately absent from `ci-gate`'s `needs`: a bas
 to record is a red job, not a red gate on a commit already merged. The `lydite` branch carries a
 `record for …` commit per recorded push.
 
-**The dashboard is not this slice.** `source/web/` is still empty; the hosted read path is
+**The dashboard is not this slice.** `source/web/` is the dashboard shell, with no ledger reader yet (`src/ledger/` and `src/auth/` are reserved for it); the hosted read path is
 [ADR 0009](../../docs/adr/0009-quality-history-storage-and-access.md)'s later work.
 
 **A finding's own detail reaches the branch too, as a transition and never as the full open

@@ -401,9 +401,9 @@ absent for it would read the same as one lydite never bothered to say anything a
 Nothing in `internal/runner` executes anything, and its tests assert argv — the same stance
 `internal/rust` and `internal/typescript` take, for the same reason: a unit test that shells out to
 a foreign toolchain tests the machine it runs on. **Rust therefore has no repository here to run
-against** — the only `Cargo.toml` files are pin manifests, deliberately not components, and
-`source/web/` is still empty. `source/cloud-services/` closes that half for TypeScript: it is a
-real npm workspace under a `vitest` component, so Biome, `internal/nodedeps` and Node toolchain
+against** — the only `Cargo.toml` files are pin manifests, deliberately not components.
+`source/web/` (pnpm) and `source/cloud-services/` (npm) close that half for TypeScript: each is a
+real workspace under a `vitest` component, so Biome, `internal/nodedeps` and Node toolchain
 resolution all run here. `ci-end2end.yml`'s `proving ground` job closes the rest,
 running `lydite test` against every component of
 [`lydite/proving-ground`](https://github.com/lydite/proving-ground) on a bare checkout — no

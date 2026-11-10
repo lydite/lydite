@@ -17,6 +17,17 @@ repository is a plain consumer of it (ADR 0051).
 `ci-test.yml` keeps the plain `go build` and `go test -race`, which is what `ci-gate` blocks a
 merge on.
 
+**`web-bundle.yml` guards the committed dashboard bundle, outside the gt pipeline.** It runs
+`source/web/scripts/bundle-hash.sh --check`, which recomputes a hash over `src/**`,
+`index.html`, `pnpm-lock.yaml` and `vite.config.ts` and compares it with the recorded
+`source/web/bundle.sha256`, and also requires `dist/index.html` to exist. It needs no Node, since
+`dist/` is committed so `go build` never does (ADR 0010). It triggers on `pull_request` and on
+`push` to `main`, both path-filtered to `source/web/**` and the workflow itself. It is not a gt
+stage, so it reports a check of its own and is not in `ci-gate`'s `needs`: a red result is
+visible on the pull request but does not block a merge. That is also why the path filter is
+safe — a filtered workflow that branch protection required would leave every pull request
+not touching `source/web` waiting on a check that never reports.
+
 The rest of this section describes what `lydite-pr.yml` and `lydite-baseline.yml` did — neither
 exists in this repository any more, both superseded by the lydite stage above — kept for
 whatever replaces them to be checked against.
