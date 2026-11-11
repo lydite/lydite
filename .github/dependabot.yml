@@ -382,3 +382,44 @@ updates:
         patterns:
           - "vitest"
           - "@vitest/*"
+
+  # The quality-history dashboard (source/web): a React single-page app
+  # built with Vite, and one component.
+  #
+  # A pnpm project, pinned by packageManager and locked by pnpm-lock.yaml.
+  # Dependabot's npm ecosystem reads and updates pnpm lockfiles, so no
+  # separate ecosystem entry exists for it.
+  #
+  # Not a tool pin: a bump here changes the bundle committed under dist/,
+  # so a dependency pull request must carry a rebuilt bundle and a
+  # re-recorded bundle.sha256 to pass web-bundle.yml. That workflow verifies
+  # digests and never rebuilds, so it cannot prove the committed dist/ is what
+  # the new lockfile builds: the reviewer owns the dist/ diff.
+  #
+  # vitest and its coverage provider are grouped for the reason
+  # /source/cloud-services groups them: @vitest/coverage-v8 declares an exact
+  # peer on vitest, so bumping either alone resolves to nothing and the
+  # install fails.
+  - package-ecosystem: "npm"
+    directory: "/source/web"
+    schedule:
+      interval: "weekly"
+    # Dependabot's commit message is also its PR title, and PRs are
+    # squash-merged, so the prefix is what keeps dependency updates inside
+    # Conventional Commits. `include: scope` appends the dependency scope,
+    # producing e.g. `build(deps): bump …`.
+    commit-message:
+      prefix: "build"
+      include: scope
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 25
+    # Grouped dependencies share a single PR. A group exists when its members
+    # must move together: landing one alone breaks the default branch, and the
+    # sibling PR then fails that same broken check — so auto-merge cannot
+    # recover on its own.
+    groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
