@@ -1,0 +1,17 @@
+{
+  "cli": {
+    "above": 0,
+    "worst": 30,
+    "producer": "go 1.26.11"
+  },
+  "cloud-services": {
+    "above": 1,
+    "worst": 38.004209912536446,
+    "producer": "vitest 5.0.5, @vitest/coverage-v8 5.0.5"
+  },
+  "web": {
+    "above": 0,
+    "worst": 1,
+    "producer": "vitest 5.0.5, @vitest/coverage-v8 5.0.5"
+  }
+}
