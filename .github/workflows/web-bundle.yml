@@ -1,0 +1,63 @@
+# Fails when the committed dashboard bundle and what it is built from disagree.
+#
+# source/web/dist/ is committed so `go build` never needs Node (ADR 0010). The
+# cost is drift: edit source/web/src, forget to rebuild, and the binary embeds
+# the previous dashboard while everything still builds and passes — or edit the
+# minified bundle by hand without re-recording it. source/web/bundle.sha256
+# records two digests, one over the bundle's inputs and one over dist/ itself,
+# and bundle-hash.sh --check recomputes both. On a pull request,
+# --check-against the merge-base also fails when the recorded dist digest moved
+# while the recorded inputs digest did not. When the inputs changed too, nothing
+# verifies that dist/ is what they produce (that needs a rebuild), so the
+# reviewer owns the dist/ diff whenever it moves. None of this needs Node or
+# Vite, or depends on Vite producing byte-identical output on two machines.
+#
+# Outside the gt pipeline, so it reports a check of its own and does not block
+# a merge through ci-gate. The paths filter is safe for that reason: a filtered
+# workflow that branch protection required would leave every pull request not
+# touching source/web waiting on a check that never reports.
+name: web bundle
+
+on:
+  pull_request:
+    paths:
+      - "source/web/**"
+      - ".github/workflows/web-bundle.yml"
+  push:
+    branches: [main]
+    paths:
+      - "source/web/**"
+      - ".github/workflows/web-bundle.yml"
+
+permissions:
+  contents: read
+
+# Superseded pushes to the same pull request are cancelled; a run on main is
+# not, so every commit there is checked.
+concurrency:
+  group: web-bundle-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  hash:
+    name: bundle hash
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history, so the merge-base and its bundle.sha256 are reachable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: check the recorded digests against the merge-base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          bash source/web/scripts/bundle-hash.sh --check-against "$base"
+
+      - name: check the recorded digests
+        if: github.event_name != 'pull_request'
+        run: bash source/web/scripts/bundle-hash.sh --check

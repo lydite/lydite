@@ -105,7 +105,14 @@ source/cli/internal/gotool/       # the version-keyed `go install` internal/gola
                                   #   internal/runner both provision through
 source/cli/internal/executil/     # shared external-command runner every scanner package uses
 source/cli/.golangci.yml          # lint config (v2 schema)
-source/web/                       # the React dashboard (see ADR 0021 for the source/ root)
+source/web/                       # the React dashboard (see ADR 0021 for the source/ root), a pnpm
+                                  #   workspace and the `web` component; AGENTS.md there names what
+                                  #   governs it
+source/web/src/                   # the app; mounts through <Vipengele> (src/theme/LyditeRoot.tsx),
+                                  #   dark-only tokens in src/theme; src/ledger and src/auth are
+                                  #   reserved for the browser ledger reader
+source/web/dist/                  # the committed build, guarded by scripts/bundle-hash.sh and
+                                  #   bundle.sha256 (ADR 0010), checked by web-bundle.yml
 source/cloud-services/            # the Workers lydite operates, as one npm workspace and so one
                                   #   component: pr-relay posts the PR comment on a consumer's
                                   #   behalf, oauth-exchange is the dashboard's (see surface.md)

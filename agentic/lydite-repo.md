@@ -52,11 +52,12 @@ again, and that file arrives on its own when you read anything in that subtree.
 The section names the prose still uses — Surface, Coverage, Components — are the rows of
 this table. A cross-reference reading "see Coverage" means `coverage.md`.
 
-Six directories carry an `AGENTS.md` of their own, each naming the references that govern
+Seven directories carry an `AGENTS.md` of their own, each naming the references that govern
 its subtree: [`source/cli`](source/cli/AGENTS.md),
 [`source/cli/cmd/lydite`](source/cli/cmd/lydite/AGENTS.md),
 [`source/cli/internal`](source/cli/internal/AGENTS.md),
-[`source/cloud-services`](source/cloud-services/AGENTS.md), [`.github`](.github/AGENTS.md)
+[`source/cloud-services`](source/cloud-services/AGENTS.md),
+[`source/web`](source/web/AGENTS.md), [`.github`](.github/AGENTS.md)
 and [`docs/design`](docs/design/AGENTS.md).
 
 **The scoped files are not maintained automatically.** `wrap-session-reviewer` buckets
@@ -93,7 +94,7 @@ go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
 
 ```
 source/cli/          # the Go module (module path lydite/lydite); every go command runs here
-source/web/          # the React dashboard (see ADR 0021 for the source/ root) — still empty
+source/web/          # the React dashboard, Vite on pnpm (ADR 0021; see AGENTS.md there)
 source/cloud-services/  # the Workers lydite operates: pr-relay, oauth-exchange (see surface.md)
 assets/, docs/design/   # the shipped logo set and the brand (see design.md)
 docs/adr/, docs/release-notes/  # the decision record; the release notes
@@ -115,7 +116,7 @@ is each nested one: `test plan`, `test merge`, `test record`, `mutation merge`, 
 **removed** (see [`coverage.md`](agentic/references/coverage.md)); the relay in
 `source/cloud-services/pr-relay` is deployed and live (see
 [`surface.md`](agentic/references/surface.md)); the quality-history dashboard is a later
-slice and `source/web/` is still empty (see
+slice: `source/web/` is the scaffolded dashboard shell, with no ledger reader yet (see
 [`quality-history.md`](agentic/references/quality-history.md)).
 
 ## Conventions
