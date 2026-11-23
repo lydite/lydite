@@ -40,3 +40,4 @@ node_modules/
 
 # Python bytecode from the CI assertion scripts.
 __pycache__/
+/.agentic-toolkit.lock.yaml
